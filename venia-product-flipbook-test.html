@@ -120,6 +120,16 @@
     font-weight: 500;
   }
 
+  /* Brief scale pulse when a view becomes active */
+  @keyframes fb-view-pulse {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.18); }
+    100% { transform: scale(1); }
+  }
+  .flipbook-view-btn.pulse {
+    animation: fb-view-pulse 0.26s ease-out;
+  }
+
   /* Swipe hint arrows flanking the view list */
   .fb-swipe-hint {
     padding: 8px 0 8px 16px;
@@ -699,14 +709,14 @@
 
     .fb-sheet-pill {
       display: block;
-      width: 32px; height: 3px;
+      width: 36px; height: 4px;
       border-radius: 2px;
-      background: rgba(0,0,0,0.14);
+      background: rgba(0,0,0,0.22);
       flex-shrink: 0;
       transition: background 0.15s;
     }
 
-    .fb-sheet-drag:active .fb-sheet-pill { background: rgba(0,0,0,0.36); }
+    .fb-sheet-drag:active .fb-sheet-pill { background: rgba(0,0,0,0.44); }
 
     /* Peek row — title only, no price */
     .fb-sheet-peek-row {
@@ -1013,6 +1023,20 @@
 
   let currentFrame = 0, targetFrame = 0, accDelta = 0;
 
+  /* ── VIEW TWEEN — smooth parametric ease for view jumps ── */
+  let tweenActive = false;
+  let tweenFrom = 0, tweenTo = 0, tweenT0 = 0;
+  const TWEEN_DURATION = 380; // ms
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  /* idle callback shim */
+  const rIC = window.requestIdleCallback
+    ? fn => requestIdleCallback(fn, { timeout: 120 })
+    : fn => setTimeout(fn, 0);
+
   const imgEl       = document.getElementById('fb-images');
   const infoEl      = document.getElementById('fb-info');
   const canvas      = document.getElementById('fb-canvas');
@@ -1032,44 +1056,60 @@
   let closeMobileSheet = function () {};
 
   /* ── GENERATED TEST FRAMES ── */
-  const offscreens = [];
+  const offscreens = new Array(TOTAL_FRAMES).fill(null);
+
+  function buildFrame(i) {
+    const oc = document.createElement('canvas');
+    oc.width = 800; oc.height = 1200;
+    const c = oc.getContext('2d');
+
+    const hue  = HUE_START + (i / (TOTAL_FRAMES - 1)) * HUE_RANGE;
+    const grad = c.createLinearGradient(0, 0, 0, 1200);
+    grad.addColorStop(0, `hsl(${hue}, 10%, 90%)`);
+    grad.addColorStop(1, `hsl(${hue + 20}, 14%, 78%)`);
+    c.fillStyle = grad;
+    c.fillRect(0, 0, 800, 1200);
+
+    c.strokeStyle = `hsla(${hue}, 8%, 58%, 0.1)`;
+    c.lineWidth = 1;
+    for (let y = 0; y < 1200; y += 80) { c.beginPath(); c.moveTo(0, y); c.lineTo(800, y); c.stroke(); }
+    for (let x = 0; x < 800;  x += 80) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, 1200); c.stroke(); }
+
+    c.fillStyle = `hsla(${hue}, 20%, 26%, 0.38)`;
+    c.font = 'bold 120px Helvetica Neue, Helvetica, Arial, sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(String(i + 1).padStart(2, '0'), 400, 560);
+
+    c.fillStyle = `hsla(${hue}, 14%, 36%, 0.55)`;
+    c.font = '500 13px Helvetica Neue, Helvetica, Arial, sans-serif';
+    c.letterSpacing = '5px';
+    c.fillText(`FRAME ${i + 1} / ${TOTAL_FRAMES}`, 400, 668);
+
+    const vi = VIEW_FRAMES.indexOf(i);
+    if (vi !== -1) {
+      c.fillStyle = `hsla(${hue}, 18%, 16%, 0.7)`;
+      c.font = '600 10px Helvetica Neue, Helvetica, Arial, sans-serif';
+      c.fillText(VIEW_NAMES[vi].toUpperCase(), 400, 714);
+    }
+    offscreens[i] = oc;
+  }
 
   function generateFrames() {
-    for (let i = 0; i < TOTAL_FRAMES; i++) {
-      const oc = document.createElement('canvas');
-      oc.width = 800; oc.height = 1200;
-      const c = oc.getContext('2d');
+    // First view (frames 0 – VIEW_FRAMES[1]-1) loads synchronously for immediate render
+    const eagerEnd = VIEW_FRAMES[1]; // frame 8
+    for (let i = 0; i < eagerEnd; i++) buildFrame(i);
 
-      const hue  = HUE_START + (i / (TOTAL_FRAMES - 1)) * HUE_RANGE;
-      const grad = c.createLinearGradient(0, 0, 0, 1200);
-      grad.addColorStop(0, `hsl(${hue}, 10%, 90%)`);
-      grad.addColorStop(1, `hsl(${hue + 20}, 14%, 78%)`);
-      c.fillStyle = grad;
-      c.fillRect(0, 0, 800, 1200);
+    // Remaining frames load lazily during idle time, in small batches
+    const deferred = [];
+    for (let i = eagerEnd; i < TOTAL_FRAMES; i++) deferred.push(i);
 
-      c.strokeStyle = `hsla(${hue}, 8%, 58%, 0.1)`;
-      c.lineWidth = 1;
-      for (let y = 0; y < 1200; y += 80) { c.beginPath(); c.moveTo(0, y); c.lineTo(800, y); c.stroke(); }
-      for (let x = 0; x < 800;  x += 80) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, 1200); c.stroke(); }
-
-      c.fillStyle = `hsla(${hue}, 20%, 26%, 0.38)`;
-      c.font = 'bold 120px Helvetica Neue, Helvetica, Arial, sans-serif';
-      c.textAlign = 'center'; c.textBaseline = 'middle';
-      c.fillText(String(i + 1).padStart(2, '0'), 400, 560);
-
-      c.fillStyle = `hsla(${hue}, 14%, 36%, 0.55)`;
-      c.font = '500 13px Helvetica Neue, Helvetica, Arial, sans-serif';
-      c.letterSpacing = '5px';
-      c.fillText(`FRAME ${i + 1} / ${TOTAL_FRAMES}`, 400, 668);
-
-      const vi = VIEW_FRAMES.indexOf(i);
-      if (vi !== -1) {
-        c.fillStyle = `hsla(${hue}, 18%, 16%, 0.7)`;
-        c.font = '600 10px Helvetica Neue, Helvetica, Arial, sans-serif';
-        c.fillText(VIEW_NAMES[vi].toUpperCase(), 400, 714);
-      }
-      offscreens.push(oc);
+    function loadNextBatch() {
+      if (!deferred.length) return;
+      // Build 3 frames per idle tick to stay well under 50ms
+      for (let k = 0; k < 3 && deferred.length; k++) buildFrame(deferred.shift());
+      if (deferred.length) rIC(loadNextBatch);
     }
+    rIC(loadNextBatch);
   }
 
   /* ── CANVAS RESIZE ── */
@@ -1082,7 +1122,16 @@
   /* ── RENDER: cover-fit on mobile, contain on desktop ── */
   function drawFrame(idx) {
     idx = Math.max(0, Math.min(TOTAL_FRAMES - 1, idx));
-    const src = offscreens[idx];
+    // Fall back to nearest already-loaded frame if this one isn't ready yet
+    let src = offscreens[idx];
+    if (!src) {
+      let lo = idx - 1, hi = idx + 1;
+      while (lo >= 0 || hi < TOTAL_FRAMES) {
+        if (lo >= 0 && offscreens[lo]) { src = offscreens[lo]; break; }
+        if (hi < TOTAL_FRAMES && offscreens[hi]) { src = offscreens[hi]; break; }
+        lo--; hi++;
+      }
+    }
     if (!src) return;
 
     const cw = canvas.width, ch = canvas.height;
@@ -1108,7 +1157,11 @@
   let lastAnnouncedView = -1;
 
   function animate() {
-    if (reducedMotion) {
+    if (tweenActive) {
+      const t = Math.min(1, (performance.now() - tweenT0) / TWEEN_DURATION);
+      currentFrame = tweenFrom + (tweenTo - tweenFrom) * easeInOutCubic(t);
+      if (t >= 1) { tweenActive = false; currentFrame = tweenTo; targetFrame = tweenTo; }
+    } else if (reducedMotion) {
       currentFrame = targetFrame;
     } else {
       currentFrame += (targetFrame - currentFrame) * LERP_FACTOR;
@@ -1133,9 +1186,30 @@
   }
 
   function jumpToView(viewIdx) {
-    const next = VIEW_FRAMES[Math.max(0, Math.min(VIEW_FRAMES.length - 1, viewIdx))];
-    targetFrame = next;
+    viewIdx = Math.max(0, Math.min(VIEW_FRAMES.length - 1, viewIdx));
+    const next = VIEW_FRAMES[viewIdx];
+    if (reducedMotion) {
+      tweenActive = false;
+      currentFrame = next;
+      targetFrame  = next;
+    } else {
+      tweenActive = true;
+      tweenFrom   = currentFrame;
+      tweenTo     = next;
+      tweenT0     = performance.now();
+      targetFrame = next;
+    }
     if (srLive) srLive.textContent = `${VIEW_NAMES[viewIdx]} view`;
+    pulseViewLabel(viewIdx);
+  }
+
+  function pulseViewLabel(viewIdx) {
+    if (reducedMotion) return;
+    const btn = views[viewIdx];
+    if (!btn) return;
+    btn.classList.remove('pulse');
+    void btn.offsetWidth; // force reflow to restart animation
+    btn.classList.add('pulse');
   }
 
   function updateActiveView(idx) {
@@ -1164,6 +1238,7 @@
   /* ── WHEEL: advance frames ── */
   imgEl.addEventListener('wheel', e => {
     e.preventDefault();
+    tweenActive = false; // user took over — cancel any in-flight view tween
     accDelta += e.deltaY;
     while (Math.abs(accDelta) >= SCROLL_PX_PER_FRAME) {
       if (accDelta > 0) { targetFrame = Math.min(TOTAL_FRAMES - 1, targetFrame + 1); accDelta -= SCROLL_PX_PER_FRAME; }
@@ -1177,6 +1252,7 @@
   const DIR_THRESHOLD = 10;
 
   imgEl.addEventListener('touchstart', e => {
+    tweenActive = false; // user took over
     touchX = touchStartX = e.touches[0].clientX;
     touchY = touchStartY = e.touches[0].clientY;
     touchAcc = 0;
