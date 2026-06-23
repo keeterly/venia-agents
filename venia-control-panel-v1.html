@@ -4769,6 +4769,7 @@ function renderPage(page) {
     case 'costs': renderCosts(); break;
     case 'clo3d': renderClo3d(); break;
     case 'samples': renderSamples(); break;
+    case 'fitnotes': renderFitNotes(); break;
     case 'linesheet': renderLineSheet(); break;
     case 'inventory': renderInventory(); break;
     case 'activity': renderActivity(); break;
@@ -8939,7 +8940,7 @@ function renderPR(filter) {
     <!-- Stats -->
     <div class="stats-row stats-4" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Active Pulls</div><div class="stat-val">${activePulls.length}</div><div class="stat-sub">${STATE.prPulls.length} total all time</div></div>
-      <div class="stat-card ${overduePulls.length ? 'style="border-left:3px solid var(--red)"' : ''}"><div class="stat-label">Overdue</div><div class="stat-val" style="color:${overduePulls.length?'var(--red)':'var(--ink)'}">${overduePulls.length}</div><div class="stat-sub">Past return date</div></div>
+      <div class="stat-card" ${overduePulls.length ? 'style="border-left:3px solid var(--red)"' : ''}><div class="stat-label">Overdue</div><div class="stat-val" style="color:${overduePulls.length?'var(--red)':'var(--ink)'}">${overduePulls.length}</div><div class="stat-sub">Past return date</div></div>
       <div class="stat-card"><div class="stat-label">Items Out</div><div class="stat-val">${totalItems}</div><div class="stat-sub">Across active pulls</div></div>
       <div class="stat-card"><div class="stat-label">Value Out</div><div class="stat-val" style="font-size:20px">$${(totalValue/1000).toFixed(1)}k</div><div class="stat-sub">Retail value at risk</div></div>
     </div>
@@ -9791,6 +9792,47 @@ function prNFCReturnLookup(tagId) {
     if (idx >= 0) { prReturnItem(pull.id, idx); toast(`NFC return: ${pull.items[idx].styleName}`); return; }
   }
   toast('No active pull found for this tag', 'warn');
+}
+
+// Compose a pull-sheet email to the press contact (opens default mail client).
+function prSendEmail(pull) {
+  if (!pull) { toast('Pull not found', 'warn'); return; }
+  if (!pull.email) { toast('No contact email on this pull — add one to send', 'warn'); return; }
+  const itemLines = (pull.items || []).map(i =>
+    `• ${i.styleName || i.styleCode || 'Item'}${i.styleCode ? ' ('+i.styleCode+')' : ''}` +
+    `${i.size ? ' — '+i.size : ''}${i.color ? ' / '+i.color : ''}`
+  ).join('\n');
+  const subject = `VENIA Pull Sheet — ${pull.invoiceNo}`;
+  const body =
+    `Hi ${pull.contact || pull.client || ''},\n\n` +
+    `Details for your VENIA press pull are below.\n\n` +
+    `Pull: ${pull.invoiceNo}\n` +
+    (pull.publication ? `Publication / usage: ${pull.publication}\n` : '') +
+    (pull.returnDate ? `Return by: ${pull.returnDate}\n` : '') +
+    `\nItems (${(pull.items||[]).length}):\n${itemLines || '—'}\n\n` +
+    `The full pull sheet with terms is available on request.\n\n` +
+    `Thank you,\nVENIA Collection\nveniacollection.com`;
+  const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const a = document.createElement('a');
+  a.href = href; a.style.display = 'none';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast(`✉ Pull sheet drafted to ${pull.email}`);
+}
+
+// Manual NFC fallback — capture a tag code by hand when scanning isn't available.
+function prManualNFCEntry() {
+  const raw = prompt('Enter the NFC tag ID or code\n(format VENIA:{styleId}:{size}:{color}):', '');
+  if (raw === null) return;
+  const tag = raw.trim();
+  if (!tag) { toast('No tag entered', 'warn'); return; }
+  const resultEl = document.getElementById('pr-nfc-result');
+  if (resultEl) { resultEl.style.display = 'block'; resultEl.textContent = `Tag: ${tag}`; }
+  const statusEl = document.getElementById('pr-nfc-status');
+  if (statusEl) statusEl.textContent = 'Tag entered';
+  const nfcInput = document.getElementById('pr-nfc-manual');
+  if (nfcInput) { nfcInput.value = tag; nfcInput.dispatchEvent(new Event('change')); }
+  if (PR_NFC_MODE === 'return') prNFCReturnLookup(tag);
+  else toast('Tag captured: ' + tag);
 }
 document.addEventListener('DOMContentLoaded', init);
 </script>
@@ -14301,13 +14343,39 @@ function renderStyleBoard() {
 }
 
 // ── FIT NOTES ──
+// Default rows used on first run (before anything is saved).
+var FITNOTES_SEED = [
+  ['VEN-001','S','Shoulder seam shifts forward — ½" ease needed','Adjust front shoulder by +0.5cm','Open'],
+  ['VEN-003','M','Back length too short by 2cm in size M','Grade +1cm M→L back length','Resolved'],
+];
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Build one editable fit-note row from [sku, size, issue, note, status].
+function fitNoteRowHTML(v) {
+  v = v || ['','','','','Open'];
+  var resolved = (v[4] === 'Resolved');
+  return '<td><input class="pom-input" style="width:80px" placeholder="VEN-00X" value="'+esc(v[0])+'" onchange="saveFitNotes()"></td>'
+    + '<td><input class="pom-input" style="width:40px" placeholder="S/M/L" value="'+esc(v[1])+'" onchange="saveFitNotes()"></td>'
+    + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Describe fit issue…" value="'+esc(v[2])+'" onchange="saveFitNotes()"></td>'
+    + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Grader note…" value="'+esc(v[3])+'" onchange="saveFitNotes()"></td>'
+    + '<td><select style="border:none;border-bottom:1px solid #e0e0e0;font-size:10px;outline:none;cursor:pointer;width:90px" onchange="saveFitNotes()"><option'+(resolved?'':' selected')+'>Open</option><option'+(resolved?' selected':'')+'>Resolved</option></select></td>'
+    + '<td><button class="btn btn-ghost btn-sm" onclick="this.closest(\'tr\').remove();saveFitNotes();showToast(\'Row removed\')">✕</button></td>';
+}
 function addFitNoteRow() {
   var tbody = document.getElementById('fitnotes-tbody');
   if (!tbody) return;
   var tr = document.createElement('tr');
-  tr.innerHTML = '<td><input class="pom-input" style="width:80px" placeholder="VEN-00X" onchange="saveFitNotes()"></td><td><input class="pom-input" style="width:40px" placeholder="S/M/L" onchange="saveFitNotes()"></td><td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Describe fit issue…" onchange="saveFitNotes()"></td><td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Grader note…" onchange="saveFitNotes()"></td><td><select style="border:none;border-bottom:1px solid #e0e0e0;font-size:10px;outline:none;cursor:pointer;width:90px" onchange="saveFitNotes()"><option>Open</option><option>Resolved</option></select></td><td><button class="btn btn-ghost btn-sm" onclick="this.closest(\'tr\').remove();saveFitNotes();showToast(\'Row removed\')">✕</button></td>';
+  tr.innerHTML = fitNoteRowHTML(null);
   tbody.appendChild(tr);
+  saveFitNotes();
   showToast('Row added');
+}
+function renderFitNotes() {
+  var tbody = document.getElementById('fitnotes-tbody');
+  if (!tbody) return;
+  var rows;
+  try { rows = JSON.parse(localStorage.getItem('venia_fitnotes') || 'null'); } catch(e) { rows = null; }
+  if (!rows || !rows.length) rows = FITNOTES_SEED;
+  tbody.innerHTML = rows.map(function(r){ return '<tr>' + fitNoteRowHTML(r) + '</tr>'; }).join('');
 }
 function saveFitNotes() {
   try {
@@ -15390,7 +15458,7 @@ function gSignIn() {
   if (!clientId) {
     showToast('Add your Google Client ID in Settings → API Keys to enable collaboration','warning');
     // Navigate to settings
-    if (typeof cpGoto === 'function') cpGoto('settings');
+    if (typeof cpGoto === 'function') cpGoto('set');
     return;
   }
   if (typeof google === 'undefined' || !google.accounts) {
