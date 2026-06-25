@@ -4590,12 +4590,35 @@ function save() {
   }));
 }
 
+// Canonical apparel size run + range expander.
+// Turns "XS-XL", "S–XL", "S,M,L", "0-12" into a real list of sizes.
+const SIZE_ORDER = ['XXS','XS','S','M','L','XL','XXL','XXXL'];
+function expandSizes(str){
+  if (!str) return [];
+  const out = [];
+  String(str).split(',').forEach(tok => {
+    tok = tok.trim();
+    if (!tok) return;
+    const m = tok.match(/^(.+?)\s*(?:-|–|—|to)\s*(.+)$/i);
+    if (m) {
+      const a = m[1].trim().toUpperCase(), b = m[2].trim().toUpperCase();
+      const ia = SIZE_ORDER.indexOf(a), ib = SIZE_ORDER.indexOf(b);
+      if (ia >= 0 && ib >= 0 && ia <= ib) { for (let i=ia;i<=ib;i++) out.push(SIZE_ORDER[i]); return; }
+      const na = parseInt(a,10), nb = parseInt(b,10);
+      if (!isNaN(na) && !isNaN(nb) && na <= nb) { for (let n=na;n<=nb;n+=2) out.push(String(n)); return; }
+      out.push(m[1].trim(), m[2].trim()); return;
+    }
+    out.push(tok);
+  });
+  return out.filter((v,i)=>out.indexOf(v)===i);
+}
+
 function buildSkus() {
   STATE.skus = [];
   STATE.styles.forEach(s => {
     if (!s.colors || !s.sizes) return;
     const colors = s.colors.split(',').map(c => c.trim()).filter(Boolean);
-    const sizes = s.sizes.split(',').map(sz => sz.trim()).filter(Boolean);
+    const sizes = expandSizes(s.sizes);
     colors.forEach(color => {
       sizes.forEach(size => {
         const cCode = color.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3);
@@ -5449,7 +5472,8 @@ function pomSelectStyle(styleId) {
   const style = STATE.styles.find(s=>s.id===styleId);
   if (!style) return;
   const points = STATE.pom[styleId] || [];
-  const sizes = ['XS','S','M','L','XL'];
+  let sizes = expandSizes(style.sizes);
+  if (!sizes.length) sizes = ['XS','S','M','L','XL'];
 
   const html = `
     <div class="sec-head" style="margin-bottom:14px">
@@ -14715,11 +14739,13 @@ function calcCostSheet() {
   const mat=v('material'), lab=v('labor'), oh=v('overhead'), dut=v('duties'), frt=v('freight');
   const landed = mat+lab+oh+dut+frt;
   if (!landed) { document.getElementById('cs-results').style.display='none'; return; }
-  const wholesale = Math.round(landed*2.5*100)/100;
-  const retail    = Math.round(wholesale*2.2*100)/100;
-  const wsMargin  = landed > 0 ? Math.round(((wholesale-landed)/wholesale)*100) : 0;
-  const rtMargin  = landed > 0 ? Math.round(((retail-landed)/retail)*100) : 0;
-  const markup    = landed > 0 ? Math.round((wholesale/landed)*100)/100 : 0;
+  // VENIA keystone (matches the catalog): wholesale ≈ landed × 1.45 (~31% WS margin),
+  // retail = wholesale × 2.5 (≈72% retail margin). (Was 2.5×/2.2× — inconsistent with the line.)
+  const wholesale = Math.round(landed*1.45*100)/100;
+  const retail    = Math.round(wholesale*2.5*100)/100;
+  const wsMargin  = wholesale > 0 ? Math.round(((wholesale-landed)/wholesale)*100) : 0;
+  const rtMargin  = retail > 0 ? Math.round(((retail-landed)/retail)*100) : 0;
+  const markup    = landed > 0 ? Math.round((retail/landed)*100)/100 : 0;
   const fmt = n => '$' + n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
   document.getElementById('cs-landed').textContent       = fmt(landed);
   document.getElementById('cs-wholesale-out').textContent= fmt(wholesale);
@@ -14740,7 +14766,18 @@ function saveCostSheet() {
   const all = JSON.parse(localStorage.getItem('venia-cost-sheets')||'{}');
   all[sid] = d;
   localStorage.setItem('venia-cost-sheets', JSON.stringify(all));
-  showToast('Cost sheet saved','success');
+  // Single source of truth: write the computed landed cost back to the style's COGS
+  // so the dashboard, margins, P&L and Missing-COGS all reflect the cost sheet.
+  const landed = d.material+d.labor+d.overhead+d.duties+d.freight;
+  const s = (STATE.styles||[]).find(x=>x.id===sid);
+  if (s && landed > 0) {
+    s.cogs = Math.round(landed*100)/100;
+    if (typeof save === 'function') save();
+    if (typeof buildSkus === 'function') buildSkus();
+    showToast('Cost sheet saved → COGS updated to $'+s.cogs,'success');
+  } else {
+    showToast('Cost sheet saved','success');
+  }
 }
 
 // Hook cost sheet init into page navigation
