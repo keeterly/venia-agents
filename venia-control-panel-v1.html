@@ -9841,18 +9841,28 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 // ── CALL CLAUDE ──────────────────────────────────────────────────────
 async function callClaude(system, userMsg, history=[]) {
   const key = getKey('anthropic');
-  if (!key) throw new Error('No Anthropic API key — go to Settings → API Keys');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2000, system, messages: msgs }),
-  });
+  const body = JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2000, system, messages: msgs });
+  let resp;
+  if (key) {
+    // Direct call with a browser-stored key (local use, or if you prefer not to use the proxy)
+    resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body,
+    });
+  } else {
+    // Secure path: Netlify Function holds the key server-side — nothing in the browser
+    resp = await fetch('/.netlify/functions/claude', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    });
+    if (resp.status === 404) throw new Error('Claude not connected — add a key in Settings → API Keys, or set ANTHROPIC_API_KEY on Netlify');
+  }
   if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || resp.statusText); }
   const data = await resp.json();
   return data.content?.[0]?.text || '';
