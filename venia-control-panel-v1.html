@@ -5510,8 +5510,9 @@ function pomSelectStyle(styleId) {
         </tbody>
       </table>
     </div>
-    <div style="margin-top:12px">
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" onclick="showPomAdd()">+ Add Measurement Point</button>
+      <button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')" title="Fill the size run from the base-size column using a grade increment">⊞ Grade from base size</button>
     </div>
   `;
   document.getElementById('pom-content').innerHTML = html;
@@ -5525,13 +5526,49 @@ function savePomPoint(styleId) {
   const point = document.getElementById('pom-new-point').value.trim();
   if (!point) return;
   if (!STATE.pom[styleId]) STATE.pom[styleId] = [];
-  const sizes = ['xs','s','m','l','xl'];
+  const style = STATE.styles.find(s=>s.id===styleId);
+  let sizes = style ? expandSizes(style.sizes) : [];
+  if (!sizes.length) sizes = ['XS','S','M','L','XL'];
   const entry = { point, tol: parseFloat(document.getElementById('pom-new-tol').value)||0.25, comment: document.getElementById('pom-new-comment').value };
-  sizes.forEach(sz => { entry[sz] = parseFloat(document.getElementById(`pom-new-${sz}`).value)||0; });
+  sizes.forEach(sz => { const k=sz.toLowerCase(); const el=document.getElementById('pom-new-'+k); entry[k] = el ? (parseFloat(el.value)||0) : 0; });
   STATE.pom[styleId].push(entry);
   save();
   pomSelectStyle(styleId);
   toast('Measurement added');
+}
+
+// Grade the whole size run from the base-size column using a uniform grade increment.
+function pomGrade(styleId) {
+  const style = STATE.styles.find(s=>s.id===styleId);
+  if (!style) return;
+  let sizes = expandSizes(style.sizes);
+  if (!sizes.length) sizes = ['XS','S','M','L','XL'];
+  if (sizes.length < 2) { toast('Need at least two sizes to grade','warn'); return; }
+  // Locate the base size (from the style's Sample Base Size), else the middle size.
+  let bi = -1;
+  if (style.baseSize) {
+    const bs = style.baseSize.toUpperCase();
+    bi = sizes.findIndex(sz => new RegExp('\\b'+sz+'\\b').test(bs));
+  }
+  if (bi < 0) bi = Math.floor((sizes.length-1)/2);
+  const baseSize = sizes[bi];
+  const incStr = prompt('Grade increment per size up (cm) — graded from base size '+baseSize+':', style.gradeInc!=null ? style.gradeInc : '1');
+  if (incStr === null) return;
+  const inc = parseFloat(incStr);
+  if (isNaN(inc)) { toast('Enter a number','warn'); return; }
+  const pts = STATE.pom[styleId] || [];
+  const bk = baseSize.toLowerCase();
+  let filled = 0;
+  pts.forEach(p => {
+    const bv = parseFloat(p[bk]);
+    if (isNaN(bv)) return;
+    sizes.forEach((sz,i) => { p[sz.toLowerCase()] = Math.round((bv + (i-bi)*inc)*100)/100; });
+    filled++;
+  });
+  style.gradeInc = inc;
+  if (typeof save === 'function') save();
+  pomSelectStyle(styleId);
+  toast(filled ? ('Graded '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+inc+'cm/size)') : ('Enter a value in the '+baseSize+' column first'), filled ? 'success' : 'warn');
 }
 
 function updatePom(styleId, idx, field, val) {
