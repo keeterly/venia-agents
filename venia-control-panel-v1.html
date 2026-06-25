@@ -3447,7 +3447,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <option value="">— Select Style —</option>
           </select>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:16px">
+        <div class="cost-calc-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:16px">
           <div><label class="fl" style="font-size:8px">Material Cost ($)</label><input class="fi fi-mono" id="cs-material" type="number" step="0.01" placeholder="0.00" oninput="calcCostSheet()" style="margin-top:4px"></div>
           <div><label class="fl" style="font-size:8px">Labor ($)</label><input class="fi fi-mono" id="cs-labor" type="number" step="0.01" placeholder="0.00" oninput="calcCostSheet()" style="margin-top:4px"></div>
           <div><label class="fl" style="font-size:8px">Overhead ($)</label><input class="fi fi-mono" id="cs-overhead" type="number" step="0.01" placeholder="0.00" oninput="calcCostSheet()" style="margin-top:4px"></div>
@@ -3576,24 +3576,8 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <thead><tr>
             <th>Style #</th><th>Size</th><th>Fit Issue</th><th>Grader Note</th><th>Status</th><th></th>
           </tr></thead>
-          <tbody id="fitnotes-tbody">
-            <tr>
-              <td class="t-mono">VEN-001</td>
-              <td>S</td>
-              <td>Shoulder seam shifts forward — ½" ease needed</td>
-              <td>Adjust front shoulder by +0.5cm</td>
-              <td><select class="fs" style="width:90px;font-size:10px;min-height:auto;padding:4px 6px" onchange="saveFitNotes()"><option>Open</option><option>Resolved</option></select></td>
-              <td><button class="btn btn-ghost btn-sm" onclick="this.closest('tr').remove();saveFitNotes();showToast('Row removed')">✕</button></td>
-            </tr>
-            <tr>
-              <td class="t-mono">VEN-003</td>
-              <td>M</td>
-              <td>Back length too short by 2cm in size M</td>
-              <td>Grade +1cm M→L back length</td>
-              <td><select class="fs" style="width:90px;font-size:10px;min-height:auto;padding:4px 6px" onchange="saveFitNotes()"><option selected>Resolved</option><option>Open</option></select></td>
-              <td><button class="btn btn-ghost btn-sm" onclick="this.closest('tr').remove();saveFitNotes();showToast('Row removed')">✕</button></td>
-            </tr>
-          </tbody>
+          <!-- Rows are rendered by renderFitNotes() (seeded + editable, persisted to venia_fitnotes). -->
+          <tbody id="fitnotes-tbody"></tbody>
         </table>
       </div>
     </div>
@@ -5608,7 +5592,7 @@ function renderVendors(filter) {
       <div class="vendor-detail">📍 <span>${v.city?v.city+', ':''} ${v.country||'—'}</span></div>
       <div class="vendor-detail">👤 <span>${v.contact||'—'}</span></div>
       <div class="vendor-detail">📧 <span>${v.email||'—'}</span></div>
-      <div class="vendor-detail">⏱ Lead: <span>${v.lead||'—'} weeks</span></div>
+      <div class="vendor-detail">⏱ Lead: <span>${v.lead||'—'} days</span></div>
       <div class="vendor-detail">MOQ: <span>${v.moq||'—'}</span></div>
       ${assignedStyles.length ? `
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
@@ -6742,7 +6726,7 @@ function renderSamples(filter='all') {
       </div>`).join('')}
     </div>
     <div class="tbl-wrap"><table><thead><tr>
-      <th>Style</th><th>Season</th><th>Category</th><th>Stage</th><th>Sample Round</th><th>Vendor</th><th>Drop</th><th>Priority</th><th>Advance</th>
+      <th>Style</th><th>Season</th><th>Category</th><th>Status</th><th>Sample Round</th><th>Vendor</th><th>Drop</th><th>Priority</th><th>Advance</th>
     </tr></thead><tbody>
     ${list.map(s=>`<tr onclick="openDp('${s.id}')">
       <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId}</div></td>
@@ -11838,6 +11822,13 @@ function wireAgent(key, screenKey) {
   const screen = document.getElementById('cp-screen-' + (screenKey || key));
   if (!screen) return;
 
+  // Reflect real connection state (was a hard-coded "Online")
+  const statusEl = screen.querySelector('.ag-chat-status');
+  if (statusEl) {
+    const online = !!getKey('anthropic');
+    statusEl.innerHTML = '<div class="ag-chat-dot"' + (online ? '' : ' style="background:var(--muted)"') + '></div>' + (online ? 'Online' : 'Offline');
+  }
+
   agent.chatBody = screen.querySelector('.ag-chat-body');
   agent.input    = screen.querySelector('.ag-chat-field input');
   const sendBtn  = screen.querySelector('.ag-chat-send');
@@ -11861,6 +11852,23 @@ function wireAgent(key, screenKey) {
     chipsEl.innerHTML = overviewCfg.suggests.map(s =>
       `<button class="ag-suggest" onclick="agentSend(${JSON.stringify(key)},${JSON.stringify(s)})">${s}</button>`
     ).join('');
+  }
+
+  // Capture the pristine overview once (so agNav('overview') can restore it),
+  // and wire the static Quick-Action (.ag-wf) cards that only exist on first load.
+  const contentEl = screen.querySelector('.ag-content');
+  if (contentEl) {
+    if (!agent._overview) agent._overview = contentEl.innerHTML;
+    contentEl.querySelectorAll('.ag-wf').forEach(card => {
+      if (card._agWired) return;
+      card._agWired = true;
+      const wfTitle = card.querySelector('.ag-wf-title');
+      if (!wfTitle) return;
+      const t = wfTitle.textContent.trim();
+      const prompt = (WORKFLOWS[key] && WORKFLOWS[key][t]) || t;
+      card.style.cursor = 'pointer';
+      card.onclick = () => agentSend(key, prompt);
+    });
   }
 }
 
@@ -14674,6 +14682,10 @@ function filterSkuSearch(val) {
 function initCostSheetCalc() {
   const sel = document.getElementById('cs-style-sel');
   if (!sel) return;
+  // Reset to the placeholder option before repopulating (was appending 5× on repeat visits)
+  const ph = sel.querySelector('option');
+  sel.innerHTML = '';
+  if (ph) sel.appendChild(ph);
   (STATE.styles||[]).filter(s=>s.status!=='archived').forEach(s=>{
     const o = document.createElement('option');
     o.value = s.id; o.textContent = s.styleId + ' — ' + s.name;
@@ -15662,6 +15674,9 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   border-radius:7px; transition:all .15s; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; }
 .ag-space:hover{ color:var(--ink); border-color:var(--border-mid); }
 .ag-space.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
+
+/* Cost calculator: 5 inputs crush on a phone — collapse to 2 columns */
+@media (max-width:560px){ .cost-calc-grid{ grid-template-columns:1fr 1fr !important; } }
 </style>
 
 <button id="sk-launch" onclick="skToggle()" aria-label="Open Eni and Nigma assistant" title="Eni & Nigma  (Cmd/Ctrl+J)">
