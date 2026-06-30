@@ -6578,32 +6578,32 @@ function mmRenderLots(lots) {
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
           <div class="fg">
             <label class="fl">Length Shrinkage %</label>
-            <input class="fi fi-mono" type="number" step="0.01" value="${lot.shrinkL||''}" placeholder="e.g. -8.75"
+            <input class="fi fi-mono" type="number" step="0.01" value="${lot.shrinkL||''}" placeholder="e.g. 8"
               onchange="mmUpdateLot(${i},'shrinkL',parseFloat(this.value)||0)"
               style="font-size:16px;font-weight:700;color:${lot.shrinkL?'var(--red)':'var(--ink)'}">
-            <div style="font-size:8px;color:var(--muted);margin-top:3px">Negative = shrinks. e.g. -8.75 = 8.75% shorter</div>
+            <div style="font-size:8px;color:var(--muted);margin-top:3px">Positive = shrinks. e.g. 8 = shrinks 8%</div>
           </div>
           <div class="fg">
             <label class="fl">Width Shrinkage %</label>
-            <input class="fi fi-mono" type="number" step="0.01" value="${lot.shrinkW||''}" placeholder="e.g. -5.0"
+            <input class="fi fi-mono" type="number" step="0.01" value="${lot.shrinkW||''}" placeholder="e.g. 5"
               onchange="mmUpdateLot(${i},'shrinkW',parseFloat(this.value)||0)"
               style="font-size:16px;font-weight:700;color:${lot.shrinkW?'var(--red)':'var(--ink)'}">
-            <div style="font-size:8px;color:var(--muted);margin-top:3px">Negative = shrinks</div>
+            <div style="font-size:8px;color:var(--muted);margin-top:3px">Positive = shrinks</div>
           </div>
           <div class="fg">
             <div class="fl">Effective Yield Multiplier</div>
             <div style="font-family:'DM Mono',monospace;font-size:18px;font-weight:700;padding:8px 0;color:var(--ink)">
-              ${lot.shrinkL ? `×${(1+(parseFloat(lot.shrinkL)||0)/100 < 0 ? 0 : 1/(1+(parseFloat(lot.shrinkL)||0)/100)).toFixed(3)}` : '×1.000'}
+              ×${shrinkageYieldMultiplier(lot).toFixed(3)}
             </div>
-            <div style="font-size:8px;color:var(--muted)">Extra yardage needed to compensate</div>
+            <div style="font-size:8px;color:var(--muted)">Extra yardage (feeds BOM waste %)</div>
           </div>
         </div>
         ${(lot.shrinkL||lot.shrinkW)?`
         <div style="margin-top:10px;padding:8px;background:var(--bg);border:1px solid var(--border)">
           <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:.5px">Pattern adjustments required for this lot</div>
-          ${lot.shrinkL?`<div style="font-size:10px;color:var(--ink)">Length: Cut <strong>${(1/(1+(parseFloat(lot.shrinkL)||0)/100)).toFixed(3)}×</strong> longer to achieve finished length (${lot.shrinkL>0?'+':''}${lot.shrinkL}% wash shrinkage)</div>`:''}
-          ${lot.shrinkW?`<div style="font-size:10px;color:var(--ink);margin-top:2px">Width: Cut <strong>${(1/(1+(parseFloat(lot.shrinkW)||0)/100)).toFixed(3)}×</strong> wider to achieve finished width (${lot.shrinkW>0?'+':''}${lot.shrinkW}% wash shrinkage)</div>`:''}
-        </div>`:''} 
+          ${lot.shrinkL?`<div style="font-size:10px;color:var(--ink)">Length: Cut <strong>${shrinkAxisMult(lot.shrinkL).toFixed(3)}×</strong> longer to achieve finished length (${lot.shrinkL}% wash shrinkage)</div>`:''}
+          ${lot.shrinkW?`<div style="font-size:10px;color:var(--ink);margin-top:2px">Width: Cut <strong>${shrinkAxisMult(lot.shrinkW).toFixed(3)}×</strong> wider to achieve finished width (${lot.shrinkW}% wash shrinkage)</div>`:''}
+        </div>`:''}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
         <div class="fg"><label class="fl">Dye / Wash Process</label>
@@ -8085,11 +8085,22 @@ function shrinkageLabel(lot) {
   return `L ${l>0?'+':''}${l}% × W ${w>0?'+':''}${w}%`;
 }
 
-// Yield multiplier: how much extra to cut to get finished size after shrinkage
+// Shrinkage convention: a POSITIVE % means the fabric shrinks by that amount
+// after wash/dye. To end up at the finished dimension you must cut LARGER, so the
+// per-axis multiplier is 1/(1 - pct/100) ≥ 1. Clamped so a bad entry can't explode.
+function shrinkAxisMult(pct) {
+  const d = 1 - (parseFloat(pct)||0)/100;
+  return d > 0.5 ? 1/d : 2;
+}
+// Length-only multiplier (legacy callers / "cut longer" display)
 function shrinkageMultiplier(lot) {
   if (!lot || (!lot.shrinkL && !lot.shrinkW)) return 1;
-  const l = 1 + (parseFloat(lot.shrinkL)||0)/100;
-  return l > 0 ? parseFloat((1/l).toFixed(4)) : 1;
+  return parseFloat(shrinkAxisMult(lot.shrinkL).toFixed(4));
+}
+// Area consumption multiplier (length × width) — how much extra yardage to buy
+function shrinkageYieldMultiplier(lot) {
+  if (!lot || (!lot.shrinkL && !lot.shrinkW)) return 1;
+  return parseFloat((shrinkAxisMult(lot.shrinkL) * shrinkAxisMult(lot.shrinkW)).toFixed(4));
 }
 
 function tpUpdatePieceMat(styleId, idx, sel) {
@@ -8659,6 +8670,11 @@ function syncPatternToBOM(styleId) {
   Object.entries(usedMats).forEach(([matId, g]) => {
     const yds = parseFloat(yieldData[matId]) || 0;
     const existingIdx = bom.findIndex(b => b.matId === matId && b._fromPattern);
+    // Roll the active lot's shrinkage into the line's waste% so extended
+    // consumption/cost reflects the extra yardage you must buy to compensate.
+    // qty stays the finished (base) yield so the BOM↔yield round-trip is clean.
+    const lot = (typeof matGetActiveLot==='function') ? matGetActiveLot(matId) : null;
+    const shrinkWaste = lot ? Math.round((shrinkageYieldMultiplier(lot)-1)*1000)/10 : 0;
     const bomLine = {
       matId,
       matName: g.mat.name,
@@ -8667,6 +8683,7 @@ function syncPatternToBOM(styleId) {
       placement: g.component + ' — ' + g.pieces.map(p=>p.name||'?').join(', '),
       supplier: g.mat.supplier || '',
       costPerUnit: g.mat.costPerUnit || 0,
+      waste: shrinkWaste > 0 ? shrinkWaste : 0,
       lineType: 'Fabric',
       _fromPattern: true, // marker so we know this was auto-synced
     };
