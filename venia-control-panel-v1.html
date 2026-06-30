@@ -5774,6 +5774,26 @@ function vendorDuty(v){
   if (v.dutyRate !== undefined && v.dutyRate !== null && v.dutyRate !== '') return parseFloat(v.dutyRate)||0;
   return vendorRegion(v)==='Domestic' ? 0 : 16; // US apparel imports avg ~16% (HTS 61/62); set exact rate per vendor
 }
+// Approximate US MFN duty by fiber/category (HTS ch. 61/62) — silk is low, wool
+// mid-high, synthetics highest. Real rate depends on the exact HTS line; this is
+// a sensible default until a broker confirms.
+function htsDutyRate(style){
+  const f = ((style&&style.fabric)||'').toLowerCase();
+  const cat = ((style&&style.category)||'').toLowerCase();
+  if (/silk/.test(f)) return 4;
+  if (/leather|suede/.test(f) || cat==='accessories') return 8;
+  if (/wool|cashmere|boucle|mohair|alpaca/.test(f)) return 18;
+  if (/nylon|poly|acryl|spandex|elastane|satin|synthetic/.test(f)) return 28;
+  if (/cotton|modal|jersey|rib|twill|poplin|knit|denim|linen/.test(f)) return 16;
+  return 16;
+}
+// Duty for a specific style at a vendor: explicit per-vendor override wins,
+// domestic = 0, otherwise refine by the garment's fiber (HTS).
+function styleDuty(style, vendor){
+  if (vendor && vendor.dutyRate!==undefined && vendor.dutyRate!==null && vendor.dutyRate!=='') return parseFloat(vendor.dutyRate)||0;
+  if (!vendor || vendorRegion(vendor)==='Domestic') return 0;
+  return htsDutyRate(style);
+}
 function vendorIncoterm(v){ return v.incoterm || (vendorRegion(v)==='Domestic' ? 'EXW (local)' : 'FOB'); }
 
 function renderVendors(filter) {
@@ -8152,15 +8172,15 @@ function generatePO(vendorId) {
 
   // Sourcing economics
   const isImport = (typeof vendorRegion==='function') && vendorRegion(vendor)==='International';
-  const dutyRate = (typeof vendorDuty==='function') ? vendorDuty(vendor) : 0;       // %
   const cur = (typeof vendorCurrency==='function') ? vendorCurrency(vendor) : 'USD';
   const incoterm = (typeof vendorIncoterm==='function') ? vendorIncoterm(vendor) : '';
   const lineRows = styles.map(s => {
     const ext = qty*(s.cogs||0);
-    const duty = isImport ? ext*dutyRate/100 : 0;
+    const dRate = isImport ? ((typeof styleDuty==='function') ? styleDuty(s, vendor) : 16) : 0;  // fiber-based HTS
+    const duty = ext*dRate/100;
     const freight = (s.freight||0)*qty;
     const landed = ext+duty+freight;
-    return { s, ext, duty, freight, landed };
+    return { s, ext, dRate, duty, freight, landed };
   });
   const totalUnits = qty*styles.length;
   const totalCogs = lineRows.reduce((a,r)=>a+r.ext,0);
@@ -8225,11 +8245,11 @@ function generatePO(vendorId) {
       <th style="text-align:right">Order Qty</th>
       <th style="text-align:right">COGS/Unit</th>
       <th style="text-align:right">Ext COGS</th>
-      ${isImport?`<th style="text-align:right">Duty ${dutyRate}%</th><th style="text-align:right">Freight</th>`:''}
+      ${isImport?`<th style="text-align:right">Duty (HTS)</th><th style="text-align:right">Freight</th>`:''}
       <th style="text-align:right">Ext Landed</th>
     </tr></thead>
     <tbody>
-      ${lineRows.map(({s,ext,duty,freight,landed})=>`<tr>
+      ${lineRows.map(({s,ext,dRate,duty,freight,landed})=>`<tr>
         <td style="font-family:'Courier New',monospace;font-size:10px">${s.styleId}</td>
         <td style="font-weight:600">${s.name}<div style="font-size:8px;color:#999">${s.category} · ${s.season} · ${s.lead?s.lead+' wk lead':''} · drop ${s.drop||'TBD'}</div></td>
         <td style="font-size:10px">${s.sizes||'—'}</td>
@@ -8237,7 +8257,7 @@ function generatePO(vendorId) {
         <td style="text-align:right;font-family:'Courier New',monospace">${qty}</td>
         <td style="text-align:right;font-family:'Courier New',monospace">$${(s.cogs||0).toFixed(2)}</td>
         <td style="text-align:right;font-family:'Courier New',monospace">$${ext.toFixed(2)}</td>
-        ${isImport?`<td style="text-align:right;font-family:'Courier New',monospace">$${duty.toFixed(2)}</td><td style="text-align:right;font-family:'Courier New',monospace">$${freight.toFixed(2)}</td>`:''}
+        ${isImport?`<td style="text-align:right;font-family:'Courier New',monospace">$${duty.toFixed(2)}<div style="font-size:8px;color:#999">${dRate}%</div></td><td style="text-align:right;font-family:'Courier New',monospace">$${freight.toFixed(2)}</td>`:''}
         <td style="text-align:right;font-family:'Courier New',monospace;font-weight:700">$${landed.toFixed(2)}</td>
       </tr>`).join('')}
       <tr class="total">
@@ -8257,7 +8277,7 @@ function generatePO(vendorId) {
       <div style="font-size:10px;color:#444;line-height:1.8">
         Origin: <strong>${vendor.country||'—'} (${isImport?'Import':'Domestic'})</strong><br>
         Incoterm: <strong>${incoterm||'—'}</strong> · MOQ: <strong>${vendor.moq||'—'}</strong><br>
-        ${isImport?`Est. duty: <strong>${dutyRate}%</strong> · `:''}Lead: <strong>${vendor.lead?vendor.lead+' days':'—'}</strong>
+        ${isImport?`Duty: <strong>per HTS fiber (see line items)</strong> · `:''}Lead: <strong>${vendor.lead?vendor.lead+' days':'—'}</strong>
       </div>
     </div>
     <div style="background:#f7f7f7;padding:12px 14px">
@@ -15024,7 +15044,7 @@ function loadCostSheet() {
   const vendor = (STATE.vendors||[]).find(v=>v.name===s.vendor);
   const isImport = vendor && typeof vendorRegion==='function' && vendorRegion(vendor)==='International';
   if (isImport && matTotal>0) {
-    const dutyRate = typeof vendorDuty==='function' ? vendorDuty(vendor) : 0;
+    const dutyRate = typeof styleDuty==='function' ? styleDuty(s, vendor) : 0;
     if (dutyRate>0) setv('duties', Math.round(matTotal*dutyRate/100*100)/100);
   }
   calcCostSheet();
@@ -15067,7 +15087,7 @@ function calcCostSheet() {
     const vendor = s && (STATE.vendors||[]).find(v=>v.name===s.vendor);
     const isImport = vendor && typeof vendorRegion==='function' && vendorRegion(vendor)==='International';
     if (isImport) {
-      const dutyRate = typeof vendorDuty==='function' ? vendorDuty(vendor) : 0;
+      const dutyRate = typeof styleDuty==='function' ? styleDuty(s, vendor) : 0;
       if (dut===0) warn = `⚠ ${s.vendor} is an import vendor but Duties are $0 — add ≈${dutyRate}% of material ($${(mat*dutyRate/100).toFixed(2)}) for a true landed cost. `;
       if (frt===0) warn += 'Freight is $0 for an import — add per-unit freight.';
     }
