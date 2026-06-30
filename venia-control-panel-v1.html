@@ -3410,6 +3410,8 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
     <div class="page" id="page-vendors">
       <div class="filters">
         <button class="pill active" onclick="filterVendor('all',this)">All</button>
+        <button class="pill" onclick="filterVendor('Domestic',this)">🏠 Domestic</button>
+        <button class="pill" onclick="filterVendor('Import',this)">🌐 Import</button>
         <button class="pill" onclick="filterVendor('Factory',this)">Factories</button>
         <button class="pill" onclick="filterVendor('Fabric Supplier',this)">Fabric</button>
         <button class="pill" onclick="filterVendor('Trim Supplier',this)">Trims</button>
@@ -4061,8 +4063,15 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <div class="fg"><label class="fl">Contact Name</label><input class="fi" id="vm-contact" placeholder="Primary contact"></div>
         <div class="fg"><label class="fl">Email</label><input class="fi" id="vm-email" type="email" placeholder="contact@factory.com"></div>
         <div class="fg"><label class="fl">Phone / WhatsApp</label><input class="fi" id="vm-phone" placeholder="+1 000 000 0000"></div>
-        <div class="fg"><label class="fl">Avg Lead Time (weeks)</label><input class="fi fi-mono" id="vm-lead" type="number" placeholder="12"></div>
+        <div class="fg"><label class="fl">Avg Lead Time (days)</label><input class="fi fi-mono" id="vm-lead" type="number" placeholder="21"></div>
         <div class="fg"><label class="fl">MOQ</label><input class="fi fi-mono" id="vm-moq" placeholder="e.g. 100 pcs"></div>
+        <div class="fg"><label class="fl">Currency</label>
+          <select class="fs" id="vm-currency"><option value="">Auto (by country)</option><option>USD</option><option>EUR</option><option>KRW</option><option>CNY</option><option>JPY</option><option>GBP</option><option>INR</option><option>TRY</option><option>VND</option></select>
+        </div>
+        <div class="fg"><label class="fl">Import Duty % <span style="color:var(--muted)">(0 = domestic)</span></label><input class="fi fi-mono" id="vm-duty" type="number" step="0.1" placeholder="auto by origin"></div>
+        <div class="fg"><label class="fl">Incoterm</label>
+          <select class="fs" id="vm-incoterm"><option value="">Auto</option><option>EXW (local)</option><option>FOB</option><option>FCA</option><option>CIF</option><option>DDP</option><option>DAP</option></select>
+        </div>
         <div class="fg"><label class="fl">Rating</label>
           <select class="fs" id="vm-rating"><option>★★★★★</option><option>★★★★</option><option>★★★</option><option>★★</option><option>★</option></select>
         </div>
@@ -5635,10 +5644,34 @@ function filterMat(type, el) {
 //  VENDORS
 // ═══════════════════════════════════════════════
 let vendorFilter = 'all';
+
+// ── Sourcing intelligence: classify origin + enterprise defaults (override per vendor) ──
+const DOMESTIC_COUNTRIES = ['usa','us','u.s.','u.s.a.','united states','united states of america','america'];
+function vendorRegion(v){
+  if (v.region) return v.region;
+  return DOMESTIC_COUNTRIES.includes((v.country||'').toLowerCase().trim()) ? 'Domestic' : 'International';
+}
+function vendorCurrency(v){
+  if (v.currency) return v.currency;
+  if (vendorRegion(v)==='Domestic') return 'USD';
+  const map = {italy:'EUR',portugal:'EUR',france:'EUR',spain:'EUR',germany:'EUR','south korea':'KRW',korea:'KRW',china:'CNY',japan:'JPY',india:'INR','united kingdom':'GBP',uk:'GBP',turkey:'TRY',vietnam:'VND'};
+  return map[(v.country||'').toLowerCase().trim()] || 'USD';
+}
+function vendorDuty(v){
+  if (v.dutyRate !== undefined && v.dutyRate !== null && v.dutyRate !== '') return parseFloat(v.dutyRate)||0;
+  return vendorRegion(v)==='Domestic' ? 0 : 16; // US apparel imports avg ~16% (HTS 61/62); set exact rate per vendor
+}
+function vendorIncoterm(v){ return v.incoterm || (vendorRegion(v)==='Domestic' ? 'EXW (local)' : 'FOB'); }
+
 function renderVendors(filter) {
   if (filter !== undefined) vendorFilter = filter;
   let list = [...STATE.vendors];
-  if (vendorFilter !== 'all') list = list.filter(v => v.type === vendorFilter);
+  if (vendorFilter === 'Domestic' || vendorFilter === 'Import') {
+    const want = vendorFilter === 'Domestic' ? 'Domestic' : 'International';
+    list = list.filter(v => vendorRegion(v) === want);
+  } else if (vendorFilter !== 'all') {
+    list = list.filter(v => v.type === vendorFilter);
+  }
   const typeColors = { Factory:'var(--gold)', 'Fabric Supplier':'var(--blue)', 'Trim Supplier':'var(--purple)', Label:'var(--green)', Agent:'var(--amber)', Logistics:'var(--teal)' };
   document.getElementById('vendor-grid').innerHTML = list.map(v => {
     const assignedStyles = STATE.styles.filter(s => s.vendor === v.name && s.status !== 'archived');
@@ -5650,6 +5683,12 @@ function renderVendors(filter) {
         <span style="color:${typeColors[v.type]||'var(--soft)'};font-size:16px">${v.rating||''}</span>
       </div>
       <div class="vendor-type" style="color:${typeColors[v.type]||'var(--muted)'}">${v.type}</div>
+      <div class="vendor-src">
+        <span class="src-badge ${vendorRegion(v)==='Domestic'?'src-dom':'src-int'}">${vendorRegion(v)==='Domestic'?'🏠 Domestic':'🌐 Import'}</span>
+        <span class="src-chip">${vendorCurrency(v)}</span>
+        ${vendorRegion(v)==='International'?`<span class="src-chip">Duty ${vendorDuty(v)}%</span>`:''}
+        <span class="src-chip">${vendorIncoterm(v)}</span>
+      </div>
       <div class="vendor-detail">📍 <span>${v.city?v.city+', ':''} ${v.country||'—'}</span></div>
       <div class="vendor-detail">👤 <span>${v.contact||'—'}</span></div>
       <div class="vendor-detail">📧 <span>${v.email||'—'}</span></div>
@@ -6578,10 +6617,11 @@ function openVendorModal(id=null) {
   if (id) {
     const v = STATE.vendors.find(x=>x.id===id);
     if (v) {
-      ['name','type','country','city','contact','email','phone','lead','moq','rating','notes'].forEach(f=>{const el=document.getElementById(`vm-${f}`);if(el)el.value=v[f]||'';});
+      ['name','type','country','city','contact','email','phone','lead','moq','rating','notes','currency','incoterm'].forEach(f=>{const el=document.getElementById(`vm-${f}`);if(el)el.value=v[f]||'';});
+      const dEl=document.getElementById('vm-duty'); if(dEl) dEl.value = (v.dutyRate!=null?v.dutyRate:'');
     }
   } else {
-    ['vm-name','vm-country','vm-city','vm-contact','vm-email','vm-phone','vm-lead','vm-moq','vm-notes'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+    ['vm-name','vm-country','vm-city','vm-contact','vm-email','vm-phone','vm-lead','vm-moq','vm-notes','vm-currency','vm-incoterm','vm-duty'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   }
   openModal('vendor-modal');
 }
@@ -6591,8 +6631,10 @@ function saveVendor() {
   if (!name) { toast('Vendor name required'); return; }
   const id = document.getElementById('vm-id').value;
   const data = {};
-  ['name','type','country','city','contact','email','phone','moq','rating','notes'].forEach(f=>{ data[f]=document.getElementById(`vm-${f}`).value; });
+  ['name','type','country','city','contact','email','phone','moq','rating','notes','currency','incoterm'].forEach(f=>{ data[f]=document.getElementById(`vm-${f}`).value; });
   data.lead = parseInt(document.getElementById('vm-lead').value)||0;
+  const dutyV = document.getElementById('vm-duty').value;
+  data.dutyRate = dutyV==='' ? null : (parseFloat(dutyV)||0);
   if (id) {
     const idx = STATE.vendors.findIndex(x=>x.id===id);
     if(idx!==-1) STATE.vendors[idx]={...STATE.vendors[idx],...data};
@@ -15784,6 +15826,15 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   #linesheet-content{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
   #linesheet-print{ min-width:600px; padding:18px !important; }
 }
+
+/* ── Vendor sourcing badges (domestic vs import + currency/duty/incoterm) ── */
+.vendor-src{ display:flex; gap:5px; flex-wrap:wrap; margin:7px 0 9px; }
+.src-badge{ font-size:8px; letter-spacing:1px; text-transform:uppercase; font-weight:700;
+  padding:3px 8px; border-radius:5px; border:1px solid var(--border); }
+.src-dom{ background:rgba(34,197,94,.10); color:#1a7f43; border-color:rgba(34,197,94,.30); }
+.src-int{ background:rgba(0,0,0,.05); color:var(--ink); border-color:var(--border-mid); }
+.src-chip{ font-size:8px; letter-spacing:.5px; text-transform:uppercase; color:var(--muted);
+  padding:3px 8px; border-radius:5px; border:1px solid var(--border); background:var(--bg-off); }
 </style>
 
 <button id="sk-launch" onclick="skToggle()" aria-label="Open Eni and Nigma assistant" title="Eni & Nigma  (Cmd/Ctrl+J)">
