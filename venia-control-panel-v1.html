@@ -8127,10 +8127,35 @@ function generatePO(vendorId) {
 
   if (!styles.length) { toast(`No active styles with ${vendor.name}`); return; }
 
+  // Order quantity makes this a real, orderable PO (not just a cost list).
+  const moqNum = parseInt(String(vendor.moq||'').replace(/[^0-9]/g,'')) || 0;
+  const defQty = moqNum || 50;
+  const qtyStr = prompt(`Units per style for this PO to ${vendor.name}`+(moqNum?` — vendor MOQ ${moqNum} units`:'')+`:`, defQty);
+  if (qtyStr === null) return;
+  const qty = parseInt(qtyStr) || defQty;
+
   const now = new Date();
   const poNumber = `PO-${now.getFullYear()}-${String(STATE.styles.filter(s=>s.vendor===vendor.name).length).padStart(3,'0')}`;
   const issueDate = now.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-  const totalCogs = styles.reduce((sum,s)=>sum+(s.cogs||0),0);
+
+  // Sourcing economics
+  const isImport = (typeof vendorRegion==='function') && vendorRegion(vendor)==='International';
+  const dutyRate = (typeof vendorDuty==='function') ? vendorDuty(vendor) : 0;       // %
+  const cur = (typeof vendorCurrency==='function') ? vendorCurrency(vendor) : 'USD';
+  const incoterm = (typeof vendorIncoterm==='function') ? vendorIncoterm(vendor) : '';
+  const lineRows = styles.map(s => {
+    const ext = qty*(s.cogs||0);
+    const duty = isImport ? ext*dutyRate/100 : 0;
+    const freight = (s.freight||0)*qty;
+    const landed = ext+duty+freight;
+    return { s, ext, duty, freight, landed };
+  });
+  const totalUnits = qty*styles.length;
+  const totalCogs = lineRows.reduce((a,r)=>a+r.ext,0);
+  const totalDuty = lineRows.reduce((a,r)=>a+r.duty,0);
+  const totalFreight = lineRows.reduce((a,r)=>a+r.freight,0);
+  const totalLanded = lineRows.reduce((a,r)=>a+r.landed,0);
+  const moqWarn = moqNum && totalUnits < moqNum;
 
   // Build PO HTML for print
   const poHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -8178,30 +8203,59 @@ function generatePO(vendorId) {
     </div>
   </div>
 
+  ${moqWarn ? `<div style="background:#fff4f4;border:1px solid #e0a0a0;padding:10px 14px;margin-bottom:16px;font-size:10px;color:#b03030">
+    ⚠ Order total <strong>${totalUnits} units</strong> is below this vendor's MOQ of <strong>${moqNum} units</strong>. Increase quantities or confirm a short-run surcharge before issuing.
+  </div>` : ''}
+
   <table>
     <thead><tr>
-      <th>Style ID</th><th>Style Name</th><th>Category</th><th>Season</th>
-      <th>Sizes</th><th>Colors</th><th>Lead Time</th><th>Drop Date</th>
+      <th>Style ID</th><th>Style Name</th><th>Sizes</th><th>Colors</th>
+      <th style="text-align:right">Order Qty</th>
       <th style="text-align:right">COGS/Unit</th>
+      <th style="text-align:right">Ext COGS</th>
+      ${isImport?`<th style="text-align:right">Duty ${dutyRate}%</th><th style="text-align:right">Freight</th>`:''}
+      <th style="text-align:right">Ext Landed</th>
     </tr></thead>
     <tbody>
-      ${styles.map(s=>`<tr>
+      ${lineRows.map(({s,ext,duty,freight,landed})=>`<tr>
         <td style="font-family:'Courier New',monospace;font-size:10px">${s.styleId}</td>
-        <td style="font-weight:600">${s.name}</td>
-        <td>${s.category}</td>
-        <td>${s.season}</td>
+        <td style="font-weight:600">${s.name}<div style="font-size:8px;color:#999">${s.category} · ${s.season} · ${s.lead?s.lead+' wk lead':''} · drop ${s.drop||'TBD'}</div></td>
         <td style="font-size:10px">${s.sizes||'—'}</td>
         <td style="font-size:10px">${s.colors||'—'}</td>
-        <td style="font-size:10px">${s.lead?s.lead+' wks':'—'}</td>
-        <td style="font-family:'Courier New',monospace;font-size:10px">${s.drop||'TBD'}</td>
-        <td style="text-align:right;font-family:'Courier New',monospace">$${s.cogs||'—'}</td>
+        <td style="text-align:right;font-family:'Courier New',monospace">${qty}</td>
+        <td style="text-align:right;font-family:'Courier New',monospace">$${(s.cogs||0).toFixed(2)}</td>
+        <td style="text-align:right;font-family:'Courier New',monospace">$${ext.toFixed(2)}</td>
+        ${isImport?`<td style="text-align:right;font-family:'Courier New',monospace">$${duty.toFixed(2)}</td><td style="text-align:right;font-family:'Courier New',monospace">$${freight.toFixed(2)}</td>`:''}
+        <td style="text-align:right;font-family:'Courier New',monospace;font-weight:700">$${landed.toFixed(2)}</td>
       </tr>`).join('')}
       <tr class="total">
-        <td colspan="8" style="text-align:right;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:#999">Total COGS (${styles.length} styles)</td>
-        <td style="text-align:right;font-family:'Courier New',monospace;font-size:14px">$${totalCogs.toFixed(2)}</td>
+        <td colspan="4" style="text-align:right;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:#999">${styles.length} styles · ${totalUnits} units</td>
+        <td style="text-align:right;font-family:'Courier New',monospace">${totalUnits}</td>
+        <td></td>
+        <td style="text-align:right;font-family:'Courier New',monospace">$${totalCogs.toFixed(2)}</td>
+        ${isImport?`<td style="text-align:right;font-family:'Courier New',monospace">$${totalDuty.toFixed(2)}</td><td style="text-align:right;font-family:'Courier New',monospace">$${totalFreight.toFixed(2)}</td>`:''}
+        <td style="text-align:right;font-family:'Courier New',monospace;font-size:14px">$${totalLanded.toFixed(2)}</td>
       </tr>
     </tbody>
   </table>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+    <div style="background:#f7f7f7;padding:12px 14px">
+      <div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Sourcing Terms</div>
+      <div style="font-size:10px;color:#444;line-height:1.8">
+        Origin: <strong>${vendor.country||'—'} (${isImport?'Import':'Domestic'})</strong><br>
+        Incoterm: <strong>${incoterm||'—'}</strong> · MOQ: <strong>${vendor.moq||'—'}</strong><br>
+        ${isImport?`Est. duty: <strong>${dutyRate}%</strong> · `:''}Lead: <strong>${vendor.lead?vendor.lead+' days':'—'}</strong>
+      </div>
+    </div>
+    <div style="background:#f7f7f7;padding:12px 14px">
+      <div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Currency</div>
+      <div style="font-size:10px;color:#444;line-height:1.8">
+        Amounts shown in <strong>USD</strong>.${cur && cur!=='USD' ? ` Settlement in <strong>${cur}</strong> at prevailing FX on invoice date.` : ''}<br>
+        ${isImport?'Landed = COGS + estimated duty + freight (verify HTS duty & actual freight at booking).':'Domestic — no duty/freight applied.'}
+      </div>
+    </div>
+  </div>
 
   <div style="background:#f7f7f7;padding:16px;margin-bottom:24px">
     <div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Terms & Notes</div>
