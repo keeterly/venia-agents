@@ -5552,6 +5552,19 @@ function pomSelectStyle(styleId) {
   let sizes = expandSizes(style.sizes);
   if (!sizes.length) sizes = ['XS','S','M','L','XL'];
 
+  // Base/sample size for the measured-vs-spec fit check (style's base size, else middle)
+  let bi = -1;
+  if (style.baseSize) { const bs=style.baseSize.toUpperCase(); bi = sizes.findIndex(sz=>new RegExp('\\b'+sz+'\\b').test(bs)); }
+  if (bi < 0) bi = Math.floor((sizes.length-1)/2);
+  const baseSz = sizes[bi], baseK = baseSz.toLowerCase();
+
+  const devCell = (p) => {
+    const spec = parseFloat(p[baseK]), meas = parseFloat(p.measured), tol = parseFloat(p.tol)||0;
+    if (isNaN(meas) || isNaN(spec)) return `<span style="color:var(--muted)">—</span>`;
+    const d = Math.round((meas-spec)*100)/100, oot = Math.abs(d) > tol;
+    return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>`;
+  };
+
   const html = `
     <div class="sec-head" style="margin-bottom:14px">
       <div class="sec-title">${style.name} <span style="color:var(--muted);font-size:14px">— POM Sheet</span></div>
@@ -5560,8 +5573,10 @@ function pomSelectStyle(styleId) {
       <table class="pom-table">
         <thead><tr>
           <th style="min-width:160px">Measurement Point</th>
-          ${sizes.map(sz=>`<th>${sz}</th>`).join('')}
+          ${sizes.map(sz=>`<th${sz===baseSz?' style="color:var(--gold)"':''}>${sz}${sz===baseSz?' ·base':''}</th>`).join('')}
           <th>Tol (+/-)</th>
+          <th title="Measured value on the ${baseSz} sample">Meas (${baseSz})</th>
+          <th title="Measured minus ${baseSz} spec; flags red if beyond tolerance">Dev</th>
           <th>Comment</th>
           <th></th>
         </tr></thead>
@@ -5571,6 +5586,8 @@ function pomSelectStyle(styleId) {
               <td style="color:var(--ink);font-weight:500">${p.point}</td>
               ${sizes.map(sz=>`<td><input class="pom-input" value="${p[sz.toLowerCase()]||''}" onchange="updatePom('${styleId}',${idx},'${sz.toLowerCase()}',this.value)"></td>`).join('')}
               <td><input class="pom-input" style="width:48px" value="${p.tol||''}" onchange="updatePom('${styleId}',${idx},'tol',this.value)"></td>
+              <td><input class="pom-input" style="width:54px" value="${p.measured||''}" placeholder="—" onchange="updatePom('${styleId}',${idx},'measured',this.value)"></td>
+              <td style="text-align:center" id="pom-dev-${idx}">${devCell(p)}</td>
               <td><input class="fi" style="font-size:10px;padding:4px 0;min-height:auto" value="${p.comment||''}" onchange="updatePom('${styleId}',${idx},'comment',this.value)"></td>
               <td style="text-align:center"><button class="btn btn-danger btn-sm" onclick="removePomPoint('${styleId}',${idx})">✕</button></td>
             </tr>`).join('')}
@@ -5578,6 +5595,7 @@ function pomSelectStyle(styleId) {
             <td><input class="fi" id="pom-new-point" placeholder="e.g. Chest" style="font-size:11px;min-height:auto;padding:4px 0"></td>
             ${sizes.map(sz=>`<td><input class="pom-input" id="pom-new-${sz.toLowerCase()}" placeholder="0"></td>`).join('')}
             <td><input class="pom-input" id="pom-new-tol" placeholder="0.5" style="width:48px"></td>
+            <td></td><td></td>
             <td><input class="fi" id="pom-new-comment" placeholder="Note" style="font-size:10px;padding:4px 0;min-height:auto"></td>
             <td style="text-align:center;white-space:nowrap">
               <button class="btn btn-gold btn-sm" onclick="savePomPoint('${styleId}')">✓</button>
@@ -5587,6 +5605,7 @@ function pomSelectStyle(styleId) {
         </tbody>
       </table>
     </div>
+    <div style="margin-top:8px;font-size:9px;color:var(--muted)">Dev = measured (${baseSz} sample) − spec; <span style="color:var(--red)">red ⚠</span> = beyond tolerance, <span style="color:var(--green)">green ✓</span> = in spec.</div>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn btn-ghost btn-sm" onclick="showPomAdd()">+ Add Measurement Point</button>
       <button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')" title="Fill the size run from the base-size column using a grade increment">⊞ Grade from base size</button>
@@ -5635,23 +5654,47 @@ function pomGrade(styleId) {
   if (isNaN(inc)) { toast('Enter a number','warn'); return; }
   const pts = STATE.pom[styleId] || [];
   const bk = baseSize.toLowerCase();
-  let filled = 0;
+  let filled = 0, cells = 0;
   pts.forEach(p => {
     const bv = parseFloat(p[bk]);
     if (isNaN(bv)) return;
-    sizes.forEach((sz,i) => { p[sz.toLowerCase()] = Math.round((bv + (i-bi)*inc)*100)/100; });
-    filled++;
+    let pf = 0;
+    sizes.forEach((sz,i) => {
+      const k = sz.toLowerCase();
+      if (k === bk) return;                       // never touch the base column
+      const cur = p[k];
+      const isEmpty = cur===undefined || cur===null || cur==='' || isNaN(parseFloat(cur));
+      if (isEmpty) { p[k] = Math.round((bv + (i-bi)*inc)*100)/100; pf++; }  // fill blanks only — preserve manual grades
+    });
+    if (pf) { filled++; cells += pf; }
   });
   style.gradeInc = inc;
   if (typeof save === 'function') save();
   pomSelectStyle(styleId);
-  toast(filled ? ('Graded '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+inc+'cm/size)') : ('Enter a value in the '+baseSize+' column first'), filled ? 'success' : 'warn');
+  toast(filled ? ('Filled '+cells+' blank cell'+(cells>1?'s':'')+' across '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+inc+'cm/size). Existing values kept.') : ('Nothing to fill — enter a value in the '+baseSize+' column, existing grades are preserved'), filled ? 'success' : 'warn');
 }
 
 function updatePom(styleId, idx, field, val) {
   if (!STATE.pom[styleId]) return;
   STATE.pom[styleId][idx][field] = isNaN(parseFloat(val)) ? val : parseFloat(val);
   save();
+  updatePomDev(styleId, idx);
+}
+
+// Recompute the measured-vs-spec deviation flag for one row without a full re-render.
+function updatePomDev(styleId, idx) {
+  const cell = document.getElementById('pom-dev-'+idx);
+  if (!cell) return;
+  const style = STATE.styles.find(s=>s.id===styleId); if (!style) return;
+  let sizes = expandSizes(style.sizes); if (!sizes.length) sizes = ['XS','S','M','L','XL'];
+  let bi=-1; if (style.baseSize){ const bs=style.baseSize.toUpperCase(); bi=sizes.findIndex(sz=>new RegExp('\\b'+sz+'\\b').test(bs)); }
+  if (bi<0) bi = Math.floor((sizes.length-1)/2);
+  const baseK = sizes[bi].toLowerCase();
+  const p = STATE.pom[styleId][idx]; if (!p) return;
+  const spec=parseFloat(p[baseK]), meas=parseFloat(p.measured), tol=parseFloat(p.tol)||0;
+  if (isNaN(meas)||isNaN(spec)) { cell.innerHTML='<span style="color:var(--muted)">—</span>'; return; }
+  const d=Math.round((meas-spec)*100)/100, oot=Math.abs(d)>tol;
+  cell.innerHTML=`<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>`;
 }
 
 function removePomPoint(styleId, idx) {
