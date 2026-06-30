@@ -4726,6 +4726,10 @@ const ADD_LABELS = {
 };
 
 function goTo(page, el) {
+  // Close any open style detail panel so it doesn't occlude the destination
+  // (especially on mobile, where the panel is full-screen).
+  try { closeDp(); } catch(e) {}
+
   // Manage .content scroll: disable when on techpack so only #techpack-content scrolls
   const contentEl = document.getElementById('content');
   if (contentEl) {
@@ -6437,6 +6441,9 @@ function saveStyle() {
     data.styleId = `VN-${seasonCode}-${num}`;
     data.id = 'STY'+Date.now();
     data.notes = [];
+    // Quick-create starts minimal — seed a default size run so the style isn't an
+    // empty shell; SKUs generate as soon as a colorway is added. All editable.
+    if (!data.sizes) data.sizes = 'XS,S,M,L,XL';
     STATE.styles.unshift(data);
     logActivity(`New style created: ${name} (${data.styleId})`);
     toast(name+' created');
@@ -6970,7 +6977,7 @@ function renderLineSheet() {
               <td data-label="Fabric" style="padding:10px 8px;font-size:10px;color:var(--silver)">${s.fabric||'—'}</td>
               <td data-label="Wholesale" style="padding:10px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:11px">${s.wholesale?'$'+s.wholesale:'—'}</td>
               <td data-label="Retail" style="padding:10px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:var(--ink)">${s.retail?'$'+s.retail:'—'}</td>
-              <td data-label="Lead" style="padding:10px 8px;text-align:center;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)">${s.lead?s.lead+'d':'—'}</td>
+              <td data-label="Lead" style="padding:10px 8px;text-align:center;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)">${s.lead?s.lead+' wk':'—'}</td>
               <td data-label="Drop" style="padding:10px 8px;text-align:center;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)">${s.drop||'—'}</td>
             </tr>`).join('')}</tbody>
           </table>
@@ -8327,7 +8334,12 @@ function cwSaveAll(styleId) {
       cw.notes = document.getElementById(`cw-notes-${i}`)?.value || '';
     }
   });
+  // Keep the legacy colors text + SKUs in sync with the structured colorways
+  // so the colorway manager actually drives SKU generation and the line sheet.
+  const cwNames = s.colorways.map(cw=>cw.name).filter(Boolean);
+  if (cwNames.length) s.colors = cwNames.join(', ');
   save();
+  buildSkus();
   document.getElementById('colorway-modal')?.remove();
   openDp(styleId);
   toast('Colorways saved');
@@ -8727,15 +8739,7 @@ function renderTechPackPrint(s) {
             <div style="width:22px;height:22px;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;font-family:'DM Mono',monospace">${c.num}</div>
             <div style="font-size:10px;color:#000;line-height:1.5">${c.text}</div>
           </div>`).join('') :
-          `<div style="font-size:9px;color:#c8c8c8;font-style:italic;line-height:1.8">
-            Add callouts in the style editor to annotate specific construction details for the manufacturer.
-            <br><br>Examples:<br>
-            <strong>①</strong> French seam at all curved seams<br>
-            <strong>②</strong> Blind hem 2.5cm, hand-stitched<br>
-            <strong>③</strong> Bartack at all stress points<br>
-            <strong>④</strong> 1/4" topstitch at collar<br>
-            <strong>⑤</strong> Invisible zip, hand-finished
-          </div>`}
+          `<div style="font-size:9px;color:#c8c8c8;font-style:italic;line-height:1.6">No construction callouts specified.</div>`}
 
         <!-- Pattern Card -->
         <div style="margin-top:16px;padding-top:14px;border-top:1px solid #e0e0e0">
@@ -8827,18 +8831,13 @@ function renderTechPackPrint(s) {
           ${field('Hang Tag', s.hangLoc)}
         </div>
 
-        <!-- Costing box -->
-        <div style="margin-top:12px;padding:10px;background:#f7f7f7;border:1px solid #e0e0e0">
-          <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Costing</div>
-          ${field('COGS', s.cogs ? '$'+s.cogs : null, true)}
+        <!-- Target cost box (manufacturer copy: NO retail price / margin) -->
+        ${(s.cogs||s.landed) ? `<div style="margin-top:12px;padding:10px;background:#f7f7f7;border:1px solid #e0e0e0">
+          <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Target Cost</div>
+          ${field('Target COGS', s.cogs ? '$'+s.cogs : null, true)}
           ${field('Landed Cost', s.landed ? '$'+s.landed : null, true)}
-          ${field('Wholesale', s.wholesale ? '$'+s.wholesale : null, true)}
-          ${field('Retail', s.retail ? '$'+s.retail : null, true)}
-          ${margin!==null ? `<div style="display:flex;justify-content:space-between;padding-top:6px;margin-top:4px;border-top:1px solid #e0e0e0">
-            <span style="font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#999">Retail Margin</span>
-            <span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:${margin>60?'#27ae60':margin<40?'#c0392b':'#000'}">${margin}%</span>
-          </div>` : ''}
-        </div>
+          <div style="margin-top:6px;font-size:7px;color:#bbb;font-style:italic">Wholesale &amp; retail pricing omitted from manufacturer copy.</div>
+        </div>` : ''}
       </div>
     </div>
 
@@ -8926,7 +8925,7 @@ function renderTechPackPrint(s) {
           </tr>`).join('')}
         </tbody>
       </table>
-      <div style="margin-top:8px;font-size:8px;color:#999;font-style:italic">All measurements in inches unless otherwise noted. Tolerance applies to all sizes.</div>
+      <div style="margin-top:8px;font-size:8px;color:#999;font-style:italic">All measurements in centimeters (cm) unless otherwise noted. Tolerance applies to all sizes.</div>
       ` : '<div style="font-size:10px;color:#999;font-style:italic;padding:8px 0">No measurements added. Go to POM / Measurements to add.</div>'}
     </div>
 
