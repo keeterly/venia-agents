@@ -3519,6 +3519,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <div style="font-size:9px;color:var(--muted)">Retail Margin: <span id="cs-retail-margin" style="color:var(--ink);font-weight:700"></span></div>
             <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="saveCostSheet()" aria-label="Save cost sheet to local storage">↓ Save</button>
           </div>
+          <div id="cs-warn" style="display:none;margin-top:10px;padding:8px 10px;background:#fff4f4;border:1px solid #e0a0a0;font-size:10px;color:#b03030;line-height:1.5"></div>
         </div>
       </div>
 
@@ -15009,8 +15010,25 @@ function loadCostSheet() {
   const sid = document.getElementById('cs-style-sel')?.value;
   if (!sid) return;
   const saved = JSON.parse(localStorage.getItem('venia-cost-sheets')||'{}');
-  if (saved[sid]) loadCostSheetData(saved[sid]);
-  else { ['cs-material','cs-labor','cs-overhead','cs-duties','cs-freight'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';}); document.getElementById('cs-results').style.display='none'; }
+  if (saved[sid]) { loadCostSheetData(saved[sid]); return; }
+  // No saved sheet yet — prefill from the style's BOM + vendor sourcing so an
+  // import style can't silently compute a $0-duty/freight "landed" cost.
+  ['cs-material','cs-labor','cs-overhead','cs-duties','cs-freight'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  const s = (STATE.styles||[]).find(x=>x.id===sid);
+  if (!s) { document.getElementById('cs-results').style.display='none'; return; }
+  const setv = (k,val) => { const el=document.getElementById('cs-'+k); if(el && (val||val===0)) el.value=val; };
+  const bom = STATE.bom[s.id]||[];
+  const matTotal = Math.round(bom.reduce((a,i)=>a+(typeof bomExt==='function'?bomExt(i):(i.qty*i.costPerUnit||0)),0)*100)/100;
+  if (matTotal>0) setv('material', matTotal);
+  if (s.freight) setv('freight', s.freight);
+  const vendor = (STATE.vendors||[]).find(v=>v.name===s.vendor);
+  const isImport = vendor && typeof vendorRegion==='function' && vendorRegion(vendor)==='International';
+  if (isImport && matTotal>0) {
+    const dutyRate = typeof vendorDuty==='function' ? vendorDuty(vendor) : 0;
+    if (dutyRate>0) setv('duties', Math.round(matTotal*dutyRate/100*100)/100);
+  }
+  calcCostSheet();
+  if (matTotal>0 || s.freight) toast('Prefilled from BOM'+(isImport?' + import duty':'')+' — adjust as needed');
 }
 
 function loadCostSheetData(d) {
@@ -15040,6 +15058,22 @@ function calcCostSheet() {
   document.getElementById('cs-markup').textContent       = markup + '×';
   document.getElementById('cs-retail-margin').textContent= rtMargin + '%';
   document.getElementById('cs-results').style.display    = 'block';
+  // Flag the silent-$0-import-cost trap: an import style with no duty/freight.
+  const warnEl = document.getElementById('cs-warn');
+  if (warnEl) {
+    let warn = '';
+    const sid = document.getElementById('cs-style-sel')?.value;
+    const s = sid && (STATE.styles||[]).find(x=>x.id===sid);
+    const vendor = s && (STATE.vendors||[]).find(v=>v.name===s.vendor);
+    const isImport = vendor && typeof vendorRegion==='function' && vendorRegion(vendor)==='International';
+    if (isImport) {
+      const dutyRate = typeof vendorDuty==='function' ? vendorDuty(vendor) : 0;
+      if (dut===0) warn = `⚠ ${s.vendor} is an import vendor but Duties are $0 — add ≈${dutyRate}% of material ($${(mat*dutyRate/100).toFixed(2)}) for a true landed cost. `;
+      if (frt===0) warn += 'Freight is $0 for an import — add per-unit freight.';
+    }
+    warnEl.textContent = warn;
+    warnEl.style.display = warn ? 'block' : 'none';
+  }
 }
 
 function saveCostSheet() {
