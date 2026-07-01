@@ -833,9 +833,11 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
   .tpsb { padding: 13px 12px; }
   .tpsh { padding: 11px 12px; }
   #dash-quick-actions { margin-bottom: 14px !important; padding-bottom: 14px !important; gap: 7px; }
-  /* Tech-pack filter row: wrap the Working/Print toggle below instead of scrolling
-     the Style label off the left edge */
-  #tp-filters { overflow-x: visible !important; row-gap: 8px; }
+  /* Tech-pack filter row: stack the Style selector and the Working/Print/Save
+     toggle vertically on phones so they don't overlap. */
+  #tp-filters { overflow-x: visible !important; flex-direction: column; align-items: stretch !important; gap: 8px; padding: 8px 12px !important; }
+  #tp-filters > div { max-width: none !important; width: 100%; }
+  #tp-filters > div:last-child { flex-wrap: wrap; gap: 4px; }
   .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { min-width: 600px; }
   .stats-5, .stats-4 { grid-template-columns: repeat(2, 1fr) !important; }
@@ -1430,7 +1432,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '14';
+  const BUILD = '15';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7711,6 +7713,7 @@ function renderTechPackWork(s) {
         </div>`).join(''):
         `<div style="font-size:10px;color:#c8c8c8;font-style:italic;line-height:1.9">Click anywhere on a sketch to drop a numbered callout, then choose its type (fabric vs construction) and describe it. Example: a <span style="color:#2563a8">blue Fabric</span> pin on the body = "Body: Wool Crepe", a <span style="color:#111">Construction</span> pin at a seam = "French seam, pressed open."</div>`}
       </div>
+      ${tpFabricMap(s)}
       ${fitPhotos.length?`<div class="tpl" style="margin:0 0 6px">Fit Photos (${fitPhotos.length})</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:6px;margin-bottom:12px">
         ${fitPhotos.map(p=>`<div style="border:1px solid #e0e0e0">
@@ -8192,6 +8195,46 @@ const TP_CO_TYPES = {
 };
 function tpCoColor(c){ return (TP_CO_TYPES[c&&c.type]||TP_CO_TYPES.construction).color; }
 function tpRenumber(s){ (s.callouts||[]).forEach((c,i)=>{ c.num = i+1; }); }
+
+// Fabric map: cross-references the Fabric-type pins with the BOM so the CAD
+// placements and the material list stay in sync (flags zones missing from the
+// BOM and materials with no placement pin).
+function tpFabricMap(s, forPrint){
+  const pins = (s.callouts||[]).filter(c=>c.type==='fabric' && (c.text||'').trim());
+  const bom = (typeof STATE!=='undefined' && STATE.bom && STATE.bom[s.id]) || [];
+  const bomFabrics = bom.filter(b=>{
+    if (b.lineType==='Fabric') return true;
+    const mat = b.matId ? (STATE.materials||[]).find(m=>m.id===b.matId) : null;
+    return mat && ['Fabric','Lining'].includes(mat.type);
+  });
+  const bomNames = [...new Set(bomFabrics.map(b=>b.matName).filter(Boolean))];
+  if (!pins.length && !bomNames.length) return '';
+  const matchBom = (txt)=>{ const t=(txt||'').toLowerCase(); return bomNames.find(n=>{ const nl=n.toLowerCase(); return t.includes(nl) || nl.split(/[\s\/]+/).some(w=>w.length>3 && t.includes(w)); }); };
+  const rows = pins.map(c=>({ num:c.num, place:c.text, mat:matchBom(c.text) }));
+  const placed = new Set(rows.filter(r=>r.mat).map(r=>r.mat.toLowerCase()));
+  const unplaced = bomNames.filter(n=>!placed.has(n.toLowerCase()));
+  const C = TP_CO_TYPES.fabric.color;
+  if (forPrint){
+    return `<div style="margin-top:14px;padding-top:12px;border-top:1px solid #e0e0e0">
+      <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Fabric Placement Map</div>
+      ${rows.length?rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline;margin-bottom:5px;font-size:9px">
+        <span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${C};color:#fff;font-size:8px;font-weight:700;text-align:center;line-height:14px;flex-shrink:0;font-family:'DM Mono',monospace">${r.num}</span>
+        <span style="flex:1;color:#000">${r.place}</span>
+        <span style="font-size:7px;color:${r.mat?'#27ae60':'#c0392b'};white-space:nowrap">${r.mat?'✓ '+r.mat:'⚠ not in BOM'}</span>
+      </div>`).join(''):'<div style="font-size:8px;color:#c8c8c8;font-style:italic">No fabric pins placed.</div>'}
+      ${unplaced.length?`<div style="font-size:8px;color:#c0392b;margin-top:6px">In BOM, not placed on CAD: ${unplaced.join(', ')}</div>`:''}
+    </div>`;
+  }
+  return `<div style="border:1px solid var(--border);background:var(--bg-off);padding:12px 14px;margin-bottom:16px">
+    <div style="font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--soft);font-weight:700;margin-bottom:8px">Fabric Map <span style="color:var(--muted);font-weight:400;letter-spacing:.3px">— what fabric goes where · synced with BOM</span></div>
+    ${rows.length?rows.map(r=>`<div style="display:flex;gap:8px;align-items:center;padding:4px 0;font-size:11px">
+      <span style="width:18px;height:18px;border-radius:50%;background:${C};color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'DM Mono',monospace">${r.num}</span>
+      <span style="flex:1;color:var(--ink);min-width:0">${r.place}</span>
+      <span style="font-size:9px;font-weight:600;color:${r.mat?'var(--green)':'var(--red)'};white-space:nowrap">${r.mat?'✓ '+r.mat:'⚠ not in BOM'}</span>
+    </div>`).join(''):`<div style="font-size:10px;color:var(--muted);font-style:italic">Drop a Fabric-type pin (e.g. "Body: Wool Crepe") to map fabrics to the CAD.</div>`}
+    ${unplaced.length?`<div style="font-size:10px;color:var(--red);margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">In BOM but not placed on the CAD: <strong>${unplaced.join(', ')}</strong> — drop a fabric pin for each.</div>`:''}
+  </div>`;
+}
 
 // Add an unplaced callout (no pin until you click a sketch to position it)
 function tpAddCallout(styleId) {
@@ -9222,6 +9265,7 @@ function renderTechPackPrint(s) {
             </div>
           </div>`).join('')}` :
           `<div style="font-size:9px;color:#c8c8c8;font-style:italic;line-height:1.6">No callouts specified.</div>`}
+        ${tpFabricMap(s, true)}
 
         <!-- Pattern Card -->
         <div style="margin-top:16px;padding-top:14px;border-top:1px solid #e0e0e0">
