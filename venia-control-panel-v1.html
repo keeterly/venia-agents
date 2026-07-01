@@ -1446,7 +1446,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '18';
+  const BUILD = '19';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16770,13 +16770,90 @@ document.addEventListener('keydown', function(e){
 })();
 </script>
 
-<!-- ── PWA service-worker registration (offline + installable on iPhone) ── -->
+<!-- ── PWA service-worker registration + update prompt ──────────────────────
+     Offline + installable on iPhone, PLUS a QWST-style "New version available"
+     prompt. iOS PWAs almost never re-navigate (they resume the same live page),
+     so a fresh deploy would otherwise sit unseen behind the cache. Here we poll
+     for a new worker, and when one is installed and waiting we show a top ribbon
+     with an Update button; tapping it activates the new worker and reloads once. -->
 <script>
-if ('serviceWorker' in navigator) {
+(function () {
+  if (!('serviceWorker' in navigator)) return;
+
+  // Only reload after the user has actively accepted an update — this guards
+  // against the reload that would otherwise fire on the very first install
+  // (when the first worker claims the page).
+  var userAccepted = false;
+
+  function showUpdatePrompt(worker) {
+    if (!worker || document.getElementById('vag-update-bar')) return;
+
+    if (!document.getElementById('vag-update-style')) {
+      var st = document.createElement('style');
+      st.id = 'vag-update-style';
+      st.textContent =
+        '#vag-update-bar{position:fixed;top:0;left:0;right:0;z-index:99999;display:flex;' +
+        'align-items:center;justify-content:center;gap:14px;' +
+        'padding:calc(11px + var(--sat,0px)) 16px 11px;background:#111;color:#fff;' +
+        "font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:.3px;" +
+        'box-shadow:0 3px 16px rgba(0,0,0,.35);animation:vagUpSlide .28s ease-out}' +
+        '@keyframes vagUpSlide{from{transform:translateY(-100%)}to{transform:translateY(0)}}' +
+        '#vag-update-bar .vag-up-msg{font-weight:500}' +
+        '#vag-update-bar .vag-up-msg b{font-weight:700;letter-spacing:.5px}' +
+        '#vag-update-btn{background:#fff;color:#111;border:none;border-radius:4px;' +
+        'padding:7px 16px;font-size:11px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;' +
+        'cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+        '#vag-update-btn:active{opacity:.7}' +
+        '#vag-update-x{background:none;border:none;color:#8a8a8a;font-size:16px;line-height:1;' +
+        'cursor:pointer;padding:4px 2px;-webkit-tap-highlight-color:transparent}';
+      document.head.appendChild(st);
+    }
+
+    var bar = document.createElement('div');
+    bar.id = 'vag-update-bar';
+    bar.innerHTML =
+      '<span class="vag-up-msg">A new version of <b>VENIA</b> is ready</span>' +
+      '<button id="vag-update-btn">Update</button>' +
+      '<button id="vag-update-x" aria-label="Dismiss">✕</button>';
+    document.body.appendChild(bar);
+
+    document.getElementById('vag-update-btn').onclick = function () {
+      userAccepted = true;
+      this.textContent = 'Updating…';
+      worker.postMessage({ type: 'SKIP_WAITING' });
+    };
+    document.getElementById('vag-update-x').onclick = function () { bar.remove(); };
+  }
+
   window.addEventListener('load', function () {
-    navigator.serviceWorker.register('/sw.js').catch(function () { /* file:// or unsupported — ignore */ });
+    navigator.serviceWorker.register('/sw.js').then(function (reg) {
+      // An update was downloaded on a previous visit and is already waiting.
+      if (reg.waiting && navigator.serviceWorker.controller) showUpdatePrompt(reg.waiting);
+
+      // A new worker began installing — prompt once it finishes (and only if an
+      // old worker is already in control, i.e. this is an update, not a first install).
+      reg.addEventListener('updatefound', function () {
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function () {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdatePrompt(nw);
+        });
+      });
+
+      // Poll for a fresh deploy: on tab focus and every 60s. iOS PWAs resume the
+      // same page for days, so without this a new build would never be noticed.
+      var poll = function () { reg.update().catch(function () {}); };
+      setInterval(poll, 60000);
+      document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+    }).catch(function () { /* file:// or unsupported — ignore */ });
+
+    // The waiting worker took control → run the new code (once, and only when
+    // the user asked for it).
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (userAccepted) { userAccepted = false; window.location.reload(); }
+    });
   });
-}
+})();
 </script>
 </body>
 </html>

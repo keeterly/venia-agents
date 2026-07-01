@@ -1,13 +1,21 @@
 /* VENIA Control Center — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v18';
+const CACHE = 'venia-shell-v19';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())
-  );
+  // NOTE: no skipWaiting() here. We let the new worker WAIT so the page can
+  // prompt the user ("New version available — Update") before it takes over,
+  // rather than swapping code out from under a live session. The page posts
+  // SKIP_WAITING when the user accepts. First install has no existing worker,
+  // so the browser activates it immediately regardless.
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+});
+
+// The page tells us to activate the waiting worker once the user taps "Update".
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
