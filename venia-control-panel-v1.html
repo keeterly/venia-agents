@@ -748,7 +748,9 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .tp-sketch-wrap{ cursor:crosshair; }
 .tp-pin{ position:absolute; transform:translate(-50%,-50%); width:21px; height:21px; border-radius:50%;
   color:#fff; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center;
-  border:1.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.45); font-family:'DM Mono',monospace; z-index:3; }
+  border:1.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.45); font-family:'DM Mono',monospace; z-index:3;
+  cursor:grab; touch-action:none; user-select:none; }
+.tp-pin:active{ cursor:grabbing; box-shadow:0 2px 8px rgba(0,0,0,.55); }
 .tp-co-row2{ display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #f0f0f0; }
 .tp-co-pin{ width:22px; height:22px; border-radius:50%; color:#fff; font-size:10px; font-weight:700;
   display:flex; align-items:center; justify-content:center; flex-shrink:0; font-family:'DM Mono',monospace; }
@@ -1428,7 +1430,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '13';
+  const BUILD = '14';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7670,19 +7672,19 @@ function renderTechPackWork(s) {
     <div class="tpsh" onclick="tpToggle(this)"><div class="tpst">② Flat Sketch & Callouts</div><span style="font-size:12px;color:#999">▾</span></div>
     <div class="tpsb">
       <div class="tp-co-legend">
-        <span style="letter-spacing:1px;text-transform:uppercase;color:#999;font-weight:700">Click a sketch to drop a callout →</span>
+        <span style="letter-spacing:1px;text-transform:uppercase;color:#999;font-weight:700">Click to drop a callout · drag a pin to move it →</span>
         ${Object.entries(TP_CO_TYPES).map(([k,t])=>`<span><span class="dot" style="background:${t.color}"></span>${t.label}</span>`).join('')}
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
         ${['front','back'].map((v,vi)=>{
           const sketchUrl = (s.sketchUrls||{})[v]||'';
-          const pins = (s.callouts||[]).filter(c=>c.view===v && c.x!=null);
+          const pins = (s.callouts||[]).map((c,i)=>({c,i})).filter(o=>o.c.view===v && o.c.x!=null);
           return `<div>
             <div class="tp-sketch-wrap" onclick="tpSketchClick(event,'${s.id}','${v}')" style="border:1px dashed #c8c8c8;min-height:230px;display:flex;align-items:center;justify-content:center;background:#fafafa;position:relative;flex-direction:column;overflow:hidden">
               ${sketchUrl ? `<img src="${sketchUrl}" alt="${v}" style="width:100%;height:100%;object-fit:contain;position:absolute;inset:0;pointer-events:none" onerror="this.style.display='none'">` : ''}
               ${s.cloLink&&!sketchUrl?`<div style="text-align:center;padding:10px;z-index:1;pointer-events:none"><div style="font-size:9px;color:#27ae60;margin-bottom:4px;letter-spacing:1px">● CLO3D linked</div><div style="font-family:'DM Mono',monospace;font-size:7px;color:#666;word-break:break-all">${s.cloFile||''}</div><div style="font-size:8px;color:#999;margin-top:6px">Paste a CLO snapshot below to annotate</div></div>`:
               !sketchUrl?`<div style="text-align:center;color:#ccc;z-index:1;pointer-events:none"><div style="font-size:26px;margin-bottom:6px">◻</div><div style="font-size:8px;letter-spacing:1px;text-transform:uppercase">${v.toUpperCase()}</div><div style="font-size:8px;color:#ddd;margin-top:4px">Add a CLO or sketch image below</div></div>`:''}
-              ${pins.map(c=>`<div class="tp-pin" style="left:${c.x}%;top:${c.y}%;background:${tpCoColor(c)}" title="${(c.text||'').replace(/"/g,'&quot;')}">${c.num}</div>`).join('')}
+              ${pins.map(({c,i})=>`<div class="tp-pin" style="left:${c.x}%;top:${c.y}%;background:${tpCoColor(c)}" title="${(c.text||'').replace(/"/g,'&quot;')} — drag to reposition" onpointerdown="tpPinDrag(event,'${s.id}',${i})">${c.num}</div>`).join('')}
               <div style="position:absolute;bottom:4px;right:6px;font-size:7px;color:#bbb;letter-spacing:1px;z-index:1;pointer-events:none">${v.toUpperCase()}</div>
             </div>
             <div style="display:flex;gap:6px;align-items:center;margin-top:4px">
@@ -8200,9 +8202,42 @@ function tpAddCallout(styleId) {
   save(); renderTechPack(styleId);
 }
 
+// Drag an existing pin to reposition it (pointer events = mouse + touch)
+function tpPinDrag(e, styleId, idx) {
+  e.preventDefault(); e.stopPropagation();
+  const pin = e.currentTarget;
+  const wrap = pin.closest('.tp-sketch-wrap');
+  const s = STATE.styles.find(z=>z.id===styleId);
+  if (!wrap || !s || !s.callouts || !s.callouts[idx]) return;
+  const startX = e.clientX, startY = e.clientY;
+  let moved = false;
+  try { pin.setPointerCapture(e.pointerId); } catch(_) {}
+  const move = (ev) => {
+    const r = wrap.getBoundingClientRect();
+    let x = Math.max(0, Math.min(100, ((ev.clientX - r.left)/r.width)*100));
+    let y = Math.max(0, Math.min(100, ((ev.clientY - r.top)/r.height)*100));
+    if (Math.abs(ev.clientX-startX)>3 || Math.abs(ev.clientY-startY)>3) moved = true;
+    s.callouts[idx].x = Math.round(x*10)/10;
+    s.callouts[idx].y = Math.round(y*10)/10;
+    pin.style.left = s.callouts[idx].x+'%';
+    pin.style.top  = s.callouts[idx].y+'%';
+  };
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    if (moved) { save(); }
+    else { // a tap (no drag) → jump to that callout's text field
+      const t = document.querySelectorAll('#tp-callout-list .tp-co-text')[idx];
+      if (t) { t.focus(); t.scrollIntoView({block:'nearest'}); }
+    }
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
 // Click on a sketch to drop a numbered callout pin at that spot
 function tpSketchClick(e, styleId, view) {
-  if (e.target.closest('a,button,input,select')) return;   // let controls work
+  if (e.target.closest('a,button,input,select,.tp-pin')) return;   // let controls/pins work
   const wrap = e.currentTarget;
   const r = wrap.getBoundingClientRect();
   const x = Math.round(((e.clientX - r.left)/r.width)*1000)/10;
