@@ -73,6 +73,40 @@
   font-size: 8px; letter-spacing: 2px; text-transform: uppercase;
   color: rgba(255,255,255,.15);
 }
+/* Face ID unlock button (shown when a passkey is registered on this device) */
+.vag-faceid {
+  display: none; align-items: center; justify-content: center; gap: 10px;
+  width: 320px; margin-bottom: 18px; padding: 15px 18px;
+  background: #fff; color: #0a0a0a; border: none; border-radius: 4px;
+  font-family: inherit; font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+  font-weight: 700; cursor: pointer; transition: opacity .2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.vag-faceid:active { opacity: .85; }
+.vag-faceid svg { width: 20px; height: 20px; }
+.vag-faceid.show { display: flex; }
+.vag-divider {
+  display: none; align-items: center; gap: 12px; width: 320px; margin-bottom: 18px;
+  color: rgba(255,255,255,.25); font-size: 8px; letter-spacing: 2px; text-transform: uppercase;
+}
+.vag-divider.show { display: flex; }
+.vag-divider::before, .vag-divider::after { content: ''; flex: 1; height: 1px; background: rgba(255,255,255,.12); }
+/* Enroll offer shown after a successful passcode unlock */
+.vag-enroll {
+  display: none; flex-direction: column; align-items: center; gap: 14px;
+  width: 320px; text-align: center;
+}
+.vag-enroll.show { display: flex; }
+.vag-enroll-title { font-size: 15px; letter-spacing: 1px; color: #fff; font-weight: 500; }
+.vag-enroll-sub { font-size: 11px; line-height: 1.6; color: rgba(255,255,255,.4); }
+.vag-enroll-row { display: flex; gap: 10px; width: 100%; margin-top: 4px; }
+.vag-enroll-yes, .vag-enroll-no {
+  flex: 1; padding: 14px; border-radius: 4px; font-family: inherit; font-size: 11px;
+  letter-spacing: 2px; text-transform: uppercase; font-weight: 700; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.vag-enroll-yes { background: #fff; color: #0a0a0a; border: none; }
+.vag-enroll-no { background: none; color: rgba(255,255,255,.5); border: 1px solid rgba(255,255,255,.15); }
 
 /* ── PRINT ── */
 @media print {
@@ -1331,41 +1365,131 @@ body{padding-top:44px;box-sizing:border-box;}
 <div id="venia-auth-gate">
   <div class="vag-wordmark">VENIA</div>
   <div class="vag-sub">Control Panel</div>
-  <div class="vag-field">
+
+  <!-- Face ID unlock (appears only when a passkey is registered on this device) -->
+  <button class="vag-faceid" id="vag-faceid" onclick="vagFaceId(true)" aria-label="Unlock with Face ID">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 10v1M15 10v1M12 9v4l-1 1M9 15c.8.7 1.9 1 3 1s2.2-.3 3-1"/></svg>
+    <span>Unlock with Face ID</span>
+  </button>
+  <div class="vag-divider" id="vag-divider"><span>or access code</span></div>
+
+  <div class="vag-field" id="vag-field">
     <input class="vag-input" id="vag-pw-input" type="password"
       placeholder="Enter access code"
       onkeydown="if(event.key==='Enter')vagSubmit()">
     <button class="vag-btn" onclick="vagSubmit()">→</button>
   </div>
   <div class="vag-error" id="vag-error">Incorrect access code</div>
+
+  <!-- Post-passcode offer to enroll Face ID for next time -->
+  <div class="vag-enroll" id="vag-enroll">
+    <div class="vag-enroll-title">Unlock faster next time</div>
+    <div class="vag-enroll-sub">Use Face ID to open VENIA on this device — no code to type.</div>
+    <div class="vag-enroll-row">
+      <button class="vag-enroll-yes" onclick="vagEnroll()">Enable Face ID</button>
+      <button class="vag-enroll-no" onclick="vagSkipEnroll()">Not now</button>
+    </div>
+  </div>
+
   <div class="vag-footer">© VENIA Collection</div>
 </div>
 <script>
 (function(){
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
+  const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
+  const SKIP = 'venia_faceid_skip';   // user declined enrollment
+  const $ = id => document.getElementById(id);
+
   async function sha256(str) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
   }
   function unlock() {
-    document.getElementById('venia-auth-gate').classList.add('hidden');
+    $('venia-auth-gate').classList.add('hidden');
     sessionStorage.setItem(KEY, '1');
   }
-  // Check session
-  if (sessionStorage.getItem(KEY) === '1') { unlock(); return; }
-  window.vagSubmit = async function() {
-    const val = document.getElementById('vag-pw-input').value;
-    const h   = await sha256(val);
-    if (h === HASH) {
+  function toast(msg){ const e=$('vag-error'); e.textContent=msg; e.classList.add('visible'); setTimeout(()=>{e.classList.remove('visible'); e.textContent='Incorrect access code';},2200); }
+
+  // ── base64url <-> ArrayBuffer ──
+  const b64u = buf => btoa(String.fromCharCode.apply(null, new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const unb64u = s => { s=s.replace(/-/g,'+').replace(/_/g,'/'); const b=atob(s); const a=new Uint8Array(b.length); for(let i=0;i<b.length;i++)a[i]=b.charCodeAt(i); return a.buffer; };
+
+  const webauthnOK = () => window.PublicKeyCredential && window.isSecureContext;
+  async function platformAuth(){
+    if(!webauthnOK()) return false;
+    try { return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); }
+    catch(e){ return false; }
+  }
+
+  // ── Register a device passkey (triggers Face ID enrollment) ──
+  window.vagEnroll = async function(){
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      const userId = crypto.getRandomValues(new Uint8Array(16));
+      const cred = await navigator.credentials.create({ publicKey:{
+        challenge,
+        rp:{ name:'VENIA Control Panel', id: location.hostname },
+        user:{ id:userId, name:'venia@creator', displayName:'VENIA' },
+        pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+        authenticatorSelection:{ authenticatorAttachment:'platform', userVerification:'required', residentKey:'preferred' },
+        timeout:60000, attestation:'none'
+      }});
+      localStorage.setItem(CRED, b64u(cred.rawId));
+      localStorage.removeItem(SKIP);
       unlock();
+    } catch(e){ toast('Face ID setup canceled'); $('vag-enroll').classList.remove('show'); $('vag-field').style.display=''; }
+  };
+  window.vagSkipEnroll = function(){ localStorage.setItem(SKIP,'1'); unlock(); };
+
+  // ── Unlock with Face ID (existing passkey) ──
+  // manual=true when the user taps the button (a user gesture); false for the
+  // auto-attempt on load, which iOS may block without a gesture — stay silent then.
+  window.vagFaceId = async function(manual){
+    const id = localStorage.getItem(CRED);
+    if(!id){ return; }
+    try {
+      const challenge = crypto.getRandomValues(new Uint8Array(32));
+      await navigator.credentials.get({ publicKey:{
+        challenge, rpId: location.hostname, timeout:60000,
+        allowCredentials:[{ type:'public-key', id: unb64u(id), transports:['internal'] }],
+        userVerification:'required'
+      }});
+      unlock();                       // Face ID verified the device owner
+    } catch(e){ if(manual) toast('Face ID failed — use access code'); }
+  };
+
+  // ── Passcode submit ──
+  window.vagSubmit = async function() {
+    const val = $('vag-pw-input').value;
+    if ((await sha256(val)) === HASH) {
+      const canFace = await platformAuth();
+      if (canFace && !localStorage.getItem(CRED) && !localStorage.getItem(SKIP)) {
+        // Offer Face ID enrollment before entering
+        $('vag-field').style.display = 'none';
+        $('vag-faceid').classList.remove('show');
+        $('vag-divider').classList.remove('show');
+        $('vag-enroll').classList.add('show');
+      } else {
+        unlock();
+      }
     } else {
-      const err = document.getElementById('vag-error');
-      err.classList.add('visible');
-      setTimeout(() => err.classList.remove('visible'), 2000);
-      document.getElementById('vag-pw-input').value = '';
+      toast('Incorrect access code');
+      $('vag-pw-input').value = '';
     }
   };
+
+  // ── Boot ──
+  (async function boot(){
+    if (sessionStorage.getItem(KEY) === '1') { unlock(); return; }
+    if (localStorage.getItem(CRED) && await platformAuth()) {
+      $('vag-faceid').classList.add('show');
+      $('vag-divider').classList.add('show');
+      // Auto-prompt Face ID shortly after load (iOS shows the sheet on user-gesture
+      // reliably, but standalone PWAs allow it on load; if it no-ops the button remains).
+      setTimeout(()=>{ window.vagFaceId(); }, 350);
+    }
+  })();
 })();
 </script>
 <!-- ═══════════════════════════════════════════════════════ -->
@@ -2186,6 +2310,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         </div>
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">System</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId()">Security</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
           <div class="ag-nav-item" onclick="setShowSection('set-about',this)">About</div>
         </div>
@@ -2409,6 +2534,25 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <div style="display:flex;gap:8px">
               <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="setSaveContact()">Save Contact</button>
               <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="document.getElementById('set-add-contact-form').style.display='none'">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECURITY / FACE ID -->
+      <div id="set-security" class="set-section" style="display:none">
+        <div class="ag-content">
+          <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:16px">Security</div>
+          <div style="background:var(--bg);border:1px solid var(--border);padding:20px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+              <div>
+                <div style="font-size:13px;color:var(--ink);font-weight:600;margin-bottom:3px">Face ID / Touch ID unlock</div>
+                <div id="set-faceid-status" style="font-size:11px;color:var(--muted);line-height:1.5">Checking…</div>
+              </div>
+              <button class="btn btn-ghost btn-sm" id="set-faceid-btn" onclick="setToggleFaceId()">…</button>
+            </div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+              Unlock VENIA with Face ID on this device instead of typing the access code. The passkey is stored on this device only — it never leaves your phone, and the access code always works as a backup.
             </div>
           </div>
         </div>
@@ -11024,6 +11168,63 @@ function setShowSection(id, navEl) {
   document.querySelectorAll('#cp-screen-set .ag-nav-item').forEach(n=>n.classList.remove('active'));
   if (navEl) navEl.classList.add('active');
   if (id==='set-data') setUpdateDataSummary();
+  if (id==='set-security') setRenderFaceId();
+}
+
+// ── Face ID / passkey management (Settings → Security) ──
+const VENIA_FACEID_CRED = 'venia_faceid_cred';
+const VENIA_FACEID_SKIP = 'venia_faceid_skip';
+async function faceIdSupported(){
+  if(!window.PublicKeyCredential || !window.isSecureContext) return false;
+  try { return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); }
+  catch(e){ return false; }
+}
+async function setRenderFaceId(){
+  const statusEl = document.getElementById('set-faceid-status');
+  const btnEl = document.getElementById('set-faceid-btn');
+  if(!statusEl || !btnEl) return;
+  const supported = await faceIdSupported();
+  const enabled = !!localStorage.getItem(VENIA_FACEID_CRED);
+  if(!supported){
+    statusEl.textContent = 'Not available on this device or browser. Open VENIA as an installed app on iPhone/iPad to use Face ID.';
+    btnEl.style.display = 'none';
+    return;
+  }
+  btnEl.style.display = '';
+  if(enabled){
+    statusEl.innerHTML = '<span style="color:var(--green)">● Enabled</span> — this device unlocks with Face ID.';
+    btnEl.textContent = 'Turn off';
+    btnEl.className = 'btn btn-ghost btn-sm';
+  } else {
+    statusEl.textContent = 'Off — you enter the access code each time.';
+    btnEl.textContent = 'Enable Face ID';
+    btnEl.className = 'btn btn-gold btn-sm';
+  }
+}
+async function setToggleFaceId(){
+  const enabled = !!localStorage.getItem(VENIA_FACEID_CRED);
+  if(enabled){
+    localStorage.removeItem(VENIA_FACEID_CRED);
+    localStorage.setItem(VENIA_FACEID_SKIP,'1');
+    toast('Face ID turned off');
+    setRenderFaceId();
+    return;
+  }
+  try {
+    const b64u = buf => btoa(String.fromCharCode.apply(null,new Uint8Array(buf))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    const cred = await navigator.credentials.create({ publicKey:{
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp:{ name:'VENIA Control Panel', id: location.hostname },
+      user:{ id: crypto.getRandomValues(new Uint8Array(16)), name:'venia@creator', displayName:'VENIA' },
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+      authenticatorSelection:{ authenticatorAttachment:'platform', userVerification:'required', residentKey:'preferred' },
+      timeout:60000, attestation:'none'
+    }});
+    localStorage.setItem(VENIA_FACEID_CRED, b64u(cred.rawId));
+    localStorage.removeItem(VENIA_FACEID_SKIP);
+    toast('Face ID enabled');
+  } catch(e){ toast('Face ID setup canceled'); }
+  setRenderFaceId();
 }
 function setUpdateDots() {
   const dots = [
