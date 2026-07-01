@@ -751,7 +751,8 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
   border:1.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,.45); font-family:'DM Mono',monospace; z-index:3;
   cursor:grab; touch-action:none; user-select:none; }
 .tp-pin:active{ cursor:grabbing; box-shadow:0 2px 8px rgba(0,0,0,.55); }
-.tp-co-row2{ display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #f0f0f0; }
+.tp-co-row2{ display:flex; gap:8px; align-items:center; padding:6px 0; border-bottom:1px solid #f0f0f0; flex-wrap:wrap; }
+.tp-co-row2 .tp-co-text{ min-width:120px; }
 .tp-co-pin{ width:22px; height:22px; border-radius:50%; color:#fff; font-size:10px; font-weight:700;
   display:flex; align-items:center; justify-content:center; flex-shrink:0; font-family:'DM Mono',monospace; }
 .tp-co-view{ font-size:8px; letter-spacing:1px; font-weight:700; color:#666; border:1px solid #ddd; padding:2px 5px; flex-shrink:0; }
@@ -1432,7 +1433,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '15';
+  const BUILD = '16';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7616,6 +7617,7 @@ function renderTechPackWork(s) {
   const bomTotal = bom.reduce((sum,i)=>sum+(i.qty*i.costPerUnit),0);
   const margin = s.retail&&s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
   const callouts = s.callouts||[];
+  const bomFabricNames = tpBomFabricNames(s);
   const fitPhotos = s.fitPhotos||[];
   const sampleColors = {Proto:'#8e44ad',SMS1:'#2980b9',SMS2:'#16a085',TOP:'#d35400',Approved:'#27ae60'};
 
@@ -7708,7 +7710,12 @@ function renderTechPackWork(s) {
             ${Object.entries(TP_CO_TYPES).map(([k,t])=>`<option value="${k}" ${(c.type||'construction')===k?'selected':''}>${t.label}</option>`).join('')}
           </select>
           <span class="tp-co-view" title="${c.x!=null?'Pinned on '+(c.view||'front'):'Not placed — click a sketch'}">${c.x!=null?(c.view||'F')[0].toUpperCase():'—'}</span>
-          <input class="tpi tp-co-text" value="${(c.text||'').replace(/"/g,'&quot;')}" placeholder="${c.type==='fabric'?'e.g. Body: Wool Crepe · Contrast panel: Silk':'e.g. French seam; bartack at pocket corners'}" onchange="tpUpdateCallout('${s.id}',${i},'text',this.value)" style="flex:1;font-size:11px">
+          <input class="tpi tp-co-text" value="${(c.text||'').replace(/"/g,'&quot;')}" placeholder="${c.type==='fabric'?'Zone, e.g. Body / Contrast collar':'e.g. French seam; bartack at pocket corners'}" onchange="tpUpdateCallout('${s.id}',${i},'text',this.value)" style="flex:1;font-size:11px">
+          ${c.type==='fabric'?`<select class="tpi tp-co-mat" onchange="tpUpdateCallout('${s.id}',${i},'matName',this.value)" style="width:150px;flex-shrink:0;font-size:10px" title="Link this pin to the exact BOM material">
+            <option value="">— link BOM material —</option>
+            ${bomFabricNames.map(n=>`<option value="${n.replace(/"/g,'&quot;')}" ${c.matName===n?'selected':''}>${n}</option>`).join('')}
+            ${(c.matName && !bomFabricNames.includes(c.matName))?`<option value="${c.matName.replace(/"/g,'&quot;')}" selected>${c.matName} (not in BOM)</option>`:''}
+          </select>`:''}
           <button class="btn btn-danger btn-sm" onclick="tpRemoveCallout('${s.id}',${i})" style="flex-shrink:0">✕</button>
         </div>`).join(''):
         `<div style="font-size:10px;color:#c8c8c8;font-style:italic;line-height:1.9">Click anywhere on a sketch to drop a numbered callout, then choose its type (fabric vs construction) and describe it. Example: a <span style="color:#2563a8">blue Fabric</span> pin on the body = "Body: Wool Crepe", a <span style="color:#111">Construction</span> pin at a seam = "French seam, pressed open."</div>`}
@@ -8038,8 +8045,8 @@ function renderTechPackWork(s) {
           <div class="tpbc" style="color:#999;font-size:10px">${item.unit}</div>
           <div class="tpbc" style="font-size:10px">${item.placement||'—'}</div>
           <div class="tpbc" style="font-size:10px;color:#999">${item.supplier||'—'}</div>
-          <div class="tpbc" style="font-family:'DM Mono',monospace;font-size:10px">$${item.costPerUnit.toFixed(2)}</div>
-          <div class="tpbc" style="font-family:'DM Mono',monospace;font-weight:700;color:#000000">$${(item.qty*item.costPerUnit).toFixed(2)}</div>
+          <div class="tpbc" style="font-family:'DM Mono',monospace;font-size:10px">$${(item.costPerUnit||0).toFixed(2)}</div>
+          <div class="tpbc" style="font-family:'DM Mono',monospace;font-weight:700;color:#000000">$${((item.qty||0)*(item.costPerUnit||0)).toFixed(2)}</div>
           <div class="tpbc" style="font-size:9px;color:#999">✎</div>
         </div>`).join('')}
         <div class="tpbr" style="background:#f7f7f7;border-top:1px solid #c8c8c8">
@@ -8196,21 +8203,29 @@ const TP_CO_TYPES = {
 function tpCoColor(c){ return (TP_CO_TYPES[c&&c.type]||TP_CO_TYPES.construction).color; }
 function tpRenumber(s){ (s.callouts||[]).forEach((c,i)=>{ c.num = i+1; }); }
 
-// Fabric map: cross-references the Fabric-type pins with the BOM so the CAD
-// placements and the material list stay in sync (flags zones missing from the
-// BOM and materials with no placement pin).
-function tpFabricMap(s, forPrint){
-  const pins = (s.callouts||[]).filter(c=>c.type==='fabric' && (c.text||'').trim());
+// Fabric material names actually in a style's BOM (for the pin↔material picker).
+function tpBomFabricNames(s){
   const bom = (typeof STATE!=='undefined' && STATE.bom && STATE.bom[s.id]) || [];
-  const bomFabrics = bom.filter(b=>{
+  return [...new Set(bom.filter(b=>{
     if (b.lineType==='Fabric') return true;
     const mat = b.matId ? (STATE.materials||[]).find(m=>m.id===b.matId) : null;
     return mat && ['Fabric','Lining'].includes(mat.type);
-  });
-  const bomNames = [...new Set(bomFabrics.map(b=>b.matName).filter(Boolean))];
+  }).map(b=>b.matName).filter(Boolean))];
+}
+
+// Fabric map: cross-references the Fabric-type pins with the BOM so the CAD
+// placements and the material list stay in sync. A pin can be hard-linked to an
+// exact BOM material (c.matName); otherwise we fall back to a fuzzy text match.
+function tpFabricMap(s, forPrint){
+  const pins = (s.callouts||[]).filter(c=>c.type==='fabric' && ((c.text||'').trim() || c.matName));
+  const bomNames = tpBomFabricNames(s);
   if (!pins.length && !bomNames.length) return '';
   const matchBom = (txt)=>{ const t=(txt||'').toLowerCase(); return bomNames.find(n=>{ const nl=n.toLowerCase(); return t.includes(nl) || nl.split(/[\s\/]+/).some(w=>w.length>3 && t.includes(w)); }); };
-  const rows = pins.map(c=>({ num:c.num, place:c.text, mat:matchBom(c.text) }));
+  const rows = pins.map(c=>{
+    const linked = c.matName && bomNames.find(n=>n===c.matName);
+    const mat = linked || matchBom(c.text);
+    return { num:c.num, place:c.text||'(unlabelled)', mat, exact:!!linked };
+  });
   const placed = new Set(rows.filter(r=>r.mat).map(r=>r.mat.toLowerCase()));
   const unplaced = bomNames.filter(n=>!placed.has(n.toLowerCase()));
   const C = TP_CO_TYPES.fabric.color;
@@ -8220,7 +8235,7 @@ function tpFabricMap(s, forPrint){
       ${rows.length?rows.map(r=>`<div style="display:flex;gap:8px;align-items:baseline;margin-bottom:5px;font-size:9px">
         <span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${C};color:#fff;font-size:8px;font-weight:700;text-align:center;line-height:14px;flex-shrink:0;font-family:'DM Mono',monospace">${r.num}</span>
         <span style="flex:1;color:#000">${r.place}</span>
-        <span style="font-size:7px;color:${r.mat?'#27ae60':'#c0392b'};white-space:nowrap">${r.mat?'✓ '+r.mat:'⚠ not in BOM'}</span>
+        <span style="font-size:7px;color:${r.mat?'#27ae60':'#c0392b'};white-space:nowrap">${r.mat?(r.exact?'● ':'✓ ')+r.mat:'⚠ not in BOM'}</span>
       </div>`).join(''):'<div style="font-size:8px;color:#c8c8c8;font-style:italic">No fabric pins placed.</div>'}
       ${unplaced.length?`<div style="font-size:8px;color:#c0392b;margin-top:6px">In BOM, not placed on CAD: ${unplaced.join(', ')}</div>`:''}
     </div>`;
@@ -8230,7 +8245,7 @@ function tpFabricMap(s, forPrint){
     ${rows.length?rows.map(r=>`<div style="display:flex;gap:8px;align-items:center;padding:4px 0;font-size:11px">
       <span style="width:18px;height:18px;border-radius:50%;background:${C};color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-family:'DM Mono',monospace">${r.num}</span>
       <span style="flex:1;color:var(--ink);min-width:0">${r.place}</span>
-      <span style="font-size:9px;font-weight:600;color:${r.mat?'var(--green)':'var(--red)'};white-space:nowrap">${r.mat?'✓ '+r.mat:'⚠ not in BOM'}</span>
+      <span style="font-size:9px;font-weight:600;color:${r.mat?'var(--green)':'var(--red)'};white-space:nowrap" title="${r.exact?'Linked to exact BOM material':(r.mat?'Matched by name':'')}">${r.mat?(r.exact?'● linked: ':'✓ ')+r.mat:'⚠ not in BOM'}</span>
     </div>`).join(''):`<div style="font-size:10px;color:var(--muted);font-style:italic">Drop a Fabric-type pin (e.g. "Body: Wool Crepe") to map fabrics to the CAD.</div>`}
     ${unplaced.length?`<div style="font-size:10px;color:var(--red);margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">In BOM but not placed on the CAD: <strong>${unplaced.join(', ')}</strong> — drop a fabric pin for each.</div>`:''}
   </div>`;
@@ -8299,7 +8314,7 @@ function tpUpdateCallout(styleId, idx, field, val) {
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s||!s.callouts||!s.callouts[idx]) return;
   s.callouts[idx][field] = val; save();
-  if (field==='type' || field==='view') renderTechPack(styleId);  // re-colour / re-place pins
+  if (field==='type' || field==='view' || field==='matName') renderTechPack(styleId);  // re-colour pins, refresh fabric map / picker
 }
 
 function tpRemoveCallout(styleId, idx) {
