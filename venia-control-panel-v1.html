@@ -1460,7 +1460,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '22';
+  const BUILD = '23';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3526,6 +3526,8 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button class="pill" onclick="filterStyles('production',this)">Production</button>
         <button class="pill" onclick="filterStyles('active',this)">Active</button>
         <button class="pill" onclick="filterStyles('sale',this)">Sale</button>
+        <button class="pill" onclick="filterStyles('archived',this)" title="Archived styles — hidden everywhere else, restorable any time">Archived</button>
+        <button class="btn btn-ghost btn-sm" id="btn-archive-season" onclick="archiveSeason()" style="display:none;white-space:nowrap;color:var(--muted)" title="Archive every style in the selected season">⌸ Archive season</button>
         <input class="search" placeholder="Search styles…" oninput="filterStylesSearch(this.value)">
       </div>
       <!-- Bulk actions bar (appears when rows are selected) -->
@@ -3535,6 +3537,8 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button onclick="bulkAdvanceStatus()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↑ Advance Stage</button>
         <button onclick="bulkDuplicate()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⊕ Duplicate</button>
         <button onclick="bulkSetSeason()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">◇ Move to Season</button>
+        <button id="bulk-archive-btn" onclick="bulkArchive()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⌸ Archive</button>
+        <button id="bulk-restore-btn" onclick="bulkRestore()" style="display:none;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↩ Restore</button>
         <button onclick="bulkExport()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↓ Export</button>
         <button onclick="clearBulkSelection()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:14px;cursor:pointer;margin-left:auto">✕</button>
       </div>
@@ -4914,6 +4918,7 @@ function expandSizes(str){
 function buildSkus() {
   STATE.skus = [];
   STATE.styles.forEach(s => {
+    if (s.status === 'archived') return;
     if (!s.colors || !s.sizes) return;
     const colors = s.colors.split(',').map(c => c.trim()).filter(Boolean);
     const sizes = expandSizes(s.sizes);
@@ -5263,7 +5268,8 @@ function renderStyles() {
   ['concept','design','sms','development','production','active','sale'].forEach(st=>{
     stageCounts[st] = all.filter(s=>s.status===st).length;
   });
-  const stageColors = {concept:'var(--purple)',design:'var(--blue)',sms:'var(--teal)',development:'var(--amber)',production:'var(--gold)',active:'var(--green)',sale:'var(--red)'};
+  stageCounts.archived = STATE.styles.length - all.length;
+  const stageColors = {concept:'var(--purple)',design:'var(--blue)',sms:'var(--teal)',development:'var(--amber)',production:'var(--gold)',active:'var(--green)',sale:'var(--red)',archived:'var(--muted)'};
   // Update each pill to show count inline
   document.querySelectorAll('#styles-filters .pill').forEach(btn => {
     const onclick = btn.getAttribute('onclick') || '';
@@ -5283,6 +5289,8 @@ function renderStyles() {
 
   let list = [...STATE.styles];
   if (STATE.styleFilter && STATE.styleFilter !== 'all') list = list.filter(s => s.status === STATE.styleFilter);
+  // Archived styles live only in the Archived view — everywhere else they're gone.
+  if (STATE.styleFilter !== 'archived') list = list.filter(s => s.status !== 'archived');
   if (STATE.seasonFilter) list = list.filter(s => s.season === STATE.seasonFilter);
   if (STATE.stageDropFilter) list = list.filter(s => s.status === STATE.stageDropFilter);
   if (STATE.styleSearch) list = list.filter(s =>
@@ -5314,6 +5322,19 @@ function renderStyles() {
     </tr>`).join('');
 
   updateBulkBar();
+  // Archive-season button: only when a specific season is picked in a live view.
+  const asBtn = document.getElementById('btn-archive-season');
+  if (asBtn) {
+    const show = STATE.seasonFilter && STATE.styleFilter !== 'archived';
+    asBtn.style.display = show ? '' : 'none';
+    if (show) asBtn.textContent = '⌸ Archive ' + STATE.seasonFilter;
+  }
+  // Bulk bar: Restore replaces Archive inside the Archived view.
+  const inArch = STATE.styleFilter === 'archived';
+  const abBtn = document.getElementById('bulk-archive-btn');
+  const rbBtn = document.getElementById('bulk-restore-btn');
+  if (abBtn) abBtn.style.display = inArch ? 'none' : '';
+  if (rbBtn) rbBtn.style.display = inArch ? '' : 'none';
   setTimeout(() => renderMobileStyleCards(list, 'styles-table'), 0);
 }
 
@@ -5415,6 +5436,60 @@ function bulkSetSeason() {
   BULK_SELECTED.clear();
   renderStyles();
   toast(`Moved to ${season.toUpperCase()}`);
+}
+
+// ── SEASON ARCHIVE ────────────────────────────────────────────────────
+// Archiving sets status='archived' (the hide-filter every list, selector,
+// timeline and SKU build already respects) and stashes the real stage in
+// prevStatus so a restore puts the style back exactly where it was.
+function archiveStyle(s) {
+  if (!s || s.status === 'archived') return;
+  s.prevStatus = s.status;
+  s.status = 'archived';
+  s.archivedAt = new Date().toISOString().split('T')[0];
+}
+function restoreStyle(s) {
+  if (!s || s.status !== 'archived') return;
+  s.status = s.prevStatus || 'active';
+  delete s.prevStatus;
+  delete s.archivedAt;
+}
+
+function archiveSeason() {
+  const season = STATE.seasonFilter;
+  if (!season) { toast('Pick a season first'); return; }
+  const targets = STATE.styles.filter(s => s.season === season && s.status !== 'archived');
+  if (!targets.length) { toast(`Nothing to archive in ${season}`); return; }
+  if (!confirm(`Archive ${season} — ${targets.length} style${targets.length>1?'s':''}?\n\nThey leave the lists, timeline, selectors and SKUs, but stay in the Archived view and can be restored any time.`)) return;
+  targets.forEach(archiveStyle);
+  buildSkus(); save(); populateStyleSelects();
+  renderStyles();
+  logActivity(`Archived season ${season} (${targets.length} styles)`);
+  toast(`${season} archived — ${targets.length} style${targets.length>1?'s':''}`);
+}
+
+function bulkArchive() {
+  if (!BULK_SELECTED.size) return;
+  let n = 0;
+  BULK_SELECTED.forEach(id => { const s = STATE.styles.find(x=>x.id===id); if (s && s.status!=='archived'){ archiveStyle(s); n++; } });
+  if (!n) return;
+  buildSkus(); save(); populateStyleSelects();
+  BULK_SELECTED.clear();
+  renderStyles();
+  logActivity(`Archived ${n} styles`);
+  toast(`Archived ${n} style${n>1?'s':''} — see the Archived view to restore`);
+}
+
+function bulkRestore() {
+  if (!BULK_SELECTED.size) return;
+  let n = 0;
+  BULK_SELECTED.forEach(id => { const s = STATE.styles.find(x=>x.id===id); if (s && s.status==='archived'){ restoreStyle(s); n++; } });
+  if (!n) return;
+  buildSkus(); save(); populateStyleSelects();
+  BULK_SELECTED.clear();
+  renderStyles();
+  logActivity(`Restored ${n} styles from archive`);
+  toast(`Restored ${n} style${n>1?'s':''}`);
 }
 
 function bulkExport() {
@@ -6189,8 +6264,8 @@ function filterGantt(filter, el) {
 //  COSTS
 // ═══════════════════════════════════════════════
 function renderCosts(seasonFilter) {
-  // Populate season filter
-  const seasons = [...new Set(STATE.styles.map(s=>s.season))].sort();
+  // Populate season filter (archived seasons drop out of the P&L)
+  const seasons = [...new Set(STATE.styles.filter(s=>s.status!=='archived').map(s=>s.season))].sort();
   const sel = document.getElementById('cost-season-filter');
   if (sel && sel.options.length <= 1) {
     seasons.forEach(s => { const o = document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
