@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '26';
+  const BUILD = '27';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -9798,9 +9798,9 @@ function prPullCard(p, now) {
 
   const itemsReturned = (p.items||[]).filter(i => i.returned).length;
   const totalItems = (p.items||[]).length;
-  // Working pull = where NFC/QR garment taps log. One at a time, active pulls only.
-  const isWorking = STATE.workingPullId === p.id && p.status === 'active';
-  const workingCtl = p.status === 'active'
+  // Working pull = where NFC/QR garment taps log. Active pulls and in-progress drafts.
+  const isWorking = STATE.workingPullId === p.id && (p.status === 'active' || p.status === 'draft');
+  const workingCtl = (p.status === 'active' || p.status === 'draft')
     ? (isWorking
         ? `<span style="background:var(--ink);color:var(--white);font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;font-weight:700" title="Garment tag taps log to this pull">◉ Working</span>`
         : `<button onclick="event.stopPropagation();prSetWorkingPull('${p.id}')" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;cursor:pointer" title="Make this the pull that garment tag taps log to">○ Set working</button>`)
@@ -9856,6 +9856,8 @@ function openPrCart(pullId=null) {
   prInit();
   PR_CART = [];
   PR_CURRENT_ID = pullId;
+  const staleNote = document.getElementById('pr-tag-cart-note');
+  if (staleNote) staleNote.remove();
 
   if (pullId) {
     const pull = STATE.prPulls.find(p => p.id === pullId);
@@ -10018,20 +10020,38 @@ function prTagCheck(tagVal) {
   const s = STATE.styles.find(x => x.id === tagVal || x.styleId === tagVal);
   if (!s) { toast(`Tag "${tagVal}" doesn't match a style`, 'error'); return; }
 
-  let pull = (STATE.prPulls||[]).find(p => p.id === STATE.workingPullId && p.status === 'active');
+  // A draft you're building counts as working — otherwise "Save Draft" would
+  // silently stop tag taps from logging and every tap would open a new form.
+  let pull = (STATE.prPulls||[]).find(p => p.id === STATE.workingPullId && (p.status === 'active' || p.status === 'draft'));
   if (!pull) {
-    // No working pull chosen — if exactly one pull is active, use it; else start one.
+    // No working pull chosen — adopt the only live candidate if there is one.
     const actives = (STATE.prPulls||[]).filter(p => p.status === 'active');
+    const drafts  = (STATE.prPulls||[]).filter(p => p.status === 'draft');
     if (actives.length === 1) { pull = actives[0]; STATE.workingPullId = pull.id; }
+    else if (!actives.length && drafts.length === 1) { pull = drafts[0]; STATE.workingPullId = pull.id; }
   }
 
   if (!pull) {
-    // Nothing to log against: open a new pull with this garment already in the cart.
+    // Nothing to log against: open a new pull with this garment already in the
+    // cart, with a PINNED note (a toast dies in seconds and hid the Save button).
     prGoPulls();
     setTimeout(() => {
       openPrCart();
       prAddToCart(s.id, tagVal);
-      toast(`${s.name} in cart — name the client and save to start the pull`, 'info');
+      setTimeout(() => {
+        // Inside the first tab panel: scrolls with the form, never fights the
+        // sticky modal head/tabs (a toast dies in seconds and hid Save).
+        const t = document.getElementById('toast');
+        if (t) t.className = 'toast';                 // kill the transient toast — it covered Save
+        const panel = document.getElementById('pr-tab-client');
+        if (panel && !document.getElementById('pr-tag-cart-note')) {
+          const n = document.createElement('div');
+          n.id = 'pr-tag-cart-note';
+          n.style.cssText = 'background:#0a0a0a;color:#fff;padding:11px 16px;font-size:10px;letter-spacing:.5px;line-height:1.7;margin-bottom:14px';
+          n.innerHTML = `◧ <strong>${s.name}</strong> is in this pull's items (tab ②). Name the client and <strong>Save</strong> — tag taps keep logging to this pull until it's closed.`;
+          panel.prepend(n);
+        }
+      }, 150);
     }, 300);
     return;
   }
@@ -10040,7 +10060,7 @@ function prTagCheck(tagVal) {
   if (out) {
     out.returned = true;
     out.returnedAt = new Date().toISOString().split('T')[0];
-    if ((pull.items||[]).every(i => i.returned)) pull.status = 'returned';
+    if (pull.status === 'active' && (pull.items||[]).every(i => i.returned)) pull.status = 'returned';
     save();
     logActivity(`Tag check-IN: ${s.name} ← ${pull.client}`);
     prTagSheet(pull, s.id, 'in');
@@ -10117,10 +10137,17 @@ function prTagSheet(pull, highlightId, action) {
 (function(){
   const t = new URLSearchParams(location.search).get('tag');
   if (!t || window.VENIA_SHARE) return;
+  let readyTicks = 0;
   const iv = setInterval(() => {
     const gate = document.getElementById('venia-auth-gate');
     if (gate && !gate.classList.contains('hidden')) return;      // wait for unlock
     if (typeof STATE === 'undefined' || !STATE.styles || !STATE.styles.length) return;
+    // A tag tap usually opens Safari, whose local data starts empty — the real
+    // pulls arrive with the first cloud sync. Deciding before it lands would
+    // miss the working pull and wrongly offer a new one. Wait for the sync,
+    // capped at ~6s so the flow still works offline.
+    readyTicks++;
+    if (!window.__sbSyncDone && window.__sbClient && readyTicks < 20) return;
     clearInterval(iv);
     try { history.replaceState({}, '', location.pathname); } catch(e) {}
     prTagCheck(t);
@@ -10336,9 +10363,11 @@ function prSaveDraft() {
   const existingIdx = STATE.prPulls.findIndex(p => p.id === pull.id);
   if (existingIdx >= 0) STATE.prPulls[existingIdx] = pull;
   else STATE.prPulls.unshift(pull);
+  // A draft in progress is where tag taps should land — make it the working pull.
+  STATE.workingPullId = pull.id;
   save();
   PR_CURRENT_ID = pull.id;
-  toast('Draft saved');
+  toast('Draft saved — tag taps log to this pull');
   logActivity(`PR Draft saved: ${pull.client}`);
   renderPR();
 }
@@ -12227,7 +12256,7 @@ function agBuildPullsSection() {
   </div>`;
 
   // Garment tag bar — tag taps log against the working pull (◉ in the list).
-  const workingPull = all.find(p => p.id === STATE.workingPullId && p.status === 'active');
+  const workingPull = all.find(p => p.id === STATE.workingPullId && (p.status === 'active' || p.status === 'draft'));
   const nfcBar = `<div class="ag-pulls-nfc-bar">
     <div style="font-size:20px;color:var(--muted)">◎</div>
     <div style="flex:1;min-width:220px">
@@ -16748,7 +16777,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (started || !sb()) return;
     started = true;
     startRealtime();
-    initialSync();
+    // Flag when the first cloud snapshot has landed — the ?tag boot path waits
+    // for this so a fresh Safari session decides against real data, not seeds.
+    initialSync().finally(function(){ window.__sbSyncDone = true; });
   };
 
   // Re-patch save() to also push the full blob (debounced).
