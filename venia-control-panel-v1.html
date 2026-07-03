@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '25';
+  const BUILD = '26';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10043,17 +10043,74 @@ function prTagCheck(tagVal) {
     if ((pull.items||[]).every(i => i.returned)) pull.status = 'returned';
     save();
     logActivity(`Tag check-IN: ${s.name} ← ${pull.client}`);
-    toast(`✓ ${s.name} returned — ${pull.client}${pull.status==='returned'?' · pull complete':''}`);
+    prTagSheet(pull, s.id, 'in');
   } else {
     if (!pull.items) pull.items = [];
     pull.items.push(prMakeItem(s, tagVal));
     pull.totalRetail = pull.items.reduce((t,i) => t + (i.retail||0), 0);
     save();
     logActivity(`Tag check-OUT: ${s.name} → ${pull.client}`);
-    toast(`${s.name} → ${pull.client} (${pull.items.length} item${pull.items.length>1?'s':''} out)`);
+    prTagSheet(pull, s.id, 'out');
   }
   prGoPulls();
   setTimeout(() => agRenderPrPullsList(), 400);
+}
+
+// The checkout sheet: shown on every tag tap so you can SEE the running pull
+// list at the rack (a toast alone tells you nothing about state). The sheet
+// stays open — consecutive taps just update it — and shows every item on the
+// working pull with the just-tapped garment highlighted.
+function prTagSheet(pull, highlightId, action) {
+  const items = pull.items || [];
+  const outCount = items.filter(i => !i.returned).length;
+  const outValue = items.filter(i => !i.returned).reduce((t,i)=>t+(i.retail||0),0);
+  const rows = items.map((i, n) => {
+    const isHit = i.styleId === highlightId;
+    const stamp = isHit
+      ? (action==='out'
+          ? '<span style="background:#111;color:#fff;font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;font-weight:700;white-space:nowrap">✓ just checked out</span>'
+          : '<span style="background:var(--green,#27ae60);color:#fff;font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;font-weight:700;white-space:nowrap">↩ just returned</span>')
+      : (i.returned
+          ? '<span style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">returned</span>'
+          : '<span style="font-size:9px;color:var(--amber,#c0700f);letter-spacing:1px;text-transform:uppercase;font-weight:700">out</span>');
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);${isHit?'background:var(--bg-off);':''}${i.returned&&!isHit?'opacity:.5;':''}">
+      <span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);width:16px;flex-shrink:0">${n+1}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--ink);${i.returned?'text-decoration:line-through;':''}">${i.styleName}</div>
+        <div style="font-family:'DM Mono',monospace;font-size:8.5px;color:var(--muted)">${i.styleCode||''}${i.color?' · '+i.color:''}${i.retail?' · $'+i.retail:''}</div>
+      </div>
+      ${stamp}
+    </div>`;
+  }).join('');
+
+  let ov = document.getElementById('pr-tag-sheet');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'pr-tag-sheet';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+  }
+  ov.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:480px;max-height:78vh;display:flex;flex-direction:column;border-radius:14px 14px 0 0;overflow:hidden" onclick="event.stopPropagation()">
+      <div style="padding:14px 16px calc(0px + 12px);background:#0a0a0a;color:#fff">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <div style="min-width:0">
+            <div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999">Pull sheet ${pull.status==='returned'?'· complete ✓':''}</div>
+            <div style="font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:16px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${pull.client}</div>
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-family:'DM Mono',monospace;font-size:16px;font-weight:700">${outCount}</div>
+            <div style="font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:#999">out · $${outValue}</div>
+          </div>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto">${rows || '<div style="padding:20px;font-size:11px;color:var(--muted);font-style:italic">Nothing on this pull yet.</div>'}</div>
+      <div style="padding:12px 16px calc(12px + var(--sab,0px));border-top:1px solid var(--border);display:flex;gap:8px;justify-content:space-between;background:var(--bg)">
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pr-tag-sheet').remove();prOpenDetail('${pull.id}')">Open full pull →</button>
+        <button class="btn btn-gold btn-sm" onclick="document.getElementById('pr-tag-sheet').remove()">Done</button>
+      </div>
+    </div>`;
 }
 
 // Boot: process ?tag=… once the app is unlocked and STATE is live.
