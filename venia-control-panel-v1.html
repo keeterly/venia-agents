@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '27';
+  const BUILD = '28';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16664,6 +16664,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 ;(function(){
   var WS_ID = 'main', BUCKET = 'venia-photos';
   var pushTimer = null, channel = null, applyingRemote = false, started = false;
+  // Captured at parse time — init() seeds localStorage at DOMContentLoaded, so
+  // reading later can't tell a truly fresh browser from a seeded one.
+  var FRESH_BROWSER = !localStorage.getItem('venia-plm-v2');
 
   function sb(){ return window.__sbClient || null; }
   function clientId(){
@@ -16700,12 +16703,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   async function pushNow(){
     if (window.VENIA_SHARE) return;   // share view is strictly read-only — never write the workspace
+    // Never push before the first pull decision: a fresh browser seeds demo
+    // data and save()s during init — pushing that would clobber the real
+    // workspace before we've even looked at it.
+    if (!window.__sbSyncDone) return;
     var c = sb(); if (!c) return;
+    var rev = Date.now();
     try {
-      await c.from('venia_workspace').upsert({
+      var res = await c.from('venia_workspace').upsert({
         id: WS_ID, data: snapshot(), updated_by: clientId(),
-        updated_at: new Date().toISOString(), rev: Date.now()
+        updated_at: new Date().toISOString(), rev: rev
       }, { onConflict:'id' });
+      if (!res || !res.error) localStorage.setItem('venia-sync-rev', String(rev));  // watermark: how new our pushes are
     } catch(e){ /* offline — will retry on next save */ }
   }
   function schedulePush(){
@@ -16763,11 +16772,23 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   async function initialSync(){
     var row = await pullRow();
-    if (row && row.data && row.updated_by !== clientId() && Array.isArray(row.data.styles) && row.data.styles.length){
-      applySnapshot(row.data);        // cloud is the shared source of truth on load
-      rerender();
-    } else if (!row){
-      pushNow();                      // no workspace yet → seed it from this device
+    window.__sbSyncDone = true;       // decision point reached — pushes may flow from here on
+    var myRev = parseInt(localStorage.getItem('venia-sync-rev')||'0', 10);
+    var cloudOk = row && row.data && Array.isArray(row.data.styles) && row.data.styles.length;
+    if (cloudOk){
+      var cloudRev = row.rev || 0;
+      // Apply the cloud copy when this browser is fresh (no real local data),
+      // or when the cloud is at least as new as the last thing WE pushed
+      // (i.e. a partner device wrote after us). Otherwise local wins: devices
+      // from before this fix have real local data but no watermark — pushing
+      // it up beats letting a stale/seed cloud copy overwrite real work.
+      if (FRESH_BROWSER || (myRev && cloudRev >= myRev)){
+        if (row.updated_by !== clientId()){ applySnapshot(row.data); rerender(); }
+      } else {
+        pushNow();
+      }
+    } else {
+      pushNow();                      // no (usable) workspace yet → seed it from this device
     }
   }
 
@@ -16843,6 +16864,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     s.fitPhotos.splice(idx,1);
     save(); if (typeof renderTechPack==='function') renderTechPack(styleId);
   };
+
+  // ── BOOTSTRAP ──
+  // sbInit runs during the Supabase module above — BEFORE sbLiveStart exists —
+  // so its "call sbLiveStart if defined" check always missed and live sync
+  // never started (pushes worked via the save() patch; pulls and realtime
+  // never ran). Kick it here, now that everything is defined.
+  if (window.__sbClient) window.sbLiveStart();
 })();
 
 // ── FACTORY SHARE LINKS — live read-only tech pack for manufacturers ──────
