@@ -903,6 +903,22 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
   #samples-content thead .samp-adv-col { background: var(--bg-off); }
 }
 
+/* ── FACTORY SHARE VIEW (?share=TOKEN) — read-only tech pack, zero chrome ── */
+html.share-mode .cp-global-bar, html.share-mode .cp-screen, html.share-mode .sidebar,
+html.share-mode .topbar, html.share-mode .mob-header, html.share-mode .mob-nav,
+html.share-mode .mob-drawer, html.share-mode .mob-drawer-overlay,
+html.share-mode #sk-launch, html.share-mode #sk-dock, html.share-mode #venia-auth-gate,
+html.share-mode #tp-filters, html.share-mode #tp-mode-bar{ display:none !important; }
+html.share-mode body{ padding-top:0 !important; }
+html.share-mode .main{ margin-left:0 !important; padding-top:0 !important; }
+html.share-mode .content{ padding:0 !important; }
+html.share-mode #techpack-content{ padding:0 0 calc(24px + var(--sab)) !important; }
+#share-banner{
+  position:sticky; top:0; z-index:50; display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  background:#0a0a0a; color:#fff; padding:calc(10px + var(--sat)) 16px 10px;
+  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; font-size:10px; letter-spacing:1px; text-transform:uppercase;
+}
+
 /* ── PRINT ── */
 @media print{
   .sidebar,.topbar,.mob-header,.mob-nav,.mob-drawer,.mob-drawer-overlay,
@@ -1460,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '23';
+  const BUILD = '24';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1468,6 +1484,14 @@ body{padding-top:44px;box-sizing:border-box;}
   const SKIP = 'venia_faceid_skip';   // user declined enrollment
   const $ = id => document.getElementById(id);
   window.VENIA_BUILD = BUILD;
+  // Factory share link (?share=TOKEN): a read-only live tech-pack view for a
+  // manufacturer. No access code — the token IS the credential. The main app
+  // never boots interactive features in this mode (see share-mode module).
+  window.VENIA_SHARE = new URLSearchParams(location.search).get('share') || null;
+  if (window.VENIA_SHARE) {
+    $('venia-auth-gate').classList.add('hidden');
+    document.documentElement.classList.add('share-mode');
+  }
   (function(){ const f = document.getElementById('vag-footer'); if (f) f.textContent = '© VENIA Collection · Build ' + BUILD + ' · ' + BUILD_DATE; })();
 
   async function sha256(str) {
@@ -1550,6 +1574,7 @@ body{padding-top:44px;box-sizing:border-box;}
 
   // ── Boot ──
   (async function boot(){
+    if (window.VENIA_SHARE) return;               // share view: gate stays hidden, no Face ID prompt
     if (sessionStorage.getItem(KEY) === '1') { unlock(); return; }
     if (localStorage.getItem(CRED) && await platformAuth()) {
       $('vag-faceid').classList.add('show');
@@ -3938,6 +3963,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <div style="display:flex;align-items:center;flex-shrink:0">
           <button class="pill active" id="tp-mode-work" onclick="setTpMode('work')">✎ Working</button>
           <button class="pill" id="tp-mode-print" onclick="setTpMode('print')">◻ Print</button>
+          <button class="btn btn-ghost btn-sm" onclick="tpShareOpen()" id="tp-share-btn" style="margin-left:12px" title="Live read-only link for your factory — always shows the latest saved tech pack">⇱ Share</button>
           <button class="btn btn-ghost btn-sm" onclick="saveTpEdits()" id="tp-save-btn" style="display:none;margin-left:12px">↓ Save</button>
           <button class="btn btn-gold btn-sm" onclick="printTechPack()" id="tp-print-btn" style="display:none;margin-left:12px">↓ PDF</button>
         </div>
@@ -7739,6 +7765,8 @@ function renderTechPackWork(s) {
     <span style="font-family:'DM Mono',monospace;font-size:10px;color:#888">${s.styleId}</span>
     <span style="padding:2px 8px;border:1px solid rgba(255,255,255,.3);font-size:8px;letter-spacing:1.5px;text-transform:uppercase">${s.season}</span>
     <span style="padding:2px 8px;border:1px solid ${sampleColors[s.sample]||'rgba(255,255,255,.3)'};font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:${sampleColors[s.sample]||'#fff'}">${s.sample||'Proto'}</span>
+    <span style="padding:2px 8px;border:1px solid rgba(255,255,255,.3);font-size:8px;letter-spacing:1.5px;font-family:'DM Mono',monospace" title="${s.revDate?'Last revision '+s.revDate:'Revision'}">REV ${s.rev||1}</span>
+    <button onclick="tpBumpRev('${s.id}')" title="Mark a new revision — stamps the print copy & share link, logs to the dev log" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:11px;line-height:1;padding:3px 8px;cursor:pointer">＋</button>
     <div style="margin-left:auto;font-size:10px">Vendor: <strong>${s.vendor||'TBD'}</strong></div>
   </div>
 
@@ -8268,6 +8296,24 @@ function tpUpdatePom(styleId, idx, field, val) {
   if (!p) return;
   p[field] = ['comment','point'].includes(field) ? val : (parseFloat(val)||0);
   save();
+}
+
+// Revision stamp: an explicit "this is a new version" marker. Shows in the
+// working bar, on the print header, and on the factory share page; the note
+// lands in the Development Log so the history reads in one place.
+function tpBumpRev(styleId) {
+  const s = STATE.styles.find(x=>x.id===styleId);
+  if (!s) return;
+  const note = prompt(`Rev ${(s.rev||1)+1} — what changed? (optional)`);
+  if (note === null) return;                      // cancelled
+  s.rev = (s.rev||1) + 1;
+  s.revDate = new Date().toISOString().split('T')[0];
+  if (!s.notes) s.notes = [];
+  s.notes.unshift({ d:s.revDate, t:`Rev ${s.rev}${note?': '+note:''}` });
+  save();
+  renderTechPack(styleId);
+  logActivity(`Tech pack Rev ${s.rev} — ${s.name}`);
+  toast(`Rev ${s.rev} stamped`);
 }
 
 function tpUpdateApproval(styleId, key, val) {
@@ -9272,7 +9318,7 @@ function renderTechPackPrint(s) {
   const margin = s.retail&&s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-  const rev = `Rev ${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getFullYear()).slice(2)}`;
+  const rev = `REV ${s.rev||1}${s.revDate?' · '+s.revDate:''}`;
   const bomByType = {};
   bom.forEach(item => { const t=item.lineType||'Other'; if(!bomByType[t])bomByType[t]=[]; bomByType[t].push(item); });
 
@@ -16410,6 +16456,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
 
   async function pushNow(){
+    if (window.VENIA_SHARE) return;   // share view is strictly read-only — never write the workspace
     var c = sb(); if (!c) return;
     try {
       await c.from('venia_workspace').upsert({
@@ -16423,6 +16470,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     clearTimeout(pushTimer);
     pushTimer = setTimeout(pushNow, 1500);
   }
+  window.sbFlushNow = pushNow;                  // share links flush before handing out a URL
 
   async function pullRow(){
     var c = sb(); if (!c) return null;
@@ -16482,6 +16530,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Called by sbInit once the client is ready.
   window.sbLiveStart = function(){
+    if (window.VENIA_SHARE) { if (typeof window.shareBoot === 'function') window.shareBoot(); return; }
     if (started || !sb()) return;
     started = true;
     startRealtime();
@@ -16548,6 +16597,119 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var s = STATE.styles.find(function(x){ return x.id===styleId; }); if (!s || !s.fitPhotos) return;
     s.fitPhotos.splice(idx,1);
     save(); if (typeof renderTechPack==='function') renderTechPack(styleId);
+  };
+})();
+
+// ── FACTORY SHARE LINKS — live read-only tech pack for manufacturers ──────
+// A token in venia_shares maps to one style. Opening ?share=TOKEN renders the
+// print tech pack straight from the synced workspace: no access code, nothing
+// editable, and the share view can never write back (pushNow hard-blocks it).
+;(function(){
+  function sb(){ return window.__sbClient || null; }
+
+  function shareFail(title, msg){
+    document.body.innerHTML =
+      '<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0a0a0a;color:#fff;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:24px">' +
+      '<div style="text-align:center;max-width:420px">' +
+      '<div style="font-size:22px;letter-spacing:6px;margin-bottom:14px">V E N I A</div>' +
+      '<div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e;margin-bottom:10px">' + title + '</div>' +
+      '<div style="font-size:12px;color:#888;line-height:1.7">' + msg + '</div>' +
+      '</div></div>';
+  }
+
+  // Boot path for ?share=TOKEN (called by sbLiveStart once the client exists).
+  window.shareBoot = async function(){
+    var token = window.VENIA_SHARE;
+    if (!token) return;
+    var c = sb();
+    if (!c){ shareFail('Connection unavailable', 'Could not reach the VENIA workspace. Check your connection and reload.'); return; }
+    try {
+      var sr = await c.from('venia_shares').select('*').eq('token', token).maybeSingle();
+      if (sr.error || !sr.data || sr.data.revoked){
+        shareFail('Link no longer active', 'This tech pack link has been revoked or does not exist. Ask VENIA for a fresh link.');
+        return;
+      }
+      var ws = await c.from('venia_workspace').select('data, updated_at').eq('id','main').maybeSingle();
+      var d = ws.data && ws.data.data;
+      if (!d || !Array.isArray(d.styles)){ shareFail('Tech pack unavailable', 'The workspace has no published data yet.'); return; }
+      STATE.styles = d.styles; STATE.materials = d.materials||[]; STATE.vendors = d.vendors||[];
+      STATE.bom = d.bom||{}; STATE.pom = d.pom||{};
+      var s = STATE.styles.find(function(x){ return x.id === sr.data.style_id; });
+      if (!s){ shareFail('Style not found', 'This style may have been removed.'); return; }
+      goTo('techpack');
+      TP_STYLE_ID = s.id; TP_MODE = 'print';
+      renderTechPackPrint(s);
+      // Banner above the document: what this is + freshness. The updated_at is
+      // the workspace save time — i.e. "current as of".
+      var upd = ws.data.updated_at ? new Date(ws.data.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+      var bar = document.createElement('div');
+      bar.id = 'share-banner';
+      bar.innerHTML =
+        '<span style="letter-spacing:4px;font-weight:700">VENIA</span>' +
+        '<span style="color:#c9a96e">' + (s.name||'') + ' · ' + (s.styleId||'') + ' · REV ' + (s.rev||1) + '</span>' +
+        '<span style="color:#777">Live tech pack — always current' + (upd ? ' · updated ' + upd : '') + '</span>';
+      var tc = document.getElementById('techpack-content');
+      if (tc) tc.prepend(bar);
+    } catch(e){
+      shareFail('Could not load', 'Something went wrong loading this tech pack. Reload to try again.');
+    }
+  };
+
+  // ── Owner side: create / copy / revoke a link for the open style ──
+  function shareModal(url, token, s){
+    var ov = document.createElement('div');
+    ov.id = 'tp-share-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+    ov.addEventListener('click', function(e){ if (e.target===ov) ov.remove(); });
+    ov.innerHTML =
+      '<div style="background:var(--bg);border:1px solid var(--border);max-width:520px;width:100%;padding:22px" onclick="event.stopPropagation()">' +
+      '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-bottom:4px">Factory link — ' + (s.name||'') + '</div>' +
+      '<div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:14px">Read-only, no login. It always shows the <strong>latest saved</strong> tech pack (currently REV ' + (s.rev||1) + ') — update the style here and the factory sees it on their next open. Revoke any time.</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:12px">' +
+      '<input id="tp-share-url" readonly value="' + url + '" style="flex:1;font-family:\'DM Mono\',monospace;font-size:10px;padding:9px 10px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);outline:none">' +
+      '<button class="btn btn-gold btn-sm" onclick="var i=document.getElementById(\'tp-share-url\');i.select();navigator.clipboard.writeText(i.value).then(function(){showToast(\'Link copied\',\'success\')})">Copy</button>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="tpShareRevoke(\'' + token + '\')">✕ Revoke link</button>' +
+      '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'tp-share-overlay\').remove()">Done</button>' +
+      '</div></div>';
+    document.body.appendChild(ov);
+  }
+
+  window.tpShareOpen = async function(){
+    var sid = (typeof TP_STYLE_ID !== 'undefined' && TP_STYLE_ID) || (document.getElementById('tp-style-select')||{}).value;
+    if (!sid){ showToast('Select a style first','warning'); return; }
+    var s = STATE.styles.find(function(x){ return x.id===sid; });
+    if (!s) return;
+    var c = sb();
+    if (!c){ showToast('Cloud connection needed for share links','warning'); return; }
+    showToast('Preparing link…','info');
+    try {
+      // Make sure the factory sees exactly what you see: flush the workspace first.
+      if (typeof window.sbFlushNow === 'function') await window.sbFlushNow();
+      var q = await c.from('venia_shares').select('*').eq('style_id', sid).eq('revoked', false).limit(1);
+      var row = q.data && q.data[0];
+      if (!row){
+        var token = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
+        var ins = await c.from('venia_shares').insert({ token: token, style_id: sid, label: s.name||'' });
+        if (ins.error) throw ins.error;
+        row = { token: token };
+      }
+      shareModal(location.origin + '/?share=' + row.token, row.token, s);
+    } catch(e){
+      showToast('Could not create link — ' + (e.message||e), 'error');
+    }
+  };
+
+  window.tpShareRevoke = async function(token){
+    var c = sb(); if (!c) return;
+    if (!confirm('Revoke this factory link? Anyone holding it loses access immediately.')) return;
+    try {
+      await c.from('venia_shares').update({ revoked: true }).eq('token', token);
+      var ov = document.getElementById('tp-share-overlay'); if (ov) ov.remove();
+      showToast('Link revoked','success');
+      logActivity('Factory link revoked');
+    } catch(e){ showToast('Revoke failed','error'); }
   };
 })();
 
