@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '24';
+  const BUILD = '25';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2726,26 +2726,35 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         </div>
       </div>
       <div class="ag-nav-list">
+        <!-- Daily-use tabs only; everything else lives behind More. Pulls is
+             promoted to slot 2 — it's the workhorse (sample checkout/returns). -->
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">Workspace</div>
           <div class="ag-nav-item active" onclick="agNav('pr','overview',this)">Overview</div>
-          <div class="ag-nav-item" onclick="agNav('pr','pitches',this)">Pitches</div>
           <div class="ag-nav-item" onclick="agNav('pr','pulls',this)">Pulls</div>
+          <div class="ag-nav-item" onclick="agNav('pr','pitches',this)">Pitches</div>
           <div class="ag-nav-item" onclick="agNav('pr','editors',this)">Editors &amp; Stylists</div>
-          <div class="ag-nav-item" onclick="agNav('pr','hits',this)">Press Hits</div>
-          <div class="ag-nav-item" onclick="agNav('pr','celebs',this)" style="color:var(--ink);font-weight:500">★ Celebrity Moments</div>
+          <div class="ag-nav-item" onclick="agNav('pr','hits',this)">Coverage</div>
         </div>
         <div class="ag-nav-grp">
-          <div class="ag-nav-lbl">Intelligence</div>
-          <div class="ag-nav-item" onclick="agNav('pr','pull-intel',this)">Pull Intelligence</div>
-          <div class="ag-nav-item" onclick="agNav('pr','coverage',this)">Coverage Tracker</div>
-          <div class="ag-nav-item" onclick="agNav('pr','intel',this)">Editor Intel</div>
-          <div class="ag-nav-item" onclick="agNav('pr','media',this)">Music Press Database</div>
+          <div class="ag-nav-item" onclick="prToggleMoreNav(this)" id="pr-nav-more-btn">More ▾</div>
+        </div>
+        <div id="pr-nav-more" style="display:none">
+          <div class="ag-nav-grp">
+            <div class="ag-nav-lbl">Intelligence</div>
+            <div class="ag-nav-item" onclick="agNav('pr','celebs',this)">★ Celebrity Moments</div>
+            <div class="ag-nav-item" onclick="agNav('pr','pull-intel',this)">Pull Intelligence</div>
+            <div class="ag-nav-item" onclick="agNav('pr','coverage',this)">Coverage Tracker</div>
+            <div class="ag-nav-item" onclick="agNav('pr','intel',this)">Editor Intel</div>
+            <div class="ag-nav-item" onclick="agNav('pr','media',this)">Music Press Database</div>
+          </div>
+          <div class="ag-nav-grp">
+            <div class="ag-nav-lbl">System</div>
+            <div class="ag-nav-item" onclick="agNav('pr','automations',this)">Automations</div>
+            <div class="ag-nav-item" onclick="agNav('pr','templates',this)">Templates</div>
+          </div>
         </div>
         <div class="ag-nav-grp">
-          <div class="ag-nav-lbl">System</div>
-          <div class="ag-nav-item" onclick="agNav('pr','automations',this)">Automations</div>
-          <div class="ag-nav-item" onclick="agNav('pr','templates',this)">Templates</div>
           <div class="ag-nav-item" onclick="agNav('pr','pr-prefs',this)">Settings</div>
         </div>
       </div>
@@ -4570,8 +4579,10 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <div id="pr-nfc-sub" style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:20px">Hold an NFC-tagged sample near your device's reader. The style will be identified automatically and added to the pull or checked back in.</div>
       <div id="pr-nfc-result" style="margin-bottom:16px;display:none"></div>
       <div style="padding:12px;background:var(--bg-off);border:1px solid var(--border);font-size:9px;color:var(--muted);text-align:left;line-height:1.8;margin-bottom:16px">
-        <strong style="color:var(--ink)">Tag Format:</strong> <code style="font-family:'DM Mono',monospace;background:var(--border);padding:1px 5px">VENIA:{styleId}:{size}:{color}</code><br>
-        Example: <code style="font-family:'DM Mono',monospace;background:var(--border);padding:1px 5px">VENIA:VN-SS25-001:M:Black</code>
+        <strong style="color:var(--ink)">iPhone?</strong> You don't need this screen — just tap the phone on the garment tag.
+        Tags carry a URL (<code style="font-family:'DM Mono',monospace;background:var(--border);padding:1px 5px">…/?tag=STY001</code>, see 🏷 Tag URLs)
+        that opens VENIA and logs check-out / check-in against the working pull automatically.
+        This live scanner is for Android Chrome only.
       </div>
       <div style="display:flex;gap:8px;justify-content:center">
         <button class="btn btn-ghost btn-sm" onclick="prManualNFCEntry()">Enter Manually</button>
@@ -4909,6 +4920,7 @@ function save() {
     pom:         STATE.pom,
     activityLog: STATE.activityLog || [],
     prPulls:     STATE.prPulls    || [],
+    workingPullId: STATE.workingPullId || null,
     prPitches:   STATE.prPitches  || [],
     prCoverage:  STATE.prCoverage || [],
     prEditors:   STATE.prEditors  || [],
@@ -9786,6 +9798,13 @@ function prPullCard(p, now) {
 
   const itemsReturned = (p.items||[]).filter(i => i.returned).length;
   const totalItems = (p.items||[]).length;
+  // Working pull = where NFC/QR garment taps log. One at a time, active pulls only.
+  const isWorking = STATE.workingPullId === p.id && p.status === 'active';
+  const workingCtl = p.status === 'active'
+    ? (isWorking
+        ? `<span style="background:var(--ink);color:var(--white);font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;font-weight:700" title="Garment tag taps log to this pull">◉ Working</span>`
+        : `<button onclick="event.stopPropagation();prSetWorkingPull('${p.id}')" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;cursor:pointer" title="Make this the pull that garment tag taps log to">○ Set working</button>`)
+    : '';
 
   return `
   <div class="pr-pull-card" onclick="prOpenDetail('${p.id}')">
@@ -9794,7 +9813,7 @@ function prPullCard(p, now) {
         <div style="font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:16px;text-transform:uppercase;letter-spacing:1px;color:var(--ink)">${p.client}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px">${p.contact} · ${p.pullType||'Editorial'} · <span style="font-family:'DM Mono',monospace">${p.invoiceNo||p.id}</span></div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">${badge}</div>
+      <div style="display:flex;gap:8px;align-items:center">${workingCtl}${badge}</div>
     </div>
     <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:12px">
       <div style="font-size:10px;color:var(--muted)">${p.publication||'—'}</div>
@@ -9958,6 +9977,139 @@ function prAddToCart(styleId, nfcTag='', size='', color='') {
 function prRemoveFromCart(idx) {
   PR_CART.splice(idx, 1);
   prRenderCart();
+}
+
+// ── GARMENT TAG FLOW (NFC / QR → working pull) ────────────────────────────
+// Tags are URLs: https://creator.veniacollection.com/?tag=<styleId>. iPhones
+// background-read NFC tags that carry a URL (no app needed) and pop a banner
+// that opens this app; the same URL printed as a QR covers any camera. Web
+// NFC (NDEFReader) never worked on iOS — this route works on everything.
+//
+// Tap semantics against the WORKING pull (◉ badge in the Pulls list):
+//   style not in pull  → checked OUT (added to the pull sheet)
+//   style already out  → checked IN  (marked returned)
+function prMakeItem(s, tagVal) {
+  return {
+    styleId: s.id, styleName: s.name, styleCode: s.styleId,
+    category: s.category, season: s.season, retail: s.retail || 0,
+    size: '', color: (s.colors ? s.colors.split(',')[0].trim() : ''),
+    nfcTag: tagVal || '', returned: false, returnedAt: null, condition: 'good',
+  };
+}
+
+function prSetWorkingPull(pullId) {
+  STATE.workingPullId = pullId;
+  save();
+  agRenderPrPullsList();
+  const p = (STATE.prPulls||[]).find(x=>x.id===pullId);
+  toast(`◉ Tag taps now log to ${p?p.client:'this pull'}`);
+}
+
+function prGoPulls() {
+  cpGoto('pr');
+  setTimeout(() => {
+    const el = [...document.querySelectorAll('#cp-screen-pr .ag-nav-item')].find(n=>/^Pulls$/.test(n.textContent.trim()));
+    agNav('pr','pulls', el||null);
+  }, 120);
+}
+
+function prTagCheck(tagVal) {
+  prInit();
+  const s = STATE.styles.find(x => x.id === tagVal || x.styleId === tagVal);
+  if (!s) { toast(`Tag "${tagVal}" doesn't match a style`, 'error'); return; }
+
+  let pull = (STATE.prPulls||[]).find(p => p.id === STATE.workingPullId && p.status === 'active');
+  if (!pull) {
+    // No working pull chosen — if exactly one pull is active, use it; else start one.
+    const actives = (STATE.prPulls||[]).filter(p => p.status === 'active');
+    if (actives.length === 1) { pull = actives[0]; STATE.workingPullId = pull.id; }
+  }
+
+  if (!pull) {
+    // Nothing to log against: open a new pull with this garment already in the cart.
+    prGoPulls();
+    setTimeout(() => {
+      openPrCart();
+      prAddToCart(s.id, tagVal);
+      toast(`${s.name} in cart — name the client and save to start the pull`, 'info');
+    }, 300);
+    return;
+  }
+
+  const out = (pull.items||[]).find(i => i.styleId === s.id && !i.returned);
+  if (out) {
+    out.returned = true;
+    out.returnedAt = new Date().toISOString().split('T')[0];
+    if ((pull.items||[]).every(i => i.returned)) pull.status = 'returned';
+    save();
+    logActivity(`Tag check-IN: ${s.name} ← ${pull.client}`);
+    toast(`✓ ${s.name} returned — ${pull.client}${pull.status==='returned'?' · pull complete':''}`);
+  } else {
+    if (!pull.items) pull.items = [];
+    pull.items.push(prMakeItem(s, tagVal));
+    pull.totalRetail = pull.items.reduce((t,i) => t + (i.retail||0), 0);
+    save();
+    logActivity(`Tag check-OUT: ${s.name} → ${pull.client}`);
+    toast(`${s.name} → ${pull.client} (${pull.items.length} item${pull.items.length>1?'s':''} out)`);
+  }
+  prGoPulls();
+  setTimeout(() => agRenderPrPullsList(), 400);
+}
+
+// Boot: process ?tag=… once the app is unlocked and STATE is live.
+(function(){
+  const t = new URLSearchParams(location.search).get('tag');
+  if (!t || window.VENIA_SHARE) return;
+  const iv = setInterval(() => {
+    const gate = document.getElementById('venia-auth-gate');
+    if (gate && !gate.classList.contains('hidden')) return;      // wait for unlock
+    if (typeof STATE === 'undefined' || !STATE.styles || !STATE.styles.length) return;
+    clearInterval(iv);
+    try { history.replaceState({}, '', location.pathname); } catch(e) {}
+    prTagCheck(t);
+  }, 300);
+  setTimeout(() => clearInterval(iv), 120000);                    // give up after 2 min
+})();
+
+// Helper: the tag URL for every live style, ready to write to NTAG stickers
+// (NFC Tools app) or print as QR codes.
+function prTagUrlsModal() {
+  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived');
+  const ov = document.createElement('div');
+  ov.id = 'pr-tag-urls-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  ov.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);max-width:560px;width:100%;max-height:82vh;display:flex;flex-direction:column" onclick="event.stopPropagation()">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700">Garment tag URLs</span>
+        <button onclick="document.getElementById('pr-tag-urls-overlay').remove()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px">✕</button>
+      </div>
+      <div style="padding:14px 20px;font-size:10px;color:var(--muted);line-height:1.8;border-bottom:1px solid var(--border)">
+        Write a style's URL to an NFC sticker (NTAG213, ~$0.20 — use the free <strong>NFC Tools</strong> app) and put it on the hang tag.
+        <strong style="color:var(--ink)">Tapping an iPhone on the tag opens VENIA and logs the garment out of / back into the working pull automatically.</strong>
+        The same URL as a QR code works with any camera.
+      </div>
+      <div style="flex:1;overflow-y:auto">
+        ${styles.map(s => `
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 20px;border-bottom:1px solid var(--border)">
+          <div style="flex:1;min-width:0">
+            <div style="font-size:11px;font-weight:600;color:var(--ink)">${s.name}</div>
+            <div style="font-family:'DM Mono',monospace;font-size:8.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${location.origin}/?tag=${s.id}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="navigator.clipboard.writeText('${location.origin}/?tag=${s.id}').then(()=>showToast('URL copied — write it to the tag','success'))">Copy</button>
+        </div>`).join('')}
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+}
+
+function prToggleMoreNav(btn) {
+  const more = document.getElementById('pr-nav-more');
+  if (!more) return;
+  const open = more.style.display !== 'none';
+  more.style.display = open ? 'none' : 'contents';   // contents = children join the flex row/column
+  if (btn) btn.textContent = open ? 'More ▾' : 'Less ▴';
 }
 
 function prRenderCart() {
@@ -10145,6 +10297,9 @@ function prFinalizePull() {
   const existingIdx = STATE.prPulls.findIndex(p => p.id === pull.id);
   if (existingIdx >= 0) STATE.prPulls[existingIdx] = pull;
   else STATE.prPulls.unshift(pull);
+  // The pull you just finalized is the one you're handing garments to —
+  // make it the working pull so tag taps log here without an extra step.
+  STATE.workingPullId = pull.id;
   save();
   logActivity(`PR Pull finalized: ${pull.client} — ${pull.items.length} items, $${pull.totalRetail} retail`);
 
@@ -11887,7 +12042,7 @@ const AG_SECTIONS = {
   pr: {
     overview:    { title:'PR · Overview',              actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm">+ New Pitch</button>`,    suggests:['Lady Gaga PR Package','Moment Capture Checklist','Next Target Artist'] },
     pitches:     { title:'PR · Pitch Tracker',         actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agentSend('pr','Which of my active pitches should I follow up on this week? List them with a one-line suggested follow-up for each.')">◈ Follow-Up Assist</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openPitchModal()">+ New Pitch</button>`, suggests:['Which pitches need follow-up?','Draft a pitch for Chelsea Wolfe placement','Best angle for i-D or NME?','What\'s my current response rate?'] },
-    pulls:       { title:'PR · Sample Pulls',          actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prStartNFCScan()">◎ NFC Scan</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openPrCart()">+ New Pull</button>`, suggests:['Build pull list for an editorial shoot','Which pulls are overdue?','Draft return reminder for a stylist','Suggest which samples to prioritize this week'] },
+    pulls:       { title:'PR · Sample Pulls',          actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prTagUrlsModal()">🏷 Tag URLs</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openPrCart()">+ New Pull</button>`, suggests:['Build pull list for an editorial shoot','Which pulls are overdue?','Draft return reminder for a stylist','Suggest which samples to prioritize this week'] },
     editors:     { title:'PR · Editors & Stylists',    actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prExport('editors')">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="prOpenEditorModal(null)">+ Add Contact</button>`, suggests:['Find editors for FW26','Who covers indie luxury?','Score my contact list'] },
     hits:        { title:'PR · Coverage Log',          actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agentSend('pr','Analyze my coverage log and tell me: (1) total estimated reach this year, (2) which outlet has given us the most coverage, (3) what story angles are working, and (4) what we should pitch next based on what\'s landed.')">◈ Coverage Analysis</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openCoverageModal()">+ Log Coverage</button>`, suggests:['Summarize my press coverage this year','Which outlet should I follow up with?','Draft a pitch leveraging recent coverage','Calculate my total coverage reach'] },
     'pull-intel': { title:'PR · Pull Intelligence',    actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNav('pr','pulls',null);agPrPullsFilter('all',null)">View All Pulls</button>`, suggests:['Which publications pull VENIA most?','What are our most-requested styles?','Which stylists have pulled the most pieces?','Write a PR brief using our pull history as proof of demand'] },
@@ -12014,15 +12169,15 @@ function agBuildPullsSection() {
     <div class="ag-stat"><div class="ag-stat-l">Value at Risk</div><div class="ag-stat-v" style="font-size:${totalValue>999?'16px':'20px'}">${totalValue>0?'$'+(totalValue/1000).toFixed(1)+'k':'$0'}</div><div class="ag-stat-s">Retail value out</div></div>
   </div>`;
 
-  // NFC bar
+  // Garment tag bar — tag taps log against the working pull (◉ in the list).
+  const workingPull = all.find(p => p.id === STATE.workingPullId && p.status === 'active');
   const nfcBar = `<div class="ag-pulls-nfc-bar">
     <div style="font-size:20px;color:var(--muted)">◎</div>
-    <div style="flex:1;min-width:0">
-      <div style="font-size:10px;font-weight:700;color:var(--ink);letter-spacing:.5px;text-transform:uppercase">NFC Check-In / Check-Out</div>
-      <div style="font-size:9px;color:var(--muted);margin-top:2px">Tap a garment tag to check out a sample to a pull, or mark it returned. Use manual if NFC unavailable.</div>
+    <div style="flex:1;min-width:220px">
+      <div style="font-size:10px;font-weight:700;color:var(--ink);letter-spacing:.5px;text-transform:uppercase">Garment Tags — Check-Out / Check-In</div>
+      <div style="font-size:9px;color:var(--muted);margin-top:2px">Tap your iPhone on a tagged garment: first tap checks it out to <strong style="color:var(--ink)">${workingPull ? workingPull.client : 'the working pull'}</strong>, tapping again checks it back in.${workingPull ? '' : ' <span style="color:var(--amber)">No working pull set — tap ○ Set working on a pull below.</span>'}</div>
     </div>
-    <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agPrNFCScan('checkout')">◎ Check Out</button>
-    <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agPrNFCScan('return')">◎ Check In</button>
+    <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prTagUrlsModal()" title="Copy the URL to write to each garment's NFC sticker or QR code">🏷 Tag URLs</button>
     <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agPrManualReturn()">Manual Return</button>
   </div>`;
 
@@ -12035,7 +12190,6 @@ function agBuildPullsSection() {
       <button class="ag-pill${AG_PR_PULLS_FILTER==='overdue'?' ag-pill-active':''}"  onclick="agPrPullsFilter('overdue',this)">⚠ Overdue</button>
     </div>
     <div class="ag-sec-actions">
-      <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agPrNFCScan('checkout')">◎ NFC Scan</button>
       <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openPrCart()">+ New Pull</button>
     </div>
   </div>`;
@@ -16437,6 +16591,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function snapshot(){
     var d = { styles: STATE.styles||[], materials: STATE.materials||[],
               vendors: STATE.vendors||[], bom: STATE.bom||{}, pom: STATE.pom||{},
+              prPulls: STATE.prPulls||[], workingPullId: STATE.workingPullId||null,
               _who: who() };
     if (STATE.samples) d.samples = STATE.samples;
     return d;
@@ -16451,6 +16606,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (data.bom)       STATE.bom = data.bom;
       if (data.pom)       STATE.pom = data.pom;
       if (data.samples)   STATE.samples = data.samples;
+      if (data.prPulls)   STATE.prPulls = data.prPulls;
+      if ('workingPullId' in data) STATE.workingPullId = data.workingPullId;
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
     } finally { applyingRemote = false; }
   }
