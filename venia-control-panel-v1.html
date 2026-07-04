@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '33';
+  const BUILD = '34';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10115,7 +10115,12 @@ function prTagCheck(tagVal) {
     const out = items[outIdx];
     out.returned = true;
     out.returnedAt = new Date().toISOString().split('T')[0];
-    if (pull.status === 'active' && items.every(i => i.returned)) pull.status = 'returned';
+    // Complete drafts too — the old code only closed 'active' pulls, so a draft
+    // (e.g. one built entirely by tapping) stayed open after every item was back.
+    if ((pull.status === 'active' || pull.status === 'draft') && items.length && items.every(i => i.returned)) {
+      pull.status = 'returned'; pull.returnedAt = new Date().toISOString();
+      if (STATE.workingPullId === pull.id) STATE.workingPullId = null;
+    }
     save();
     logActivity(`Tag check-IN: ${s.name} ← ${pull.client}`);
     prTagSheet(pull, outIdx, 'in');
@@ -10772,7 +10777,11 @@ function prOpenDetail(pullId) {
   // (Android Chrome) — on iPhone you just tap the garment tag.
   document.getElementById('pr-detail-foot').innerHTML = `
     <div style="display:flex;gap:8px;flex-wrap:wrap;width:100%">
-      ${pull.status === 'active' && (pull.items||[]).length && (pull.items||[]).every(i=>i.returned) ? `<button class="btn btn-gold btn-sm" style="flex:1 1 100%" onclick="prMarkAllReturned('${pullId}')">✓ Mark Pull Complete</button>` : ''}
+      ${(pull.status === 'active' || pull.status === 'draft') && (pull.items||[]).length
+        ? ((pull.items||[]).some(i=>!i.returned)
+            ? `<button class="btn btn-gold btn-sm" style="flex:1 1 100%" onclick="prMarkAllReturned('${pullId}')">✓ Return all remaining &amp; close</button>`
+            : `<button class="btn btn-gold btn-sm" style="flex:1 1 100%" onclick="prMarkAllReturned('${pullId}')">✓ Mark pull complete</button>`)
+        : ''}
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="closeModal('pr-detail-modal');openPrCart('${pullId}')">✎ Edit Pull</button>
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prSendEmail(STATE.prPulls.find(p=>p.id==='${pullId}'))">✉ Re-send Sheet</button>
       ${pull.status === 'active' ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prPrintPullSheet('${pullId}')">↓ Pull Sheet PDF</button>` : ''}
@@ -10792,10 +10801,11 @@ function prReturnItem(pullId, itemIdx) {
   pull.items[itemIdx].returned = true;
   pull.items[itemIdx].returnedAt = new Date().toISOString();
   pull.items[itemIdx].returnCondition = condEl?.value || 'good';
-  // If all returned, mark pull as returned
-  if (pull.items.every(i => i.returned)) {
+  // If all returned, mark pull complete (works for drafts too).
+  if (pull.items.length && pull.items.every(i => i.returned)) {
     pull.status = 'returned';
     pull.returnedAt = new Date().toISOString();
+    if (STATE.workingPullId === pullId) STATE.workingPullId = null;
     toast(`✓ All items returned — pull complete`);
   } else {
     toast(`✓ ${pull.items[itemIdx].styleName} marked returned`);
@@ -10809,14 +10819,18 @@ function prReturnItem(pullId, itemIdx) {
 function prMarkAllReturned(pullId) {
   const pull = STATE.prPulls.find(p => p.id === pullId);
   if (!pull) return;
+  if (!pull.items || !pull.items.length) { toast('No items on this pull'); return; }
+  const outCount = pull.items.filter(i => !i.returned).length;
+  if (outCount && !confirm(`Mark all ${outCount} remaining item${outCount>1?'s':''} returned and close "${pull.client}"?`)) return;
   pull.items.forEach(i => { if (!i.returned) { i.returned=true; i.returnedAt=new Date().toISOString(); i.returnCondition='good'; }});
   pull.status = 'returned';
   pull.returnedAt = new Date().toISOString();
+  if (STATE.workingPullId === pullId) STATE.workingPullId = null;
   save();
   logActivity(`PR Pull complete: ${pull.client} — all ${pull.items.length} items returned`);
   closeModal('pr-detail-modal');
-  renderPR();
-  toast(`✓ Pull marked complete`);
+  agRenderPrPullsList();
+  toast(`✓ Pull complete`);
 }
 
 // ── Stripe & Payment Integration ────────────────────────────────────────────
