@@ -1,7 +1,7 @@
 /* VENIA Control Center — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v35';
+const CACHE = 'venia-shell-v36';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
