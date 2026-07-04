@@ -1476,7 +1476,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '30';
+  const BUILD = '31';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1489,6 +1489,13 @@ body{padding-top:44px;box-sizing:border-box;}
   // never boots interactive features in this mode (see share-mode module).
   window.VENIA_SHARE = new URLSearchParams(location.search).get('share') || null;
   if (window.VENIA_SHARE) {
+    $('venia-auth-gate').classList.add('hidden');
+    document.documentElement.classList.add('share-mode');
+  }
+  // Stripe returns the STYLIST here after paying (?pay=success|cancelled) —
+  // they should see a branded confirmation, never the app or its gate.
+  window.VENIA_PAY = new URLSearchParams(location.search).get('pay') || null;
+  if (window.VENIA_PAY) {
     $('venia-auth-gate').classList.add('hidden');
     document.documentElement.classList.add('share-mode');
   }
@@ -2470,6 +2477,27 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
               <button class="btn btn-gold btn-sm" onclick="setApiKey('shopify')">Save</button>
               <button class="btn btn-ghost btn-sm" onclick="setTestShopify()">Test Connection</button>
               <a href="https://admin.shopify.com" target="_blank" style="font-size:9px;color:var(--muted);text-decoration:underline">Admin → Apps → Private apps →</a>
+            </div>
+          </div>
+
+          <!-- Stripe (server-side — key never enters the browser) -->
+          <div style="background:var(--bg);border:1px solid var(--border);padding:20px;margin-bottom:1px">
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+              <div style="width:44px;height:44px;background:#635bff;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px;flex-shrink:0">S</div>
+              <div style="flex:1">
+                <div style="font-size:14px;font-weight:700;color:var(--ink)">Stripe</div>
+                <div style="font-size:10px;color:var(--muted)">Deposits &amp; card holds for stylist pulls — payment links from the Finish Checkout sheet</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div id="set-conn-stripe-dot" style="width:8px;height:8px;border-radius:50%;background:var(--border-mid)"></div>
+                <span id="set-conn-stripe-label" style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:700">Not tested</span>
+              </div>
+            </div>
+            <div style="margin-top:14px;font-size:10px;color:var(--muted);line-height:1.8">
+              The secret key lives <strong>server-side only</strong>: Netlify → Site configuration → Environment variables → add <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">STRIPE_SECRET_KEY</code> (from <a href="https://dashboard.stripe.com/apikeys" target="_blank" style="color:var(--muted);text-decoration:underline">dashboard.stripe.com/apikeys</a>), then redeploy and test.
+            </div>
+            <div style="margin-top:10px">
+              <button class="btn btn-ghost btn-sm" onclick="setTestStripe()">Test Connection</button>
             </div>
           </div>
 
@@ -10023,9 +10051,11 @@ function prTagCheck(tagVal) {
   const s = STATE.styles.find(x => x.id === tagVal || x.styleId === tagVal);
   if (!s) { toast(`Tag "${tagVal}" doesn't match a style`, 'error'); return; }
 
-  // A draft you're building counts as working — otherwise "Save Draft" would
-  // silently stop tag taps from logging and every tap would open a new form.
-  let pull = (STATE.prPulls||[]).find(p => p.id === STATE.workingPullId && (p.status === 'active' || p.status === 'draft'));
+  // The explicit working pull matches by id REGARDLESS of status: a draft
+  // you're building counts, and so does a pull that just auto-completed when
+  // its last item came back — the next tap re-opens it (same shoot, same
+  // stylist) instead of dead-ending into a brand-new form.
+  let pull = (STATE.prPulls||[]).find(p => p.id === STATE.workingPullId);
   if (!pull) {
     // No working pull chosen — adopt the only live candidate if there is one.
     const actives = (STATE.prPulls||[]).filter(p => p.status === 'active');
@@ -10059,21 +10089,35 @@ function prTagCheck(tagVal) {
     return;
   }
 
-  const out = (pull.items||[]).find(i => i.styleId === s.id && !i.returned);
-  if (out) {
+  const items = pull.items = pull.items || [];
+  const outIdx = items.findIndex(i => i.styleId === s.id && !i.returned);
+  if (outIdx >= 0) {
+    const out = items[outIdx];
     out.returned = true;
     out.returnedAt = new Date().toISOString().split('T')[0];
-    if (pull.status === 'active' && (pull.items||[]).every(i => i.returned)) pull.status = 'returned';
+    if (pull.status === 'active' && items.every(i => i.returned)) pull.status = 'returned';
     save();
     logActivity(`Tag check-IN: ${s.name} ← ${pull.client}`);
-    prTagSheet(pull, s.id, 'in');
+    prTagSheet(pull, outIdx, 'in');
   } else {
-    if (!pull.items) pull.items = [];
-    pull.items.push(prMakeItem(s, tagVal));
-    pull.totalRetail = pull.items.reduce((t,i) => t + (i.retail||0), 0);
-    save();
-    logActivity(`Tag check-OUT: ${s.name} → ${pull.client}`);
-    prTagSheet(pull, s.id, 'out');
+    // Same garment going out again? Reuse its row (it's the same physical
+    // piece + tag) instead of stacking duplicate lines on the sheet.
+    const backIdx = items.findIndex(i => i.styleId === s.id && i.returned);
+    if (backIdx >= 0) {
+      const it = items[backIdx];
+      it.returned = false; it.returnedAt = null; it.condition = 'good';
+      if (pull.status === 'returned') pull.status = 'active';
+      save();
+      logActivity(`Tag re-check-OUT: ${s.name} → ${pull.client}`);
+      prTagSheet(pull, backIdx, 'out');
+    } else {
+      items.push(prMakeItem(s, tagVal));
+      pull.totalRetail = items.reduce((t,i) => t + (i.retail||0), 0);
+      if (pull.status === 'returned') pull.status = 'active';   // new checkout re-opens a completed pull
+      save();
+      logActivity(`Tag check-OUT: ${s.name} → ${pull.client}`);
+      prTagSheet(pull, items.length - 1, 'out');
+    }
   }
   prGoPulls();
   setTimeout(() => agRenderPrPullsList(), 400);
@@ -10083,12 +10127,12 @@ function prTagCheck(tagVal) {
 // list at the rack (a toast alone tells you nothing about state). The sheet
 // stays open — consecutive taps just update it — and shows every item on the
 // working pull with the just-tapped garment highlighted.
-function prTagSheet(pull, highlightId, action) {
+function prTagSheet(pull, highlightIdx, action) {
   const items = pull.items || [];
   const outCount = items.filter(i => !i.returned).length;
   const outValue = items.filter(i => !i.returned).reduce((t,i)=>t+(i.retail||0),0);
   const rows = items.map((i, n) => {
-    const isHit = i.styleId === highlightId;
+    const isHit = n === highlightIdx;   // exact row only — same style on other rows stays unstamped
     const stamp = isHit
       ? (action==='out'
           ? '<span style="background:#111;color:#fff;font-size:8px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;font-weight:700;white-space:nowrap">✓ just checked out</span>'
@@ -10129,12 +10173,188 @@ function prTagSheet(pull, highlightId, action) {
         </div>
       </div>
       <div style="flex:1;overflow-y:auto">${rows || '<div style="padding:20px;font-size:11px;color:var(--muted);font-style:italic">Nothing on this pull yet.</div>'}</div>
-      <div style="padding:12px 16px calc(12px + var(--sab,0px));border-top:1px solid var(--border);display:flex;gap:8px;justify-content:space-between;background:var(--bg)">
-        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('pr-tag-sheet').remove();prOpenDetail('${pull.id}')">Open full pull →</button>
-        <button class="btn btn-gold btn-sm" onclick="document.getElementById('pr-tag-sheet').remove()">Done</button>
+      <div style="padding:12px 16px calc(12px + var(--sab,0px));border-top:1px solid var(--border);display:flex;gap:8px;background:var(--bg)">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="document.getElementById('pr-tag-sheet').remove();prOpenDetail('${pull.id}')">Full pull</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="document.getElementById('pr-tag-sheet').remove()">Done</button>
+        <button class="btn btn-gold btn-sm" style="flex:1.4" onclick="prTagFinish('${pull.id}')">Finish →</button>
       </div>
     </div>`;
 }
+
+// ── FINISH CHECKOUT — the step after tapping garments ─────────────────────
+// One panel that closes out the handoff: return-by date, a Stripe deposit or
+// card hold (link the stylist pays on their phone; the secret key lives in a
+// Netlify function, never the browser), and the confirmation email.
+function prTagFinish(pullId) {
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId);
+  if (!pull) return;
+  const items = pull.items || [];
+  const outItems = items.filter(i => !i.returned);
+  const outValue = outItems.reduce((t,i)=>t+(i.retail||0),0);
+  const pay = pull.payment || null;
+
+  let ov = document.getElementById('pr-tag-sheet');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'pr-tag-sheet';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;display:flex;align-items:flex-end;justify-content:center';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+  }
+
+  const sec = (t) => `<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:0 0 8px">${t}</div>`;
+  const chip = (pct) => `<button onclick="prDepositChip('${pullId}',${pct})" style="background:none;border:1px solid var(--border);color:var(--muted);font-size:9px;letter-spacing:1px;padding:5px 10px;cursor:pointer">${pct}%</button>`;
+
+  // Payment section: either the create controls, or the live link + status.
+  let payHtml;
+  if (pay && pay.url) {
+    const st = pay.status || 'pending';
+    const stChip = st === 'paid' || st === 'captured'
+      ? `<span style="color:var(--green);font-weight:700">✓ ${st === 'captured' ? 'Hold captured' : 'Paid'} $${pay.amount}</span>`
+      : st === 'authorized'
+      ? `<span style="color:var(--green);font-weight:700">✓ Hold authorized — $${pay.amount}</span>`
+      : st === 'released'
+      ? `<span style="color:var(--muted)">Hold released</span>`
+      : `<span style="color:var(--amber);font-weight:700">⏳ ${pay.type === 'hold' ? 'Hold' : 'Payment'} pending — $${pay.amount}</span>`;
+    payHtml = `
+      <div style="font-size:11px;margin-bottom:10px">${stChip}</div>
+      ${st === 'pending' ? `<div style="display:flex;gap:8px;margin-bottom:8px">
+        <input readonly value="${pay.url}" style="flex:1;font-family:'DM Mono',monospace;font-size:9px;padding:8px 10px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);outline:none;min-width:0">
+        <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="navigator.clipboard.writeText('${pay.url}').then(()=>showToast('Link copied — text or email it to the stylist','success'))">Copy</button>
+      </div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${st === 'pending' ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="window.open('${pay.url}','_blank')">Open link</button>` : ''}
+        ${st !== 'captured' && st !== 'released' ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="prStripeCheck('${pullId}')">↻ Check status</button>` : ''}
+        ${pay.type === 'hold' && st === 'authorized' ? `<button class="btn btn-gold btn-sm" style="flex:1" onclick="prStripeCapture('${pullId}')">◈ Capture $${pay.amount}</button>` : ''}
+        ${pay.type === 'hold' && st === 'authorized' ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="prStripeRelease('${pullId}')">Release hold</button>` : ''}
+        ${st === 'pending' ? `<button class="btn btn-ghost btn-sm" style="flex-shrink:0;color:var(--red)" onclick="delete STATE.prPulls.find(p=>p.id==='${pullId}').payment;save();prTagFinish('${pullId}')" title="Discard this link and start over">✕</button>` : ''}
+      </div>`;
+  } else {
+    payHtml = `
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <span style="font-size:12px;color:var(--muted)">$</span>
+        <input id="pr-fin-amt" type="number" inputmode="decimal" value="${Math.max(1, Math.round(outValue*0.2))}" style="width:110px;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;padding:7px 10px;border:1px solid var(--border);background:var(--bg);color:var(--ink);outline:none">
+        ${chip(20)}${chip(50)}${chip(100)}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-gold btn-sm" style="flex:1" onclick="prStripeCreate('${pullId}', true)">◈ Hold on card</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="prStripeCreate('${pullId}', false)">Charge now</button>
+      </div>
+      <div style="font-size:9px;color:var(--muted);margin-top:8px;line-height:1.6">Creates a secure Stripe page the stylist pays on their phone. A <strong>hold</strong> authorizes the card without charging — capture it if samples don't come back, release it when they do.</div>`;
+  }
+
+  ov.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:480px;max-height:86vh;display:flex;flex-direction:column;border-radius:14px 14px 0 0;overflow:hidden" onclick="event.stopPropagation()">
+      <div style="padding:14px 16px 12px;background:#0a0a0a;color:#fff;display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div style="min-width:0">
+          <div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999">Finish checkout</div>
+          <div style="font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:16px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${pull.client}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-family:'DM Mono',monospace;font-size:16px;font-weight:700">${outItems.length}</div>
+          <div style="font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:#999">out · $${outValue.toLocaleString()}</div>
+        </div>
+      </div>
+      <div style="flex:1;overflow-y:auto;padding:16px">
+        <div style="margin-bottom:18px">
+          ${sec('Return by')}
+          <input type="date" value="${pull.returnDate||''}" onchange="var p=STATE.prPulls.find(function(x){return x.id==='${pullId}'});if(p){p.returnDate=this.value;save();}" style="font-size:14px;padding:8px 10px;border:1px solid var(--border);background:var(--bg);color:var(--ink);outline:none;font-family:'DM Mono',monospace">
+        </div>
+        <div style="margin-bottom:18px">
+          ${sec('Deposit / card hold — Stripe')}
+          ${payHtml}
+        </div>
+        <div style="margin-bottom:6px">
+          ${sec('Confirmation')}
+          <button class="btn btn-ghost btn-sm" style="width:100%" onclick="prSendEmail(STATE.prPulls.find(p=>p.id==='${pullId}'))">✉ Email pull sheet${pull.email ? ' to ' + pull.email : ''}</button>
+          <div style="font-size:9px;color:var(--muted);margin-top:6px;line-height:1.6">Drafts the itemized pull sheet in Mail${pay && pay.url && (pay.status||'pending')==='pending' ? ' — the payment link is included automatically' : ''}.</div>
+        </div>
+      </div>
+      <div style="padding:12px 16px calc(12px + var(--sab,0px));border-top:1px solid var(--border);display:flex;gap:8px;background:var(--bg)">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="prTagSheet(STATE.prPulls.find(p=>p.id==='${pullId}'), -1, 'out')">← Items</button>
+        <button class="btn btn-gold btn-sm" style="flex:1.4" onclick="document.getElementById('pr-tag-sheet').remove()">Done</button>
+      </div>
+    </div>`;
+}
+
+window.prDepositChip = function(pullId, pct){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); if (!pull) return;
+  const outValue = (pull.items||[]).filter(i=>!i.returned).reduce((t,i)=>t+(i.retail||0),0);
+  const el = document.getElementById('pr-fin-amt');
+  if (el) el.value = Math.max(1, Math.round(outValue * pct / 100));
+};
+
+async function prStripe(action, payload){
+  const r = await fetch('/.netlify/functions/stripe', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({action:action}, payload||{}))
+  });
+  return r.json();
+}
+
+window.prStripeCreate = async function(pullId, hold){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); if (!pull) return;
+  const amt = parseFloat((document.getElementById('pr-fin-amt')||{}).value) || 0;
+  if (!amt || amt < 0.5) { showToast('Enter an amount (min $0.50)','warning'); return; }
+  showToast('Creating Stripe link…','info');
+  try {
+    const res = await prStripe('create', { amount: amt, hold: !!hold, email: pull.email||'', description: `VENIA pull ${pull.invoiceNo||pull.id} — ${hold?'card hold':'deposit'}` });
+    if (res.error) { showToast(res.error,'error'); return; }
+    pull.payment = { sessionId: res.id, url: res.url, amount: amt, type: hold?'hold':'charge', status: 'pending' };
+    save(); logActivity(`Stripe ${hold?'hold':'charge'} link created — $${amt} · ${pull.client}`);
+    prTagFinish(pullId);
+  } catch(e){ showToast('Stripe function unreachable — is the site deployed?','error'); }
+};
+
+window.prStripeCheck = async function(pullId){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
+  if (!pay || !pay.sessionId) return;
+  try {
+    const res = await prStripe('status', { id: pay.sessionId });
+    if (res.error) { showToast(res.error,'error'); return; }
+    if (res.payment_intent) pay.paymentIntent = res.payment_intent;
+    if (pay.type === 'hold') pay.status = res.payment_status === 'paid' ? 'captured' : (res.status === 'complete' ? 'authorized' : 'pending');
+    else pay.status = res.payment_status === 'paid' ? 'paid' : 'pending';
+    save(); prTagFinish(pullId);
+    showToast(pay.status === 'pending' ? 'Not completed yet' : '✓ ' + pay.status, 'info');
+  } catch(e){ showToast('Could not check status','error'); }
+};
+
+window.prStripeCapture = async function(pullId){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
+  if (!pay || !pay.paymentIntent) { showToast('Run ↻ Check status first','warning'); return; }
+  try {
+    const res = await prStripe('capture', { payment_intent: pay.paymentIntent });
+    if (res.error) { showToast(res.error,'error'); return; }
+    pay.status = 'captured'; save(); prTagFinish(pullId);
+    logActivity(`Stripe hold captured — $${pay.amount} · ${pull.client}`);
+    showToast(`✓ Captured $${pay.amount}`,'success');
+  } catch(e){ showToast('Capture failed','error'); }
+};
+
+window.prStripeRelease = async function(pullId){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
+  if (!pay || !pay.paymentIntent) { showToast('Run ↻ Check status first','warning'); return; }
+  try {
+    const res = await prStripe('cancel', { payment_intent: pay.paymentIntent });
+    if (res.error) { showToast(res.error,'error'); return; }
+    pay.status = 'released'; save(); prTagFinish(pullId);
+    logActivity(`Stripe hold released — $${pay.amount} · ${pull.client}`);
+    showToast('Hold released','success');
+  } catch(e){ showToast('Release failed','error'); }
+};
+
+window.setTestStripe = async function(){
+  const dot = document.getElementById('set-conn-stripe-dot');
+  const label = document.getElementById('set-conn-stripe-label');
+  try {
+    const res = await prStripe('ping', {});
+    const ok = !!res.configured;
+    if (dot) dot.style.background = ok ? '#22c55e' : 'var(--border-mid)';
+    if (label) label.textContent = ok ? 'Connected ✓' : 'Not set';
+    showToast(ok ? 'Stripe connected ✓' : 'STRIPE_SECRET_KEY not set in Netlify env', ok?'success':'warning');
+  } catch(e){ showToast('Stripe function unreachable (deploy first)','error'); }
+};
 
 // Boot: process ?tag=… once the app is unlocked and STATE is live.
 (function(){
@@ -10871,8 +11091,11 @@ function prSendEmail(pull) {
     `Pull: ${pull.invoiceNo}\n` +
     (pull.publication ? `Publication / usage: ${pull.publication}\n` : '') +
     (pull.returnDate ? `Return by: ${pull.returnDate}\n` : '') +
-    `\nItems (${(pull.items||[]).length}):\n${itemLines || '—'}\n\n` +
-    `The full pull sheet with terms is available on request.\n\n` +
+    `\nItems (${(pull.items||[]).length}):\n${itemLines || '—'}\n` +
+    (pull.payment && pull.payment.url && (pull.payment.status||'pending') === 'pending'
+      ? `\n${pull.payment.type==='hold' ? 'Card hold (not charged unless samples are unreturned)' : 'Deposit'}: $${pull.payment.amount}\nPlease complete here before pickup:\n${pull.payment.url}\n`
+      : '') +
+    `\nThe full pull sheet with terms is available on request.\n\n` +
     `Thank you,\nVENIA Collection\nveniacollection.com`;
   const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const a = document.createElement('a');
@@ -16898,6 +17121,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       '<div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e;margin-bottom:10px">' + title + '</div>' +
       '<div style="font-size:12px;color:#888;line-height:1.7">' + msg + '</div>' +
       '</div></div>';
+  }
+
+  // Stylist landing after a Stripe payment (?pay=success|cancelled): a clean
+  // branded page — no app, no gate, nothing to poke at.
+  if (window.VENIA_PAY) {
+    var ok = window.VENIA_PAY === 'success';
+    shareFail(
+      ok ? 'Payment received' : 'Payment not completed',
+      ok ? 'Thank you — your pull is confirmed with VENIA. You can close this page.'
+         : 'The payment step was cancelled. You can reopen the link any time, or contact VENIA.'
+    );
   }
 
   // Boot path for ?share=TOKEN (called by sbLiveStart once the client exists).
