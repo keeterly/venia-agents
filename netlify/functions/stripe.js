@@ -21,6 +21,23 @@ export default async (req) => {
   if (body.action === 'ping') return json({ configured: !!key });
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables' }, 400);
 
+  // Gate the money-moving actions. capture/cancel move real money on cards, and
+  // the pull records (with their payment_intent IDs) sync to the shared
+  // workspace — so without this, anyone who read those IDs could release or
+  // charge holds against the public function. Require the VENIA access code:
+  // the client sends it, we compare its SHA-256 to STRIPE_GATE_HASH (the same
+  // hash the login gate uses). The raw code never appears in the page source,
+  // only its hash does, so knowing the hash doesn't let you forge the header.
+  const GATED = ['capture', 'cancel'];
+  if (GATED.includes(body.action)) {
+    const gateHash = process.env.STRIPE_GATE_HASH;
+    if (gateHash) {
+      const sent = req.headers.get('x-venia-code') || '';
+      const ok = sent && (await sha256Hex(sent)) === gateHash.toLowerCase();
+      if (!ok) return json({ error: 'Not authorized — enter your VENIA access code to move a card hold.' }, 401);
+    }
+  }
+
   const form = (o) => Object.entries(o)
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
   const call = async (path, data, method = 'POST') => {
@@ -36,6 +53,7 @@ export default async (req) => {
     if (body.action === 'create') {
       const amt = Math.round(Number(body.amount) * 100);
       if (!amt || amt < 50) return json({ error: 'Amount must be at least $0.50' }, 400);
+      if (amt > 5000000) return json({ error: 'Amount too large' }, 400);   // $50k sanity cap
       const s = await call('checkout/sessions', {
         mode: 'payment',
         'line_items[0][price_data][currency]': 'usd',
@@ -73,3 +91,8 @@ export default async (req) => {
 
 const json = (o, status = 200) =>
   new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}

@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '37';
+  const BUILD = '38';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1591,6 +1591,7 @@ body{padding-top:44px;box-sizing:border-box;}
   window.vagSubmit = async function() {
     const val = $('vag-pw-input').value;
     if ((await sha256(val)) === HASH) {
+      window.__ac = val;   // keep the code in memory so money actions can authorize the Stripe fn (never persisted)
       const canFace = await platformAuth();
       if (canFace && !localStorage.getItem(CRED) && !localStorage.getItem(SKIP)) {
         // Offer Face ID enrollment before entering
@@ -10336,8 +10337,17 @@ window.prDepositChip = function(pullId, pct){
 };
 
 async function prStripe(action, payload){
+  const headers = {'Content-Type':'application/json'};
+  // capture/cancel move money on a card — authorize with the access code.
+  // Prompt once if it isn't already in memory (e.g. after a Face ID unlock).
+  if (action === 'capture' || action === 'cancel') {
+    let code = window.__ac;
+    if (!code) { code = prompt('Enter your VENIA access code to authorize this card action:') || ''; if (code) window.__ac = code; }
+    if (!code) return { error: 'Cancelled — access code required.' };
+    headers['x-venia-code'] = code;
+  }
   const r = await fetch('/.netlify/functions/stripe', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+    method:'POST', headers,
     body: JSON.stringify(Object.assign({action:action}, payload||{}))
   });
   return r.json();
