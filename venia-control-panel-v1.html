@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '38';
+  const BUILD = '39';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2440,7 +2440,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         </div>
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">System</div>
-          <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId()">Security</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh()">Security</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
           <div class="ag-nav-item" onclick="setShowSection('set-about',this)">About</div>
         </div>
@@ -2705,6 +2705,15 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
               Unlock VENIA with Face ID on this device instead of typing the access code. The passkey is stored on this device only — it never leaves your phone, and the access code always works as a backup.
             </div>
+          </div>
+          <!-- TEAM SIGN-IN (Supabase Auth — additive; access code still guards entry) -->
+          <div style="background:var(--bg);border:1px solid var(--border);padding:20px;margin-top:16px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <div style="font-size:13px;color:var(--ink);font-weight:600">Team sign-in</div>
+              <span style="font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 6px">Beta</span>
+            </div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:14px">Sign in with your VENIA email so we can move the app onto real accounts (and lock the shared data down). This doesn't change how you get in yet — the access code still works. First time: type your email and <strong>choose</strong> a password; that becomes your account.</div>
+            <div id="set-auth-status" style="font-size:11px;color:var(--muted)">Checking…</div>
           </div>
         </div>
       </div>
@@ -17308,6 +17317,82 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       logActivity('Factory link revoked');
     } catch(e){ showToast('Revoke failed','error'); }
   };
+})();
+
+// ── TEAM AUTH (Supabase email + password) — Step A: ADDITIVE ──────────────
+// Establishes a real Supabase session so we can later lock the database to
+// authenticated users. Right now it changes nothing about how you get in — the
+// access-code gate still guards entry — so there's zero lockout risk while you
+// verify sign-in works on your devices. Signups are restricted + auto-confirmed
+// to the two VENIA emails by a DB trigger, so first sign-in just creates the
+// account with a password you choose.
+;(function(){
+  function sb(){ return window.__sbClient || null; }
+  var statusEl = function(){ return document.getElementById('set-auth-status'); };
+  window.veniaAuthUser = null;
+
+  function render(){
+    var el = statusEl(); if (!el) return;
+    var u = window.veniaAuthUser;
+    if (u) {
+      el.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
+        '<div style="font-size:12px;color:var(--ink)">✓ Signed in as <strong>' + (u.email||'') + '</strong></div>' +
+        '<button class="btn btn-ghost btn-sm" onclick="veniaSignOut()">Sign out</button></div>';
+    } else {
+      el.innerHTML =
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end">' +
+        '<div style="flex:1;min-width:160px"><label class="fl">Email</label><input class="fi" id="venia-auth-email" type="email" autocomplete="username" placeholder="you@veniacollection.com"></div>' +
+        '<div style="flex:1;min-width:140px"><label class="fl">Password</label><input class="fi" id="venia-auth-pw" type="password" autocomplete="current-password" placeholder="choose a password" onkeydown="if(event.key===\'Enter\')veniaSignIn()"></div>' +
+        '<button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="veniaSignIn()">Sign in</button></div>';
+    }
+  }
+
+  async function refresh(){
+    var c = sb();
+    if (!c || !c.auth) { window.veniaAuthUser = null; render(); return; }
+    try { var r = await c.auth.getSession(); window.veniaAuthUser = (r.data && r.data.session) ? r.data.session.user : null; }
+    catch(e){ window.veniaAuthUser = null; }
+    render();
+  }
+  window.veniaAuthRefresh = refresh;
+
+  window.veniaSignIn = async function(){
+    var c = sb();
+    if (!c || !c.auth) { showToast('Cloud not connected yet — try again in a moment','warning'); return; }
+    var email = ((document.getElementById('venia-auth-email')||{}).value||'').trim().toLowerCase();
+    var pw = (document.getElementById('venia-auth-pw')||{}).value||'';
+    if (!email || !pw) { showToast('Enter your email and a password','warning'); return; }
+    if (pw.length < 6) { showToast('Password must be at least 6 characters','warning'); return; }
+    showToast('Signing in…','info');
+    try {
+      var res = await c.auth.signInWithPassword({ email: email, password: pw });
+      if (res.error) {
+        // No account yet? Create it (the DB guard restricts + auto-confirms), then sign in.
+        var su = await c.auth.signUp({ email: email, password: pw });
+        if (su.error) {
+          showToast(/already regist/i.test(su.error.message) ? 'That account exists — check your password' : su.error.message, 'error');
+          return;
+        }
+        res = await c.auth.signInWithPassword({ email: email, password: pw });
+        if (res.error) { showToast(res.error.message, 'error'); return; }
+      }
+      window.veniaAuthUser = res.data.user;
+      render();
+      showToast('✓ Signed in as ' + email, 'success');
+      logActivity('Team sign-in: ' + email);
+    } catch(e){ showToast('Sign-in failed — ' + (e.message||e), 'error'); }
+  };
+
+  window.veniaSignOut = async function(){
+    var c = sb();
+    try { if (c && c.auth) await c.auth.signOut(); } catch(e){}
+    window.veniaAuthUser = null; render();
+    showToast('Signed out','info');
+  };
+
+  // Populate the status block whenever Settings opens (client may connect late).
+  document.addEventListener('DOMContentLoaded', function(){ setTimeout(refresh, 1200); });
 })();
 
 // ── GOOGLE AUTH HELPERS ───────────────────────────────────────
