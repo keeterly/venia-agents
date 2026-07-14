@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '42';
+  const BUILD = '43';
   const BUILD_DATE = '2026.07.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17599,38 +17599,103 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Universal .ics — Apple Calendar, Google, Outlook all import it. On iPhone a
   // tap opens Calendar with the event pre-filled; on desktop it downloads.
-  window.dumpCal = function(i){
-    var m = (planData().meetings || [])[i]; if (!m) return;
-    var start = m.startISO ? new Date(m.startISO) : null;
-    if (!start || isNaN(start.getTime())){ window.dumpCalGoogle(i); return; }   // no firm time → let them pick in Google
-    var dur = Number(m.durationMin) || 30;
-    var end = new Date(start.getTime() + dur * 60000);
+  // Returns false if it couldn't build/trigger (caller falls back to Google).
+  function downloadICS(title, start, durMin, notes){
+    if (!start || isNaN(start.getTime())) return false;
+    var end = new Date(start.getTime() + (Number(durMin) || 30) * 60000);
     var ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//VENIA//BrainDump//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH',
-      'BEGIN:VEVENT','UID:' + Date.now() + '-' + i + '@venia','DTSTAMP:' + icsStamp(new Date()),
-      'DTSTART:' + icsStamp(start),'DTEND:' + icsStamp(end),'SUMMARY:' + icsEsc(m.title),
-      'DESCRIPTION:' + icsEsc(meetingDesc(m)),'END:VEVENT','END:VCALENDAR'].join('\r\n');
+      'BEGIN:VEVENT','UID:' + Date.now() + '-' + Math.round(start.getTime()/1000) + '@venia','DTSTAMP:' + icsStamp(new Date()),
+      'DTSTART:' + icsStamp(start),'DTEND:' + icsStamp(end),'SUMMARY:' + icsEsc(title),
+      'DESCRIPTION:' + icsEsc(notes || ''),'BEGIN:VALARM','ACTION:DISPLAY','DESCRIPTION:' + icsEsc(title),'TRIGGER:-PT10M','END:VALARM',
+      'END:VEVENT','END:VCALENDAR'].join('\r\n');
     try {
       var blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
-      a.href = url; a.download = (String(m.title||'event').replace(/[^\w]+/g,'-').slice(0,40) || 'event') + '.ics';
+      a.href = url; a.download = (String(title||'event').replace(/[^\w]+/g,'-').slice(0,40) || 'event') + '.ics';
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(function(){ URL.revokeObjectURL(url); }, 3000);
-      showToast('Calendar event ready — open it to add','success');
-    } catch(e){ window.dumpCalGoogle(i); }
-  };
-
+      return true;
+    } catch(e){ return false; }
+  }
   // Google Calendar template link — opens a pre-filled event to place on the calendar.
-  window.dumpCalGoogle = function(i){
-    var m = (planData().meetings || [])[i]; if (!m) return;
-    var url = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(m.title || 'Meeting')
-      + '&details=' + encodeURIComponent(meetingDesc(m));
-    var start = m.startISO ? new Date(m.startISO) : null;
+  function openGcal(title, start, durMin, notes){
+    var url = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(title || 'Reminder')
+      + '&details=' + encodeURIComponent(notes || '');
     if (start && !isNaN(start.getTime())){
-      var end = new Date(start.getTime() + (Number(m.durationMin) || 30) * 60000);
-      url += '&dates=' + icsStamp(start).replace(/Z$/,'Z') + '/' + icsStamp(end).replace(/Z$/,'Z');
+      var end = new Date(start.getTime() + (Number(durMin) || 30) * 60000);
+      url += '&dates=' + icsStamp(start) + '/' + icsStamp(end);
     }
     window.open(url, '_blank');
+  }
+
+  window.dumpCal = function(i){
+    var m = (planData().meetings || [])[i]; if (!m) return;
+    var start = m.startISO ? new Date(m.startISO) : null;
+    if (!start || isNaN(start.getTime())){ window.dumpCalGoogle(i); return; }   // no firm time → let them pick in Google
+    if (downloadICS(m.title, start, m.durationMin, meetingDesc(m))) showToast('Calendar event ready — open it to add','success');
+    else window.dumpCalGoogle(i);
+  };
+  window.dumpCalGoogle = function(i){
+    var m = (planData().meetings || [])[i]; if (!m) return;
+    openGcal(m.title, m.startISO ? new Date(m.startISO) : null, m.durationMin, meetingDesc(m));
+  };
+
+  // ── Turn any plan task into a timed calendar reminder ───────────────────
+  function toLocalInput(d){ var z = new Date(d.getTime() - d.getTimezoneOffset()*60000); return z.toISOString().slice(0,16); }
+  function defaultRemind(){ var d = new Date(); d.setMinutes(0,0,0); d.setHours(d.getHours()+1); if (d.getHours() >= 18){ d.setDate(d.getDate()+1); d.setHours(9); } return d; }
+
+  // key encodes section+index: f=focus, w=week, q=quickWins (e.g. 'f0','w2')
+  window.dumpRemind = function(key, ev){
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    var d = planData();
+    var kind = key[0], idx = parseInt(key.slice(1), 10);
+    var list = kind === 'f' ? d.focus : kind === 'w' ? d.week : kind === 'q' ? d.quickWins : null;
+    var text = list && list[idx]; if (!text) return;
+    openReminderSheet(text);
+  };
+
+  function openReminderSheet(text){
+    var ex = document.getElementById('dump-remind'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-remind';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9300;display:flex;align-items:center;justify-content:center;padding:20px';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    ov.innerHTML =
+      '<div style="background:var(--bg);border:1px solid var(--border);border-radius:14px;max-width:380px;width:100%;padding:18px" onclick="event.stopPropagation()">'
+      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">Set a reminder</div>'
+      + '<div style="font-size:13px;color:var(--ink);font-weight:600;line-height:1.4;margin-bottom:14px">' + esc(text) + '</div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:11px">'
+      +   '<button class="btn btn-ghost btn-sm" onclick="dumpRemindPreset(\'1h\')">In 1 hour</button>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="dumpRemindPreset(\'eve\')">Tonight 6pm</button>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="dumpRemindPreset(\'am\')">Tomorrow 9am</button>'
+      + '</div>'
+      + '<input type="datetime-local" id="dump-remind-when" value="' + toLocalInput(defaultRemind()) + '" style="width:100%;font-size:15px;padding:9px 10px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);margin-bottom:14px;outline:none">'
+      + '<div style="display:flex;gap:8px">'
+      +   '<button class="btn btn-gold btn-sm" style="flex:1" onclick="dumpRemindGo(\'ics\')">📅 Add to Calendar</button>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="dumpRemindGo(\'g\')">Google</button>'
+      +   '<button class="btn btn-ghost btn-sm" onclick="var o=document.getElementById(\'dump-remind\');if(o)o.remove()">Cancel</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    window.__dumpRemindFor = text;
+  }
+  window.dumpRemindPreset = function(k){
+    var d = new Date();
+    if (k === '1h'){ d.setMinutes(0,0,0); d.setHours(d.getHours()+1); }
+    else if (k === 'eve'){ d.setHours(18,0,0,0); if (d.getTime() < Date.now()){ d.setDate(d.getDate()+1); } }
+    else if (k === 'am'){ d.setDate(d.getDate()+1); d.setHours(9,0,0,0); }
+    var inp = document.getElementById('dump-remind-when'); if (inp) inp.value = toLocalInput(d);
+  };
+  window.dumpRemindGo = function(mode){
+    var inp = document.getElementById('dump-remind-when'); if (!inp) return;
+    var val = inp.value; if (!val){ showToast('Pick a date and time','warning'); return; }
+    var start = new Date(val);   // datetime-local has no zone → parsed as local time
+    if (isNaN(start.getTime())){ showToast('That time didn\'t read right — try again','warning'); return; }
+    var title = window.__dumpRemindFor || 'VENIA reminder';
+    if (mode === 'g') openGcal(title, start, 30, 'VENIA reminder');
+    else if (!downloadICS(title, start, 30, 'VENIA reminder')) openGcal(title, start, 30, 'VENIA reminder');
+    var o = document.getElementById('dump-remind'); if (o) o.remove();
+    showToast('Reminder ready — open it to add','success');
   };
 
   // Open the drafted email in the founder's mail app, ready to review and send.
@@ -17693,6 +17758,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return '<div onclick="dumpPlanCheck(\'' + key + '\')" style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer">'
       + '<span style="flex-shrink:0;width:18px;height:18px;border:1.5px solid;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;margin-top:1px;' + ring + '">✓</span>'
       + '<div style="flex:1;min-width:0;font-size:12.5px;line-height:1.5;color:' + (checked ? 'var(--muted)' : 'var(--ink)') + ';' + (checked ? 'text-decoration:line-through' : '') + '">' + inner + '</div>'
+      + '<button onclick="dumpRemind(\'' + key + '\',event)" title="Set a reminder" style="background:none;border:none;color:var(--border-mid);font-size:13px;cursor:pointer;padding:0 2px;flex-shrink:0;margin-top:1px;line-height:1">📅</button>'
       + '</div>';
   };
 
@@ -17716,7 +17782,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         var key = 'f' + i, on = !!ck[key];
         h += '<div onclick="dumpPlanCheck(\'' + key + '\')" style="display:flex;gap:12px;align-items:center;padding:14px;margin-bottom:8px;border:1px solid ' + (on ? 'var(--border)' : 'var(--ink)') + ';border-radius:12px;background:' + (on ? 'var(--bg-off)' : 'var(--bg)') + ';cursor:pointer;' + (on ? 'opacity:.6' : 'box-shadow:0 1px 0 var(--border)') + '">'
           + '<span style="flex-shrink:0;width:26px;height:26px;border-radius:50%;background:' + (on ? 'var(--muted)' : 'var(--ink)') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-family:\'DM Mono\',monospace;font-size:13px;font-weight:600">' + (on ? '✓' : (i + 1)) + '</span>'
-          + '<div style="flex:1;font-size:13.5px;line-height:1.4;font-weight:600;color:var(--ink);' + (on ? 'text-decoration:line-through' : '') + '">' + esc(t) + '</div></div>';
+          + '<div style="flex:1;font-size:13.5px;line-height:1.4;font-weight:600;color:var(--ink);' + (on ? 'text-decoration:line-through' : '') + '">' + esc(t) + '</div>'
+          + '<button onclick="dumpRemind(\'' + key + '\',event)" title="Set a reminder" style="background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1">📅</button></div>';
       });
     }
 
