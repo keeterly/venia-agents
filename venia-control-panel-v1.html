@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '39';
+  const BUILD = '40';
   const BUILD_DATE = '2026.07.01';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1639,6 +1639,7 @@ body{padding-top:44px;box-sizing:border-box;}
   </div>
   <div class="cp-gb-right">
     <div class="cp-gb-status"><div class="cp-gb-dot"></div>All systems</div>
+    <button class="cp-gb-icon" onclick="dumpOpen()" title="Brain dump — capture a thought (from anywhere)" aria-label="Brain dump" style="position:relative">✎<span id="dump-gb-badge" style="display:none;position:absolute;top:2px;right:-4px;background:var(--gold);color:#000;font-size:7px;font-weight:700;min-width:12px;height:12px;border-radius:6px;line-height:12px;text-align:center;padding:0 2px;font-family:'DM Mono',monospace"></span></button>
     <button class="cp-gb-icon" onclick="cpGoto('set')" title="Settings" aria-label="Settings">⚙︎</button>
     <div class="cp-gb-user" title="Keeter">K</div>
   </div>
@@ -1664,6 +1665,15 @@ body{padding-top:44px;box-sizing:border-box;}
     <div class="cpl-block">
       <div class="cpl-block-label">Focus</div>
       <div id="cpl-today"></div>
+    </div>
+
+    <!-- Brain dump — zero-friction capture, organized by Eni on demand -->
+    <div class="cpl-block" onclick="dumpOpen()" style="cursor:pointer">
+      <div class="cpl-block-label" style="display:flex;justify-content:space-between;align-items:baseline">
+        <span>Brain Dump</span>
+        <span style="font-size:9px;letter-spacing:1px;color:var(--gold);text-transform:none">✎ Capture →</span>
+      </div>
+      <div id="cpl-dump-peek" style="font-size:11px;color:var(--muted);line-height:1.7;padding:4px 0">Dump ideas, notes and to-dos here all day — Eni turns them into a plan.</div>
     </div>
 
     <!-- Live pulse (Command Center, folded in) -->
@@ -4841,6 +4851,8 @@ let STATE = {
   pom: {},
   skus: [],
   activityLog: [],
+  dump: [],            // brain-dump inbox: {id, t, d, done}
+  dumpPlan: null,      // last AI-organized plan: {md, at, count}
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -4953,6 +4965,7 @@ function init() {
     const parsed = JSON.parse(stored);
     Object.assign(STATE, parsed);
     if (!STATE.activityLog) STATE.activityLog = [];
+    if (!STATE.dump)       STATE.dump       = [];
     if (!STATE.prPulls)    STATE.prPulls    = [];
     if (!STATE.prPitches)  STATE.prPitches  = [];
     if (!STATE.prCoverage) STATE.prCoverage = [];
@@ -4983,6 +4996,8 @@ function save() {
     bom:         STATE.bom,
     pom:         STATE.pom,
     activityLog: STATE.activityLog || [],
+    dump:        STATE.dump       || [],
+    dumpPlan:    STATE.dumpPlan   || null,
     prPulls:     STATE.prPulls    || [],
     workingPullId: STATE.workingPullId || null,
     prPitches:   STATE.prPitches  || [],
@@ -17003,6 +17018,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var d = { styles: STATE.styles||[], materials: STATE.materials||[],
               vendors: STATE.vendors||[], bom: STATE.bom||{}, pom: STATE.pom||{},
               prPulls: STATE.prPulls||[], workingPullId: STATE.workingPullId||null,
+              dump: STATE.dump||[], dumpPlan: STATE.dumpPlan||null,
               _who: who() };
     if (STATE.samples) d.samples = STATE.samples;
     return d;
@@ -17019,7 +17035,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (data.samples)   STATE.samples = data.samples;
       if (data.prPulls)   STATE.prPulls = data.prPulls;
       if ('workingPullId' in data) STATE.workingPullId = data.workingPullId;
+      if (data.dump)      STATE.dump = data.dump;
+      if ('dumpPlan' in data) STATE.dumpPlan = data.dumpPlan;
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
+      if (typeof window.dumpBadge === 'function') window.dumpBadge();
     } finally { applyingRemote = false; }
   }
 
@@ -17393,6 +17412,187 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Populate the status block whenever Settings opens (client may connect late).
   document.addEventListener('DOMContentLoaded', function(){ setTimeout(refresh, 1200); });
+})();
+
+// ── BRAIN DUMP — zero-friction capture + Eni-organized plan ───────────────
+// One tap from the global bar (✎) anywhere in the app. Items live in STATE
+// (localStorage + the synced workspace, so both phones see the same inbox).
+// "Organize with Eni" sends the open items through the existing Claude proxy
+// and returns a prioritized, grouped plan that's saved alongside the inbox.
+;(function(){
+  var TAB = 'inbox';   // inbox | done | plan
+  var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
+  var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
+
+  function age(iso){
+    var m = Math.max(0, (Date.now() - new Date(iso).getTime()) / 60000);
+    if (m < 60) return Math.round(m) + 'm';
+    if (m < 1440) return Math.round(m/60) + 'h';
+    return Math.round(m/1440) + 'd';
+  }
+
+  // Minimal markdown → HTML for the plan (headers, bullets, bold; escaped first)
+  function md(t){
+    return String(t||'').split('\n').map(function(line){
+      var l = esc(line);
+      var h2 = l.match(/^##+\s+(.*)$/);
+      if (h2) return '<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink);margin:16px 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">' + h2[1] + '</div>';
+      var b = l.match(/^\s*[-*•]\s+(.*)$/) || l.match(/^\s*\d+[.)]\s+(.*)$/);
+      var body = (b ? b[1] : l).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      if (b) return '<div style="display:flex;gap:8px;padding:3px 0;font-size:12px;line-height:1.55;color:var(--ink)"><span style="color:var(--gold);flex-shrink:0">•</span><span>' + body + '</span></div>';
+      if (!l.trim()) return '';
+      return '<div style="font-size:12px;line-height:1.6;color:var(--ink);padding:2px 0">' + body + '</div>';
+    }).join('');
+  }
+
+  window.dumpBadge = function(){
+    var open = items().filter(function(i){ return !i.done; });
+    var b = document.getElementById('dump-gb-badge');
+    if (b){ b.style.display = open.length ? '' : 'none'; b.textContent = open.length > 99 ? '99' : open.length; }
+    var peek = document.getElementById('cpl-dump-peek');
+    if (peek){
+      peek.innerHTML = open.length
+        ? '<strong style="color:var(--ink)">' + open.length + ' open</strong> · latest: ' + esc((open[0].t||'').slice(0,70)) + ((open[0].t||'').length > 70 ? '…' : '')
+        : 'Dump ideas, notes and to-dos here all day — Eni turns them into a plan.';
+    }
+  };
+
+  function sheet(){ return document.getElementById('dump-sheet'); }
+
+  window.dumpOpen = function(){
+    if (sheet()) { render(); return; }
+    var ov = document.createElement('div');
+    ov.id = 'dump-sheet';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9200;display:flex;align-items:flex-end;justify-content:center';
+    ov.addEventListener('click', function(e){ if (e.target === ov) window.dumpClose(); });
+    document.body.appendChild(ov);
+    render();
+    setTimeout(function(){ var t = document.getElementById('dump-input'); if (t) t.focus(); }, 120);
+  };
+  window.dumpClose = function(){ var s = sheet(); if (s) s.remove(); window.dumpBadge(); };
+  window.dumpTab = function(t){ TAB = t; render(); };
+
+  window.dumpAdd = function(){
+    var t = document.getElementById('dump-input');
+    var v = (t && t.value || '').trim();
+    if (!v) return;
+    items().unshift({ id: 'n' + Date.now() + Math.random().toString(36).slice(2,6), t: v, d: new Date().toISOString(), done: false });
+    save();
+    TAB = 'inbox';
+    render();
+    var t2 = document.getElementById('dump-input'); if (t2) t2.focus();
+  };
+  window.dumpKey = function(e){
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpAdd(); }
+  };
+  window.dumpToggle = function(id){
+    var it = items().find(function(i){ return i.id === id; }); if (!it) return;
+    it.done = !it.done;
+    it.doneAt = it.done ? new Date().toISOString() : null;
+    save(); render();
+  };
+  window.dumpDelete = function(id){
+    var idx = items().findIndex(function(i){ return i.id === id; }); if (idx < 0) return;
+    items().splice(idx, 1); save(); render();
+  };
+  window.dumpClearDone = function(){
+    var done = items().filter(function(i){ return i.done; });
+    if (!done.length) return;
+    if (done.length > 3 && !confirm('Clear ' + done.length + ' completed items?')) return;
+    STATE.dump = items().filter(function(i){ return !i.done; });
+    save(); render();
+  };
+
+  window.dumpOrganize = async function(){
+    var open = items().filter(function(i){ return !i.done; });
+    if (!open.length){ showToast('Nothing to organize — dump some thoughts first','info'); return; }
+    var btns = document.querySelectorAll('.dump-org-btn');
+    btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Organizing…'; });
+    try {
+      var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t + '  (' + age(i.d) + ' ago)'; }).join('\n');
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'The founder brain-dumps raw notes, ideas and to-dos all day. Organize them into a clear, actionable plan in markdown using EXACTLY these sections, omitting any that would be empty:\n'
+        + '## Do now — at most 3 items, the true priorities, imperative one-liners\n'
+        + '## This week — time-sensitive tasks, each one line\n'
+        + '## Ideas worth developing — each with a bold one-line **next step:**\n'
+        + '## Quick wins — small tasks under 15 minutes\n'
+        + '## Reference — facts or notes worth keeping\n'
+        + 'Merge duplicates, group related thoughts, preserve the founder\'s intent, stay concise. No preamble, no closing remarks.';
+      var out = await callClaude(sys, 'Raw brain dump (newest first):\n' + raw + '\n\n' + plmContext());
+      if (!out || !out.trim()) throw new Error('Empty response');
+      STATE.dumpPlan = { md: out.trim(), at: new Date().toISOString(), count: open.length };
+      save();
+      TAB = 'plan';
+      render();
+      showToast('✦ Plan ready','success');
+      logActivity('Brain dump organized — ' + open.length + ' items');
+    } catch(e){
+      showToast(String(e.message||e), 'error');
+    } finally {
+      btns.forEach(function(b){ b.disabled = false; b.textContent = '✦ Organize with Eni'; });
+    }
+  };
+
+  function render(){
+    var ov = sheet(); if (!ov) return;
+    var all = items();
+    var open = all.filter(function(i){ return !i.done; });
+    var done = all.filter(function(i){ return i.done; });
+    var plan = STATE.dumpPlan;
+
+    var chip = function(id, label, n){
+      var on = TAB === id;
+      return '<button onclick="dumpTab(\'' + id + '\')" style="background:' + (on ? 'var(--ink)' : 'none') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';font-size:9px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;padding:6px 12px;cursor:pointer">' + label + (n != null ? ' <span style="font-family:\'DM Mono\',monospace">' + n + '</span>' : '') + '</button>';
+    };
+
+    var row = function(i){
+      return '<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)">'
+        + '<input type="checkbox" ' + (i.done ? 'checked' : '') + ' onchange="dumpToggle(\'' + i.id + '\')" style="margin-top:2px;cursor:pointer;accent-color:var(--ink);flex-shrink:0;width:16px;height:16px">'
+        + '<div style="flex:1;min-width:0;font-size:12px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word">' + esc(i.t) + '</div>'
+        + '<span style="font-family:\'DM Mono\',monospace;font-size:8px;color:var(--muted);flex-shrink:0;margin-top:3px">' + age(i.d) + '</span>'
+        + '<button onclick="dumpDelete(\'' + i.id + '\')" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1" title="Delete">✕</button>'
+        + '</div>';
+    };
+
+    var body;
+    if (TAB === 'plan'){
+      body = plan
+        ? '<div style="font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + md(plan.md)
+          + '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-top:16px;width:100%" onclick="dumpOrganize()">✦ Organize with Eni</button>'
+        : '<div style="font-size:11px;color:var(--muted);line-height:1.8;padding:16px 0;text-align:center">No plan yet.<br>Dump your thoughts in the Inbox, then let Eni sort them into priorities, ideas and quick wins.</div>'
+          + '<button class="btn btn-gold btn-sm dump-org-btn" style="width:100%" onclick="dumpOrganize()">✦ Organize with Eni</button>';
+    } else if (TAB === 'done'){
+      body = (done.length ? done.map(row).join('') : '<div style="font-size:11px;color:var(--muted);padding:16px 0;text-align:center">Nothing completed yet.</div>')
+        + (done.length ? '<button class="btn btn-ghost btn-sm" style="margin-top:14px" onclick="dumpClearDone()">Clear completed</button>' : '');
+    } else {
+      body = open.length ? open.map(row).join('')
+        : '<div style="font-size:11px;color:var(--muted);line-height:1.8;padding:16px 0;text-align:center">Empty inbox. Type anything above — an idea, a task, a fabric to source — and hit enter.</div>';
+    }
+
+    ov.innerHTML =
+      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:86vh;max-height:86vh;display:flex;flex-direction:column;border-radius:14px 14px 0 0;overflow:hidden" onclick="event.stopPropagation()">'
+      + '<div style="padding:14px 16px 12px;background:#0a0a0a;color:#fff;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
+      +   '<div><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999">Capture anything</div>'
+      +   '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:16px;letter-spacing:2px;text-transform:uppercase">✎ Brain Dump</div></div>'
+      +   '<button onclick="dumpClose()" style="background:none;border:none;color:#999;font-size:18px;cursor:pointer;padding:4px 8px;line-height:1">✕</button>'
+      + '</div>'
+      + '<div style="padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      +   '<div style="display:flex;gap:8px;align-items:flex-end">'
+      +     '<textarea id="dump-input" rows="2" placeholder="Idea, task, note… Enter saves. Shift+Enter = new line." onkeydown="dumpKey(event)" style="flex:1;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px 12px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
+      +     '<button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="dumpAdd()">Add</button>'
+      +   '</div>'
+      + '</div>'
+      + '<div style="display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0;align-items:center">'
+      +   chip('inbox','Inbox', open.length) + chip('done','Done', done.length) + chip('plan','✦ Plan', null)
+      +   (TAB === 'inbox' && open.length ? '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-left:auto" onclick="dumpOrganize()">✦ Organize with Eni</button>' : '')
+      + '</div>'
+      + '<div style="flex:1;overflow-y:auto;padding:6px 16px calc(20px + var(--sab,0px))">' + body + '</div>'
+      + '</div>';
+
+    window.dumpBadge();
+  }
+
+  document.addEventListener('DOMContentLoaded', function(){ setTimeout(window.dumpBadge, 400); });
 })();
 
 // ── GOOGLE AUTH HELPERS ───────────────────────────────────────
