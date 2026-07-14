@@ -1504,8 +1504,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '40';
-  const BUILD_DATE = '2026.07.01';
+  const BUILD = '41';
+  const BUILD_DATE = '2026.07.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -11282,7 +11282,7 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 async function callClaude(system, userMsg, history=[]) {
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
-  const body = JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 2000, system, messages: msgs });
+  const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 2000, system, messages: msgs });
   let resp;
   if (key) {
     // Direct call with a browser-stored key (local use, or if you prefer not to use the proxy)
@@ -17503,6 +17503,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     save(); render();
   };
 
+  // Pull a JSON object out of a model reply even if it's wrapped in prose or a
+  // ```json fence. Returns null if nothing parses.
+  function extractJSON(txt){
+    if (!txt) return null;
+    var s = String(txt);
+    var fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) s = fence[1];
+    var a = s.indexOf('{'), b = s.lastIndexOf('}');
+    if (a < 0 || b <= a) return null;
+    try { return JSON.parse(s.slice(a, b + 1)); } catch(e){ return null; }
+  }
+
   window.dumpOrganize = async function(){
     var open = items().filter(function(i){ return !i.done; });
     if (!open.length){ showToast('Nothing to organize — dump some thoughts first','info'); return; }
@@ -17511,27 +17523,132 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t + '  (' + age(i.d) + ' ago)'; }).join('\n');
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
-        + 'The founder brain-dumps raw notes, ideas and to-dos all day. Organize them into a clear, actionable plan in markdown using EXACTLY these sections, omitting any that would be empty:\n'
-        + '## Do now — at most 3 items, the true priorities, imperative one-liners\n'
-        + '## This week — time-sensitive tasks, each one line\n'
-        + '## Ideas worth developing — each with a bold one-line **next step:**\n'
-        + '## Quick wins — small tasks under 15 minutes\n'
-        + '## Reference — facts or notes worth keeping\n'
-        + 'Merge duplicates, group related thoughts, preserve the founder\'s intent, stay concise. No preamble, no closing remarks.';
+        + 'The founder brain-dumps raw notes, ideas and to-dos all day. Turn them into a focused, actionable plan. '
+        + 'Merge duplicates, group related thoughts, preserve the founder\'s intent, be concise and concrete.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence) in exactly this shape:\n'
+        + '{\n'
+        + '  "headline": "one short motivating sentence naming the single most important focus today",\n'
+        + '  "focus": ["at most 3 true top priorities, each an imperative one-liner"],\n'
+        + '  "week": ["time-sensitive tasks for this week, each one short line"],\n'
+        + '  "ideas": [{"idea": "the idea in a few words", "next": "the concrete next step to move it forward"}],\n'
+        + '  "quickWins": ["small tasks under 15 minutes"],\n'
+        + '  "reference": ["facts or notes worth keeping"]\n'
+        + '}\n'
+        + 'Omit array items that don\'t apply, but always include every key (use an empty array if a section is empty). Keep each string tight — no trailing punctuation lists, no markdown.';
       var out = await callClaude(sys, 'Raw brain dump (newest first):\n' + raw + '\n\n' + plmContext());
-      if (!out || !out.trim()) throw new Error('Empty response');
-      STATE.dumpPlan = { md: out.trim(), at: new Date().toISOString(), count: open.length };
+      if (!out || !out.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(out);
+      if (data && typeof data === 'object'){
+        // Normalize so the renderer can trust the shape.
+        var arr = function(v){ return Array.isArray(v) ? v.filter(Boolean) : []; };
+        data = {
+          headline: typeof data.headline === 'string' ? data.headline : '',
+          focus: arr(data.focus).map(String),
+          week: arr(data.week).map(String),
+          ideas: arr(data.ideas).map(function(x){
+            return (x && typeof x === 'object') ? { idea: String(x.idea||''), next: String(x.next||'') }
+                                                : { idea: String(x||''), next: '' };
+          }).filter(function(x){ return x.idea; }),
+          quickWins: arr(data.quickWins).map(String),
+          reference: arr(data.reference).map(String)
+        };
+        STATE.dumpPlan = { data: data, at: new Date().toISOString(), count: open.length, checked: {} };
+      } else {
+        // Model didn't return clean JSON — keep the raw text so nothing is lost.
+        STATE.dumpPlan = { md: out.trim(), at: new Date().toISOString(), count: open.length };
+      }
       save();
       TAB = 'plan';
       render();
       showToast('✦ Plan ready','success');
       logActivity('Brain dump organized — ' + open.length + ' items');
     } catch(e){
-      showToast(String(e.message||e), 'error');
+      showToast('Could not organize — ' + String(e.message||e), 'error');
     } finally {
       btns.forEach(function(b){ b.disabled = false; b.textContent = '✦ Organize with Eni'; });
     }
   };
+
+  // Check off an item inside the plan (local focus tracking; doesn't touch inbox).
+  window.dumpPlanCheck = function(key){
+    var p = STATE.dumpPlan; if (!p) return;
+    if (!p.checked) p.checked = {};
+    p.checked[key] = !p.checked[key];
+    save(); render();
+  };
+
+  // ── Visual, focus-first plan view ──────────────────────────────────────
+  var sectionLabel = function(txt){
+    return '<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--muted);margin:20px 0 8px">' + esc(txt) + '</div>';
+  };
+  // A tappable check circle that dims/strikes the row when checked.
+  var checkRow = function(key, checked, inner){
+    var ring = checked ? 'background:var(--ink);border-color:var(--ink);color:#fff' : 'background:transparent;border-color:var(--border-mid);color:transparent';
+    return '<div onclick="dumpPlanCheck(\'' + key + '\')" style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer">'
+      + '<span style="flex-shrink:0;width:18px;height:18px;border:1.5px solid;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;margin-top:1px;' + ring + '">✓</span>'
+      + '<div style="flex:1;min-width:0;font-size:12.5px;line-height:1.5;color:' + (checked ? 'var(--muted)' : 'var(--ink)') + ';' + (checked ? 'text-decoration:line-through' : '') + '">' + inner + '</div>'
+      + '</div>';
+  };
+
+  function planHTML(plan){
+    // Legacy markdown plans (pre-Build 41) still render via md().
+    if (plan.md && !plan.data) return md(plan.md);
+    var d = plan.data || {};
+    var ck = plan.checked || {};
+    var h = '';
+
+    if (d.headline){
+      h += '<div style="background:linear-gradient(135deg,rgba(198,168,110,.14),rgba(198,168,110,.04));border:1px solid var(--gold);border-radius:12px;padding:14px 16px;margin-bottom:4px">'
+        + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:4px">Today\'s focus</div>'
+        + '<div style="font-size:14px;line-height:1.45;color:var(--ink);font-weight:600">' + esc(d.headline) + '</div></div>';
+    }
+
+    // DO NOW — hero cards, numbered, the visual anchor of the whole view.
+    if (d.focus && d.focus.length){
+      h += sectionLabel('▲ Do now');
+      d.focus.forEach(function(t, i){
+        var key = 'f' + i, on = !!ck[key];
+        h += '<div onclick="dumpPlanCheck(\'' + key + '\')" style="display:flex;gap:12px;align-items:center;padding:14px;margin-bottom:8px;border:1px solid ' + (on ? 'var(--border)' : 'var(--ink)') + ';border-radius:12px;background:' + (on ? 'var(--bg-off)' : 'var(--bg)') + ';cursor:pointer;' + (on ? 'opacity:.6' : 'box-shadow:0 1px 0 var(--border)') + '">'
+          + '<span style="flex-shrink:0;width:26px;height:26px;border-radius:50%;background:' + (on ? 'var(--muted)' : 'var(--ink)') + ';color:#fff;display:flex;align-items:center;justify-content:center;font-family:\'DM Mono\',monospace;font-size:13px;font-weight:600">' + (on ? '✓' : (i + 1)) + '</span>'
+          + '<div style="flex:1;font-size:13.5px;line-height:1.4;font-weight:600;color:var(--ink);' + (on ? 'text-decoration:line-through' : '') + '">' + esc(t) + '</div></div>';
+      });
+    }
+
+    // THIS WEEK — checklist
+    if (d.week && d.week.length){
+      h += sectionLabel('This week');
+      d.week.forEach(function(t, i){ var key = 'w' + i; h += checkRow(key, !!ck[key], esc(t)); });
+    }
+
+    // IDEAS — card each, with a highlighted next step
+    if (d.ideas && d.ideas.length){
+      h += sectionLabel('◇ Ideas worth developing');
+      d.ideas.forEach(function(x){
+        h += '<div style="border:1px solid var(--border);border-radius:10px;padding:11px 13px;margin-bottom:8px;background:var(--bg-off)">'
+          + '<div style="font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.4">' + esc(x.idea) + '</div>'
+          + (x.next ? '<div style="margin-top:6px;font-size:11px;color:var(--muted);line-height:1.45"><span style="color:var(--gold);font-weight:700">Next → </span>' + esc(x.next) + '</div>' : '')
+          + '</div>';
+      });
+    }
+
+    // QUICK WINS — compact, checkable
+    if (d.quickWins && d.quickWins.length){
+      h += sectionLabel('⚡ Quick wins · under 15 min');
+      d.quickWins.forEach(function(t, i){ var key = 'q' + i; h += checkRow(key, !!ck[key], esc(t)); });
+    }
+
+    // REFERENCE — muted keep-list
+    if (d.reference && d.reference.length){
+      h += sectionLabel('Reference');
+      d.reference.forEach(function(t){
+        h += '<div style="display:flex;gap:8px;padding:4px 0;font-size:11.5px;color:var(--muted);line-height:1.5"><span style="color:var(--border-mid);flex-shrink:0">·</span><span>' + esc(t) + '</span></div>';
+      });
+    }
+
+    var empty = !d.headline && !(d.focus||[]).length && !(d.week||[]).length && !(d.ideas||[]).length && !(d.quickWins||[]).length && !(d.reference||[]).length;
+    if (empty) h += '<div style="font-size:11px;color:var(--muted);padding:16px 0;text-align:center">Eni couldn\'t find anything actionable — add a bit more detail and try again.</div>';
+    return h;
+  }
 
   function render(){
     var ov = sheet(); if (!ov) return;
@@ -17557,8 +17674,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var body;
     if (TAB === 'plan'){
       body = plan
-        ? '<div style="font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:4px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + md(plan.md)
-          + '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-top:16px;width:100%" onclick="dumpOrganize()">✦ Organize with Eni</button>'
+        ? '<div style="font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:2px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + planHTML(plan)
+          + '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-top:18px;width:100%" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
         : '<div style="font-size:11px;color:var(--muted);line-height:1.8;padding:16px 0;text-align:center">No plan yet.<br>Dump your thoughts in the Inbox, then let Eni sort them into priorities, ideas and quick wins.</div>'
           + '<button class="btn btn-gold btn-sm dump-org-btn" style="width:100%" onclick="dumpOrganize()">✦ Organize with Eni</button>';
     } else if (TAB === 'done'){
