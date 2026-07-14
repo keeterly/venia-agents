@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '41';
+  const BUILD = '42';
   const BUILD_DATE = '2026.07.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17522,20 +17522,27 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Organizing…'; });
     try {
       var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t + '  (' + age(i.d) + ' ago)'; }).join('\n');
+      var now = new Date();
+      var nowCtx = 'Right now it is ' + now.toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'})
+        + ' (timezone offset ' + (-now.getTimezoneOffset()/60) + 'h). Resolve relative times like "tomorrow 3pm" or "Friday" against this.';
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
-        + 'The founder brain-dumps raw notes, ideas and to-dos all day. Turn them into a focused, actionable plan. '
+        + 'The founder brain-dumps raw notes, ideas and to-dos all day — by typing or by voice. Act like a sharp personal assistant: '
+        + 'turn the dump into a focused, prioritized plan AND pull out anything that should become a calendar event or an email to send. '
         + 'Merge duplicates, group related thoughts, preserve the founder\'s intent, be concise and concrete.\n\n'
         + 'Respond with ONLY a JSON object (no prose, no code fence) in exactly this shape:\n'
         + '{\n'
         + '  "headline": "one short motivating sentence naming the single most important focus today",\n'
         + '  "focus": ["at most 3 true top priorities, each an imperative one-liner"],\n'
         + '  "week": ["time-sensitive tasks for this week, each one short line"],\n'
+        + '  "meetings": [{"title": "short event name", "with": "who, if mentioned", "startISO": "full ISO 8601 datetime with offset if a time is stated or clearly implied, else empty string", "durationMin": 30, "notes": "one-line agenda or context"}],\n'
+        + '  "emails": [{"to": "recipient email if known, else empty", "subject": "clear subject line", "body": "a complete, ready-to-send draft in the founder\'s warm, professional voice — greeting, body, sign-off as VENIA", "why": "a few words on what this email accomplishes"}],\n'
         + '  "ideas": [{"idea": "the idea in a few words", "next": "the concrete next step to move it forward"}],\n'
         + '  "quickWins": ["small tasks under 15 minutes"],\n'
         + '  "reference": ["facts or notes worth keeping"]\n'
         + '}\n'
-        + 'Omit array items that don\'t apply, but always include every key (use an empty array if a section is empty). Keep each string tight — no trailing punctuation lists, no markdown.';
-      var out = await callClaude(sys, 'Raw brain dump (newest first):\n' + raw + '\n\n' + plmContext());
+        + 'Only create a meeting when the dump implies scheduling something with a person or a time. Only draft an email when the dump implies reaching out to someone. '
+        + 'Omit array items that don\'t apply, but always include every key (use an empty array if a section is empty). Keep strings tight and free of markdown.';
+      var out = await callClaude(sys, nowCtx + '\n\nRaw brain dump (newest first):\n' + raw + '\n\n' + plmContext());
       if (!out || !out.trim()) throw new Error('Empty response from Eni');
       var data = extractJSON(out);
       if (data && typeof data === 'object'){
@@ -17545,6 +17552,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           headline: typeof data.headline === 'string' ? data.headline : '',
           focus: arr(data.focus).map(String),
           week: arr(data.week).map(String),
+          meetings: arr(data.meetings).map(function(x){
+            return (x && typeof x === 'object') ? { title:String(x.title||''), with:String(x.with||''), startISO:String(x.startISO||''), durationMin:Number(x.durationMin)||30, notes:String(x.notes||'') } : null;
+          }).filter(function(x){ return x && x.title; }),
+          emails: arr(data.emails).map(function(x){
+            return (x && typeof x === 'object') ? { to:String(x.to||''), subject:String(x.subject||''), body:String(x.body||''), why:String(x.why||'') } : null;
+          }).filter(function(x){ return x && (x.subject || x.body); }),
           ideas: arr(data.ideas).map(function(x){
             return (x && typeof x === 'object') ? { idea: String(x.idea||''), next: String(x.next||'') }
                                                 : { idea: String(x||''), next: '' };
@@ -17575,6 +17588,99 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!p.checked) p.checked = {};
     p.checked[key] = !p.checked[key];
     save(); render();
+  };
+
+  // ── Action helpers: calendar events + email drafts ──────────────────────
+  function planData(){ return (STATE.dumpPlan && STATE.dumpPlan.data) || {}; }
+  function pad2(n){ return (n < 10 ? '0' : '') + n; }
+  function icsStamp(d){ return d.getUTCFullYear() + pad2(d.getUTCMonth()+1) + pad2(d.getUTCDate()) + 'T' + pad2(d.getUTCHours()) + pad2(d.getUTCMinutes()) + '00Z'; }
+  function icsEsc(s){ return String(s||'').replace(/\\/g,'\\\\').replace(/;/g,'\\;').replace(/,/g,'\\,').replace(/\r?\n/g,'\\n'); }
+  function meetingDesc(m){ return [m.with ? 'With: ' + m.with : '', m.notes || ''].filter(Boolean).join('\n'); }
+
+  // Universal .ics — Apple Calendar, Google, Outlook all import it. On iPhone a
+  // tap opens Calendar with the event pre-filled; on desktop it downloads.
+  window.dumpCal = function(i){
+    var m = (planData().meetings || [])[i]; if (!m) return;
+    var start = m.startISO ? new Date(m.startISO) : null;
+    if (!start || isNaN(start.getTime())){ window.dumpCalGoogle(i); return; }   // no firm time → let them pick in Google
+    var dur = Number(m.durationMin) || 30;
+    var end = new Date(start.getTime() + dur * 60000);
+    var ics = ['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//VENIA//BrainDump//EN','CALSCALE:GREGORIAN','METHOD:PUBLISH',
+      'BEGIN:VEVENT','UID:' + Date.now() + '-' + i + '@venia','DTSTAMP:' + icsStamp(new Date()),
+      'DTSTART:' + icsStamp(start),'DTEND:' + icsStamp(end),'SUMMARY:' + icsEsc(m.title),
+      'DESCRIPTION:' + icsEsc(meetingDesc(m)),'END:VEVENT','END:VCALENDAR'].join('\r\n');
+    try {
+      var blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = (String(m.title||'event').replace(/[^\w]+/g,'-').slice(0,40) || 'event') + '.ics';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 3000);
+      showToast('Calendar event ready — open it to add','success');
+    } catch(e){ window.dumpCalGoogle(i); }
+  };
+
+  // Google Calendar template link — opens a pre-filled event to place on the calendar.
+  window.dumpCalGoogle = function(i){
+    var m = (planData().meetings || [])[i]; if (!m) return;
+    var url = 'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' + encodeURIComponent(m.title || 'Meeting')
+      + '&details=' + encodeURIComponent(meetingDesc(m));
+    var start = m.startISO ? new Date(m.startISO) : null;
+    if (start && !isNaN(start.getTime())){
+      var end = new Date(start.getTime() + (Number(m.durationMin) || 30) * 60000);
+      url += '&dates=' + icsStamp(start).replace(/Z$/,'Z') + '/' + icsStamp(end).replace(/Z$/,'Z');
+    }
+    window.open(url, '_blank');
+  };
+
+  // Open the drafted email in the founder's mail app, ready to review and send.
+  window.dumpMail = function(i){
+    var m = (planData().emails || [])[i]; if (!m) return;
+    var url = 'mailto:' + encodeURIComponent(m.to || '')
+      + '?subject=' + encodeURIComponent(m.subject || '')
+      + '&body=' + encodeURIComponent(m.body || '');
+    window.location.href = url;
+  };
+  window.dumpMailCopy = function(i){
+    var m = (planData().emails || [])[i]; if (!m) return;
+    var txt = (m.subject ? 'Subject: ' + m.subject + '\n\n' : '') + (m.body || '');
+    var done = function(){ showToast('Email copied','success'); };
+    if (navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done, function(){ done(); }); }
+    else { try { var ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(); } catch(e){} }
+  };
+
+  // ── Voice capture — speak your dump, it transcribes into the box ─────────
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var rec = null, recActive = false;
+  function micBtn(on){
+    var b = document.getElementById('dump-mic'); if (!b) return;
+    b.innerHTML = on ? '● Stop' : '🎤';
+    b.style.background = on ? '#c0392b' : '';
+    b.style.color = on ? '#fff' : '';
+    b.style.borderColor = on ? '#c0392b' : '';
+  }
+  window.dumpMicSupported = function(){ return !!SR; };
+  window.dumpMic = function(){
+    if (!SR){ showToast('Voice input isn\'t supported on this browser — try Chrome or Safari','warning'); return; }
+    if (recActive){ try { rec && rec.stop(); } catch(e){} return; }
+    var t = document.getElementById('dump-input'); if (!t) return;
+    var base = t.value ? t.value.replace(/\s+$/,'') + ' ' : '';
+    var finalTxt = '';
+    rec = new SR();
+    rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true;
+    rec.onresult = function(e){
+      var interim = '';
+      for (var k = e.resultIndex; k < e.results.length; k++){
+        var r = e.results[k];
+        if (r.isFinal) finalTxt += r[0].transcript + ' ';
+        else interim += r[0].transcript;
+      }
+      t.value = base + finalTxt + interim;
+    };
+    rec.onerror = function(ev){ recActive = false; micBtn(false); if (ev.error !== 'aborted' && ev.error !== 'no-speech') showToast('Voice error — ' + ev.error, 'error'); };
+    rec.onend = function(){ recActive = false; micBtn(false); var tt = document.getElementById('dump-input'); if (tt){ tt.value = (base + finalTxt).replace(/\s+$/,''); tt.focus(); } };
+    try { rec.start(); recActive = true; micBtn(true); showToast('Listening… tap Stop when done','info'); }
+    catch(e){ recActive = false; micBtn(false); }
   };
 
   // ── Visual, focus-first plan view ──────────────────────────────────────
@@ -17620,6 +17726,41 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       d.week.forEach(function(t, i){ var key = 'w' + i; h += checkRow(key, !!ck[key], esc(t)); });
     }
 
+    // MEETINGS — assistant pulls these out and hands you a calendar event
+    if (d.meetings && d.meetings.length){
+      h += sectionLabel('📅 Schedule');
+      d.meetings.forEach(function(m, i){
+        var when = m.startISO ? new Date(m.startISO) : null;
+        var whenTxt = (when && !isNaN(when.getTime()))
+          ? when.toLocaleString('en-US',{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + ' · ' + (m.durationMin||30) + ' min'
+          : 'Time not set — you\'ll pick it';
+        h += '<div style="border:1px solid var(--border);border-radius:10px;padding:11px 13px;margin-bottom:8px;background:var(--bg-off)">'
+          + '<div style="font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.4">' + esc(m.title) + (m.with ? ' <span style="font-weight:400;color:var(--muted)">· with ' + esc(m.with) + '</span>' : '') + '</div>'
+          + '<div style="margin-top:3px;font-size:10.5px;color:var(--gold);font-family:\'DM Mono\',monospace">' + esc(whenTxt) + '</div>'
+          + (m.notes ? '<div style="margin-top:5px;font-size:11px;color:var(--muted);line-height:1.45">' + esc(m.notes) + '</div>' : '')
+          + '<div style="display:flex;gap:8px;margin-top:9px">'
+          +   '<button class="btn btn-gold btn-sm" style="flex:1" onclick="dumpCal(' + i + ')">📅 Add to Calendar</button>'
+          +   '<button class="btn btn-ghost btn-sm" onclick="dumpCalGoogle(' + i + ')">Google</button>'
+          + '</div></div>';
+      });
+    }
+
+    // EMAILS — assistant drafts the message; one tap opens it ready to send
+    if (d.emails && d.emails.length){
+      h += sectionLabel('✉ Draft & send');
+      d.emails.forEach(function(m, i){
+        h += '<div style="border:1px solid var(--border);border-radius:10px;padding:11px 13px;margin-bottom:8px;background:var(--bg-off)">'
+          + '<div style="font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.4">' + esc(m.subject || '(no subject)') + '</div>'
+          + (m.to ? '<div style="margin-top:2px;font-size:10.5px;color:var(--muted);font-family:\'DM Mono\',monospace">to ' + esc(m.to) + '</div>' : '')
+          + (m.why ? '<div style="margin-top:4px;font-size:10.5px;color:var(--gold)">' + esc(m.why) + '</div>' : '')
+          + (m.body ? '<div style="margin-top:7px;font-size:11px;color:var(--muted);line-height:1.5;white-space:pre-wrap;max-height:96px;overflow:auto;border-left:2px solid var(--border);padding-left:9px">' + esc(m.body) + '</div>' : '')
+          + '<div style="display:flex;gap:8px;margin-top:9px">'
+          +   '<button class="btn btn-gold btn-sm" style="flex:1" onclick="dumpMail(' + i + ')">✉ Open in mail</button>'
+          +   '<button class="btn btn-ghost btn-sm" onclick="dumpMailCopy(' + i + ')">Copy</button>'
+          + '</div></div>';
+      });
+    }
+
     // IDEAS — card each, with a highlighted next step
     if (d.ideas && d.ideas.length){
       h += sectionLabel('◇ Ideas worth developing');
@@ -17645,7 +17786,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       });
     }
 
-    var empty = !d.headline && !(d.focus||[]).length && !(d.week||[]).length && !(d.ideas||[]).length && !(d.quickWins||[]).length && !(d.reference||[]).length;
+    var empty = !d.headline && !(d.focus||[]).length && !(d.week||[]).length && !(d.meetings||[]).length && !(d.emails||[]).length && !(d.ideas||[]).length && !(d.quickWins||[]).length && !(d.reference||[]).length;
     if (empty) h += '<div style="font-size:11px;color:var(--muted);padding:16px 0;text-align:center">Eni couldn\'t find anything actionable — add a bit more detail and try again.</div>';
     return h;
   }
@@ -17696,8 +17837,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<div style="padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
       +   '<div style="display:flex;gap:8px;align-items:flex-end">'
       +     '<textarea id="dump-input" rows="2" placeholder="Idea, task, note… Enter saves. Shift+Enter = new line." onkeydown="dumpKey(event)" style="flex:1;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px 12px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
-      +     '<button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="dumpAdd()">Add</button>'
+      +     '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">'
+      +       (window.dumpMicSupported && window.dumpMicSupported() ? '<button id="dump-mic" class="btn btn-ghost btn-sm" title="Speak your note" onclick="dumpMic()" style="min-width:52px">🎤</button>' : '')
+      +       '<button class="btn btn-gold btn-sm" onclick="dumpAdd()">Add</button>'
+      +     '</div>'
       +   '</div>'
+      +   (window.dumpMicSupported && window.dumpMicSupported() ? '<div style="font-size:9px;color:var(--muted);margin-top:6px;letter-spacing:.3px">🎤 Tap to speak — Eni transcribes, then sorts it with everything else.</div>' : '')
       + '</div>'
       + '<div style="display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0;align-items:center">'
       +   chip('inbox','Inbox', open.length) + chip('done','Done', done.length) + chip('plan','✦ Plan', null)
