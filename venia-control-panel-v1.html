@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '50';
+  const BUILD = '51';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17573,6 +17573,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 // and returns a prioritized, grouped plan that's saved alongside the inbox.
 ;(function(){
   var TAB = 'inbox';   // inbox | done | plan
+  var editingId = null;   // id of the inbox item currently being edited inline
   var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
   var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
 
@@ -17654,6 +17655,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     STATE.dump = items().filter(function(i){ return !i.done; });
     save(); render();
   };
+
+  // Inline editing of a captured thought.
+  window.dumpStartEdit = function(id){
+    editingId = id; render();
+    setTimeout(function(){
+      var e = document.getElementById('dump-edit-input');
+      if (e){ e.focus(); try { e.setSelectionRange(e.value.length, e.value.length); } catch(_){} }
+    }, 60);
+  };
+  window.dumpEditKey = function(e, id){
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpSaveEdit(id); }
+    else if (e.key === 'Escape'){ window.dumpCancelEdit(); }
+  };
+  window.dumpSaveEdit = function(id){
+    var e = document.getElementById('dump-edit-input');
+    var it = items().find(function(i){ return i.id === id; });
+    if (e && it){
+      var v = e.value.trim();
+      if (v) it.t = v;
+      else { var idx = items().indexOf(it); if (idx >= 0) items().splice(idx, 1); }   // cleared → remove
+    }
+    editingId = null; save(); render();
+  };
+  window.dumpCancelEdit = function(){ editingId = null; render(); };
 
   // Pull a JSON object out of a model reply even if it's wrapped in prose or a
   // ```json fence. Returns null if nothing parses.
@@ -18064,13 +18089,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '</button>';
     };
 
-    // A captured thought: round toggle, roomy text, gentle timestamp, delete.
+    // A captured thought — tap the text (or ✎) to edit inline; while editing,
+    // the row becomes a text box with Save / Cancel.
     var row = function(i){
-      return '<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
+      if (editingId === i.id){
+        return '<div style="display:flex;gap:10px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--border)">'
+          + '<textarea id="dump-edit-input" rows="2" onkeydown="dumpEditKey(event,\'' + i.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:9px 11px;border:1px solid var(--ink);border-radius:9px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45">' + esc(i.t) + '</textarea>'
+          + '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">'
+          +   '<button onclick="dumpSaveEdit(\'' + i.id + '\')" class="btn btn-gold btn-sm" style="border-radius:8px;min-width:64px">Save</button>'
+          +   '<button onclick="dumpCancelEdit()" class="btn btn-ghost btn-sm" style="border-radius:8px">Cancel</button>'
+          + '</div></div>';
+      }
+      return '<div style="display:flex;gap:11px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:22px;height:22px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:12px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
-        + '<div style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word">' + esc(i.t) + '</div>'
-        + '<span style="font-family:\'DM Mono\',monospace;font-size:9px;color:var(--muted);flex-shrink:0;margin-top:4px">' + age(i.d) + '</span>'
-        + '<button onclick="dumpDelete(\'' + i.id + '\')" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1" title="Delete">✕</button>'
+        + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
+        + '<button onclick="dumpStartEdit(\'' + i.id + '\')" title="Edit" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 3px;flex-shrink:0;margin-top:1px;line-height:1">✎</button>'
+        + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 3px;flex-shrink:0;line-height:1">✕</button>'
         + '</div>';
     };
 
@@ -18099,30 +18133,35 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         : emptyState('🧠', 'Your mind, cleared', 'Type or speak anything — an idea, a task, a fabric to source.<br>I\'ll hold onto it and help you sort it when you\'re ready.');
     }
 
+    // The capture box appears only on the Inbox tab, so the Plan and Done views
+    // get the full height of the sheet instead of being squeezed under it.
+    var captureBlock = (TAB === 'inbox')
+      ? '<div style="padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg)">'
+        +   '<textarea id="dump-input" rows="2" placeholder="What\'s on your mind?" onkeydown="dumpKey(event)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
+        +   '<div style="display:flex;gap:8px;margin-top:8px">'
+        +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">🎤 Speak</button>' : '')
+        +     '<button class="btn btn-gold" onclick="dumpAdd()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">＋ Add</button>'
+        +   '</div>'
+        + '</div>'
+      : '';
+
     ov.innerHTML =
-      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:90vh;max-height:90vh;display:flex;flex-direction:column;border-radius:18px 18px 0 0;overflow:hidden;box-shadow:0 -8px 40px rgba(0,0,0,.28)" onclick="event.stopPropagation()">'
-      // Warm header
-      + '<div style="padding:18px 18px 16px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0">'
+      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:92vh;max-height:92vh;display:flex;flex-direction:column;border-radius:18px 18px 0 0;overflow:hidden;box-shadow:0 -8px 40px rgba(0,0,0,.28)" onclick="event.stopPropagation()">'
+      // Compact header
+      + '<div style="padding:14px 16px 13px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
       +   '<div>'
-      +     '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:19px;letter-spacing:.5px;display:flex;align-items:center;gap:8px">✎ Brain Dump</div>'
-      +     '<div style="font-size:11.5px;color:#9a9a9a;margin-top:4px">Capture anything — I\'ll organize it for you.</div>'
+      +     '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:17px;letter-spacing:.5px;display:flex;align-items:center;gap:8px">✎ Brain Dump</div>'
+      +     '<div style="font-size:11px;color:#9a9a9a;margin-top:2px">Capture anything — I\'ll organize it for you.</div>'
       +   '</div>'
-      +   '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:34px;height:34px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'
+      +   '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:32px;height:32px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'
       + '</div>'
-      // Capture: big field + clear Speak / Add buttons
-      + '<div style="padding:14px 16px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg)">'
-      +   '<textarea id="dump-input" rows="2" placeholder="What\'s on your mind?" onkeydown="dumpKey(event)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:13px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
-      +   '<div style="display:flex;gap:8px;margin-top:9px">'
-      +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" style="flex:1;min-height:46px;border-radius:11px;font-size:12px">🎤 Speak</button>' : '')
-      +     '<button class="btn btn-gold" onclick="dumpAdd()" style="flex:1;min-height:46px;border-radius:11px;font-size:12px">＋ Add</button>'
-      +   '</div>'
-      + '</div>'
-      // Tabs
-      + '<div style="display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      // Tabs (always directly under the header)
+      + '<div style="display:flex;gap:8px;padding:11px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
       +   chip('inbox','📥 Inbox', open.length) + chip('done','✓ Done', done.length) + chip('plan','✦ Plan', null)
       + '</div>'
+      + captureBlock
       // Scroll body
-      + '<div id="dump-scroll" style="flex:1;overflow-y:auto;padding:12px 16px calc(22px + var(--sab,0px))">' + body + '</div>'
+      + '<div id="dump-scroll" style="flex:1;overflow-y:auto;padding:14px 16px calc(24px + var(--sab,0px))">' + body + '</div>'
       + '</div>';
 
     if (listening) micBtn(true);   // keep the Listening state visible across re-renders
