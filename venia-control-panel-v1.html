@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '72';
+  const BUILD = '73';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5035,27 +5035,32 @@ function init() {
   updateUserUI();
 }
 
+// The single source of truth for WHAT persists and syncs. save() (localStorage),
+// snapshot() (cloud push) and applySnapshot() (cloud pull) all derive from this
+// one list, so the two can never drift out of parity again — the exact bug the
+// audit found (Sales/Marketing/Brand/most-of-PR data lived only on one phone).
+// Everything here is real workspace data. Per-device view state (currentPage,
+// filters, sort, selection) and device/auth state (googleUser) are deliberately
+// NOT synced. `skus` is derived (rebuilt on load), so it is excluded too.
+const SYNC_KEYS = [
+  // PLM core
+  'styles', 'materials', 'vendors', 'bom', 'pom',
+  // PR
+  'prPulls', 'workingPullId', 'prPitches', 'prCoverage', 'prEditors', 'prPrefs',
+  // Sales
+  'slBuyers', 'slQuotes', 'slOrders', 'slLinesheets', 'slPrefs',
+  // Marketing
+  'mkCaptions', 'mkCalendar', 'mkPrefs',
+  // Brand
+  'brTone', 'brPrefs',
+  // Brain dump + shared
+  'dump', 'dumpPlan', 'dumpMap', 'activityLog', 'samples',
+];
+window.SYNC_KEYS = SYNC_KEYS;
 function save() {
-  localStorage.setItem('venia-plm-v2', JSON.stringify({
-    styles:      STATE.styles,
-    materials:   STATE.materials,
-    vendors:     STATE.vendors,
-    bom:         STATE.bom,
-    pom:         STATE.pom,
-    activityLog: STATE.activityLog || [],
-    dump:        STATE.dump       || [],
-    dumpPlan:    STATE.dumpPlan   || null,
-    dumpMap:     STATE.dumpMap    || null,
-    prPulls:     STATE.prPulls    || [],
-    workingPullId: STATE.workingPullId || null,
-    prPitches:   STATE.prPitches  || [],
-    prCoverage:  STATE.prCoverage || [],
-    prEditors:   STATE.prEditors  || [],
-    mkCaptions:  STATE.mkCaptions || [],
-    mkCalendar:  STATE.mkCalendar || [],
-    slBuyers:    STATE.slBuyers   || [],
-    prPrefs:     STATE.prPrefs    || {},
-  }));
+  const out = {};
+  for (const k of SYNC_KEYS) if (STATE[k] !== undefined) out[k] = STATE[k];
+  localStorage.setItem('venia-plm-v2', JSON.stringify(out));
 }
 
 // Canonical apparel size run + range expander.
@@ -17488,31 +17493,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Lossless snapshot: tech-pack fields all hang off the style objects.
   function snapshot(){
-    var d = { styles: STATE.styles||[], materials: STATE.materials||[],
-              vendors: STATE.vendors||[], bom: STATE.bom||{}, pom: STATE.pom||{},
-              prPulls: STATE.prPulls||[], workingPullId: STATE.workingPullId||null,
-              slBuyers: STATE.slBuyers||[],
-              dump: STATE.dump||[], dumpPlan: STATE.dumpPlan||null, dumpMap: STATE.dumpMap||null,
-              _who: who() };
-    if (STATE.samples) d.samples = STATE.samples;
+    // Built from the same SYNC_KEYS list save() uses, so cloud parity is
+    // automatic — add a collection to SYNC_KEYS and it persists AND syncs.
+    var d = { _who: who() };
+    var keys = window.SYNC_KEYS || [];
+    for (var i = 0; i < keys.length; i++) { var k = keys[i]; if (STATE[k] !== undefined) d[k] = STATE[k]; }
     return d;
   }
   function applySnapshot(data){
     if (!data) return;
     applyingRemote = true;
     try {
-      if (data.styles)    STATE.styles = data.styles;
-      if (data.materials) STATE.materials = data.materials;
-      if (data.vendors)   STATE.vendors = data.vendors;
-      if (data.bom)       STATE.bom = data.bom;
-      if (data.pom)       STATE.pom = data.pom;
-      if (data.samples)   STATE.samples = data.samples;
-      if (data.prPulls)   STATE.prPulls = data.prPulls;
-      if (data.slBuyers)  STATE.slBuyers = data.slBuyers;
-      if ('workingPullId' in data) STATE.workingPullId = data.workingPullId;
-      if (data.dump)      STATE.dump = data.dump;
-      if ('dumpPlan' in data) STATE.dumpPlan = data.dumpPlan;
-      if ('dumpMap' in data) STATE.dumpMap = data.dumpMap;
+      var keys = window.SYNC_KEYS || [];
+      for (var i = 0; i < keys.length; i++) { var k = keys[i]; if (k in data) STATE[k] = data[k]; }
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
       if (typeof window.dumpBadge === 'function') window.dumpBadge();
     } finally { applyingRemote = false; }
