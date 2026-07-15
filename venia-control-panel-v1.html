@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '53';
+  const BUILD = '54';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17575,8 +17575,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 // "Organize with Eni" sends the open items through the existing Claude proxy
 // and returns a prioritized, grouped plan that's saved alongside the inbox.
 ;(function(){
-  var TAB = 'inbox';   // inbox | done | plan
-  var editingId = null;   // id of the inbox item currently being edited inline
+  var TAB = 'inbox';   // inbox | plan | map | done
+  var editingId = null;      // id of the inbox item currently being edited inline
+  var mapMergeSource = null; // index of the map area being merged (transient)
+  var mapRenaming = null;    // index of the map area being renamed (transient)
   var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
   var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
 
@@ -17804,6 +17806,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } finally {
       btns.forEach(function(b){ b.disabled = false; b.textContent = '◍ Group into a map'; });
     }
+  };
+
+  // ── Map area actions: collapse, send-to-plan, rename, merge, remove ──────
+  function grp(gi){ return (STATE.dumpMap && STATE.dumpMap.groups || [])[gi]; }
+  window.dumpMapCollapse = function(gi){ var g = grp(gi); if (!g) return; g.collapsed = !g.collapsed; save(); render(); };
+  window.dumpMapAddToPlan = function(gi){
+    var g = grp(gi); if (!g) return;
+    if (!STATE.dumpPlan || !STATE.dumpPlan.data){
+      STATE.dumpPlan = { data: { headline:'', focus:[], week:[], meetings:[], emails:[], ideas:[], quickWins:[], reference:[] }, at: new Date().toISOString(), count: 0, checked:{} };
+    }
+    var wk = STATE.dumpPlan.data.week = STATE.dumpPlan.data.week || [];
+    var added = 0;
+    g.items.forEach(function(it){ if (wk.indexOf(it) < 0){ wk.push(it); added++; } });
+    save(); TAB = 'plan'; render();
+    showToast(added ? ('Added ' + added + ' to Plan · This week') : 'Already in your Plan', 'success');
+  };
+  window.dumpMapRenameStart = function(gi){
+    mapRenaming = gi; render();
+    setTimeout(function(){ var e = document.getElementById('dump-map-rename'); if (e){ e.focus(); e.select(); } }, 60);
+  };
+  window.dumpMapRenameSave = function(gi){
+    var e = document.getElementById('dump-map-rename'); var g = grp(gi);
+    if (e && g){ var v = e.value.trim(); if (v) g.title = v; }
+    mapRenaming = null; save(); render();
+  };
+  window.dumpMapRenameCancel = function(){ mapRenaming = null; render(); };
+  window.dumpMapMergeStart = function(gi){ mapMergeSource = gi; render(); };
+  window.dumpMapMergeCancel = function(){ mapMergeSource = null; render(); };
+  window.dumpMapMergeInto = function(gi){
+    var groups = STATE.dumpMap && STATE.dumpMap.groups; var src = mapMergeSource;
+    if (src == null || src === gi || !groups || !groups[src] || !groups[gi]){ mapMergeSource = null; render(); return; }
+    groups[src].items.forEach(function(it){ if (groups[gi].items.indexOf(it) < 0) groups[gi].items.push(it); });
+    groups.splice(src, 1);
+    mapMergeSource = null; save(); render();
+    showToast('Areas merged','success');
+  };
+  window.dumpMapDelete = function(gi){
+    var groups = STATE.dumpMap && STATE.dumpMap.groups; if (!groups || !groups[gi]) return;
+    if (!confirm('Remove the "' + groups[gi].title + '" area? Your notes stay in the Inbox.')) return;
+    groups.splice(gi, 1); save(); render();
   };
 
   // ── Action helpers: calendar events + email drafts ──────────────────────
@@ -18108,28 +18150,65 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var groups = (map && map.groups) || [];
     if (!groups.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">No groups yet.</div>';
     var h = '';
+    var merging = (mapMergeSource != null && groups[mapMergeSource]);
+
+    // Merge banner
+    if (merging){
+      h += '<div style="background:var(--ink);color:#fff;border-radius:10px;padding:10px 13px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px">'
+        + '<span style="font-size:12px;line-height:1.4">Merging <strong>' + esc(groups[mapMergeSource].title) + '</strong> — tap another area to combine it there.</span>'
+        + '<button onclick="dumpMapMergeCancel()" style="background:rgba(255,255,255,.2);border:none;color:#fff;font-size:11px;padding:6px 11px;border-radius:7px;cursor:pointer;flex-shrink:0">Cancel</button>'
+        + '</div>';
+    }
+
     // Central hub
     h += '<div style="display:flex;flex-direction:column;align-items:center;margin:2px 0 4px">'
       + '<div style="font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:9px">Your thinking, grouped</div>'
       + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + groups.length + ' areas</div>'
       + '</div>';
+
     // Spine + cluster cards
     h += '<div style="position:relative;margin-top:10px">'
       + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
     groups.forEach(function(g, gi){
       var c = MAP_COLORS[gi % MAP_COLORS.length];
+      var collapsed = !!g.collapsed;
+      var isSource = (mapMergeSource === gi);
+      var tapTarget = (merging && !isSource);
       h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
         + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:' + c + ';border:3px solid var(--bg);box-sizing:border-box"></div>'
-        + '<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">'
-        +   '<div style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:' + c + '14;border-bottom:1px solid var(--border)">'
-        +     '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
-        +     '<span style="flex:1;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(g.title) + '</span>'
-        +     '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + g.items.length + '</span>'
-        +   '</div>'
-        +   '<div style="padding:8px 14px 10px">'
-        +     g.items.map(function(it){ return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + c + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(it) + '</span></div>'; }).join('')
-        +   '</div>'
-        + '</div></div>';
+        + '<div style="border:1px solid ' + (isSource ? 'var(--ink)' : 'var(--border)') + ';border-radius:12px;overflow:hidden">';
+
+      // Header — rename input, or the tappable title bar.
+      if (mapRenaming === gi){
+        h += '<div style="display:flex;gap:8px;padding:9px 12px;background:' + c + '14">'
+          + '<input id="dump-map-rename" value="' + esc(g.title) + '" onkeydown="if(event.key===\'Enter\'){event.preventDefault();dumpMapRenameSave(' + gi + ')}else if(event.key===\'Escape\'){dumpMapRenameCancel()}" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;padding:7px 10px;border:1px solid var(--ink);border-radius:7px;background:var(--bg);color:var(--ink);outline:none">'
+          + '<button onclick="dumpMapRenameSave(' + gi + ')" class="btn btn-gold btn-sm" style="border-radius:7px">Save</button>'
+          + '</div>';
+      } else {
+        h += '<div onclick="' + (tapTarget ? 'dumpMapMergeInto(' + gi + ')' : 'dumpMapCollapse(' + gi + ')') + '" style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:' + c + '14;' + ((collapsed || tapTarget) ? '' : 'border-bottom:1px solid var(--border);') + 'cursor:pointer">'
+          + '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
+          + '<span style="flex:1;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(g.title) + '</span>'
+          + (tapTarget ? '<span style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--ink)">Merge here →</span>'
+                       : '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + g.items.length + '</span>'
+                         + '<span style="color:var(--muted);font-size:11px;flex-shrink:0">' + (collapsed ? '▸' : '▾') + '</span>')
+          + '</div>';
+      }
+
+      // Items + action footer (only expanded, not renaming, not merging).
+      if (!collapsed && mapRenaming !== gi && !tapTarget){
+        h += '<div style="padding:8px 14px 10px">'
+          + g.items.map(function(it){ return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + c + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(it) + '</span></div>'; }).join('');
+        if (!merging){
+          h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:11px;padding-top:9px;border-top:1px solid var(--border)">'
+            + '<button onclick="dumpMapAddToPlan(' + gi + ')" class="btn btn-gold btn-sm" style="border-radius:7px">→ Plan</button>'
+            + '<button onclick="dumpMapRenameStart(' + gi + ')" class="btn btn-ghost btn-sm" style="border-radius:7px">Rename</button>'
+            + '<button onclick="dumpMapMergeStart(' + gi + ')" class="btn btn-ghost btn-sm" style="border-radius:7px">Merge</button>'
+            + '<button onclick="dumpMapDelete(' + gi + ')" class="btn btn-ghost btn-sm" style="border-radius:7px;color:var(--muted)">Remove</button>'
+            + '</div>';
+        }
+        h += '</div>';
+      }
+      h += '</div></div>';
     });
     h += '</div>';
     return h;
