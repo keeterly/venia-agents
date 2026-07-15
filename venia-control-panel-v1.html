@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '82';
+  const BUILD = '83';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18641,6 +18641,74 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     showToast(added ? ('Added ' + added + ' to Plan · This week') : 'Already in your Plan', 'success');
   };
 
+  // ── Mind-map WEB actions ────────────────────────────────────────────────
+  function ensurePlanShell(){
+    if (!STATE.dumpPlan || !STATE.dumpPlan.data){
+      STATE.dumpPlan = { data: { headline:'', focus:[], week:[], meetings:[], emails:[], ideas:[], quickWins:[], reference:[] }, at: new Date().toISOString(), count: 0, checked:{} };
+    }
+    return STATE.dumpPlan.data.week = STATE.dumpPlan.data.week || [];
+  }
+  // Push a plan's open steps onto the Eni "This week" list.
+  window.dumpPlanFromGroup = function(gid){
+    var g = findGroup(gid); if (!g) return;
+    var wk = ensurePlanShell(), added = 0;
+    g.children.forEach(function(c){ if (!c.done && c.t && wk.indexOf(c.t) < 0){ wk.push(c.t); added++; } });
+    save(); TAB = 'plan'; render();
+    showToast(added ? ('Added ' + added + ' to Plan · This week') : 'Already in your Plan', 'success');
+  };
+  // Toggle every step under a web branch on/off together.
+  window.dumpWebBranch = function(gid, bi){
+    var g = findGroup(gid); if (!g || !g.web || !g.web.branches[bi]) return;
+    var leaves = (g.web.branches[bi].ids || []).map(function(id){ return g.children.find(function(c){ return c.id === id; }); }).filter(Boolean);
+    if (!leaves.length) return;
+    var allDone = leaves.every(function(c){ return c.done; });
+    leaves.forEach(function(c){ c.done = !allDone; });
+    syncGroupDone(g); save(); render();
+  };
+  // Ask Eni to cluster a plan's steps into 2–4 themed branches — turning the
+  // flat spider web into a genuine two-level mind map. Leaves keep referencing
+  // the live steps, so checking a node still checks off the step.
+  window.dumpExpandWeb = async function(gid){
+    var g = findGroup(gid); if (!g) return;
+    var steps = g.children.filter(function(c){ return c.t; });
+    if (steps.length < 3){ showToast('Add a few steps first — then Eni can branch them','info'); return; }
+    var btns = document.querySelectorAll('.dump-web-btn');
+    btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Growing…'; });
+    try {
+      var raw = steps.map(function(c, n){ return (n + 1) + '. ' + c.t; }).join('\n');
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'You are turning one plan into a mind map. Cluster its steps into 2–4 themed branches so the plan reads as a clear web. '
+        + 'Give each branch a short 1–3 word label. Put every step in exactly one branch, preserving the step\'s EXACT wording.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "branches": [ { "label": "short name", "steps": ["exact step", ...] } ] }';
+      var out = await callClaude(sys, 'Plan: ' + g.t + '\nSteps:\n' + raw);
+      if (!out || !out.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(out);
+      var brs = (data && Array.isArray(data.branches)) ? data.branches : null;
+      if (!brs) throw new Error('Could not read the branches');
+      var used = {};
+      var branches = brs.map(function(b){
+        var strs = (b && Array.isArray(b.steps)) ? b.steps.filter(Boolean).map(String) : [];
+        var ids = [];
+        strs.forEach(function(str){
+          var key = norm(str);
+          var m = steps.find(function(c){ return !used[c.id] && norm(c.t) === key; });
+          if (m){ used[m.id] = true; ids.push(m.id); }
+        });
+        return { label: String((b && b.label) || 'Branch'), ids: ids };
+      }).filter(function(b){ return b.ids.length; });
+      var leftover = steps.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
+      if (leftover.length) branches.push({ label: 'More', ids: leftover });
+      if (!branches.length) throw new Error('No branches came back');
+      g.web = { branches: branches, at: new Date().toISOString() };
+      save(); TAB = 'map'; render();
+      showToast('✦ Mind map grown','success');
+      logActivity('Mind map grown — ' + (g.t || 'plan'));
+    } catch(e){
+      showToast('Could not grow branches — ' + String(e.message || e), 'error');
+      render();   // rebuild buttons to their normal labels
+    }
+  };
+
   // ── Action helpers: calendar events + email drafts ──────────────────────
   function planData(){ return (STATE.dumpPlan && STATE.dumpPlan.data) || {}; }
   function pad2(n){ return (n < 10 ? '0' : '') + n; }
@@ -18966,6 +19034,102 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:' + (c.done ? 'var(--muted)' : 'var(--ink)') + ';' + (c.done ? 'text-decoration:line-through' : '') + '"><span style="color:' + color + ';flex-shrink:0;font-weight:700;font-size:11px">' + (c.done ? '✓' : '○') + '</span><span>' + esc(c.t) + '</span></div>';
   };
 
+  // ── Mind-map WEB: a plan drawn as a node-link diagram ────────────────────
+  // A dumped idea becomes both a linear plan (the Inbox card) AND a web here —
+  // a central node with the steps radiating out on colour-coded strands, joined
+  // by a faint spider-web ring. "Grow branches with Eni" clusters the steps into
+  // themed sub-branches for a true two-level mind map. Every leaf is the live
+  // step, so tapping a node on the web checks it off just like the list.
+  var LH = 18, FS = 14;   // svg text line-height + font-size (user units)
+  var rnd = function(v){ return Math.round(v); };
+  // Break a label into up to maxLines lines of ~maxChars, ellipsising overflow.
+  function wrapLabel(s, maxChars, maxLines){
+    var words = String(s || '').trim().split(/\s+/).filter(Boolean);
+    var lines = [], cur = '';
+    words.forEach(function(w){
+      if (w.length > maxChars) w = w.slice(0, maxChars - 1) + '…';
+      if (!cur) cur = w;
+      else if ((cur + ' ' + w).length <= maxChars) cur += ' ' + w;
+      else { lines.push(cur); cur = w; }
+    });
+    if (cur) lines.push(cur);
+    if (lines.length > maxLines){ lines = lines.slice(0, maxLines); var last = lines[maxLines - 1]; lines[maxLines - 1] = last.length > 1 ? last.slice(0, -1) + '…' : '…'; }
+    return lines.length ? lines : [''];
+  }
+  function svgNode(n){
+    var x = n.x - n.w / 2, y = n.y - n.h / 2, s = '';
+    s += '<g' + (n.click ? ' onclick="' + n.click + '" style="cursor:pointer"' : '') + (n.done ? ' opacity=".5"' : '') + '>';
+    s += '<rect x="' + rnd(x) + '" y="' + rnd(y) + '" width="' + rnd(n.w) + '" height="' + rnd(n.h) + '" rx="12" '
+      + (n.fillHex ? ('fill="' + n.fillHex + '"') : 'style="fill:var(--bg)"') + ' stroke="' + n.stroke + '" stroke-width="' + (n.done ? 1.3 : 1.8) + '"/>';
+    var tx = n.dot ? (x + 26) : n.x, anchor = n.dot ? 'start' : 'middle';
+    if (n.dot) s += '<circle cx="' + rnd(x + 14) + '" cy="' + rnd(n.y) + '" r="4" fill="' + n.dot + '"/>';
+    var ty = n.y - (n.lines.length - 1) * LH / 2 + 5;
+    n.lines.forEach(function(ln, li){
+      s += '<text x="' + rnd(tx) + '" y="' + rnd(ty + li * LH) + '" text-anchor="' + anchor + '" font-size="' + FS + '" '
+        + (n.bold ? 'font-weight="700" ' : '') + 'font-family="Helvetica Neue,Helvetica,Arial,sans-serif" '
+        + (n.textHex ? ('fill="' + n.textHex + '"') : 'style="fill:var(--ink)"') + '>' + esc(ln) + '</text>';
+    });
+    s += '</g>';
+    return s;
+  }
+  function planWebSVG(it){
+    var kids = it.children || [];
+    var nodes = [], links = [], ringPath = '';
+    var cLines = wrapLabel(it.t || 'Plan', 20, 3);
+    var center = { x: 0, y: 0, w: 200, h: cLines.length * LH + 18, lines: cLines, stroke: '#000', fillHex: '#171717', textHex: '#fff', bold: true };
+    var web = (it.web && it.web.branches && it.web.branches.length) ? it.web : null;
+
+    if (web){
+      var B = web.branches.length;
+      var R1 = 155, R2 = 150;
+      web.branches.forEach(function(br, bi){
+        var ang = -Math.PI / 2 + bi * (2 * Math.PI / B);
+        var col = MAP_COLORS[bi % MAP_COLORS.length];
+        var leaves = (br.ids || []).map(function(id){ return kids.find(function(c){ return c.id === id; }); }).filter(Boolean);
+        var bx = R1 * Math.cos(ang), by = R1 * Math.sin(ang);
+        var bLines = wrapLabel(br.label || 'Branch', 15, 2);
+        nodes.push({ x: bx, y: by, w: 148, h: bLines.length * LH + 14, lines: bLines, stroke: col, textHex: col, bold: true, dot: col, click: 'dumpWebBranch(\'' + it.id + '\',' + bi + ')' });
+        links.push({ x1: 0, y1: 0, x2: bx, y2: by, color: col, done: false });
+        var L = leaves.length, sectorHalf = (Math.PI / B) * 0.82;
+        leaves.forEach(function(c, j){
+          var la = L > 1 ? (ang - sectorHalf + j * (2 * sectorHalf / (L - 1))) : ang;
+          var lx = (R1 + R2) * Math.cos(la), ly = (R1 + R2) * Math.sin(la);
+          var lLines = wrapLabel((c.done ? '✓ ' : '') + c.t, 17, 3);
+          nodes.push({ x: lx, y: ly, w: 150, h: lLines.length * LH + 14, lines: lLines, stroke: col, dot: col, done: c.done, click: 'dumpToggleChild(\'' + it.id + '\',\'' + c.id + '\')' });
+          links.push({ x1: bx, y1: by, x2: lx, y2: ly, color: col, done: c.done });
+        });
+      });
+    } else {
+      var k = kids.length;
+      var R = Math.max(175, 55 + k * 32);
+      var ring = [];
+      kids.forEach(function(c, i){
+        var ang = -Math.PI / 2 + i * (2 * Math.PI / Math.max(1, k));
+        var x = R * Math.cos(ang), y = R * Math.sin(ang);
+        var col = MAP_COLORS[i % MAP_COLORS.length];
+        var lines = wrapLabel((c.done ? '✓ ' : '') + c.t, 17, 3);
+        nodes.push({ x: x, y: y, w: 158, h: lines.length * LH + 14, lines: lines, stroke: col, dot: col, done: c.done, click: 'dumpToggleChild(\'' + it.id + '\',\'' + c.id + '\')' });
+        links.push({ x1: 0, y1: 0, x2: x, y2: y, color: col, done: c.done });
+        ring.push([x, y]);
+      });
+      if (ring.length >= 2){
+        ringPath = '<polygon points="' + ring.map(function(p){ return rnd(p[0]) + ',' + rnd(p[1]); }).join(' ') + '" fill="none" style="stroke:var(--border)" stroke-width="1.2" stroke-dasharray="3 5" opacity=".75"/>';
+      }
+    }
+
+    nodes.push(center);   // draw the hub last so it sits on top
+    var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    nodes.forEach(function(n){ minX = Math.min(minX, n.x - n.w / 2); maxX = Math.max(maxX, n.x + n.w / 2); minY = Math.min(minY, n.y - n.h / 2); maxY = Math.max(maxY, n.y + n.h / 2); });
+    var pad = 16; minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+
+    var svg = '<svg viewBox="' + rnd(minX) + ' ' + rnd(minY) + ' ' + rnd(maxX - minX) + ' ' + rnd(maxY - minY) + '" style="width:100%;height:auto;display:block;max-height:76vh" xmlns="http://www.w3.org/2000/svg">';
+    links.forEach(function(l){ svg += '<line x1="' + rnd(l.x1) + '" y1="' + rnd(l.y1) + '" x2="' + rnd(l.x2) + '" y2="' + rnd(l.y2) + '" stroke="' + l.color + '" stroke-width="2" opacity="' + (l.done ? '.3' : '.7') + '"/>'; });
+    svg += ringPath;
+    nodes.forEach(function(n){ svg += svgNode(n); });
+    svg += '</svg>';
+    return svg;
+  }
+
   function mapHTML(){
     migrateMapIfNeeded();
     var groups = (STATE.dumpMap && STATE.dumpMap.groups) || [];
@@ -19003,29 +19167,31 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + areaCount + ' area' + (areaCount === 1 ? '' : 's') + '</div>'
       + '</div>';
 
-    h += '<div style="position:relative;margin-top:10px">'
-      + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
-
-    // Plan branches first — the founder's own structured plans, each a titled
-    // node with its checkable steps and live progress.
-    plans.forEach(function(it, pi){
-      var c = MAP_COLORS[pi % MAP_COLORS.length];
+    // Plan WEBS first — each dumped plan drawn as a node-link mind map. This is
+    // the visual twin of the linear Inbox card: same live steps, seen as a web.
+    plans.forEach(function(it){
       var kids = it.children || [];
       var doneN = kids.filter(function(k){ return k.done; }).length;
-      h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
-        + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:' + c + ';border:3px solid var(--bg);box-sizing:border-box"></div>'
-        + '<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">'
-        +   '<div style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:' + c + '14;border-bottom:1px solid var(--border)">'
-        +     '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
-        +     '<span style="flex:1;min-width:0;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(it.t || 'Plan') + '</span>'
-        +     '<span style="font-size:8px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#fff;background:' + c + ';padding:3px 6px;border-radius:6px;flex-shrink:0">Plan</span>'
-        +     '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted);flex-shrink:0">' + doneN + '/' + kids.length + '</span>'
-        +   '</div>'
-        +   '<div style="padding:8px 14px 10px">'
-        +     kids.map(function(k){ return mapStepLine(k, c); }).join('')
-        +   '</div>'
-        + '</div></div>';
+      var expanded = !!(it.web && it.web.branches && it.web.branches.length);
+      h += '<div style="border:1px solid var(--border);border-radius:14px;margin-bottom:14px;overflow:hidden;background:var(--bg)">'
+        + '<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;background:var(--bg-off);border-bottom:1px solid var(--border)">'
+        +   '<span style="font-size:8px;letter-spacing:.14em;text-transform:uppercase;font-weight:700;color:#fff;background:var(--ink);padding:3px 7px;border-radius:6px;flex-shrink:0">Web</span>'
+        +   '<span style="flex:1;min-width:0;font-size:12.5px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(it.t || 'Plan') + '</span>'
+        +   '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted);flex-shrink:0">' + doneN + '/' + kids.length + '</span>'
+        + '</div>'
+        + '<div style="padding:14px 10px 6px;overflow-x:auto">' + planWebSVG(it) + '</div>'
+        + '<div style="display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px 12px">'
+        +   '<button onclick="dumpTab(\'inbox\')" class="btn btn-ghost btn-sm" style="border-radius:7px">▤ List view</button>'
+        +   '<button onclick="dumpExpandWeb(\'' + it.id + '\')" class="btn ' + (expanded ? 'btn-ghost' : 'btn-gold') + ' btn-sm dump-web-btn" style="border-radius:7px">✦ ' + (expanded ? 'Re-grow branches' : 'Grow branches with Eni') + '</button>'
+        +   '<button onclick="dumpPlanFromGroup(\'' + it.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:7px">→ Plan</button>'
+        + '</div>'
+        + '</div>';
     });
+
+    if (!shown.length && !unsorted.length) return h;   // only plan webs — no AI spine needed
+
+    h += '<div style="position:relative;margin-top:10px">'
+      + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
 
     shown.forEach(function(entry){
       var gi = entry.gi, live = entry.live, g = groups[gi];
@@ -19175,11 +19341,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<button onclick="dumpDeleteChild(\'' + i.id + '\',\'' + c.id + '\')" title="Delete step" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1">✕</button>'
           + '</div>';
       }).join('');
-      var addStep = '<div style="padding:8px 12px 10px 42px;border-top:1px solid var(--border)">'
+      var footer = '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px 10px 42px;border-top:1px solid var(--border);background:var(--bg-off)">'
         + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
+        + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
         + '</div>';
       return '<div style="border:1px solid var(--border);border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
-        + head + childHTML + addStep + '</div>';
+        + head + childHTML + footer + '</div>';
     };
 
     // A captured thought — tap the text (or ✎) to edit inline; while editing,
