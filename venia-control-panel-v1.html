@@ -1504,8 +1504,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '45';
-  const BUILD_DATE = '2026.07.14';
+  const BUILD = '46';
+  const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -17425,6 +17425,102 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Populate the status block whenever Settings opens (client may connect late).
   document.addEventListener('DOMContentLoaded', function(){ setTimeout(refresh, 1200); });
+})();
+
+// ── SECURE SIGN-IN AT ENTRY ───────────────────────────────────────────────
+// Promotes the team sign-in to the front door so a real Supabase session
+// exists on the device — the prerequisite for locking the database to VENIA
+// accounts. It appears only when there is NO active session (Supabase persists
+// and auto-refreshes the session, so after the first sign-in this rarely shows
+// again, and Face ID / the access code still handle daily quick entry).
+// During this transition it is SKIPPABLE ("I'll do this later"), so there is
+// zero lockout risk until the database is actually locked.
+;(function(){
+  function sb(){ return window.__sbClient || null; }
+  var EMAILS = ['keeter@veniacollection.com','christine@veniacollection.com'];
+  var SKIP_KEY = 'venia_signin_skipped';   // session-scoped so we don't nag repeatedly
+
+  async function hasSession(){
+    var c = sb(); if (!c || !c.auth) return false;
+    try { var r = await c.auth.getSession(); return !!(r.data && r.data.session); } catch(e){ return false; }
+  }
+  function ov(){ return document.getElementById('venia-signin'); }
+
+  function build(){
+    if (ov()) return ov();
+    var o = document.createElement('div');
+    o.id = 'venia-signin';
+    o.style.cssText = 'position:fixed;inset:0;z-index:9500;background:#0a0a0a;color:#fff;display:none;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
+    o.innerHTML =
+      '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:30px;letter-spacing:8px;font-weight:700">VENIA</div>'
+      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Secure sign-in</div>'
+      + '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Sign in with your VENIA account so your workspace stays private to you and Christine. You\'ll only do this once on this device.</div>'
+      + '<div id="vsi-pick" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;justify-content:center"></div>'
+      + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
+      +   '<input id="vsi-email" type="email" autocomplete="username" placeholder="you@veniacollection.com" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;border-radius:11px;background:#151515;color:#fff;outline:none">'
+      +   '<input id="vsi-pw" type="password" autocomplete="current-password" placeholder="Password — set one on first sign-in" onkeydown="if(event.key===\'Enter\')veniaEntrySignIn()" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;border-radius:11px;background:#151515;color:#fff;outline:none">'
+      +   '<button onclick="veniaEntrySignIn()" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;border-radius:11px;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Sign in</button>'
+      + '</div>'
+      + '<div id="vsi-error" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center"></div>'
+      + '<button id="vsi-skip" onclick="veniaEntrySkip()" style="background:none;border:none;color:#7a7a7a;font-size:12px;margin-top:8px;cursor:pointer;text-decoration:underline">I\'ll do this later</button>';
+    document.body.appendChild(o);
+    var pick = o.querySelector('#vsi-pick');
+    EMAILS.forEach(function(e){
+      var b = document.createElement('button');
+      b.textContent = e.split('@')[0];
+      b.style.cssText = 'background:#1c1c1c;border:1px solid #333;color:#ddd;font-size:11px;padding:8px 14px;border-radius:20px;cursor:pointer';
+      b.onclick = function(){ document.getElementById('vsi-email').value = e; document.getElementById('vsi-pw').focus(); };
+      pick.appendChild(b);
+    });
+    return o;
+  }
+  function show(){ build().style.display = 'flex'; }
+  function hide(){ var o = ov(); if (o) o.style.display = 'none'; }
+
+  window.veniaEntrySignIn = async function(){
+    var c = sb(); var err = document.getElementById('vsi-error');
+    if (!c || !c.auth){ if (err) err.textContent = 'Still connecting — try again in a moment.'; return; }
+    var email = ((document.getElementById('vsi-email')||{}).value||'').trim().toLowerCase();
+    var pw = (document.getElementById('vsi-pw')||{}).value||'';
+    if (!email || !pw){ if (err) err.textContent = 'Enter your email and a password.'; return; }
+    if (pw.length < 6){ if (err) err.textContent = 'Password must be at least 6 characters.'; return; }
+    if (err) err.textContent = 'Signing in…';
+    try {
+      var res = await c.auth.signInWithPassword({ email: email, password: pw });
+      if (res.error){
+        var su = await c.auth.signUp({ email: email, password: pw });   // first time: guard restricts + auto-confirms
+        if (su.error){ if (err) err.textContent = /already regist/i.test(su.error.message) ? 'That account exists — check your password.' : su.error.message; return; }
+        res = await c.auth.signInWithPassword({ email: email, password: pw });
+        if (res.error){ if (err) err.textContent = res.error.message; return; }
+      }
+      window.veniaAuthUser = res.data.user;
+      if (window.veniaAuthRefresh) window.veniaAuthRefresh();
+      hide();
+      if (window.showToast) showToast('✓ Signed in as ' + email, 'success');
+      try { logActivity('Signed in: ' + email); } catch(e){}
+    } catch(e){ if (err) err.textContent = 'Sign-in failed — ' + (e.message||e); }
+  };
+  window.veniaEntrySkip = function(){ try { sessionStorage.setItem(SKIP_KEY,'1'); } catch(e){} hide(); };
+
+  // Prompt once the access-code gate is passed and Supabase is up, if signed out.
+  window.veniaEnsureSignIn = function(){
+    if (window.VENIA_SHARE || window.VENIA_PAY) return;
+    try { if (sessionStorage.getItem(SKIP_KEY)) return; } catch(e){}
+    var tries = 0;
+    (function wait(){
+      var c = sb();
+      if (!c || !c.auth){ if (tries++ < 25) setTimeout(wait, 400); return; }
+      hasSession().then(function(ok){ if (!ok) show(); });
+    })();
+  };
+  document.addEventListener('DOMContentLoaded', function(){
+    var tries = 0;
+    (function waitGate(){
+      var gate = document.getElementById('venia-auth-gate');
+      if (!gate || gate.classList.contains('hidden')){ window.veniaEnsureSignIn(); return; }
+      if (tries++ < 240) setTimeout(waitGate, 500);
+    })();
+  });
 })();
 
 // ── BRAIN DUMP — zero-friction capture + Eni-organized plan ───────────────
