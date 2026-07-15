@@ -1,4 +1,5 @@
 // Server-side, READ-ONLY proxy to the Shopify Admin API.
+// deploy: rebuild to capture SHOPIFY_STORE_DOMAIN / SHOPIFY_ADMIN_TOKEN env vars (2026-07-15).
 //
 // Why this exists: the Shopify Admin token (shpat_…) is a powerful credential
 // — it can read and write orders, products, and customers. It must never live
