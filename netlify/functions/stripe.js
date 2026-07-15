@@ -12,8 +12,24 @@
 //   {action:'status', id}                 → { payment_status, status, payment_intent }
 //   {action:'capture', payment_intent}    → { status }   (capture a hold)
 //   {action:'cancel',  payment_intent}    → { status }   (release a hold)
+// Only VENIA's own site may call this endpoint. A browser always sends an
+// Origin on these POSTs; a present-but-foreign Origin is a third-party trying
+// to spin up Checkout sessions against the account — reject it. (capture/cancel
+// keep their separate access-code gate below.)
+const ALLOWED_ORIGINS = new Set([
+  'https://creator.veniacollection.com',
+  'https://venia-creator.netlify.app',
+  'https://main--venia-creator.netlify.app',
+]);
+function originAllowed(req) {
+  const o = req.headers.get('origin');
+  if (!o) return true;
+  return ALLOWED_ORIGINS.has(o);
+}
+
 export default async (req) => {
   if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+  if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403);
   const key = process.env.STRIPE_SECRET_KEY;
   let body;
   try { body = await req.json(); } catch (e) { return json({ error: 'Bad JSON' }, 400); }
