@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '70';
+  const BUILD = '71';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5053,6 +5053,7 @@ function save() {
     prEditors:   STATE.prEditors  || [],
     mkCaptions:  STATE.mkCaptions || [],
     mkCalendar:  STATE.mkCalendar || [],
+    slBuyers:    STATE.slBuyers   || [],
     prPrefs:     STATE.prPrefs    || {},
   }));
 }
@@ -13637,7 +13638,19 @@ function escHtml(str) {
 //  action creates is reversible (drafts + an Undo button). Scoped per agent.
 // ══════════════════════════════════════════════════════════
 function agentActionSpec(key) {
-  if (key !== 'pr') return '';   // only the PR agent can act, for now
+  if (key === 'sl') {
+    return '\n\nLEAD ACQUISITION — you are VENIA\'s wholesale scout as well as its sales agent.\n'
+      + 'When the user asks you to find, suggest, research, or vet wholesale stockists / accounts, propose REAL, currently-operating stores that genuinely fit VENIA (dark, architectural, elevated design; premium price point; concept stores, avant-garde boutiques, and forward department / online retailers). For each store give a one-line fit rationale and a tier — "dream", "strong", or "reach" — and, when you know it, the city and store type.\n'
+      + 'ACTION — add_buyers: save target stores into the Buyers CRM as prospects.\n'
+      + 'When the user asks you to save / add them (or clearly agrees to), do BOTH:\n'
+      + '1) One short sentence naming what you are adding.\n'
+      + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
+      + '```venia:action\n'
+      + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, Country","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","approach":"Optional first-move suggestion"}]}\n'
+      + '```\n'
+      + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.';
+  }
+  if (key !== 'pr') return '';   // PR handled below
   return '\n\nACTIONS — you can take ONE real action in VENIA, but only when the user clearly asks for it:\n'
     + '• create_pull — log a new press / sample pull in the workspace.\n'
     + 'When (and ONLY when) the user asks to create, log, start, or set up a pull, do BOTH of these:\n'
@@ -13711,9 +13724,16 @@ function agentBuildPull(action) {
   return { pull, unmatched };
 }
 
-// Execute a validated action and show a confirmation card with Open / Undo.
+// Dispatch a validated action to its handler. Each handler runs the change
+// through the same paths the manual UI uses, and is reversible.
 function agentRunAction(key, action, chatBody) {
-  if (key !== 'pr' || !action || action.type !== 'create_pull') return;
+  if (!action || !action.type) return;
+  if (key === 'pr' && action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
+  if (key === 'sl' && action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
+}
+
+// Execute a create_pull action and show a confirmation card with Open / Undo.
+function agentRunCreatePull(action, chatBody) {
   const { pull, unmatched } = agentBuildPull(action);
   if (!pull.client) {   // never create an unlabelled pull — ask instead
     appendAgentNote(chatBody, 'I can set that up — what publication or stylist should I file the pull under?');
@@ -13810,6 +13830,105 @@ window.agentUndoPull = function (id, btn) {
     try { if (typeof prRefreshOverview === 'function') prRefreshOverview(); } catch (e) {}
   }
   if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Draft pull removed.</div>'; }
+};
+
+// ── Lead acquisition: turn vetted stockist suggestions into real CRM records ──
+const AGENT_TIER_LABEL = { dream: 'Dream', strong: 'Strong', reach: 'Reach' };
+// Build buyer objects from an add_buyers action, matching slSaveBuyer's shape.
+// The vetting rationale (tier + fit + approach) is folded into notes so it shows
+// in the existing buyer detail, and kept structurally for later.
+function agentBuildBuyers(action) {
+  const list = Array.isArray(action.buyers) ? action.buyers
+             : Array.isArray(action.prospects) ? action.prospects
+             : Array.isArray(action.stores) ? action.stores : [];
+  const okTypes = ['Concept store','Department store','Online retail','Boutique','Specialty retail','Showroom'];
+  const now = Date.now();
+  const built = [];
+  list.forEach((x, i) => {
+    const name = String(x && (x.name || x.store) || '').trim();
+    if (!name) return;
+    const tier = String(x.tier || '').toLowerCase();
+    const fit  = String(x.fit || x.why || '').trim();
+    let type = String(x.type || '').trim();
+    if (type && !okTypes.some(t => t.toLowerCase() === type.toLowerCase())) type = '';   // keep the select's known set
+    const noteParts = [];
+    if (AGENT_TIER_LABEL[tier]) noteParts.push('[' + AGENT_TIER_LABEL[tier] + ' fit]');
+    if (fit) noteParts.push(fit);
+    if (x.approach) noteParts.push('Approach: ' + String(x.approach).trim());
+    built.push({
+      id: 'BUY' + now + i,
+      name,
+      location: String(x.location || x.city || x.region || '').trim(),
+      type,
+      stage: 'new',
+      contactName: String(x.contactName || x.contact || '').trim(),
+      email: String(x.email || '').trim(),
+      website: String(x.website || x.url || '').trim(),
+      tier, fit,
+      notes: noteParts.join(' '),
+      source: String(x.source || 'Agent — lead acquisition').trim(),
+      lastContact: new Date().toISOString().slice(0, 10),
+      createdAt: new Date().toISOString(),
+      addedByAgent: true,
+    });
+  });
+  return built;
+}
+
+function isSalesBuyersVisible() {
+  const el = document.getElementById('sl-buyers-list');
+  return !!(el && el.offsetParent !== null);
+}
+window.slOpenBuyers = function () {
+  try { cpGoto('sl'); } catch (e) {}
+  try { agNav('sl', 'buyers', document.querySelector('#cp-screen-sl .ag-nav-item[onclick*="buyers"]')); } catch (e) {}
+};
+
+// Execute an add_buyers action: save the prospects and show a confirmation card.
+function agentRunAddBuyers(action, chatBody) {
+  const built = agentBuildBuyers(action);
+  if (!built.length) { appendAgentNote(chatBody, 'Tell me which stores to add and I\'ll save them as prospects.'); return; }
+  if (!STATE.slBuyers) STATE.slBuyers = [];
+  built.forEach(b => STATE.slBuyers.unshift(b));
+  save();
+  try { logActivity('Sales: ' + built.length + ' prospect(s) added by agent'); } catch (e) {}
+  if (isSalesBuyersVisible()) window.slOpenBuyers();   // refresh the list only if it's already on screen
+
+  const ids = built.map(b => b.id).join(',');
+  const rows = built.map(b => {
+    const tl = AGENT_TIER_LABEL[b.tier] || '';
+    const meta = [b.type, b.location].filter(Boolean).join(' · ');
+    return '<div style="padding:8px 0;border-top:1px solid var(--border)">' +
+      '<div style="font-size:12px;font-weight:700">' + escHtml(b.name) +
+        (tl ? ' <span style="font-size:8px;letter-spacing:1px;border:1px solid var(--ink);padding:1px 5px;margin-left:4px">' + tl.toUpperCase() + '</span>' : '') +
+      '</div>' +
+      (meta ? '<div style="font-size:10px;color:var(--muted);margin-top:1px">' + escHtml(meta) + '</div>' : '') +
+      (b.fit ? '<div style="font-size:10px;margin-top:3px">' + escHtml(b.fit) + '</div>' : '') +
+    '</div>';
+  }).join('');
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML =
+    '<div class="ag-msg-meta">Action</div>' +
+    '<div class="ag-msg-bubble" style="border-color:var(--ink)">' +
+      '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + built.length + ' prospect' + (built.length > 1 ? 's' : '') + ' added</div>' +
+      '<div style="font-size:10px;color:var(--muted);margin-bottom:2px">Saved to Buyers (CRM) at stage “New” — yours to review and contact.</div>' +
+      rows +
+      '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
+        '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="slOpenBuyers()">Open CRM</button>' +
+        '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoBuyers(\'' + ids + '\', this)">Undo</button>' +
+      '</div>' +
+    '</div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+window.agentUndoBuyers = function (idsStr, btn) {
+  const ids = String(idsStr || '').split(',').filter(Boolean);
+  if (window.STATE && STATE.slBuyers) STATE.slBuyers = STATE.slBuyers.filter(b => !ids.includes(b.id));
+  save();
+  if (isSalesBuyersVisible()) window.slOpenBuyers();
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Prospects removed.</div>'; }
 };
 
 // ══════════════════════════════════════════════════════════
@@ -14644,7 +14763,7 @@ function agBuildBuyersSection() {
       <div class="ag-workflows" style="grid-template-columns:repeat(2,1fr)">
         <div class="ag-wf" onclick="agentSend('sl','Who are my top 5 buyer accounts to close this season? Rank by order value potential, relationship warmth, and fit for VENIA FW26.')"><div class="ag-wf-tag">ANALYZE</div><div class="ag-wf-title">Score the Pipeline</div><div class="ag-wf-desc">Rank accounts by close likelihood and value.</div></div>
         <div class="ag-wf" onclick="agentSend('sl','Which buyer accounts have gone silent — no contact in 60+ days? Draft a re-engagement email for each, with a different angle from the original pitch.')"><div class="ag-wf-tag">DRAFT</div><div class="ag-wf-title">Re-engage Silent Accounts</div><div class="ag-wf-desc">Re-activation emails for cold leads.</div></div>
-        <div class="ag-wf" onclick="agentSend('sl','Suggest 5 new wholesale accounts VENIA should be targeting this season — concept stores or boutiques with strong aesthetic fit, international presence, and the right customer profile.')"><div class="ag-wf-tag">FIND</div><div class="ag-wf-title">Find New Accounts</div><div class="ag-wf-desc">5 target accounts that fit VENIA\'s aesthetic.</div></div>
+        <div class="ag-wf" onclick="agentSend('sl','Find 6 new wholesale stockists VENIA should target — real concept stores, avant boutiques or forward retailers with strong aesthetic fit, the right price point, and an international customer. Vet each with a one-line fit rationale and a tier, then add them to my prospects.')"><div class="ag-wf-tag">FIND</div><div class="ag-wf-title">Find &amp; Vet Stockists</div><div class="ag-wf-desc">Agent scouts real target stores and files them as prospects.</div></div>
         <div class="ag-wf" onclick="agentSend('sl','Write a 3-touch follow-up sequence for a buyer who received a quote 7 days ago and hasn\'t responded. Days 3, 7, and 14. Different angles each time. VENIA voice — direct, not desperate.')"><div class="ag-wf-tag">BUILD</div><div class="ag-wf-title">Follow-Up Sequence</div><div class="ag-wf-desc">3-touch sequence for quote follow-up.</div></div>
       </div>
     </div>`;
@@ -17364,6 +17483,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var d = { styles: STATE.styles||[], materials: STATE.materials||[],
               vendors: STATE.vendors||[], bom: STATE.bom||{}, pom: STATE.pom||{},
               prPulls: STATE.prPulls||[], workingPullId: STATE.workingPullId||null,
+              slBuyers: STATE.slBuyers||[],
               dump: STATE.dump||[], dumpPlan: STATE.dumpPlan||null, dumpMap: STATE.dumpMap||null,
               _who: who() };
     if (STATE.samples) d.samples = STATE.samples;
@@ -17380,6 +17500,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (data.pom)       STATE.pom = data.pom;
       if (data.samples)   STATE.samples = data.samples;
       if (data.prPulls)   STATE.prPulls = data.prPulls;
+      if (data.slBuyers)  STATE.slBuyers = data.slBuyers;
       if ('workingPullId' in data) STATE.workingPullId = data.workingPullId;
       if (data.dump)      STATE.dump = data.dump;
       if ('dumpPlan' in data) STATE.dumpPlan = data.dumpPlan;
