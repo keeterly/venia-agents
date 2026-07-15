@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '81';
+  const BUILD = '82';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18235,15 +18235,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 ;(function(){
   var TAB = 'inbox';   // inbox | plan | map | done
   var editingId = null;      // id of the inbox item currently being edited inline
+  var editingChildId = null; // id of the group sub-step being edited inline
   var mapMergeSource = null; // index of the map area being merged (transient)
   var mapRenaming = null;    // index of the map area being renamed (transient)
   var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
+  var uid = function(){ return 'n' + Date.now() + Math.random().toString(36).slice(2,6); };
+  var isGroup = function(i){ return i && Array.isArray(i.children); };
   var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
   var openItems = function(){ return items().filter(function(i){ return !i.done; }); };
   var norm = function(s){ return String(s||'').trim().toLowerCase().replace(/\s+/g,' '); };
   // A signature of the open inbox — changes on any add / edit / delete / complete.
   // Used to tell when a Plan snapshot has drifted from the live inbox.
-  var dumpSig = function(){ return openItems().map(function(i){ return i.id + '~' + i.t; }).join('§'); };
+  var dumpSig = function(){ return openItems().map(function(i){ return i.id + '~' + i.t + (isGroup(i) ? '~' + i.children.map(function(c){ return c.t + (c.done ? '1' : '0'); }).join(',') : ''); }).join('§'); };
 
   function age(iso){
     var m = Math.max(0, (Date.now() - new Date(iso).getTime()) / 60000);
@@ -18285,7 +18288,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var ov = document.createElement('div');
     ov.id = 'dump-sheet';
     ov.className = 'dump-opening';   // plays the slide-up once, then removed so tab switches don't re-slide
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9200;display:flex;align-items:flex-end;justify-content:center';
+    // Full-screen when active — the Brain Dump takes over the whole viewport so
+    // capturing, planning and mapping get the room they need (was a bottom sheet).
+    ov.style.cssText = 'position:fixed;inset:0;background:var(--bg);z-index:9200;display:flex;align-items:stretch;justify-content:center';
     ov.addEventListener('click', function(e){ if (e.target === ov) window.dumpClose(); });
     document.body.appendChild(ov);
     render();
@@ -18295,15 +18300,43 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpClose = function(){ var s = sheet(); if (s) s.remove(); window.dumpBadge(); };
   window.dumpTab = function(t){ TAB = t; render(); };
 
+  // A leading bullet marker on a line — the signal that a block is a plan (a
+  // heading followed by steps) rather than a single loose thought.
+  var BULLET = /^\s*[-*•–—▪·]\s+/;
+  // Parse one block of text into an inbox item. A block whose first line is a
+  // heading and whose later lines are bullets becomes a GROUP — a titled plan
+  // with checkable sub-steps. Anything else stays a single captured thought
+  // (internal line breaks preserved).
+  function parseDumpBlock(block){
+    var lines = String(block || '').split(/\r?\n/).map(function(l){ return l.replace(/\s+$/,''); }).filter(function(l){ return l.trim(); });
+    if (!lines.length) return null;
+    var hasBullets = lines.slice(1).some(function(l){ return BULLET.test(l); });
+    if (lines.length >= 2 && hasBullets){
+      var title = lines[0].replace(BULLET,'').replace(/:\s*$/,'').trim();
+      var kids = lines.slice(1)
+        .map(function(l){ return l.replace(BULLET,'').trim(); })
+        .filter(Boolean)
+        .map(function(txt){ return { id: uid(), t: txt, done: false }; });
+      return { id: uid(), t: title || 'Untitled plan', d: new Date().toISOString(), done: false, children: kids };
+    }
+    return { id: uid(), t: lines.join('\n'), d: new Date().toISOString(), done: false };
+  }
+
   window.dumpAdd = function(){
     var t = document.getElementById('dump-input');
     var v = (t && t.value || '').trim();
     if (!v) return;
-    items().unshift({ id: 'n' + Date.now() + Math.random().toString(36).slice(2,6), t: v, d: new Date().toISOString(), done: false });
+    // Blank lines separate blocks, so several plans/thoughts can land at once.
+    var added = v.split(/\n\s*\n/).map(parseDumpBlock).filter(Boolean);
+    if (!added.length) return;
+    // Unshift in reverse so the first block typed ends up on top of the inbox.
+    added.slice().reverse().forEach(function(it){ items().unshift(it); });
     save();
     TAB = 'inbox';
     render();
-    var t2 = document.getElementById('dump-input'); if (t2) t2.focus();
+    var t2 = document.getElementById('dump-input'); if (t2){ t2.value = ''; t2.focus(); }
+    var groups = added.filter(isGroup).length;
+    if (groups) showToast(groups === 1 ? 'Plan captured — tap a step to check it off' : (groups + ' plans captured'), 'success');
   };
   window.dumpKey = function(e){
     if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpAdd(); }
@@ -18312,7 +18345,62 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var it = items().find(function(i){ return i.id === id; }); if (!it) return;
     it.done = !it.done;
     it.doneAt = it.done ? new Date().toISOString() : null;
+    // Completing a plan checks off every step (and un-checking re-opens them).
+    if (isGroup(it)) it.children.forEach(function(c){ c.done = it.done; });
     save(); render();
+  };
+
+  // ── Group (plan) sub-steps: toggle / edit / add / delete ────────────────
+  // A plan auto-completes when its last step is checked, and re-opens if a step
+  // is unchecked — so a finished plan drops into Done on its own.
+  function syncGroupDone(g){
+    if (!isGroup(g) || !g.children.length) return;
+    var allDone = g.children.every(function(c){ return c.done; });
+    if (allDone && !g.done){ g.done = true; g.doneAt = new Date().toISOString(); }
+    else if (!allDone && g.done){ g.done = false; g.doneAt = null; }
+  }
+  function findGroup(gid){ return items().find(function(i){ return i.id === gid && isGroup(i); }); }
+  window.dumpToggleChild = function(gid, cid){
+    var g = findGroup(gid); if (!g) return;
+    var c = g.children.find(function(x){ return x.id === cid; }); if (!c) return;
+    c.done = !c.done; syncGroupDone(g); save(); render();
+  };
+  window.dumpDeleteChild = function(gid, cid){
+    var g = findGroup(gid); if (!g) return;
+    g.children = g.children.filter(function(x){ return x.id !== cid; });
+    syncGroupDone(g); save(); render();
+  };
+  window.dumpAddChild = function(gid){
+    var g = findGroup(gid); if (!g) return;
+    var c = { id: uid(), t: '', done: false };
+    g.children.push(c); g.done = false; g.doneAt = null;
+    editingChildId = c.id; save(); render();
+    setTimeout(function(){ var e = document.getElementById('dump-child-edit'); if (e) e.focus(); }, 60);
+  };
+  window.dumpChildStartEdit = function(gid, cid){
+    editingChildId = cid; render();
+    setTimeout(function(){ var e = document.getElementById('dump-child-edit'); if (e){ e.focus(); try { e.setSelectionRange(e.value.length, e.value.length); } catch(_){} } }, 60);
+  };
+  window.dumpChildEditKey = function(e, gid, cid){
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpChildSaveEdit(gid, cid); }
+    else if (e.key === 'Escape'){ window.dumpChildCancelEdit(gid, cid); }
+  };
+  window.dumpChildSaveEdit = function(gid, cid){
+    var g = findGroup(gid); if (!g) return;
+    var e = document.getElementById('dump-child-edit');
+    var c = g.children.find(function(x){ return x.id === cid; });
+    if (e && c){
+      var v = e.value.trim();
+      if (v) c.t = v;
+      else g.children = g.children.filter(function(x){ return x.id !== cid; });   // cleared → drop the step
+    }
+    editingChildId = null; syncGroupDone(g); save(); render();
+  };
+  window.dumpChildCancelEdit = function(gid, cid){
+    // A freshly-added, still-empty step is discarded on cancel.
+    var g = findGroup(gid);
+    if (g){ var c = g.children.find(function(x){ return x.id === cid; }); if (c && !c.t) g.children = g.children.filter(function(x){ return x.id !== cid; }); }
+    editingChildId = null; render();
   };
   window.dumpDelete = function(id){
     var idx = items().findIndex(function(i){ return i.id === id; }); if (idx < 0) return;
@@ -18368,7 +18456,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var btns = document.querySelectorAll('.dump-org-btn');
     btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Organizing…'; });
     try {
-      var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t + '  (' + age(i.d) + ' ago)'; }).join('\n');
+      var raw = open.map(function(i, n){
+        var line = (n+1) + '. ' + i.t + '  (' + age(i.d) + ' ago)';
+        if (isGroup(i) && i.children.length){
+          line += '\n' + i.children.map(function(c){ return '   - [' + (c.done ? 'x' : ' ') + '] ' + c.t; }).join('\n');
+        }
+        return line;
+      }).join('\n');
       var now = new Date();
       var nowCtx = 'Right now it is ' + now.toLocaleString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'})
         + ' (timezone offset ' + (-now.getTimezoneOffset()/60) + 'h). Resolve relative times like "tomorrow 3pm" or "Friday" against this.';
@@ -18445,7 +18539,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var btns = document.querySelectorAll('.dump-map-btn');
     btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Mapping…'; });
     try {
-      var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t; }).join('\n');
+      var raw = open.map(function(i, n){
+        var line = (n+1) + '. ' + i.t;
+        if (isGroup(i) && i.children.length){ line += ' (steps: ' + i.children.map(function(c){ return c.t; }).join('; ') + ')'; }
+        return line;
+      }).join('\n');
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
         + 'Cluster the founder\'s brain-dump into a small set of themed areas so scattered thoughts become compartmentalized. '
         + 'Use 3–6 groups. Give each a short 1–3 word title (e.g. "Product & Design", "Production", "Sales & Wholesale", "Marketing & PR", "Cash & Admin", "Brand", "Personal"). '
@@ -18863,6 +18961,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   var mapItemLine = function(text, color){
     return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + color + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(text) + '</span></div>';
   };
+  // A plan step on the map — shows its checked state so progress reads at a glance.
+  var mapStepLine = function(c, color){
+    return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:' + (c.done ? 'var(--muted)' : 'var(--ink)') + ';' + (c.done ? 'text-decoration:line-through' : '') + '"><span style="color:' + color + ';flex-shrink:0;font-weight:700;font-size:11px">' + (c.done ? '✓' : '○') + '</span><span>' + esc(c.t) + '</span></div>';
+  };
 
   function mapHTML(){
     migrateMapIfNeeded();
@@ -18870,16 +18972,21 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var open = openItems();
     var byId = {}; open.forEach(function(i){ byId[i.id] = i; });
     var assigned = {};
-    // Resolve each group to its LIVE inbox items (skipping any since deleted/done).
+    // Dumped PLANS are their own branches on the map — a heading with its steps —
+    // shown natively without needing Eni to cluster anything.
+    var plans = open.filter(function(i){ return isGroup(i) && i.children.length; });
+    plans.forEach(function(i){ assigned[i.id] = true; });
+    // Resolve each AI area to its LIVE loose inbox items (skipping plans, and any
+    // item since deleted or completed).
     var resolved = groups.map(function(g){
-      var live = (g.ids || []).map(function(id){ return byId[id]; }).filter(Boolean);
+      var live = (g.ids || []).map(function(id){ return byId[id]; }).filter(Boolean).filter(function(it){ return !isGroup(it); });
       live.forEach(function(it){ assigned[it.id] = true; });
       return live;
     });
     var shown = [];
     resolved.forEach(function(live, gi){ if (live.length) shown.push({ gi: gi, live: live }); });
     var unsorted = open.filter(function(i){ return !assigned[i.id]; });
-    if (!shown.length && !unsorted.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">Nothing to map yet.</div>';
+    if (!shown.length && !unsorted.length && !plans.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">Nothing to map yet.</div>';
 
     var h = '';
     var merging = (mapMergeSource != null && groups[mapMergeSource]);
@@ -18890,7 +18997,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '</div>';
     }
 
-    var areaCount = shown.length + (unsorted.length ? 1 : 0);
+    var areaCount = plans.length + shown.length + (unsorted.length ? 1 : 0);
     h += '<div style="display:flex;flex-direction:column;align-items:center;margin:2px 0 4px">'
       + '<div style="font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:9px">Your thinking, grouped</div>'
       + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + areaCount + ' area' + (areaCount === 1 ? '' : 's') + '</div>'
@@ -18898,6 +19005,27 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
     h += '<div style="position:relative;margin-top:10px">'
       + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
+
+    // Plan branches first — the founder's own structured plans, each a titled
+    // node with its checkable steps and live progress.
+    plans.forEach(function(it, pi){
+      var c = MAP_COLORS[pi % MAP_COLORS.length];
+      var kids = it.children || [];
+      var doneN = kids.filter(function(k){ return k.done; }).length;
+      h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
+        + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:' + c + ';border:3px solid var(--bg);box-sizing:border-box"></div>'
+        + '<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">'
+        +   '<div style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:' + c + '14;border-bottom:1px solid var(--border)">'
+        +     '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
+        +     '<span style="flex:1;min-width:0;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(it.t || 'Plan') + '</span>'
+        +     '<span style="font-size:8px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#fff;background:' + c + ';padding:3px 6px;border-radius:6px;flex-shrink:0">Plan</span>'
+        +     '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted);flex-shrink:0">' + doneN + '/' + kids.length + '</span>'
+        +   '</div>'
+        +   '<div style="padding:8px 14px 10px">'
+        +     kids.map(function(k){ return mapStepLine(k, c); }).join('')
+        +   '</div>'
+        + '</div></div>';
+    });
 
     shown.forEach(function(entry){
       var gi = entry.gi, live = entry.live, g = groups[gi];
@@ -19013,9 +19141,51 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '</button>';
     };
 
+    // A dumped PLAN — a heading with checkable sub-steps. Renders as a titled
+    // card: complete-all toggle, progress count, and each step tap-to-check,
+    // tap-text-to-edit, plus an "add step" affordance for planning on the fly.
+    var groupRow = function(i){
+      var kids = i.children || [];
+      var doneN = kids.filter(function(c){ return c.done; }).length;
+      var mono = '\'DM Mono\',monospace';
+      var head;
+      if (editingId === i.id){
+        head = '<div style="display:flex;gap:8px;align-items:flex-start;padding:11px 12px">'
+          + '<textarea id="dump-edit-input" rows="1" onkeydown="dumpEditKey(event,\'' + i.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-weight:700;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:8px 10px;border:1px solid var(--ink);border-radius:8px;background:var(--bg);color:var(--ink);outline:none;resize:none;line-height:1.35">' + esc(i.t) + '</textarea>'
+          + '<button onclick="dumpSaveEdit(\'' + i.id + '\')" class="btn btn-gold btn-sm" style="border-radius:8px">Save</button>'
+          + '</div>';
+      } else {
+        head = '<div style="display:flex;gap:11px;align-items:center;padding:11px 12px;background:var(--bg-off)">'
+          + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Complete every step" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
+          + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to rename" style="flex:1;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:.01em;line-height:1.35;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'cursor:text;word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
+          + '<span style="flex-shrink:0;font-family:' + mono + ';font-size:10.5px;color:var(--muted)">' + doneN + '/' + kids.length + '</span>'
+          + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete plan" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1">✕</button>'
+          + '</div>';
+      }
+      var childHTML = kids.map(function(c){
+        if (editingChildId === c.id){
+          return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 12px 7px 42px;border-top:1px solid var(--border)">'
+            + '<textarea id="dump-child-edit" rows="1" onkeydown="dumpChildEditKey(event,\'' + i.id + '\',\'' + c.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:7px 9px;border:1px solid var(--ink);border-radius:7px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4">' + esc(c.t) + '</textarea>'
+            + '<button onclick="dumpChildSaveEdit(\'' + i.id + '\',\'' + c.id + '\')" class="btn btn-gold btn-sm" style="border-radius:7px">Save</button>'
+            + '</div>';
+        }
+        return '<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px;border-top:1px solid var(--border)">'
+          + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
+          + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
+          + '<button onclick="dumpDeleteChild(\'' + i.id + '\',\'' + c.id + '\')" title="Delete step" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1">✕</button>'
+          + '</div>';
+      }).join('');
+      var addStep = '<div style="padding:8px 12px 10px 42px;border-top:1px solid var(--border)">'
+        + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
+        + '</div>';
+      return '<div style="border:1px solid var(--border);border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
+        + head + childHTML + addStep + '</div>';
+    };
+
     // A captured thought — tap the text (or ✎) to edit inline; while editing,
     // the row becomes a text box with Save / Cancel.
     var row = function(i){
+      if (isGroup(i)) return groupRow(i);
       if (editingId === i.id){
         return '<div style="display:flex;gap:10px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--border)">'
           + '<textarea id="dump-edit-input" rows="2" onkeydown="dumpEditKey(event,\'' + i.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:9px 11px;border:1px solid var(--ink);border-radius:9px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45">' + esc(i.t) + '</textarea>'
@@ -19059,9 +19229,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>';
     } else if (TAB === 'map'){
       var map = STATE.dumpMap;
-      body = map
-        ? metaLine('Grouped', map.count, map.at) + mapHTML()
-          + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">◍ Re-group into a map</button>'
+      // Dumped plans show as their own branches even before Eni clusters the
+      // loose notes — so the Map is useful the moment a plan is captured.
+      var hasPlans = open.some(function(i){ return isGroup(i) && i.children.length; });
+      var mapBtnLabel = map ? '◍ Re-group loose notes' : '◍ Group loose notes into areas';
+      body = (map || hasPlans)
+        ? (map ? metaLine('Grouped', map.count, map.at) : '') + mapHTML()
+          + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">' + mapBtnLabel + '</button>'
         : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
     } else if (TAB === 'done'){
@@ -19082,18 +19256,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // get the full height of the sheet instead of being squeezed under it.
     var captureBlock = (TAB === 'inbox')
       ? '<div style="padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg)">'
-        +   '<textarea id="dump-input" rows="2" placeholder="What\'s on your mind?" onkeydown="dumpKey(event)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
+        +   '<textarea id="dump-input" rows="3" placeholder="What\'s on your mind?&#10;&#10;A heading + bullet steps becomes a plan, e.g.&#10;VENIA Paris activation for SS27&#10;- get showroom&#10;- invite buyers" onkeydown="dumpKey(event)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
         +   '<div style="display:flex;gap:8px;margin-top:8px">'
         +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">🎤 Speak</button>' : '')
         +     '<button class="btn btn-gold" onclick="dumpAdd()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">＋ Add</button>'
         +   '</div>'
+        +   '<div style="font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.4">Tip: a heading with <strong style="color:var(--ink);font-weight:600">- bullet</strong> lines becomes a checkable plan. Enter adds · Shift+Enter for a new line.</div>'
         + '</div>'
       : '';
 
     ov.innerHTML =
-      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:92vh;max-height:92vh;display:flex;flex-direction:column;border-radius:18px 18px 0 0;overflow:hidden;box-shadow:0 -8px 40px rgba(0,0,0,.28)" onclick="event.stopPropagation()">'
-      // Compact header
-      + '<div style="padding:14px 16px 13px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
+      '<div style="background:var(--bg);width:100%;max-width:720px;height:100dvh;max-height:100dvh;display:flex;flex-direction:column;border-radius:0;overflow:hidden" onclick="event.stopPropagation()">'
+      // Compact header — pads for the notch/status bar so it clears the top edge.
+      + '<div style="padding:calc(14px + var(--sat,0px)) 16px 13px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
       +   '<div>'
       +     '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:17px;letter-spacing:.5px;display:flex;align-items:center;gap:8px">✎ Brain Dump</div>'
       +     '<div style="font-size:11px;color:#9a9a9a;margin-top:2px">Capture anything — I\'ll organize it for you.</div>'
