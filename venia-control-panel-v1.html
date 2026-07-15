@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '75';
+  const BUILD = '76';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -12617,8 +12617,7 @@ function agBuildCelebsSection() {
     for (const c of celebs) {
       const sCls = c.s==='undocumented'?'ag-celeb-s-undoc':c.s==='partial'?'ag-celeb-s-partial':'ag-celeb-s-done';
       const sLbl = c.s==='undocumented'?'Undocumented':c.s==='partial'?'Partial':'Documented';
-      const prompt = prCelebPrompt(c).replace(/`/g,'\\`').replace(/\$/g,'\\$');
-      html += `<div class="ag-celeb-card" onclick="agentSend('pr',\`${prompt}\`)">
+      html += `<div class="ag-celeb-card" ${agAttr('pr', prCelebPrompt(c))}>
         <div class="ag-celeb-tier-lbl">TIER ${c.tier}</div>
         <div class="ag-celeb-name">${c.n}</div>
         <div class="ag-celeb-genre">${c.g}</div>
@@ -12712,9 +12711,7 @@ function agNav(key, section, el) {
   // Update chat suggest chips
   const chipsEl = screen.querySelector('.ag-chat-suggest');
   if (chipsEl && cfg.suggests) {
-    chipsEl.innerHTML = cfg.suggests.map(s =>
-      `<button class="ag-suggest" onclick="agentSend(${JSON.stringify(key)},${JSON.stringify(s)})">${s}</button>`
-    ).join('');
+    chipsEl.innerHTML = cfg.suggests.map(s => agChip(key, s, 'ag-suggest')).join('');
   }
 
   // Render main content area
@@ -13549,9 +13546,7 @@ function wireAgent(key, screenKey) {
   const chipsEl = screen.querySelector('.ag-chat-suggest');
   const overviewCfg = (AG_SECTIONS[key] || {})['overview'] || {};
   if (chipsEl && overviewCfg.suggests) {
-    chipsEl.innerHTML = overviewCfg.suggests.map(s =>
-      `<button class="ag-suggest" onclick="agentSend(${JSON.stringify(key)},${JSON.stringify(s)})">${s}</button>`
-    ).join('');
+    chipsEl.innerHTML = overviewCfg.suggests.map(s => agChip(key, s, 'ag-suggest')).join('');
   }
 
   // Capture the pristine overview once (so agNav('overview') can restore it),
@@ -13717,6 +13712,34 @@ function agentPrefsText(key) {
   if (!lines.length) return '';
   const title = { pr: 'PR', mk: 'Marketing', sl: 'Sales', br: 'Brand' }[key] || '';
   return '\n\n' + title + ' preferences set by VENIA — honor these:\n' + lines.join('\n');
+}
+
+// Delegated click handling for agent chips and cards. Inlining prompt text into
+// an onclick attribute broke every prompt that contained a quote or apostrophe
+// (the audit's 37 dead Celebrity cards and the chips that went inert after
+// navigation). Instead we stash the prompt in a registry and reference it by id
+// from ONE document-level listener — the text never touches HTML parsing.
+window.__agProm = window.__agProm || {};
+window.__agPromN = window.__agPromN || 0;
+function agRegister(key, prompt) {
+  const id = 'agp' + (++window.__agPromN);
+  window.__agProm[id] = { key: key, prompt: prompt };
+  return id;
+}
+function agAttr(key, prompt) { return 'data-agp="' + agRegister(key, prompt) + '"'; }
+function agChip(key, prompt, cls, label) {
+  return '<button class="' + cls + '" data-agp="' + agRegister(key, prompt) + '">' + escHtml(label == null ? prompt : label) + '</button>';
+}
+if (!window.__agDelegated) {
+  window.__agDelegated = true;
+  document.addEventListener('click', function (e) {
+    const el = e.target.closest && e.target.closest('[data-agp]');
+    if (!el) return;
+    const rec = window.__agProm[el.getAttribute('data-agp')];
+    if (!rec) return;
+    if (rec.key === '__sk') { if (typeof skSend === 'function') skSend(rec.prompt); }
+    else if (typeof agentSend === 'function') agentSend(rec.key, rec.prompt);
+  });
 }
 
 // Build a pull object from a create_pull action, matching prBuildPullObj's shape
@@ -14572,7 +14595,7 @@ function agBuildSection(key, section, cfg) {
     </div>`;
     if (cfg.suggests) {
       html += '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:16px">' +
-        cfg.suggests.map(s => `<button class="ag-pill" onclick="agentSend(${JSON.stringify(key)},${JSON.stringify(s)})">${s}</button>`).join('') +
+        cfg.suggests.map(s => agChip(key, s, 'ag-pill')).join('') +
         '</div>';
     }
   }
@@ -19393,8 +19416,7 @@ function skUpdateContext(){
   const ctx = document.getElementById('sk-context');
   if (ctx) ctx.textContent = 'Following: ' + info.label;
   const sg = document.getElementById('sk-suggest');
-  if (sg) sg.innerHTML = info.suggests.map(s =>
-    `<button class="sk-chip" onclick='skSend(${JSON.stringify(s)})'>${escHtml(s)}</button>`).join('');
+  if (sg) sg.innerHTML = info.suggests.map(s => agChip('__sk', s, 'sk-chip')).join('');
   const f = document.getElementById('sk-field');
   if (f) f.placeholder = 'Ask ' + (SK.agent==='eni'?'Eni':'Nigma') + ' anything…';
 }
