@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '74';
+  const BUILD = '75';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13610,9 +13610,7 @@ async function agentSend(key, message) {
   chatBody.scrollTop = chatBody.scrollHeight;
 
   try {
-    const voiceNotes = (STATE.prPrefs || {}).voiceNotes || '';
-    const sysPrompt  = agent.system + '\n\n' + plmContext() + agentActionSpec(key)
-      + (voiceNotes ? '\n\nVENIA Voice / Tone Notes: ' + voiceNotes : '');
+    const sysPrompt  = agent.system + '\n\n' + plmContext() + agentActionSpec(key) + agentPrefsText(key);
 
     agent.history.push({ role: 'user', content: message });
     if (agent.history.length > 40) agent.history = agent.history.slice(-40);
@@ -13620,8 +13618,13 @@ async function agentSend(key, message) {
     const reply = await callClaude(sysPrompt, null, agent.history);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
-    const { clean, action } = agentExtractAction(reply);
-    const shown = clean || (action ? "Done — here's what I set up:" : reply);
+    const { clean, action, parseError } = agentExtractAction(reply);
+    // If a block was present but unparseable, don't show the success prose as if
+    // it worked — nothing was saved, so say so.
+    const shown = parseError
+      ? (clean ? clean + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.'
+               : '⚠ I couldn\'t complete that change — nothing was saved. Please try once more.')
+      : (clean || (action ? "Done — here's what I set up:" : reply));
     agent.history.push({ role: 'assistant', content: shown });
 
     const thinkEl = document.getElementById(thinkId);
@@ -13688,11 +13691,32 @@ function agentActionSpec(key) {
 // parsed action (or null). Tolerant of malformed JSON — a bad block is ignored.
 function agentExtractAction(text) {
   const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
-  if (!m) return { clean: String(text || ''), action: null };
-  let action = null;
-  try { action = JSON.parse(m[1].trim()); } catch (e) { action = null; }
+  if (!m) return { clean: String(text || ''), action: null, parseError: false };
+  let action = null, parseError = false;
+  try { action = JSON.parse(m[1].trim()); } catch (e) { action = null; parseError = true; }
   const clean = String(text).replace(m[0], '').trim();
-  return { clean, action };
+  return { clean, action, parseError };
+}
+
+// Each agent's own saved settings, formatted for its system prompt. Fixes the
+// bug where every agent received PR's voice notes regardless of space.
+function agentPrefsText(key) {
+  const S = window.STATE || {};
+  const obj = key === 'pr' ? S.prPrefs : key === 'mk' ? S.mkPrefs
+            : key === 'sl' ? S.slPrefs : key === 'br' ? S.brPrefs : null;
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return '';
+  const labels = {
+    pr: { voiceNotes: 'Voice / tone notes' },
+    mk: { tone: 'Tone', voiceNotes: 'Voice notes', cadence: 'Cadence', captionLen: 'Caption length', hashtagStyle: 'Hashtags', avoidWords: 'Avoid words', season: 'Season', budget: 'Budget', audience: 'Audience' },
+    sl: { season: 'Season', target: 'Targets', markets: 'Markets', moq: 'MOQ', terms: 'Payment terms', markup: 'Markup', discountCap: 'Max discount', quoteFollowUp: 'Quote follow-up', inactiveAlert: 'Inactive alert', reorderThreshold: 'Reorder threshold', voiceNotes: 'Context notes' },
+    br: { oneliner: 'One-liner', customer: 'Customer', manifesto: 'Manifesto', aesthetic: 'Aesthetic', palette: 'Palette', refs: 'References', voice: 'Voice', alwaysUse: 'Always use', neverUse: 'Never use', toneGuard: 'Tone guard', agentNotes: 'Notes' },
+  };
+  const map = labels[key] || {};
+  const lines = [];
+  Object.keys(map).forEach((f) => { const v = obj[f]; if (v && String(v).trim()) lines.push(map[f] + ': ' + String(v).trim()); });
+  if (!lines.length) return '';
+  const title = { pr: 'PR', mk: 'Marketing', sl: 'Sales', br: 'Brand' }[key] || '';
+  return '\n\n' + title + ' preferences set by VENIA — honor these:\n' + lines.join('\n');
 }
 
 // Build a pull object from a create_pull action, matching prBuildPullObj's shape
@@ -15282,7 +15306,7 @@ function mkToggleChannel(btn, ch) {
   else          { STATE.mkPrefs.channels.push(ch);      btn.classList.add('ag-pill-active'); }
 }
 function mkSavePrefs() {
-  if (!STATE.mkPrefs) STATE.mkPrefs = {};
+  if (!STATE.mkPrefs || Array.isArray(STATE.mkPrefs)) STATE.mkPrefs = {};
   const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
   STATE.mkPrefs.tone         = g('mkp-tone');
   STATE.mkPrefs.voiceNotes   = g('mkp-voiceNotes');
@@ -15380,7 +15404,7 @@ function agBuildSlPrefsSection() {
   </div>`;
 }
 function slSavePrefs() {
-  if (!STATE.slPrefs) STATE.slPrefs = {};
+  if (!STATE.slPrefs || Array.isArray(STATE.slPrefs)) STATE.slPrefs = {};
   const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
   STATE.slPrefs.season           = g('slp-season');
   STATE.slPrefs.target           = g('slp-target');
@@ -15477,7 +15501,7 @@ function agBuildBrPrefsSection() {
   </div>`;
 }
 function brSavePrefs() {
-  if (!STATE.brPrefs) STATE.brPrefs = {};
+  if (!STATE.brPrefs || Array.isArray(STATE.brPrefs)) STATE.brPrefs = {};
   const g = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
   STATE.brPrefs.oneliner  = g('brp-oneliner');
   STATE.brPrefs.customer  = g('brp-customer');
@@ -15644,9 +15668,13 @@ function slExportOrders() {
 // ══════════════════════════════════════════════════════════
 (function() {
   const _extendInit = () => {
-    if (!STATE.mkPrefs)  STATE.mkPrefs  = dbGet('mkPrefs')  || {};
-    if (!STATE.slPrefs)  STATE.slPrefs  = dbGet('slPrefs')  || {};
-    if (!STATE.brPrefs)  STATE.brPrefs  = dbGet('brPrefs')  || {};
+    // Prefs must be OBJECTS. dbGet() returns [] for a missing key, and setting
+    // fields on an array drops them through JSON — so coerce anything that isn't
+    // a plain object to {} (fixes settings that appeared to save then vanished).
+    const _obj = (v) => (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    if (!STATE.mkPrefs || Array.isArray(STATE.mkPrefs)) STATE.mkPrefs = _obj(dbGet('mkPrefs'));
+    if (!STATE.slPrefs || Array.isArray(STATE.slPrefs)) STATE.slPrefs = _obj(dbGet('slPrefs'));
+    if (!STATE.brPrefs || Array.isArray(STATE.brPrefs)) STATE.brPrefs = _obj(dbGet('brPrefs'));
     if (!STATE.slOrders) STATE.slOrders = dbGet('slOrders') || [];
   };
   if (document.readyState === 'loading') {
