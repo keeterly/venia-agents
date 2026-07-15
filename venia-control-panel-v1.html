@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '68';
+  const BUILD = '69';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4906,6 +4906,12 @@ let STATE = {
   seasonFilter: '',
   stageDropFilter: '',
 };
+// Expose the live state object on window. STATE is a bare top-level `let`, which
+// is reachable across scripts by name but is NOT a window property — so code
+// written as `window.STATE` (plmContext, the About screen, agent actions) was
+// silently reading undefined. STATE is only ever mutated in place, never
+// reassigned, so this single alias stays valid for the app's lifetime.
+window.STATE = STATE;
 
 // ═══════════════════════════════════════════════
 //  SEED DATA
@@ -13584,24 +13590,29 @@ async function agentSend(key, message) {
 
   try {
     const voiceNotes = (STATE.prPrefs || {}).voiceNotes || '';
-    const sysPrompt  = agent.system + '\n\n' + plmContext()
+    const sysPrompt  = agent.system + '\n\n' + plmContext() + agentActionSpec(key)
       + (voiceNotes ? '\n\nVENIA Voice / Tone Notes: ' + voiceNotes : '');
 
     agent.history.push({ role: 'user', content: message });
     if (agent.history.length > 40) agent.history = agent.history.slice(-40);
 
     const reply = await callClaude(sysPrompt, null, agent.history);
-    agent.history.push({ role: 'assistant', content: reply });
+    // The agent may append a machine-readable action block. Split it off so the
+    // chat shows only the human sentence; the block drives a real change.
+    const { clean, action } = agentExtractAction(reply);
+    const shown = clean || (action ? "Done — here's what I set up:" : reply);
+    agent.history.push({ role: 'assistant', content: shown });
 
     const thinkEl = document.getElementById(thinkId);
     if (thinkEl) {
       const bubble = thinkEl.querySelector('.ag-msg-bubble');
       bubble.className = 'ag-msg-bubble';
-      bubble.innerHTML = reply
+      bubble.innerHTML = shown
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
         .replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>')
         .replace(/\n/g,'<br>');
     }
+    if (action) { try { agentRunAction(key, action, chatBody); } catch(e){ console.warn('agent action failed', e); } }
   } catch (err) {
     const thinkEl = document.getElementById(thinkId);
     if (thinkEl) {
@@ -13617,6 +13628,147 @@ async function agentSend(key, message) {
 function escHtml(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// ══════════════════════════════════════════════════════════
+//  AGENT ACTIONS — natural language that actually DOES something.
+//  The agent can emit a fenced ```venia:action {json}``` block. We split it out
+//  of the visible reply and run it against the live workspace through the same
+//  paths the manual UI uses, so it syncs and behaves identically. Everything an
+//  action creates is reversible (drafts + an Undo button). Scoped per agent.
+// ══════════════════════════════════════════════════════════
+function agentActionSpec(key) {
+  if (key !== 'pr') return '';   // only the PR agent can act, for now
+  return '\n\nACTIONS — you can take ONE real action in VENIA, but only when the user clearly asks for it:\n'
+    + '• create_pull — log a new press / sample pull in the workspace.\n'
+    + 'When (and ONLY when) the user asks to create, log, start, or set up a pull, do BOTH of these:\n'
+    + '1) Write one short, natural sentence confirming what you are creating.\n'
+    + '2) Then, on its own line, emit exactly ONE fenced block and nothing after it:\n'
+    + '```venia:action\n'
+    + '{"type":"create_pull","client":"Publication or stylist name","contact":"Contact name","email":"","pullType":"editorial","publication":"Usage, e.g. Vogue US September issue","returnDate":"YYYY-MM-DD","shootDate":"YYYY-MM-DD","photographer":"","notes":"","items":[{"style":"Exact style name from the PLM list","size":"","color":""}]}\n'
+    + '```\n'
+    + 'Rules: dates must be ISO (YYYY-MM-DD) or omitted. For items, use ONLY style names or codes that appear in the PLM Context above — never invent a style; if the user names one that is not listed, leave it out and say so. Omit any field you do not know rather than guessing. "client" is required — if you do not have a publication or stylist name, ask for it instead of emitting the block. Do NOT emit a block for questions, drafts of emails, or anything other than an explicit request to create a pull. The pull is created as a DRAFT the user reviews.';
+}
+
+// Pull the machine-readable block out of a reply. Returns the human text and the
+// parsed action (or null). Tolerant of malformed JSON — a bad block is ignored.
+function agentExtractAction(text) {
+  const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
+  if (!m) return { clean: String(text || ''), action: null };
+  let action = null;
+  try { action = JSON.parse(m[1].trim()); } catch (e) { action = null; }
+  const clean = String(text).replace(m[0], '').trim();
+  return { clean, action };
+}
+
+// Build a pull object from a create_pull action, matching prBuildPullObj's shape
+// exactly. Items are matched to REAL styles only; anything unmatched is reported,
+// never fabricated. Returns { pull, unmatched }.
+function agentBuildPull(action) {
+  const styles = window.STATE && STATE.styles || [];
+  const norm = v => String(v || '').trim().toLowerCase();
+  const items = [], unmatched = [];
+  (Array.isArray(action.items) ? action.items : []).forEach(it => {
+    const q = norm(it && (it.style || it.name) || it);
+    if (!q) return;
+    let s = styles.find(x => norm(x.name) === q || norm(x.styleId) === q)
+         || styles.find(x => norm(x.name).includes(q) || (q.length > 3 && q.includes(norm(x.name))));
+    if (!s) { unmatched.push((it && (it.style || it.name)) || String(it)); return; }
+    items.push({
+      styleId: s.id, styleName: s.name, styleCode: s.styleId, category: s.category, season: s.season,
+      retail: s.retail || 0, size: (it && it.size) || '',
+      color: (it && it.color) || (s.colors ? String(s.colors).split(',')[0].trim() : ''),
+      nfcTag: '', returned: false, returnedAt: null, condition: 'good',
+    });
+  });
+  const validDate = d => (/^\d{4}-\d{2}-\d{2}$/.test(String(d || ''))) ? d : '';
+  const total = items.reduce((sum, i) => sum + (i.retail || 0), 0);
+  const pull = {
+    id: 'PR' + Date.now(),
+    status: 'draft',
+    client: String(action.client || action.publication || '').trim(),
+    contact: String(action.contact || '').trim(),
+    email: String(action.email || '').trim(),
+    phone: String(action.phone || '').trim(),
+    pullType: String(action.pullType || 'editorial').trim(),
+    publication: String(action.publication || '').trim(),
+    pullDate: validDate(action.pullDate),
+    returnDate: validDate(action.returnDate),
+    shootDate: validDate(action.shootDate),
+    photographer: String(action.photographer || '').trim(),
+    address: String(action.address || '').trim(),
+    notes: String(action.notes || '').trim(),
+    invoiceNo: `PR-${new Date().getFullYear()}-${String((window.STATE && STATE.prPulls || []).length + 1).padStart(3, '0')}`,
+    termsNotes: '',
+    feeType: 'none', feeAmount: 0, totalRetail: total,
+    items,
+    createdAt: new Date().toISOString(),
+    terms: { damage: false, credit: false, alteration: false, tearsheet: false },
+    createdByAgent: true,
+  };
+  return { pull, unmatched };
+}
+
+// Execute a validated action and show a confirmation card with Open / Undo.
+function agentRunAction(key, action, chatBody) {
+  if (key !== 'pr' || !action || action.type !== 'create_pull') return;
+  const { pull, unmatched } = agentBuildPull(action);
+  if (!pull.client) {   // never create an unlabelled pull — ask instead
+    appendAgentNote(chatBody, 'I can set that up — what publication or stylist should I file the pull under?');
+    return;
+  }
+  if (!STATE.prPulls) STATE.prPulls = [];
+  STATE.prPulls.unshift(pull);
+  STATE.workingPullId = pull.id;          // tag taps land here, same as a manual draft
+  save();
+  try { logActivity('PR pull drafted by agent: ' + pull.client); } catch (e) {}
+  try { if (typeof renderPR === 'function') renderPR(); } catch (e) {}
+  try { if (typeof prRefreshOverview === 'function') prRefreshOverview(); } catch (e) {}
+
+  const itemsLine = pull.items.length ? pull.items.map(i => i.styleName).join(', ') : 'no items yet — add them in the pull';
+  const sub = [pull.pullType, pull.publication, pull.returnDate ? 'return ' + pull.returnDate : ''].filter(Boolean).join(' · ');
+  const warn = unmatched.length
+    ? `<div style="font-size:10px;color:var(--amber);margin-top:8px">Not in your catalog, so left off: ${escHtml(unmatched.join(', '))}. Add them by hand if needed.</div>` : '';
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML =
+    '<div class="ag-msg-meta">Action</div>' +
+    '<div class="ag-msg-bubble" style="border-color:var(--ink)">' +
+      '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:7px">✓ Draft pull created</div>' +
+      '<div style="font-size:13px;font-weight:700">' + escHtml(pull.client) + '</div>' +
+      (sub ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + escHtml(sub) + '</div>' : '') +
+      '<div style="font-size:11px;margin-top:7px">' + escHtml(itemsLine) + '</div>' +
+      warn +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+        '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="cpGoto(\'pr\');prOpenDetail(\'' + pull.id + '\')">Open pull</button>' +
+        '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoPull(\'' + pull.id + '\', this)">Undo</button>' +
+      '</div>' +
+    '</div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+// A plain agent note bubble (used when an action needs more info).
+function appendAgentNote(chatBody, text) {
+  if (!chatBody) return;
+  const el = document.createElement('div');
+  el.className = 'ag-msg from-agent';
+  el.innerHTML = '<div class="ag-msg-meta">Agent</div><div class="ag-msg-bubble">' + escHtml(text) + '</div>';
+  chatBody.appendChild(el);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+// Undo an agent-created pull — removes it and syncs, same as deleting a draft.
+window.agentUndoPull = function (id, btn) {
+  const i = (window.STATE && STATE.prPulls || []).findIndex(p => p.id === id);
+  if (i >= 0) {
+    STATE.prPulls.splice(i, 1);
+    if (STATE.workingPullId === id) STATE.workingPullId = null;
+    save();
+    try { if (typeof renderPR === 'function') renderPR(); } catch (e) {}
+    try { if (typeof prRefreshOverview === 'function') prRefreshOverview(); } catch (e) {}
+  }
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Draft pull removed.</div>'; }
+};
 
 // ══════════════════════════════════════════════════════════
 //  PR OVERVIEW — live stats refresh
