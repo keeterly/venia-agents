@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '83';
+  const BUILD = '84';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18236,6 +18236,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   var TAB = 'inbox';   // inbox | plan | map | done
   var editingId = null;      // id of the inbox item currently being edited inline
   var editingChildId = null; // id of the group sub-step being edited inline
+  var expandingId = null;    // id of a loose idea Eni is turning into a plan+map
   var mapMergeSource = null; // index of the map area being merged (transient)
   var mapRenaming = null;    // index of the map area being renamed (transient)
   var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
@@ -18706,6 +18707,51 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){
       showToast('Could not grow branches — ' + String(e.message || e), 'error');
       render();   // rebuild buttons to their normal labels
+    }
+  };
+
+  // Turn a single loose idea into BOTH a linear plan and a mind-map web in one
+  // Eni pass: it writes the steps AND clusters them into branches. The loose
+  // thought becomes a group (checkable steps) with a ready-made web.
+  window.dumpExpandItem = async function(id){
+    var it = items().find(function(x){ return x.id === id; });
+    if (!it || isGroup(it)) return;
+    var idea = (it.t || '').trim();
+    if (!idea){ showToast('Nothing to expand yet','info'); return; }
+    expandingId = id; render();
+    try {
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'The founder dumped a single idea. Turn it into an actionable plan AND a mind map. '
+        + 'Write 4–8 concrete, sequenced steps that genuinely move the idea forward — specific to running a luxury fashion label, not generic filler. '
+        + 'Then cluster those SAME steps into 2–4 themed branches for a mind map; give each branch a short 1–3 word label. '
+        + 'Every step appears in exactly one branch, using the EXACT step wording.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
+      var out = await callClaude(sys, 'Idea: ' + idea + '\n\n' + plmContext());
+      if (!out || !out.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(out);
+      var steps = (data && Array.isArray(data.steps)) ? data.steps.filter(Boolean).map(String) : null;
+      if (!steps || !steps.length) throw new Error('Eni didn\'t return any steps');
+      var kids = steps.map(function(s){ return { id: uid(), t: s, done: false }; });
+      var byNorm = {}; kids.forEach(function(c){ var kk = norm(c.t); if (byNorm[kk] == null) byNorm[kk] = c.id; });
+      var used = {};
+      var brs = (data && Array.isArray(data.branches)) ? data.branches : [];
+      var branches = brs.map(function(b){
+        var strs = (b && Array.isArray(b.steps)) ? b.steps.filter(Boolean).map(String) : [];
+        var ids = [];
+        strs.forEach(function(str){ var cid = byNorm[norm(str)]; if (cid && !used[cid]){ used[cid] = true; ids.push(cid); } });
+        return { label: String((b && b.label) || 'Branch'), ids: ids };
+      }).filter(function(b){ return b.ids.length; });
+      var leftover = kids.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
+      if (leftover.length) branches.push({ label: 'Steps', ids: leftover });
+      it.children = kids; it.done = false; it.doneAt = null;
+      if (branches.length) it.web = { branches: branches, at: new Date().toISOString() };
+      expandingId = null;
+      save(); TAB = 'map'; render();
+      showToast('✦ Plan + mind map ready','success');
+      logActivity('Idea expanded into a plan — ' + idea.slice(0, 40));
+    } catch(e){
+      expandingId = null; render();
+      showToast('Could not expand — ' + String(e.message || e), 'error');
     }
   };
 
@@ -19353,6 +19399,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // the row becomes a text box with Save / Cancel.
     var row = function(i){
       if (isGroup(i)) return groupRow(i);
+      if (expandingId === i.id){
+        return '<div style="display:flex;gap:12px;align-items:center;padding:13px 2px;border-bottom:1px solid var(--border)">'
+          + '<div style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:var(--ink)">' + esc(i.t) + '</div>'
+          + '<span style="font-size:11px;color:var(--gold);font-weight:700;flex-shrink:0;letter-spacing:.02em">✦ Planning…</span>'
+          + '</div>';
+      }
       if (editingId === i.id){
         return '<div style="display:flex;gap:10px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--border)">'
           + '<textarea id="dump-edit-input" rows="2" onkeydown="dumpEditKey(event,\'' + i.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:9px 11px;border:1px solid var(--ink);border-radius:9px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45">' + esc(i.t) + '</textarea>'
@@ -19364,6 +19416,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       return '<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
+        + (i.done ? '' : '<button onclick="dumpExpandItem(\'' + i.id + '\')" title="Expand into a plan + mind map with Eni" style="background:none;border:none;color:var(--gold);font-size:14px;cursor:pointer;padding:0 3px;flex-shrink:0;margin-top:1px;line-height:1">✦</button>')
         + '<button onclick="dumpStartEdit(\'' + i.id + '\')" title="Edit" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 3px;flex-shrink:0;margin-top:1px;line-height:1">✎</button>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 3px;flex-shrink:0;line-height:1">✕</button>'
         + '</div>';
@@ -19428,7 +19481,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">🎤 Speak</button>' : '')
         +     '<button class="btn btn-gold" onclick="dumpAdd()" style="flex:1;min-height:44px;border-radius:11px;font-size:12px">＋ Add</button>'
         +   '</div>'
-        +   '<div style="font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.4">Tip: a heading with <strong style="color:var(--ink);font-weight:600">- bullet</strong> lines becomes a checkable plan. Enter adds · Shift+Enter for a new line.</div>'
+        +   '<div style="font-size:10.5px;color:var(--muted);margin-top:7px;line-height:1.45">Tip: a heading with <strong style="color:var(--ink);font-weight:600">- bullet</strong> lines becomes a checkable plan. Or dump a one-line idea and tap <strong style="color:var(--gold);font-weight:700">✦</strong> to have Eni build the plan + mind-map web. Enter adds · Shift+Enter for a new line.</div>'
         + '</div>'
       : '';
 
