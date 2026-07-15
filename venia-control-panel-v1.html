@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '49';
+  const BUILD = '50';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11282,7 +11282,7 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 async function callClaude(system, userMsg, history=[]) {
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
-  const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 2000, system, messages: msgs });
+  const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 4096, system, messages: msgs });
 
   // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
   // path that can't be shadowed by the site's "/" rewrite. We try the relative
@@ -11329,7 +11329,17 @@ async function callClaude(system, userMsg, history=[]) {
     throw new Error(detail + ' (' + resp.status + ')');
   }
   const data = await resp.json();
-  return data.content?.[0]?.text || '';
+  // Concatenate every text block (a response can lead with a non-text block,
+  // in which case content[0].text is undefined and the old code saw "empty").
+  const blocks = Array.isArray(data.content) ? data.content : [];
+  const text = blocks
+    .filter(b => b && b.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text).join('');
+  if (!text.trim() && blocks.length) {
+    // Got a real reply but no usable text — surface why, so it's diagnosable.
+    throw new Error('Eni replied with no text — stop: ' + (data.stop_reason || '?') + ', blocks: ' + (blocks.map(b => b && b.type).join('/') || 'none'));
+  }
+  return text;
 }
 
 function plmContext() {
