@@ -52,7 +52,11 @@ export default async (req) => {
 
   const domain = process.env.SHOPIFY_STORE_DOMAIN;
   const token  = process.env.SHOPIFY_ADMIN_TOKEN;
-  const version = process.env.SHOPIFY_API_VERSION || '2024-10';
+  // Keep this on a currently-supported Admin API version. Shopify removes very
+  // old versions on a rolling schedule, so a stale default (e.g. 2024-10) can
+  // start failing with no code change on our side. Override with
+  // SHOPIFY_API_VERSION if needed.
+  const version = process.env.SHOPIFY_API_VERSION || '2026-01';
 
   let body;
   try { body = JSON.parse(await req.text() || '{}'); } catch (e) { return json({ error: 'Bad JSON' }, 400, cors); }
@@ -61,7 +65,7 @@ export default async (req) => {
   // ping lets the UI show a "Connected" state without ever revealing the token.
   // The build marker forces a fresh function bundle so env-var changes are
   // captured (esbuild strips comments, so a real output change is needed).
-  if (action === 'ping') return json({ configured: !!(domain && token), build: '2026-07-15c' }, 200, cors);
+  if (action === 'ping') return json({ configured: !!(domain && token), version, build: '2026-07-16a' }, 200, cors);
 
   if (!domain || !token) {
     return json({ error: 'Shopify not configured — set SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN in Netlify environment variables.' }, 400, cors);
@@ -93,8 +97,18 @@ export default async (req) => {
     });
     const text = await r.text();
     if (!r.ok) {
-      // Surface a clean message; never echo the token or full upstream headers.
-      return json({ error: `Shopify ${r.status} ${r.statusText}` }, r.status === 401 ? 401 : 502, cors);
+      // Surface a clean, actionable message; never echo the token or headers.
+      let detail = '';
+      try { const j = JSON.parse(text); detail = typeof j.errors === 'string' ? j.errors : (j.errors ? JSON.stringify(j.errors) : ''); } catch (_) {}
+      let msg;
+      if (r.status === 401 || r.status === 403) {
+        msg = `Shopify rejected the credentials (${r.status}). Update SHOPIFY_ADMIN_TOKEN in Netlify with a current Admin API access token.`;
+      } else if (r.status === 404) {
+        msg = `Shopify returned 404. Check SHOPIFY_STORE_DOMAIN (should be your-store.myshopify.com) and that API version ${version} is valid.`;
+      } else {
+        msg = `Shopify ${r.status} ${r.statusText}${detail ? ' — ' + detail : ''} (API ${version})`;
+      }
+      return json({ error: msg }, (r.status === 401 || r.status === 403) ? 401 : 502, cors);
     }
     return new Response(text, { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
   } catch (e) {
