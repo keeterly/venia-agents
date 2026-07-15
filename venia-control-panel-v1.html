@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '69';
+  const BUILD = '70';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13644,9 +13644,11 @@ function agentActionSpec(key) {
     + '1) Write one short, natural sentence confirming what you are creating.\n'
     + '2) Then, on its own line, emit exactly ONE fenced block and nothing after it:\n'
     + '```venia:action\n'
-    + '{"type":"create_pull","client":"Publication or stylist name","contact":"Contact name","email":"","pullType":"editorial","publication":"Usage, e.g. Vogue US September issue","returnDate":"YYYY-MM-DD","shootDate":"YYYY-MM-DD","photographer":"","notes":"","items":[{"style":"Exact style name from the PLM list","size":"","color":""}]}\n'
+    + '{"type":"create_pull","client":"Publication or stylist name","contact":"Contact name","email":"stylist@publication.com","pullType":"editorial","publication":"Usage, e.g. Vogue US September issue","pullDate":"YYYY-MM-DD","returnDate":"YYYY-MM-DD","shootDate":"YYYY-MM-DD","photographer":"","notes":"","draftEmail":false,"emailNote":"","items":[{"style":"Exact style name from the PLM list","size":"","color":""}]}\n'
     + '```\n'
-    + 'Rules: dates must be ISO (YYYY-MM-DD) or omitted. For items, use ONLY style names or codes that appear in the PLM Context above — never invent a style; if the user names one that is not listed, leave it out and say so. Omit any field you do not know rather than guessing. "client" is required — if you do not have a publication or stylist name, ask for it instead of emitting the block. Do NOT emit a block for questions, drafts of emails, or anything other than an explicit request to create a pull. The pull is created as a DRAFT the user reviews.';
+    + 'Rules: dates must be ISO (YYYY-MM-DD) or omitted. For items, use ONLY style names or codes that appear in the PLM Context above — never invent a style; if the user names one that is not listed, leave it out and say so. Omit any field you do not know rather than guessing. "client" is required — if you do not have a publication or stylist name, ask for it instead of emitting the block. '
+    + 'Set "draftEmail":true ONLY if the user asks you to also email / write to / notify the stylist or contact — then put any specific pickup or return instructions the user gave into "emailNote" (one or two sentences, in VENIA\'s voice; leave "" if none). The email is prepared for the user to review and send, not sent automatically. '
+    + 'Do NOT emit a block for questions or anything other than an explicit request to create a pull. The pull is created as a DRAFT the user reviews.';
 }
 
 // Pull the machine-readable block out of a reply. Returns the human text and the
@@ -13704,6 +13706,7 @@ function agentBuildPull(action) {
     createdAt: new Date().toISOString(),
     terms: { damage: false, credit: false, alteration: false, tearsheet: false },
     createdByAgent: true,
+    emailNote: String(action.emailNote || '').trim(),   // optional line the agent wrote for the stylist email
   };
   return { pull, unmatched };
 }
@@ -13728,6 +13731,15 @@ function agentRunAction(key, action, chatBody) {
   const sub = [pull.pullType, pull.publication, pull.returnDate ? 'return ' + pull.returnDate : ''].filter(Boolean).join(' · ');
   const warn = unmatched.length
     ? `<div style="font-size:10px;color:var(--amber);margin-top:8px">Not in your catalog, so left off: ${escHtml(unmatched.join(', '))}. Add them by hand if needed.</div>` : '';
+  // Email affordance. If the agent was asked to draft the stylist email and we
+  // have an address, offer it prominently; if asked but no address, say so.
+  const wantsEmail = !!action.draftEmail;
+  let emailBtn = '', emailHint = '';
+  if (pull.email) {
+    emailBtn = '<button class="ag-btn ag-btn-sm ' + (wantsEmail ? 'ag-btn-primary' : 'ag-btn-ghost') + '" onclick="agentDraftPullEmail(\'' + pull.id + '\')">Draft email</button>';
+  } else if (wantsEmail) {
+    emailHint = '<div style="font-size:10px;color:var(--muted);margin-top:8px">Add the stylist’s email on the pull and I’ll draft the message.</div>';
+  }
   const card = document.createElement('div');
   card.className = 'ag-msg from-agent';
   card.innerHTML =
@@ -13737,15 +13749,45 @@ function agentRunAction(key, action, chatBody) {
       '<div style="font-size:13px;font-weight:700">' + escHtml(pull.client) + '</div>' +
       (sub ? '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + escHtml(sub) + '</div>' : '') +
       '<div style="font-size:11px;margin-top:7px">' + escHtml(itemsLine) + '</div>' +
-      warn +
-      '<div style="display:flex;gap:8px;margin-top:12px">' +
-        '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="cpGoto(\'pr\');prOpenDetail(\'' + pull.id + '\')">Open pull</button>' +
+      warn + emailHint +
+      '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
+        '<button class="ag-btn ag-btn-sm ' + (wantsEmail && pull.email ? 'ag-btn-ghost' : 'ag-btn-primary') + '" onclick="cpGoto(\'pr\');prOpenDetail(\'' + pull.id + '\')">Open pull</button>' +
+        emailBtn +
         '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoPull(\'' + pull.id + '\', this)">Undo</button>' +
       '</div>' +
     '</div>';
   chatBody.appendChild(card);
   chatBody.scrollTop = chatBody.scrollHeight;
 }
+
+// Draft a return/pickup email to the stylist for an agent-created pull. Opens
+// the user's mail client with a prepared message (never sends on its own).
+// Uses any note the agent wrote (pull.emailNote) as the opening line.
+window.agentDraftPullEmail = function (pullId) {
+  const pull = (window.STATE && STATE.prPulls || []).find(p => p.id === pullId);
+  if (!pull) { toast('Pull not found', 'warn'); return; }
+  if (!pull.email) { toast('No contact email on this pull — open it and add one first', 'warn'); return; }
+  const items = (pull.items || []).map(i =>
+    `• ${i.styleName || i.styleCode || 'Item'}${i.styleCode ? ' (' + i.styleCode + ')' : ''}` +
+    `${i.size ? ' — ' + i.size : ''}${i.color ? ' / ' + i.color : ''}`).join('\n');
+  const subject = `VENIA pull — ${pull.publication || pull.client} (${pull.invoiceNo})`;
+  const opener = pull.emailNote
+    ? pull.emailNote
+    : `Here are the details for your VENIA pull${pull.publication ? ' for ' + pull.publication : ''}.`;
+  const body =
+    `Hi ${pull.contact || pull.client || ''},\n\n` +
+    opener + '\n\n' +
+    (pull.pullDate  ? `Pickup / ship: ${pull.pullDate}\n` : '') +
+    (pull.returnDate ? `Return by: ${pull.returnDate}\n` : '') +
+    `\nItems (${(pull.items || []).length}):\n${items || '—'}\n\n` +
+    `Please keep everything in original condition — unreturned or damaged samples are invoiced at full retail. The full pull sheet with terms is available on request.\n\n` +
+    `Thank you,\nVENIA Collection\nveniacollection.com`;
+  const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const a = document.createElement('a');
+  a.href = href; a.style.display = 'none';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast(`✉ Email drafted to ${pull.email}`);
+};
 
 // A plain agent note bubble (used when an action needs more info).
 function appendAgentNote(chatBody, text) {
