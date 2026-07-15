@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '87';
+  const BUILD = '88';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18362,10 +18362,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (e.cancelable) e.preventDefault();
     e.stopPropagation();
     var rowEl = document.querySelector('#dump-scroll .dump-row[data-id="' + id + '"]'); if (!rowEl) return;
-    dnd = { id: id, el: rowEl, startY: e.clientY, moved: false };
+    rowEl.style.transform = '';   // measure the natural (untransformed) top
+    var natTop = rowEl.getBoundingClientRect().top;
+    // The element after the last row (the Map/Plan actions block) — the anchor we
+    // insert before when the finger drops past the end, so a row can't slip below
+    // the action buttons.
+    var allRows = rowEl.parentNode.querySelectorAll('.dump-row');
+    var tail = allRows.length ? allRows[allRows.length - 1].nextElementSibling : null;
+    dnd = { id: id, el: rowEl, grabY: e.clientY - natTop, startY: e.clientY, tail: tail, moved: false };
     rowEl.classList.add('dump-drag-active');
     rowEl.style.transition = 'none'; rowEl.style.position = 'relative'; rowEl.style.zIndex = '50';
-    rowEl.style.opacity = '.96'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
+    rowEl.style.willChange = 'transform'; rowEl.style.opacity = '.97'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
     document.body.classList.add('dump-dragging');
     try { e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); } catch(_){}
     document.addEventListener('pointermove', dumpDragMove, { passive: false });
@@ -18373,24 +18380,33 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.addEventListener('pointercancel', dumpDragEnd);
     document.addEventListener('touchmove', dumpTouchBlock, { passive: false });
   };
+  // Reorder only when the finger crosses into a new slot, then pin the row to
+  // the finger by transforming it against its *natural* position — so the row
+  // never jumps and the siblings just reflow once behind it (no per-frame churn).
   function dumpDragMove(e){
     if (!dnd) return;
     if (e.cancelable) e.preventDefault();
-    dnd.moved = true;
-    var dy = e.clientY - dnd.startY;
-    dnd.el.style.transform = 'translateY(' + dy + 'px)';
-    var rows = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row'));
-    var dr = dnd.el.getBoundingClientRect(); var midY = dr.top + dr.height / 2;
+    if (Math.abs(e.clientY - dnd.startY) > 3) dnd.moved = true;
+    var fingerY = e.clientY;
+    var container = dnd.el.parentNode;
+    var rows = Array.prototype.slice.call(container.querySelectorAll('.dump-row'));
+    // Find the first row (other than the dragged one) whose midpoint is below the
+    // finger — the dragged row belongs just before it (or at the end).
+    var ref = null;
     for (var k = 0; k < rows.length; k++){
       var r = rows[k]; if (r === dnd.el) continue;
       var rect = r.getBoundingClientRect();
-      if (midY > rect.top && midY < rect.bottom){
-        if (midY < rect.top + rect.height / 2) r.parentNode.insertBefore(dnd.el, r);
-        else r.parentNode.insertBefore(dnd.el, r.nextSibling);
-        dnd.startY = e.clientY; dnd.el.style.transform = 'translateY(0px)';
-        break;
-      }
+      if (fingerY < rect.top + rect.height / 2){ ref = r; break; }
     }
+    if (ref === null) ref = dnd.tail;   // past the last row → sit just before the actions block
+    // Only touch the DOM if the slot actually changed.
+    if (ref !== dnd.el.nextElementSibling){
+      container.insertBefore(dnd.el, ref);
+    }
+    // Pin: transform = where the finger wants the top − where it naturally sits.
+    dnd.el.style.transform = '';
+    var natTop = dnd.el.getBoundingClientRect().top;
+    dnd.el.style.transform = 'translateY(' + (fingerY - dnd.grabY - natTop) + 'px)';
   }
   function dumpDragEnd(){
     document.removeEventListener('pointermove', dumpDragMove, { passive: false });
@@ -18401,7 +18417,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!dnd) return;
     var el = dnd.el, moved = dnd.moved;
     el.classList.remove('dump-drag-active');
-    el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = '';
+    el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = ''; el.style.willChange = '';
     dnd = null;
     if (!moved) return;   // a tap on the grip that never moved — nothing to reorder
     var ids = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row')).map(function(r){ return r.getAttribute('data-id'); });
