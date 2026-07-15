@@ -3,16 +3,25 @@
 // configuration → Environment variables), so it is never exposed in the
 // browser. The app calls /.netlify/functions/claude with the same body it
 // would send to Anthropic directly.
+//
 // Only VENIA's own site may use this relay. A browser always sends an Origin
 // header on these POSTs, so a request whose Origin is present but not ours is a
-// third-party site trying to spend the Anthropic budget — reject it. (Requests
-// with no Origin at all are left to pass for now; the strong lock is the
-// signed-in-user check that lands with the database work.)
+// third-party site trying to spend the Anthropic budget — reject it.
 const ALLOWED_ORIGINS = new Set([
   'https://creator.veniacollection.com',
   'https://venia-creator.netlify.app',
   'https://main--venia-creator.netlify.app',
 ]);
+function corsHeaders(req) {
+  const o = req.headers.get('origin');
+  const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';
+  return {
+    'Access-Control-Allow-Origin': allow,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+}
 function originAllowed(req) {
   const o = req.headers.get('origin');
   if (!o) return true;
@@ -20,18 +29,23 @@ function originAllowed(req) {
 }
 
 export default async (req) => {
+  const cors = corsHeaders(req);
+  // Preflight — answer it so a cross-origin POST (e.g. when the app is opened on
+  // the .netlify.app address) is allowed through instead of failing.
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (req.method !== 'POST') {
-    return new Response('Method Not Allowed', { status: 405 });
+    return new Response(JSON.stringify({ error: { message: 'Method Not Allowed — expected POST' } }),
+      { status: 405, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
   if (!originAllowed(req)) {
     return new Response(JSON.stringify({ error: { message: 'Forbidden' } }),
-      { status: 403, headers: { 'Content-Type': 'application/json' } });
+      { status: 403, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
     return new Response(
       JSON.stringify({ error: { message: 'ANTHROPIC_API_KEY is not set on this Netlify site' } }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } }
     );
   }
 
@@ -40,7 +54,7 @@ export default async (req) => {
   let payload;
   try { payload = JSON.parse(await req.text()); } catch (e) {
     return new Response(JSON.stringify({ error: { message: 'Bad JSON' } }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } });
+      { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
   if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 4096) payload.max_tokens = 4096;
 
@@ -55,6 +69,6 @@ export default async (req) => {
   });
   return new Response(await r.text(), {
     status: r.status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...cors, 'Content-Type': 'application/json' },
   });
 };

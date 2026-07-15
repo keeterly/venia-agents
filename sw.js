@@ -1,7 +1,7 @@
 /* VENIA Control Center — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v47';
+const CACHE = 'venia-shell-v48';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -30,6 +30,7 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;                       // leave API POST/PATCH alone
   const url = new URL(req.url);
+  if (url.pathname.startsWith('/.netlify/')) return;      // never touch serverless functions
   if (url.origin !== self.location.origin) return;        // don't cache APIs or fonts
 
   // App shell: network-first so updates land when online, cache when offline.
