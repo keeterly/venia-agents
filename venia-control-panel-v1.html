@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '46';
+  const BUILD = '47';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17262,24 +17262,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var c = sb();
     if (!c){ shareFail('Connection unavailable', 'Could not reach the VENIA workspace. Check your connection and reload.'); return; }
     try {
-      var sr = await c.from('venia_shares').select('*').eq('token', token).maybeSingle();
-      if (sr.error || !sr.data || sr.data.revoked){
-        shareFail('Link no longer active', 'This tech pack link has been revoked or does not exist. Ask VENIA for a fresh link.');
-        return;
+      var s = null, upd = '';
+
+      // Preferred path: the secure server function returns ONLY this style's
+      // data using the service-role key. This keeps working after the database
+      // is locked, and the factory never receives any other styles.
+      try {
+        var fn = await c.functions.invoke('factory-share', { body: { token: token } });
+        var fd = fn && fn.data;
+        if (!fn.error && fd && fd.style){
+          s = fd.style;
+          STATE.styles = [s]; STATE.materials = fd.materials||[]; STATE.vendors = fd.vendors||[];
+          STATE.bom = fd.bom||{}; STATE.pom = fd.pom||{};
+          upd = fd.updated_at ? new Date(fd.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+        } else if (fd && fd.error === 'revoked'){
+          shareFail('Link no longer active', 'This tech pack link has been revoked or does not exist. Ask VENIA for a fresh link.');
+          return;
+        }
+      } catch(_){ /* function unavailable — fall back to a direct read below */ }
+
+      // Fallback: direct read (works while the database is open).
+      if (!s){
+        var sr = await c.from('venia_shares').select('*').eq('token', token).maybeSingle();
+        if (sr.error || !sr.data || sr.data.revoked){
+          shareFail('Link no longer active', 'This tech pack link has been revoked or does not exist. Ask VENIA for a fresh link.');
+          return;
+        }
+        var ws = await c.from('venia_workspace').select('data, updated_at').eq('id','main').maybeSingle();
+        var d = ws.data && ws.data.data;
+        if (!d || !Array.isArray(d.styles)){ shareFail('Tech pack unavailable', 'The workspace has no published data yet.'); return; }
+        STATE.styles = d.styles; STATE.materials = d.materials||[]; STATE.vendors = d.vendors||[];
+        STATE.bom = d.bom||{}; STATE.pom = d.pom||{};
+        s = STATE.styles.find(function(x){ return x.id === sr.data.style_id; });
+        upd = ws.data.updated_at ? new Date(ws.data.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
       }
-      var ws = await c.from('venia_workspace').select('data, updated_at').eq('id','main').maybeSingle();
-      var d = ws.data && ws.data.data;
-      if (!d || !Array.isArray(d.styles)){ shareFail('Tech pack unavailable', 'The workspace has no published data yet.'); return; }
-      STATE.styles = d.styles; STATE.materials = d.materials||[]; STATE.vendors = d.vendors||[];
-      STATE.bom = d.bom||{}; STATE.pom = d.pom||{};
-      var s = STATE.styles.find(function(x){ return x.id === sr.data.style_id; });
+
       if (!s){ shareFail('Style not found', 'This style may have been removed.'); return; }
       goTo('techpack');
       TP_STYLE_ID = s.id; TP_MODE = 'print';
       renderTechPackPrint(s);
-      // Banner above the document: what this is + freshness. The updated_at is
-      // the workspace save time — i.e. "current as of".
-      var upd = ws.data.updated_at ? new Date(ws.data.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+      // Banner above the document: what this is + freshness (workspace save time).
       var bar = document.createElement('div');
       bar.id = 'share-banner';
       bar.innerHTML =
