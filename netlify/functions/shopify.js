@@ -59,7 +59,9 @@ export default async (req) => {
   const action = body.action;
 
   // ping lets the UI show a "Connected" state without ever revealing the token.
-  if (action === 'ping') return json({ configured: !!(domain && token) }, 200, cors);
+  // The build marker forces a fresh function bundle so env-var changes are
+  // captured (esbuild strips comments, so a real output change is needed).
+  if (action === 'ping') return json({ configured: !!(domain && token), build: '2026-07-15b' }, 200, cors);
 
   if (!domain || !token) {
     return json({ error: 'Shopify not configured — set SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN in Netlify environment variables.' }, 400, cors);
