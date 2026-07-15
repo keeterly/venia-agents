@@ -72,3 +72,9 @@ export default async (req) => {
     headers: { ...cors, 'Content-Type': 'application/json' },
   });
 };
+
+// Serve the function at a clean, friendly path in addition to the default
+// /.netlify/functions/claude. A dedicated /api/claude path can't be shadowed by
+// the site's "/" rewrite or the root static publish, which is what was causing
+// POSTs to be rejected with a bare 405 before they reached this code.
+export const config = { path: ['/api/claude', '/.netlify/functions/claude'] };

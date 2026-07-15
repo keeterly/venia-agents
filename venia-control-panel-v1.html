@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '48';
+  const BUILD = '49';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11284,29 +11284,31 @@ async function callClaude(system, userMsg, history=[]) {
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
   const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 2000, system, messages: msgs });
 
-  // Proxy-first: the Netlify function holds a current key server-side, so this
-  // is both the secure path AND the reliable one. (Previously a browser-stored
-  // key took priority — if that key was ever rotated/revoked, every AI call
-  // failed even though the server key was fine. That was the "Could not
-  // organize" bug.) We only fall back to a stored browser key if the proxy
-  // isn't there at all, e.g. opening the file locally outside Netlify.
-  const CANON = 'https://creator.veniacollection.com/.netlify/functions/claude';
+  // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
+  // path that can't be shadowed by the site's "/" rewrite. We try the relative
+  // path, then the canonical absolute URL (in case the app was opened on a
+  // redirecting address that flips POST→GET into a 405), and finally — if the
+  // proxy fails for ANY reason and a browser key is stored — a direct call, so
+  // the app keeps working even while the server route is misbehaving.
+  const PATHS = ['/api/claude', '/.netlify/functions/claude'];
+  const CANON = 'https://creator.veniacollection.com';
   async function post(url){
     try { return await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }); }
     catch(e){ return null; }
   }
-  let resp = await post('/.netlify/functions/claude');
-  // If the app was opened on a URL that Netlify redirects (e.g. the .netlify.app
-  // address or a non-canonical domain), the browser turns our POST into a GET
-  // while following the redirect and the function replies 405. Retry straight at
-  // the canonical address, which doesn't redirect.
-  if (resp && (resp.status === 405 || resp.redirected) && location.origin !== 'https://creator.veniacollection.com') {
-    const r2 = await post(CANON);
-    if (r2) resp = r2;
+  let resp = null;
+  for (const path of PATHS) {
+    resp = await post(path);
+    if (resp && (resp.status === 405 || resp.status === 404 || resp.redirected) && location.origin !== CANON) {
+      resp = (await post(CANON + path)) || resp;   // retry the canonical origin
+    }
+    if (resp && resp.ok) break;                     // got a good answer — stop
   }
 
-  if ((!resp || resp.status === 404) && key) {
-    resp = await fetch('https://api.anthropic.com/v1/messages', {
+  // Direct fallback with a browser-stored key — used only if every proxy attempt
+  // failed. This is what makes "set your key in Settings" an instant unblock.
+  if ((!resp || !resp.ok) && key) {
+    const authed = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -11315,11 +11317,12 @@ async function callClaude(system, userMsg, history=[]) {
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body,
-    });
+    }).catch(() => null);
+    if (authed) resp = authed;
   }
 
   if (!resp) throw new Error('No connection to Eni — check your internet and try again.');
-  if (resp.status === 404) throw new Error('Eni isn\'t connected on this site yet — set ANTHROPIC_API_KEY on Netlify, or add a key in Settings → API Keys.');
+  if (resp.status === 404) throw new Error('Eni isn\'t connected yet — add your Anthropic key in Settings → API Keys, or set ANTHROPIC_API_KEY on Netlify.');
   if (!resp.ok) {
     let detail = resp.statusText || ('HTTP ' + resp.status);
     try { const e = await resp.json(); if (e && e.error && e.error.message) detail = e.error.message; } catch(_){}
