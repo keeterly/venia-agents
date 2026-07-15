@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '85';
+  const BUILD = '86';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18348,6 +18348,59 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpComposer = function(focused){
     var hint = document.getElementById('dump-hint'); if (hint) hint.style.display = focused ? 'block' : 'none';
   };
+
+  // ── Inbox drag-to-reorder ────────────────────────────────────────────────
+  // A grip handle on each row starts a pointer drag; rows re-flow live and the
+  // new order is committed to STATE.dump on release (open items reorder; done
+  // items keep their place at the end).
+  var dnd = null;
+  window.dumpDragStart = function(e, id){
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    var rowEl = document.querySelector('#dump-scroll .dump-row[data-id="' + id + '"]'); if (!rowEl) return;
+    dnd = { id: id, el: rowEl, startY: e.clientY };
+    rowEl.style.transition = 'none'; rowEl.style.position = 'relative'; rowEl.style.zIndex = '50';
+    rowEl.style.opacity = '.94'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
+    document.body.style.userSelect = 'none';
+    try { e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId); } catch(_){}
+    document.addEventListener('pointermove', dumpDragMove);
+    document.addEventListener('pointerup', dumpDragEnd);
+    document.addEventListener('pointercancel', dumpDragEnd);
+  };
+  function dumpDragMove(e){
+    if (!dnd) return;
+    var dy = e.clientY - dnd.startY;
+    dnd.el.style.transform = 'translateY(' + dy + 'px)';
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row'));
+    var dr = dnd.el.getBoundingClientRect(); var midY = dr.top + dr.height / 2;
+    for (var k = 0; k < rows.length; k++){
+      var r = rows[k]; if (r === dnd.el) continue;
+      var rect = r.getBoundingClientRect();
+      if (midY > rect.top && midY < rect.bottom){
+        if (midY < rect.top + rect.height / 2) r.parentNode.insertBefore(dnd.el, r);
+        else r.parentNode.insertBefore(dnd.el, r.nextSibling);
+        dnd.startY = e.clientY; dnd.el.style.transform = 'translateY(0px)';
+        break;
+      }
+    }
+  }
+  function dumpDragEnd(){
+    document.removeEventListener('pointermove', dumpDragMove);
+    document.removeEventListener('pointerup', dumpDragEnd);
+    document.removeEventListener('pointercancel', dumpDragEnd);
+    document.body.style.userSelect = '';
+    if (!dnd) return;
+    var el = dnd.el; el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = '';
+    var ids = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row')).map(function(r){ return r.getAttribute('data-id'); });
+    var byId = {}; items().forEach(function(it){ byId[it.id] = it; });
+    var open = []; ids.forEach(function(id){ if (byId[id]) open.push(byId[id]); });
+    var done = items().filter(function(it){ return it.done; });
+    STATE.dump = open.concat(done);
+    dnd = null; save(); render();
+  }
+  var dumpGrip = function(id){
+    return '<button class="dump-grip" onpointerdown="dumpDragStart(event,\'' + id + '\')" title="Drag to reorder" aria-label="Reorder" style="background:none;border:none;color:var(--border-mid);font-size:15px;cursor:grab;padding:0 1px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>';
+  };
   window.dumpToggle = function(id){
     var it = items().find(function(i){ return i.id === id; }); if (!it) return;
     it.done = !it.done;
@@ -19280,7 +19333,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.innerHTML =
       '<div style="padding:calc(12px + var(--sat,0px)) 14px 12px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;align-items:center;gap:10px;flex-shrink:0">'
       +   '<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(g.t || 'Plan') + '</div>'
-      +   '<div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">Drag nodes · pinch or scroll to zoom · tap a node to expand</div></div>'
+      +   '<div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">Drag nodes · pinch to zoom · tap a node to edit, add, expand</div></div>'
+      +   '<button onclick="dumpInfoModal(\'' + g.id + '\')" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:34px;padding:0 13px;border-radius:17px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">＋ Info</button>'
       +   '<button onclick="dumpMapFullClose()" aria-label="Close" style="background:rgba(255,255,255,.14);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0">✕</button>'
       + '</div>'
       + '<div id="fmf-viewport" style="flex:1;position:relative;overflow:hidden;touch-action:none;background:var(--bg-off)">'
@@ -19395,34 +19449,126 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     e.stopPropagation();
     fmMenu(id);
   };
+  function fmShell(){ var ov = document.getElementById('dump-fullmap'); return ov; }
   function fmMenu(id){
     fmMenuClose();
     var g = fmGroup(); var n = fm.nodes.find(function(x){ return x.id === id; }); if (!g || !n) return;
+    // Actions vary by node kind: steps check off, ideas promote to actions,
+    // branches toggle; everything can be renamed, extended, or deleted.
     var acts = '';
-    if (n.kind === 'leaf') acts += fmAct('fmToggleLeaf(\'' + id + '\')', n.done ? '↺ Mark undone' : '✓ Mark done');
-    acts += fmAct('fmExpandNode(\'' + id + '\')', '✦ Expand ideas');
+    if (n.kind === 'leaf') acts += fmAct('fmToggleLeaf(\'' + id + '\')', n.done ? '↺ Undone' : '✓ Done');
+    if (n.kind === 'extra') acts += fmActGold('fmPromoteIdea(\'' + id + '\')', '→ Turn into action');
+    acts += fmAct('fmRenamePrompt(\'' + id + '\')', '✎ Rename');
+    if (n.kind === 'branch' || n.kind === 'center') acts += fmAct('fmAddStep(\'' + id + '\')', '＋ Add step');
+    else acts += fmAct('fmAddIdea(\'' + id + '\')', '＋ Add idea');
+    acts += fmAct('fmExpandNode(\'' + id + '\')', '✦ Expand');
     if (n.kind === 'branch') acts += fmAct('dumpWebBranch(\'' + g.id + '\',' + n.bi + ');fmRenderCanvas()', '✓ Toggle branch');
-    if (n.kind === 'extra') acts += fmAct('fmRemoveExtra(\'' + id + '\')', '✕ Remove');
+    if (n.kind !== 'center') acts += fmActMuted('fmDeleteNode(\'' + id + '\')', '🗑 Delete');
     var bar = document.createElement('div');
     bar.id = 'fmf-menu';
     bar.style.cssText = 'position:absolute;left:12px;right:12px;bottom:calc(18px + var(--sab,0px));background:var(--bg);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 34px rgba(0,0,0,.22);padding:12px;z-index:8';
     bar.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><div style="flex:1;min-width:0;font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(n.label) + '</div>'
       + '<button onclick="fmMenuClose()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer">✕</button></div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap">' + acts + '</div>';
-    var ov = document.getElementById('dump-fullmap'); if (ov) ov.appendChild(bar);
+    var ov = fmShell(); if (ov) ov.appendChild(bar);
   }
   window.fmMenuClose = function(){ var m = document.getElementById('fmf-menu'); if (m) m.remove(); };
   function fmAct(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-ghost btn-sm" style="border-radius:9px">' + label + '</button>'; }
+  function fmActGold(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-gold btn-sm" style="border-radius:9px">' + label + '</button>'; }
+  function fmActMuted(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-ghost btn-sm" style="border-radius:9px;color:var(--muted)">' + label + '</button>'; }
   window.fmToggleLeaf = function(id){
     var g = fmGroup(); if (!g) return;
     var c = (g.children || []).find(function(x){ return x.id === id; }); if (!c) return;
     c.done = !c.done; syncGroupDone(g); save(); fmMenuClose(); fmRenderCanvas();
   };
-  window.fmRemoveExtra = function(id){
-    var g = fmGroup(); if (!g || !g.web || !g.web.extra) return;
-    g.web.extra = g.web.extra.filter(function(x){ return x.id !== id; });
-    if (g.web.pos) delete g.web.pos[id];
+  // Rename any node in place (center → plan title, branch → label, leaf → step,
+  // idea → idea text).
+  window.fmRenamePrompt = function(id){
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    var bar = document.getElementById('fmf-menu'); if (!bar){ fmMenu(id); bar = document.getElementById('fmf-menu'); if (!bar) return; }
+    bar.innerHTML = '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px">Rename</div>'
+      + '<textarea id="fmf-rename" rows="2" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();fmRenameSave(\'' + id + '\')}else if(event.key===\'Escape\'){fmMenuClose()}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px;border:1px solid var(--ink);border-radius:10px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;margin-bottom:10px">' + esc(n.label) + '</textarea>'
+      + '<div style="display:flex;gap:8px"><button onclick="fmRenameSave(\'' + id + '\')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px">Save</button><button onclick="fmMenuClose()" class="btn btn-ghost btn-sm" style="border-radius:9px">Cancel</button></div>';
+    setTimeout(function(){ var t = document.getElementById('fmf-rename'); if (t){ t.focus(); try { t.setSelectionRange(t.value.length, t.value.length); } catch(_){} } }, 60);
+  };
+  window.fmRenameSave = function(id){
+    var g = fmGroup(); var t = document.getElementById('fmf-rename'); if (!g || !t) return;
+    var v = t.value.trim(); if (!v){ fmMenuClose(); return; }
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n){ fmMenuClose(); return; }
+    if (n.kind === 'center') g.t = v;
+    else if (n.kind === 'branch' && g.web && g.web.branches[n.bi]) g.web.branches[n.bi].label = v;
+    else if (n.kind === 'leaf'){ var c = g.children.find(function(x){ return x.id === id; }); if (c) c.t = v; }
+    else if (n.kind === 'extra'){ var e = (g.web && g.web.extra || []).find(function(x){ return x.id === id; }); if (e) e.t = v; }
     save(); fmMenuClose(); fmRenderCanvas();
+  };
+  // Add a real checkable STEP under a branch or the hub.
+  window.fmAddStep = function(id){
+    var g = fmGroup(); if (!g) return;
+    var c = { id: uid(), t: 'New step', done: false };
+    g.children.push(c);
+    if (!g.web) g.web = { branches: [] };
+    if (g.web.branches && g.web.branches.length){
+      var n = fm.nodes.find(function(x){ return x.id === id; });
+      var bi = (n && n.kind === 'branch') ? n.bi : 0;
+      (g.web.branches[bi] || g.web.branches[0]).ids.push(c.id);
+    }
+    if (!g.web.pos) g.web.pos = {};
+    var base = fm.nodes.find(function(x){ return x.id === id; }) || { x: CC, y: CC };
+    g.web.pos[c.id] = { x: Math.round(base.x + 140), y: Math.round(base.y + 120) };
+    g.done = false; g.doneAt = null;
+    save(); fmRenderCanvas(); fmMenu(c.id); fmRenamePrompt(c.id);
+  };
+  // Add a free-form IDEA node (map-only) under any node.
+  window.fmAddIdea = function(id){
+    var g = fmGroup(); if (!g) return;
+    if (!g.web) g.web = { branches: [] };
+    if (!g.web.extra) g.web.extra = [];
+    if (!g.web.pos) g.web.pos = {};
+    var eid = uid();
+    g.web.extra.push({ id: eid, parentId: id, t: 'New idea' });
+    var base = fm.nodes.find(function(x){ return x.id === id; }) || { x: CC, y: CC };
+    g.web.pos[eid] = { x: Math.round(base.x + 150), y: Math.round(base.y + 110) };
+    save(); fmRenderCanvas(); fmMenu(eid); fmRenamePrompt(eid);
+  };
+  // Delete a node: a step, an idea, or a whole branch (with its steps).
+  window.fmDeleteNode = function(id){
+    var g = fmGroup(); if (!g) return;
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    if (n.kind === 'center'){ showToast('The centre is the plan itself','info'); return; }
+    if (n.kind === 'leaf'){
+      g.children = g.children.filter(function(c){ return c.id !== id; });
+      (g.web && g.web.branches || []).forEach(function(b){ b.ids = (b.ids || []).filter(function(x){ return x !== id; }); });
+    } else if (n.kind === 'branch'){
+      var br = g.web.branches[n.bi]; var ids = (br && br.ids) || [];
+      if (ids.length && !confirm('Delete "' + n.label + '" and its ' + ids.length + ' step' + (ids.length === 1 ? '' : 's') + '?')) return;
+      g.children = g.children.filter(function(c){ return ids.indexOf(c.id) < 0; });
+      g.web.branches.splice(n.bi, 1);
+    } else if (n.kind === 'extra'){
+      g.web.extra = (g.web.extra || []).filter(function(e){ return e.id !== id; });
+    }
+    if (g.web && g.web.pos) delete g.web.pos[id];
+    syncGroupDone(g); save(); fmMenuClose(); fmRenderCanvas();
+  };
+  window.fmRemoveExtra = function(id){ window.fmDeleteNode(id); };
+  // Turn an IDEA node into a real, checkable action step in the plan.
+  window.fmPromoteIdea = function(id){
+    var g = fmGroup(); if (!g) return;
+    var ex = (g.web && g.web.extra || []).find(function(e){ return e.id === id; }); if (!ex) return;
+    var c = { id: uid(), t: ex.t, done: false };
+    g.children.push(c);
+    if (g.web.branches && g.web.branches.length){
+      var targetBi = -1;
+      g.web.branches.forEach(function(b, bi){ if ('b' + bi === ex.parentId || (b.ids || []).indexOf(ex.parentId) >= 0) targetBi = bi; });
+      if (targetBi >= 0) g.web.branches[targetBi].ids.push(c.id);
+      else { var ib = g.web.branches.find(function(b){ return b.label === 'Ideas'; }); if (ib) ib.ids.push(c.id); else g.web.branches.push({ label: 'Ideas', ids: [c.id] }); }
+    }
+    if (!g.web.pos) g.web.pos = {};
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (n) g.web.pos[c.id] = { x: Math.round(n.x), y: Math.round(n.y) };
+    g.web.extra = g.web.extra.filter(function(e){ return e.id !== id; });
+    delete g.web.pos[id];
+    g.done = false; g.doneAt = null;
+    syncGroupDone(g); save(); fmMenuClose(); fmRenderCanvas();
+    showToast('✓ Turned into an action step','success');
   };
   window.fmExpandNode = async function(id){
     var g = fmGroup(); if (!g) return;
@@ -19462,6 +19608,81 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   };
 
+  // ── Dump info → reshape the whole map ────────────────────────────────────
+  // The founder dumps new context (a constraint, a decision, extra facts) and
+  // Eni reprocesses the ENTIRE plan around it — adding, dropping, merging,
+  // renaming and reorganising steps and branches. Checked steps that survive
+  // keep their done state (matched by text).
+  window.dumpInfoModal = function(gid){
+    var g = items().find(function(i){ return i.id === gid && isGroup(i); }); if (!g) return;
+    var ex = document.getElementById('dump-info-modal'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-info-modal';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
+      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">Add info &amp; reshape</div>'
+      + '<div style="font-size:14px;font-weight:700;color:var(--ink);margin-bottom:4px">' + esc(g.t || 'Plan') + '</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Dump anything new — a constraint, a decision, extra context. Eni reworks the whole map around it.</div>'
+      + '<textarea id="dump-info-input" rows="4" placeholder="e.g. We only have 6 weeks and a $15k budget — cut anything non-essential and front-load the lender outreach" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){dumpReprocessMap(\'' + gid + '\')}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px"></textarea>'
+      + '<div style="display:flex;gap:8px">'
+      +   '<button onclick="dumpReprocessMap(\'' + gid + '\')" class="btn btn-gold dump-reshape-btn" style="flex:1;min-height:46px;border-radius:11px">✦ Reshape map</button>'
+      +   '<button onclick="var o=document.getElementById(\'dump-info-modal\');if(o)o.remove()" class="btn btn-ghost" style="min-height:46px;border-radius:11px">Cancel</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+    setTimeout(function(){ var t = document.getElementById('dump-info-input'); if (t) t.focus(); }, 100);
+  };
+  window.dumpReprocessMap = async function(gid){
+    var g = items().find(function(i){ return i.id === gid && isGroup(i); }); if (!g) return;
+    var inp = document.getElementById('dump-info-input'); var info = (inp && inp.value || '').trim();
+    if (!info){ showToast('Add some info first','info'); return; }
+    var btn = document.querySelector('.dump-reshape-btn'); if (btn){ btn.disabled = true; btn.textContent = '◐ Reshaping…'; }
+    try {
+      var curSteps = (g.children || []).map(function(c){ return '- [' + (c.done ? 'x' : ' ') + '] ' + c.t; }).join('\n');
+      var curBr = (g.web && g.web.branches || []).map(function(b){
+        var names = (b.ids || []).map(function(id){ var c = g.children.find(function(x){ return x.id === id; }); return c ? c.t : null; }).filter(Boolean);
+        return '  • ' + b.label + ': ' + names.join('; ');
+      }).join('\n');
+      var extras = (g.web && g.web.extra || []).map(function(e){ return '- ' + e.t; }).join('\n');
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'Below is an existing plan with its mind-map structure, plus NEW information the founder just added. '
+        + 'Reprocess the ENTIRE plan to reflect the latest thinking: add, remove, merge, rename or reorder steps and branches as needed, and honor the new info (constraints, decisions, scope changes). Keep what still applies. '
+        + 'Use 4–10 steps and 2–4 branches. Preserve the wording of steps you keep so their progress carries over.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "title": "short plan title", "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
+      var user = 'Current plan title: ' + g.t + '\nCurrent steps:\n' + (curSteps || '(none)') + '\nCurrent branches:\n' + (curBr || '(none)') + (extras ? '\nExtra idea notes on the map:\n' + extras : '') + '\n\nNEW INFO:\n' + info + '\n\n' + plmContext();
+      var out = await callClaude(sys, user);
+      if (!out || !out.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(out);
+      var steps = (data && Array.isArray(data.steps)) ? data.steps.filter(Boolean).map(String) : null;
+      if (!steps || !steps.length) throw new Error('Eni didn\'t return steps');
+      var oldDone = {}; (g.children || []).forEach(function(c){ oldDone[norm(c.t)] = c.done; });
+      var kids = steps.map(function(s){ return { id: uid(), t: s, done: !!oldDone[norm(s)] }; });
+      var byNorm = {}; kids.forEach(function(c){ var k = norm(c.t); if (byNorm[k] == null) byNorm[k] = c.id; });
+      var used = {};
+      var brs = (data && Array.isArray(data.branches)) ? data.branches : [];
+      var branches = brs.map(function(b){
+        var strs = (b && Array.isArray(b.steps)) ? b.steps.filter(Boolean).map(String) : [];
+        var ids = [];
+        strs.forEach(function(str){ var cid = byNorm[norm(str)]; if (cid && !used[cid]){ used[cid] = true; ids.push(cid); } });
+        return { label: String((b && b.label) || 'Branch'), ids: ids };
+      }).filter(function(b){ return b.ids.length; });
+      var leftover = kids.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
+      if (leftover.length) branches.push({ label: 'Steps', ids: leftover });
+      if (data.title && String(data.title).trim()) g.t = String(data.title).trim();
+      g.children = kids;
+      g.web = branches.length ? { branches: branches, at: new Date().toISOString() } : undefined;   // fresh structure — drop stale positions/extras
+      syncGroupDone(g);
+      save();
+      var o = document.getElementById('dump-info-modal'); if (o) o.remove();
+      showToast('✦ Map reshaped','success');
+      logActivity('Mind map reshaped with new info — ' + (g.t || '').slice(0, 40));
+      if (document.getElementById('dump-fullmap')){ fm.gid = gid; fmRenderCanvas(); fmFit(); } else { render(); }
+    } catch(e){
+      showToast('Could not reshape — ' + String(e.message || e), 'error');
+      var b = document.querySelector('.dump-reshape-btn'); if (b){ b.disabled = false; b.textContent = '✦ Reshape map'; }
+    }
+  };
+
   function mapHTML(){
     migrateMapIfNeeded();
     var groups = (STATE.dumpMap && STATE.dumpMap.groups) || [];
@@ -19493,12 +19714,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '</div>';
     }
 
-    var areaCount = plans.length + shown.length + (unsorted.length ? 1 : 0);
-    h += '<div style="display:flex;flex-direction:column;align-items:center;margin:2px 0 4px">'
-      + '<div style="font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:9px">Your thinking, grouped</div>'
-      + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + areaCount + ' area' + (areaCount === 1 ? '' : 's') + '</div>'
-      + '</div>';
-
     // Plan WEBS first — each dumped plan drawn as a node-link mind map. This is
     // the visual twin of the linear Inbox card: same live steps, seen as a web.
     plans.forEach(function(it){
@@ -19514,9 +19729,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '<div onclick="dumpMapFull(\'' + it.id + '\')" title="Open fullscreen — drag, zoom, expand" style="padding:14px 10px 6px;overflow-x:auto;cursor:pointer">' + planWebSVG(it) + '</div>'
         + '<div style="display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px 12px">'
         +   '<button onclick="dumpMapFull(\'' + it.id + '\')" class="btn btn-gold btn-sm" style="border-radius:7px">⤢ Fullscreen</button>'
+        +   '<button onclick="dumpInfoModal(\'' + it.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:7px">＋ Info</button>'
         +   '<button onclick="dumpTab(\'inbox\')" class="btn btn-ghost btn-sm" style="border-radius:7px">▤ List</button>'
         +   '<button onclick="dumpExpandWeb(\'' + it.id + '\')" class="btn btn-ghost btn-sm dump-web-btn" style="border-radius:7px">✦ ' + (expanded ? 'Re-grow' : 'Grow branches') + '</button>'
-        +   '<button onclick="dumpPlanFromGroup(\'' + it.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:7px">→ Plan</button>'
         + '</div>'
         + '</div>';
     });
@@ -19657,7 +19872,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<button onclick="dumpSaveEdit(\'' + i.id + '\')" class="btn btn-gold btn-sm" style="border-radius:8px">Save</button>'
           + '</div>';
       } else {
-        head = '<div style="display:flex;gap:11px;align-items:center;padding:11px 12px;background:var(--bg-off)">'
+        head = '<div style="display:flex;gap:9px;align-items:center;padding:11px 12px;background:var(--bg-off)">'
+          + (i.done ? '' : dumpGrip(i.id))
           + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Complete every step" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
           + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to rename" style="flex:1;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:.01em;line-height:1.35;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'cursor:text;word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
           + '<span style="flex-shrink:0;font-family:' + mono + ';font-size:10.5px;color:var(--muted)">' + doneN + '/' + kids.length + '</span>'
@@ -19708,7 +19924,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           +   '<button onclick="dumpCancelEdit()" class="btn btn-ghost btn-sm" style="border-radius:8px">Cancel</button>'
           + '</div></div>';
       }
-      return '<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
+      return '<div style="display:flex;gap:9px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
+        + (i.done ? '' : dumpGrip(i.id))
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
         + (i.done ? '' : '<button onclick="dumpExpandItem(\'' + i.id + '\')" title="Expand into a plan + mind map with Eni" style="background:none;border:none;color:var(--gold);font-size:14px;cursor:pointer;padding:0 3px;flex-shrink:0;margin-top:1px;line-height:1">✦</button>')
@@ -19749,7 +19966,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var hasPlans = open.some(function(i){ return isGroup(i) && i.children.length; });
       var mapBtnLabel = map ? '◍ Re-group loose notes' : '◍ Group loose notes into areas';
       body = (map || hasPlans)
-        ? (map ? metaLine('Grouped', map.count, map.at) : '') + mapHTML()
+        ? mapHTML()
           + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">' + mapBtnLabel + '</button>'
         : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
@@ -19759,7 +19976,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         : emptyState('🌱', 'Nothing done yet', 'As you check things off, they\'ll gather here<br>so you can see what you\'ve moved forward.');
     } else {
       body = open.length
-        ? open.map(row).join('')
+        ? open.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('')
           + '<div style="display:flex;gap:8px;margin-top:18px">'
           +   '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Map</button>'
           +   '<button class="btn btn-gold dump-org-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Plan</button>'
