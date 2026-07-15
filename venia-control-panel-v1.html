@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '52';
+  const BUILD = '53';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4853,6 +4853,7 @@ let STATE = {
   activityLog: [],
   dump: [],            // brain-dump inbox: {id, t, d, done}
   dumpPlan: null,      // last AI-organized plan: {md, at, count}
+  dumpMap: null,       // last thematic cluster map: {groups, at, count}
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -4998,6 +4999,7 @@ function save() {
     activityLog: STATE.activityLog || [],
     dump:        STATE.dump       || [],
     dumpPlan:    STATE.dumpPlan   || null,
+    dumpMap:     STATE.dumpMap    || null,
     prPulls:     STATE.prPulls    || [],
     workingPullId: STATE.workingPullId || null,
     prPitches:   STATE.prPitches  || [],
@@ -17052,7 +17054,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var d = { styles: STATE.styles||[], materials: STATE.materials||[],
               vendors: STATE.vendors||[], bom: STATE.bom||{}, pom: STATE.pom||{},
               prPulls: STATE.prPulls||[], workingPullId: STATE.workingPullId||null,
-              dump: STATE.dump||[], dumpPlan: STATE.dumpPlan||null,
+              dump: STATE.dump||[], dumpPlan: STATE.dumpPlan||null, dumpMap: STATE.dumpMap||null,
               _who: who() };
     if (STATE.samples) d.samples = STATE.samples;
     return d;
@@ -17071,6 +17073,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if ('workingPullId' in data) STATE.workingPullId = data.workingPullId;
       if (data.dump)      STATE.dump = data.dump;
       if ('dumpPlan' in data) STATE.dumpPlan = data.dumpPlan;
+      if ('dumpMap' in data) STATE.dumpMap = data.dumpMap;
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
       if (typeof window.dumpBadge === 'function') window.dumpBadge();
     } finally { applyingRemote = false; }
@@ -17767,6 +17770,42 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     save(); render();
   };
 
+  // Cluster the inbox into themed areas — the "mind map" that compartmentalizes
+  // scattered thoughts (Product, Sales, Cash, Brand…) so nothing blurs together.
+  window.dumpMakeMap = async function(){
+    var open = items().filter(function(i){ return !i.done; });
+    if (!open.length){ showToast('Nothing to map — capture some thoughts first','info'); return; }
+    var btns = document.querySelectorAll('.dump-map-btn');
+    btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Mapping…'; });
+    try {
+      var raw = open.map(function(i, n){ return (n+1) + '. ' + i.t; }).join('\n');
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'Cluster the founder\'s brain-dump into a small set of themed areas so scattered thoughts become compartmentalized. '
+        + 'Use 3–6 groups. Give each a short 1–3 word title (e.g. "Product & Design", "Production", "Sales & Wholesale", "Marketing & PR", "Cash & Admin", "Brand", "Personal"). '
+        + 'Put every item in exactly one group, preserving the item\'s wording. Order groups by how much attention they need.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "groups": [ { "title": "short area name", "items": ["item", ...] } ] }';
+      var out = await callClaude(sys, 'Brain dump:\n' + raw);
+      if (!out || !out.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(out);
+      var groups = (data && Array.isArray(data.groups)) ? data.groups : null;
+      if (!groups) throw new Error('Could not read the grouping');
+      groups = groups.map(function(g){
+        return { title: String((g && g.title) || 'Notes'), items: (g && Array.isArray(g.items) ? g.items.filter(Boolean).map(String) : []) };
+      }).filter(function(g){ return g.items.length; });
+      if (!groups.length) throw new Error('No groups came back');
+      STATE.dumpMap = { groups: groups, at: new Date().toISOString(), count: open.length };
+      save();
+      TAB = 'map';
+      render();
+      showToast('◍ Map ready','success');
+      logActivity('Brain dump mapped — ' + groups.length + ' areas');
+    } catch(e){
+      showToast('Could not map — ' + String(e.message||e), 'error');
+    } finally {
+      btns.forEach(function(b){ b.disabled = false; b.textContent = '◍ Group into a map'; });
+    }
+  };
+
   // ── Action helpers: calendar events + email drafts ──────────────────────
   function planData(){ return (STATE.dumpPlan && STATE.dumpPlan.data) || {}; }
   function pad2(n){ return (n < 10 ? '0' : '') + n; }
@@ -18063,6 +18102,39 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return h;
   }
 
+  // ── Mind map: themed clusters on a spine, colour-coded to compartmentalize ──
+  var MAP_COLORS = ['#3F6A50','#9E3B34','#A67B2C','#3B5876','#6B4A7A','#4A6B6B'];
+  function mapHTML(map){
+    var groups = (map && map.groups) || [];
+    if (!groups.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">No groups yet.</div>';
+    var h = '';
+    // Central hub
+    h += '<div style="display:flex;flex-direction:column;align-items:center;margin:2px 0 4px">'
+      + '<div style="font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:9px">Your thinking, grouped</div>'
+      + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + groups.length + ' areas</div>'
+      + '</div>';
+    // Spine + cluster cards
+    h += '<div style="position:relative;margin-top:10px">'
+      + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
+    groups.forEach(function(g, gi){
+      var c = MAP_COLORS[gi % MAP_COLORS.length];
+      h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
+        + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:' + c + ';border:3px solid var(--bg);box-sizing:border-box"></div>'
+        + '<div style="border:1px solid var(--border);border-radius:12px;overflow:hidden">'
+        +   '<div style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:' + c + '14;border-bottom:1px solid var(--border)">'
+        +     '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
+        +     '<span style="flex:1;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(g.title) + '</span>'
+        +     '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + g.items.length + '</span>'
+        +   '</div>'
+        +   '<div style="padding:8px 14px 10px">'
+        +     g.items.map(function(it){ return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + c + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(it) + '</span></div>'; }).join('')
+        +   '</div>'
+        + '</div></div>';
+    });
+    h += '</div>';
+    return h;
+  }
+
   function injectCSS(){
     if (document.getElementById('dump-css')) return;
     var s = document.createElement('style');
@@ -18107,8 +18179,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           +   '<button onclick="dumpCancelEdit()" class="btn btn-ghost btn-sm" style="border-radius:8px">Cancel</button>'
           + '</div></div>';
       }
-      return '<div style="display:flex;gap:11px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
-        + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:22px;height:22px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:12px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
+      return '<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
+        + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
         + '<button onclick="dumpStartEdit(\'' + i.id + '\')" title="Edit" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 3px;flex-shrink:0;margin-top:1px;line-height:1">✎</button>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 3px;flex-shrink:0;line-height:1">✕</button>'
@@ -18122,13 +18194,23 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '<div style="font-size:12.5px;line-height:1.65">' + sub + '</div></div>';
     };
 
+    var metaLine = function(verb, n, at){
+      return '<div style="font-size:10px;color:var(--muted);letter-spacing:.3px;margin-bottom:8px">' + verb + ' ' + n + ' item' + (n > 1 ? 's' : '') + ' · ' + new Date(at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>';
+    };
     var body;
     if (TAB === 'plan'){
       body = plan
-        ? '<div style="font-size:10px;color:var(--muted);letter-spacing:.3px;margin-bottom:6px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + planHTML(plan)
+        ? metaLine('Organized', plan.count, plan.at) + planHTML(plan)
           + '<button class="btn btn-ghost dump-org-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
         : emptyState('✦', 'Let Eni make sense of it', 'Add a few thoughts to your inbox, then I\'ll sort them into<br>today\'s priorities, meetings, emails and quick wins.')
           + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>';
+    } else if (TAB === 'map'){
+      var map = STATE.dumpMap;
+      body = map
+        ? metaLine('Grouped', map.count, map.at) + mapHTML(map)
+          + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">◍ Re-group into a map</button>'
+        : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
+          + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
     } else if (TAB === 'done'){
       body = done.length
         ? done.map(row).join('') + '<button class="btn btn-ghost btn-sm" style="margin-top:16px;border-radius:10px" onclick="dumpClearDone()">Clear completed</button>'
@@ -18136,7 +18218,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } else {
       body = open.length
         ? open.map(row).join('')
-          + '<button class="btn btn-gold dump-org-btn" style="width:100%;margin-top:18px;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize ' + open.length + ' into a plan</button>'
+          + '<div style="display:flex;gap:8px;margin-top:18px">'
+          +   '<button class="btn btn-gold dump-org-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Plan</button>'
+          +   '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Map</button>'
+          + '</div>'
         : emptyState('🧠', 'Your mind, cleared', 'Type or speak anything — an idea, a task, a fabric to source.<br>I\'ll hold onto it and help you sort it when you\'re ready.');
     }
 
@@ -18163,8 +18248,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +   '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:32px;height:32px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'
       + '</div>'
       // Tabs (always directly under the header)
-      + '<div style="display:flex;gap:8px;padding:11px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
-      +   chip('inbox','📥 Inbox', open.length) + chip('done','✓ Done', done.length) + chip('plan','✦ Plan', null)
+      + '<div style="display:flex;gap:6px;padding:11px 14px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      +   chip('inbox','Inbox', open.length) + chip('plan','Plan', null) + chip('map','Map', null) + chip('done','Done', done.length)
       + '</div>'
       + captureBlock
       // Scroll body
