@@ -24,9 +24,18 @@ function corsHeaders(req) {
 }
 function originAllowed(req) {
   const o = req.headers.get('origin');
-  if (!o) return true;
-  return ALLOWED_ORIGINS.has(o);
+  if (o) return ALLOWED_ORIGINS.has(o);          // Origin present → must be ours
+  // No Origin header: browsers still mark same-origin POSTs with Sec-Fetch-Site,
+  // which curl/script calls don't send. Allow only that case. This closes the
+  // trivial "no Origin" bypass; it is not a hard wall against a client that
+  // forges headers (a signed-session gate would be — planned follow-up).
+  const site = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+  return site === 'same-origin' || site === 'same-site';
 }
+// Only these models may be driven through the relay, so a stray or malicious
+// caller can't pick an expensive one. Anything else is coerced to the default.
+const ALLOWED_MODELS = new Set(['claude-sonnet-5', 'claude-haiku-4-5', 'claude-haiku-4-5-20251001']);
+const DEFAULT_MODEL = 'claude-sonnet-5';
 
 export default async (req) => {
   const cors = corsHeaders(req);
@@ -57,6 +66,7 @@ export default async (req) => {
       { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
   if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 4096) payload.max_tokens = 4096;
+  if (!ALLOWED_MODELS.has(payload.model)) payload.model = DEFAULT_MODEL;   // pin model server-side
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

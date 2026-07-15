@@ -23,13 +23,26 @@ const ALLOWED_ORIGINS = new Set([
 ]);
 function originAllowed(req) {
   const o = req.headers.get('origin');
-  if (!o) return true;
-  return ALLOWED_ORIGINS.has(o);
+  if (o) return ALLOWED_ORIGINS.has(o);          // Origin present → must be ours
+  const site = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+  return site === 'same-origin' || site === 'same-site';   // no Origin → browser same-origin only
+}
+function corsHeaders(req) {
+  const o = req.headers.get('origin');
+  const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';
+  return {
+    'Access-Control-Allow-Origin': allow,
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, x-venia-code',
+    'Vary': 'Origin',
+  };
 }
 
 export default async (req) => {
-  if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-  if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403);
+  const cors = corsHeaders(req);
+  if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
+  if (req.method !== 'POST') return json({ error: 'Method Not Allowed' }, 405, cors);
+  if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403, cors);
   const key = process.env.STRIPE_SECRET_KEY;
   let body;
   try { body = await req.json(); } catch (e) { return json({ error: 'Bad JSON' }, 400); }
@@ -47,11 +60,12 @@ export default async (req) => {
   const GATED = ['capture', 'cancel'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
-    if (gateHash) {
-      const sent = req.headers.get('x-venia-code') || '';
-      const ok = sent && (await sha256Hex(sent)) === gateHash.toLowerCase();
-      if (!ok) return json({ error: 'Not authorized — enter your VENIA access code to move a card hold.' }, 401);
-    }
+    // Fail CLOSED: if the gate hash isn't configured, refuse the money action
+    // rather than letting it through unauthenticated.
+    if (!gateHash) return json({ error: 'Card actions are disabled until STRIPE_GATE_HASH is set in Netlify environment variables.' }, 503, cors);
+    const sent = req.headers.get('x-venia-code') || '';
+    const ok = sent && (await sha256Hex(sent)) === gateHash.toLowerCase();
+    if (!ok) return json({ error: 'Not authorized — enter your VENIA access code to move a card hold.' }, 401, cors);
   }
 
   const form = (o) => Object.entries(o)
@@ -105,8 +119,8 @@ export default async (req) => {
   }
 };
 
-const json = (o, status = 200) =>
-  new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
+const json = (o, status = 200, cors) =>
+  new Response(JSON.stringify(o), { status, headers: { ...(cors || {}), 'Content-Type': 'application/json' } });
 
 async function sha256Hex(str) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));

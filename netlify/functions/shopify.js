@@ -35,8 +35,12 @@ function corsHeaders(req) {
 }
 function originAllowed(req) {
   const o = req.headers.get('origin');
-  if (!o) return true;
-  return ALLOWED_ORIGINS.has(o);
+  if (o) return ALLOWED_ORIGINS.has(o);          // Origin present → must be ours
+  // No Origin: allow only a browser same-origin/site POST (Sec-Fetch-Site is set
+  // by the browser, absent on curl/script). Closes the trivial no-Origin bypass
+  // that would otherwise hand this store's customer/order data to any caller.
+  const site = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+  return site === 'same-origin' || site === 'same-site';
 }
 
 export default async (req) => {
