@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '54';
+  const BUILD = '55';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17581,6 +17581,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   var mapRenaming = null;    // index of the map area being renamed (transient)
   var esc = function(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); };
   var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
+  var openItems = function(){ return items().filter(function(i){ return !i.done; }); };
+  var norm = function(s){ return String(s||'').trim().toLowerCase().replace(/\s+/g,' '); };
+  // A signature of the open inbox — changes on any add / edit / delete / complete.
+  // Used to tell when a Plan snapshot has drifted from the live inbox.
+  var dumpSig = function(){ return openItems().map(function(i){ return i.id + '~' + i.t; }).join('§'); };
 
   function age(iso){
     var m = Math.max(0, (Date.now() - new Date(iso).getTime()) / 60000);
@@ -17747,10 +17752,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           quickWins: arr(data.quickWins).map(String),
           reference: arr(data.reference).map(String)
         };
-        STATE.dumpPlan = { data: data, at: new Date().toISOString(), count: open.length, checked: {} };
+        STATE.dumpPlan = { data: data, at: new Date().toISOString(), count: open.length, checked: {}, sig: dumpSig() };
       } else {
         // Model didn't return clean JSON — keep the raw text so nothing is lost.
-        STATE.dumpPlan = { md: out.trim(), at: new Date().toISOString(), count: open.length };
+        STATE.dumpPlan = { md: out.trim(), at: new Date().toISOString(), count: open.length, sig: dumpSig() };
       }
       save();
       TAB = 'plan';
@@ -17791,11 +17796,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var data = extractJSON(out);
       var groups = (data && Array.isArray(data.groups)) ? data.groups : null;
       if (!groups) throw new Error('Could not read the grouping');
-      groups = groups.map(function(g){
-        return { title: String((g && g.title) || 'Notes'), items: (g && Array.isArray(g.items) ? g.items.filter(Boolean).map(String) : []) };
-      }).filter(function(g){ return g.items.length; });
-      if (!groups.length) throw new Error('No groups came back');
-      STATE.dumpMap = { groups: groups, at: new Date().toISOString(), count: open.length };
+      // Store each group as a list of inbox item IDs (matched by the wording the
+      // model preserved), not copied strings — so the map stays live-linked to
+      // the inbox: edits, deletes and completions carry over automatically.
+      var used = {};
+      var idGroups = groups.map(function(g){
+        var strs = (g && Array.isArray(g.items) ? g.items.filter(Boolean).map(String) : []);
+        var ids = [];
+        strs.forEach(function(str){
+          var key = norm(str);
+          var m = open.find(function(it){ return !used[it.id] && norm(it.t) === key; });
+          if (m){ used[m.id] = true; ids.push(m.id); }
+        });
+        return { title: String((g && g.title) || 'Notes'), ids: ids };
+      }).filter(function(g){ return g.ids.length; });
+      if (!idGroups.length) throw new Error('No groups came back');
+      STATE.dumpMap = { groups: idGroups, at: new Date().toISOString(), count: open.length };
       save();
       TAB = 'map';
       render();
@@ -17810,6 +17826,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // ── Map area actions: collapse, send-to-plan, rename, merge, remove ──────
   function grp(gi){ return (STATE.dumpMap && STATE.dumpMap.groups || [])[gi]; }
+  // Live texts for a group's IDs (skips items since deleted or completed).
+  function groupTexts(g){
+    var byId = {}; openItems().forEach(function(i){ byId[i.id] = i; });
+    return (g && g.ids || []).map(function(id){ return byId[id] && byId[id].t; }).filter(Boolean);
+  }
   window.dumpMapCollapse = function(gi){ var g = grp(gi); if (!g) return; g.collapsed = !g.collapsed; save(); render(); };
   window.dumpMapAddToPlan = function(gi){
     var g = grp(gi); if (!g) return;
@@ -17818,7 +17839,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
     var wk = STATE.dumpPlan.data.week = STATE.dumpPlan.data.week || [];
     var added = 0;
-    g.items.forEach(function(it){ if (wk.indexOf(it) < 0){ wk.push(it); added++; } });
+    groupTexts(g).forEach(function(t){ if (wk.indexOf(t) < 0){ wk.push(t); added++; } });
     save(); TAB = 'plan'; render();
     showToast(added ? ('Added ' + added + ' to Plan · This week') : 'Already in your Plan', 'success');
   };
@@ -17837,7 +17858,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpMapMergeInto = function(gi){
     var groups = STATE.dumpMap && STATE.dumpMap.groups; var src = mapMergeSource;
     if (src == null || src === gi || !groups || !groups[src] || !groups[gi]){ mapMergeSource = null; render(); return; }
-    groups[src].items.forEach(function(it){ if (groups[gi].items.indexOf(it) < 0) groups[gi].items.push(it); });
+    groups[gi].ids = groups[gi].ids || [];
+    (groups[src].ids || []).forEach(function(id){ if (groups[gi].ids.indexOf(id) < 0) groups[gi].ids.push(id); });
     groups.splice(src, 1);
     mapMergeSource = null; save(); render();
     showToast('Areas merged','success');
@@ -17846,6 +17868,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var groups = STATE.dumpMap && STATE.dumpMap.groups; if (!groups || !groups[gi]) return;
     if (!confirm('Remove the "' + groups[gi].title + '" area? Your notes stay in the Inbox.')) return;
     groups.splice(gi, 1); save(); render();
+  };
+  window.dumpMapUnsortedToPlan = function(){
+    var assigned = {};
+    (STATE.dumpMap && STATE.dumpMap.groups || []).forEach(function(g){ (g.ids || []).forEach(function(id){ assigned[id] = true; }); });
+    var texts = openItems().filter(function(i){ return !assigned[i.id]; }).map(function(i){ return i.t; });
+    if (!texts.length) return;
+    if (!STATE.dumpPlan || !STATE.dumpPlan.data){
+      STATE.dumpPlan = { data: { headline:'', focus:[], week:[], meetings:[], emails:[], ideas:[], quickWins:[], reference:[] }, at: new Date().toISOString(), count: 0, checked:{} };
+    }
+    var wk = STATE.dumpPlan.data.week = STATE.dumpPlan.data.week || [];
+    var added = 0; texts.forEach(function(t){ if (wk.indexOf(t) < 0){ wk.push(t); added++; } });
+    save(); TAB = 'plan'; render();
+    showToast(added ? ('Added ' + added + ' to Plan · This week') : 'Already in your Plan', 'success');
   };
 
   // ── Action helpers: calendar events + email drafts ──────────────────────
@@ -18146,13 +18181,48 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // ── Mind map: themed clusters on a spine, colour-coded to compartmentalize ──
   var MAP_COLORS = ['#3F6A50','#9E3B34','#A67B2C','#3B5876','#6B4A7A','#4A6B6B'];
-  function mapHTML(map){
-    var groups = (map && map.groups) || [];
-    if (!groups.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">No groups yet.</div>';
+  // Older maps stored copied strings; migrate them to inbox-item IDs once so the
+  // map becomes live-linked to the inbox (edits/deletes/completions carry over).
+  function migrateMapIfNeeded(){
+    var m = STATE.dumpMap; if (!m || !m.groups) return;
+    if (!m.groups.some(function(g){ return g && g.items && !g.ids; })) return;
+    var open = openItems(), used = {};
+    m.groups.forEach(function(g){ if (g.ids) g.ids.forEach(function(id){ used[id] = true; }); });
+    m.groups.forEach(function(g){
+      if (g.ids) return;
+      var ids = [];
+      (g.items || []).forEach(function(str){
+        var key = norm(str);
+        var mm = open.find(function(it){ return !used[it.id] && norm(it.t) === key; });
+        if (mm){ used[mm.id] = true; ids.push(mm.id); }
+      });
+      g.ids = ids; delete g.items;
+    });
+    save();
+  }
+  var mapItemLine = function(text, color){
+    return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + color + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(text) + '</span></div>';
+  };
+
+  function mapHTML(){
+    migrateMapIfNeeded();
+    var groups = (STATE.dumpMap && STATE.dumpMap.groups) || [];
+    var open = openItems();
+    var byId = {}; open.forEach(function(i){ byId[i.id] = i; });
+    var assigned = {};
+    // Resolve each group to its LIVE inbox items (skipping any since deleted/done).
+    var resolved = groups.map(function(g){
+      var live = (g.ids || []).map(function(id){ return byId[id]; }).filter(Boolean);
+      live.forEach(function(it){ assigned[it.id] = true; });
+      return live;
+    });
+    var shown = [];
+    resolved.forEach(function(live, gi){ if (live.length) shown.push({ gi: gi, live: live }); });
+    var unsorted = open.filter(function(i){ return !assigned[i.id]; });
+    if (!shown.length && !unsorted.length) return '<div style="font-size:12px;color:var(--muted);padding:16px 0;text-align:center">Nothing to map yet.</div>';
+
     var h = '';
     var merging = (mapMergeSource != null && groups[mapMergeSource]);
-
-    // Merge banner
     if (merging){
       h += '<div style="background:var(--ink);color:#fff;border-radius:10px;padding:10px 13px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:10px">'
         + '<span style="font-size:12px;line-height:1.4">Merging <strong>' + esc(groups[mapMergeSource].title) + '</strong> — tap another area to combine it there.</span>'
@@ -18160,16 +18230,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '</div>';
     }
 
-    // Central hub
+    var areaCount = shown.length + (unsorted.length ? 1 : 0);
     h += '<div style="display:flex;flex-direction:column;align-items:center;margin:2px 0 4px">'
       + '<div style="font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:9px">Your thinking, grouped</div>'
-      + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + groups.length + ' areas</div>'
+      + '<div style="padding:9px 18px;background:var(--ink);color:#fff;border-radius:22px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700">◍ ' + areaCount + ' area' + (areaCount === 1 ? '' : 's') + '</div>'
       + '</div>';
 
-    // Spine + cluster cards
     h += '<div style="position:relative;margin-top:10px">'
       + '<div style="position:absolute;left:11px;top:0;bottom:24px;width:2px;background:var(--border)"></div>';
-    groups.forEach(function(g, gi){
+
+    shown.forEach(function(entry){
+      var gi = entry.gi, live = entry.live, g = groups[gi];
       var c = MAP_COLORS[gi % MAP_COLORS.length];
       var collapsed = !!g.collapsed;
       var isSource = (mapMergeSource === gi);
@@ -18177,8 +18248,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
         + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:' + c + ';border:3px solid var(--bg);box-sizing:border-box"></div>'
         + '<div style="border:1px solid ' + (isSource ? 'var(--ink)' : 'var(--border)') + ';border-radius:12px;overflow:hidden">';
-
-      // Header — rename input, or the tappable title bar.
       if (mapRenaming === gi){
         h += '<div style="display:flex;gap:8px;padding:9px 12px;background:' + c + '14">'
           + '<input id="dump-map-rename" value="' + esc(g.title) + '" onkeydown="if(event.key===\'Enter\'){event.preventDefault();dumpMapRenameSave(' + gi + ')}else if(event.key===\'Escape\'){dumpMapRenameCancel()}" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;padding:7px 10px;border:1px solid var(--ink);border-radius:7px;background:var(--bg);color:var(--ink);outline:none">'
@@ -18189,15 +18258,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<span style="width:9px;height:9px;border-radius:50%;background:' + c + ';flex-shrink:0"></span>'
           + '<span style="flex:1;font-size:12.5px;font-weight:700;color:var(--ink);letter-spacing:.02em">' + esc(g.title) + '</span>'
           + (tapTarget ? '<span style="font-size:9px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--ink)">Merge here →</span>'
-                       : '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + g.items.length + '</span>'
+                       : '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + live.length + '</span>'
                          + '<span style="color:var(--muted);font-size:11px;flex-shrink:0">' + (collapsed ? '▸' : '▾') + '</span>')
           + '</div>';
       }
-
-      // Items + action footer (only expanded, not renaming, not merging).
       if (!collapsed && mapRenaming !== gi && !tapTarget){
         h += '<div style="padding:8px 14px 10px">'
-          + g.items.map(function(it){ return '<div style="display:flex;gap:9px;padding:5px 0;font-size:12.5px;line-height:1.5;color:var(--ink)"><span style="color:' + c + ';flex-shrink:0;font-weight:700">·</span><span>' + esc(it) + '</span></div>'; }).join('');
+          + live.map(function(it){ return mapItemLine(it.t, c); }).join('');
         if (!merging){
           h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:11px;padding-top:9px;border-top:1px solid var(--border)">'
             + '<button onclick="dumpMapAddToPlan(' + gi + ')" class="btn btn-gold btn-sm" style="border-radius:7px">→ Plan</button>'
@@ -18210,6 +18277,29 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }
       h += '</div></div>';
     });
+
+    // Unsorted — open thoughts captured after the last map, or freed by Remove.
+    if (unsorted.length){
+      var uc = 'var(--border-mid)';
+      h += '<div style="position:relative;padding-left:34px;margin-bottom:14px">'
+        + '<div style="position:absolute;left:3px;top:14px;width:16px;height:16px;border-radius:50%;background:var(--border-mid);border:3px solid var(--bg);box-sizing:border-box"></div>'
+        + '<div style="border:1px dashed var(--border-mid);border-radius:12px;overflow:hidden">'
+        +   '<div style="display:flex;align-items:center;gap:9px;padding:11px 14px;background:var(--bg-off);border-bottom:1px solid var(--border)">'
+        +     '<span style="width:9px;height:9px;border-radius:50%;background:var(--border-mid);flex-shrink:0"></span>'
+        +     '<span style="flex:1;font-size:12.5px;font-weight:700;color:var(--muted);letter-spacing:.02em">Unsorted</span>'
+        +     '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + unsorted.length + '</span>'
+        +   '</div>'
+        +   '<div style="padding:8px 14px 10px">'
+        +     '<div style="font-size:10.5px;color:var(--muted);margin-bottom:4px">New thoughts not filed into an area yet.</div>'
+        +     unsorted.map(function(it){ return mapItemLine(it.t, uc); }).join('')
+        +     (!merging ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:11px;padding-top:9px;border-top:1px solid var(--border)">'
+                          + '<button onclick="dumpMakeMap()" class="btn btn-gold btn-sm dump-map-btn" style="border-radius:7px">◍ Re-map to file these</button>'
+                          + '<button onclick="dumpMapUnsortedToPlan()" class="btn btn-ghost btn-sm" style="border-radius:7px">→ Plan</button>'
+                          + '</div>' : '')
+        +   '</div>'
+        + '</div></div>';
+    }
+
     h += '</div>';
     return h;
   }
@@ -18276,17 +18366,25 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var metaLine = function(verb, n, at){
       return '<div style="font-size:10px;color:var(--muted);letter-spacing:.3px;margin-bottom:8px">' + verb + ' ' + n + ' item' + (n > 1 ? 's' : '') + ' · ' + new Date(at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>';
     };
+    // Plan is an AI interpretation (it rewords/merges), so it can drift from a
+    // changed inbox. Flag it when the open inbox no longer matches what the plan
+    // was built from, with a one-tap refresh.
+    var planStale = plan && plan.sig != null && plan.sig !== dumpSig();
+    var staleBanner = '<div style="display:flex;align-items:center;gap:10px;background:var(--bg-off);border:1px solid var(--border);border-radius:10px;padding:10px 13px;margin-bottom:12px">'
+      + '<span style="flex:1;font-size:11.5px;color:var(--muted);line-height:1.4">Your inbox changed since this plan.</span>'
+      + '<button class="btn btn-gold btn-sm dump-org-btn" style="border-radius:8px;flex-shrink:0" onclick="dumpOrganize()">Refresh</button>'
+      + '</div>';
     var body;
     if (TAB === 'plan'){
       body = plan
-        ? metaLine('Organized', plan.count, plan.at) + planHTML(plan)
+        ? metaLine('Organized', plan.count, plan.at) + (planStale ? staleBanner : '') + planHTML(plan)
           + '<button class="btn btn-ghost dump-org-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
         : emptyState('✦', 'Let Eni make sense of it', 'Add a few thoughts to your inbox, then I\'ll sort them into<br>today\'s priorities, meetings, emails and quick wins.')
           + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>';
     } else if (TAB === 'map'){
       var map = STATE.dumpMap;
       body = map
-        ? metaLine('Grouped', map.count, map.at) + mapHTML(map)
+        ? metaLine('Grouped', map.count, map.at) + mapHTML()
           + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">◍ Re-group into a map</button>'
         : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
