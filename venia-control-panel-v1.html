@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '88';
+  const BUILD = '89';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4902,6 +4902,9 @@ let STATE = {
   dump: [],            // brain-dump inbox: {id, t, d, done}
   dumpPlan: null,      // last AI-organized plan: {md, at, count}
   dumpMap: null,       // last thematic cluster map: {groups, at, count}
+  dumpMasterPos: null,       // master-map node positions {nodeId:{x,y}}
+  dumpMasterCollapsed: null, // master-map collapsed categories {cid:true}
+  dumpMasterTitle: null,     // master-map hub label (default "VENIA")
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -5062,7 +5065,7 @@ const SYNC_KEYS = [
   // Brand
   'brTone', 'brPrefs',
   // Brain dump + shared
-  'dump', 'dumpPlan', 'dumpMap', 'activityLog', 'samples',
+  'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -19271,7 +19274,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // link layer. Positions persist on the plan (g.web.pos); tapping a node opens
   // actions, including "✦ Expand" which asks Eni for fresh sub-ideas and redraws
   // them in live. This is the "work in the web" surface.
-  var fm = { gid: null, zoom: 1, panX: 0, panY: 0, drag: null, pointers: {}, pinch: null, nodes: [], links: [], suppressClick: false };
+  var fm = { gid: null, mode: 'group', fromMaster: false, zoom: 1, panX: 0, panY: 0, drag: null, pointers: {}, pinch: null, nodes: [], links: [], suppressClick: false };
   var CANVAS = 3000, CC = CANVAS / 2;
   function fmGroup(){ return items().find(function(i){ return i.id === fm.gid && isGroup(i); }); }
   function fmDist(a, b){ var dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
@@ -19316,6 +19319,44 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     });
     return { nodes: nodes, links: links };
   }
+  // Build the MASTER map: one hub, a category node per plan (and a Notes
+  // category for loose items), each expandable to its steps. Everything you've
+  // got going on, compartmentalised in one web.
+  var LOOSE_COLOR = '#6B4A7A';
+  function fmBuildMaster(){
+    var pos = STATE.dumpMasterPos || (STATE.dumpMasterPos = {});
+    var collapsed = STATE.dumpMasterCollapsed || (STATE.dumpMasterCollapsed = {});
+    var nodes = [], links = [];
+    function P(id, dx, dy){ return pos[id] ? { x: pos[id].x, y: pos[id].y } : { x: CC + dx, y: CC + dy }; }
+    var rp = P('root', 0, 0);
+    nodes.push({ id: 'root', kind: 'root', label: STATE.dumpMasterTitle || 'VENIA', x: rp.x, y: rp.y });
+    var groups = openItems().filter(function(i){ return isGroup(i) && i.children.length; });
+    var loose = openItems().filter(function(i){ return !isGroup(i); });
+    var cats = groups.map(function(g){ return { type: 'group', g: g }; });
+    if (loose.length) cats.push({ type: 'loose', items: loose });
+    var C = Math.max(1, cats.length);
+    var R1 = Math.max(320, C * 74);
+    cats.forEach(function(cat, ci){
+      var ang = -Math.PI / 2 + ci * (2 * Math.PI / C);
+      var col = cat.type === 'loose' ? LOOSE_COLOR : MAP_COLORS[ci % MAP_COLORS.length];
+      var cid = cat.type === 'group' ? ('g:' + cat.g.id) : 'loose';
+      var leaves = cat.type === 'group' ? cat.g.children : cat.items;
+      var doneN = leaves.filter(function(c){ return c.done; }).length;
+      var title = cat.type === 'group' ? ((cat.g.t || 'Plan') + '  (' + doneN + '/' + leaves.length + ')') : ('Notes & ideas  (' + leaves.length + ')');
+      var cp = P(cid, Math.cos(ang) * R1, Math.sin(ang) * R1);
+      nodes.push({ id: cid, kind: cat.type === 'group' ? 'gcat' : 'mloose', gid: cat.type === 'group' ? cat.g.id : null, label: title, x: cp.x, y: cp.y, color: col });
+      links.push({ a: 'root', b: cid, color: col });
+      if (collapsed[cid]) return;   // categories are drill-in compartments; expand to see steps
+      var L = leaves.length, R2 = R1 + Math.max(200, L * 26), sh = (Math.PI / C) * 0.86;
+      leaves.forEach(function(c, j){
+        var la = L > 1 ? (ang - sh + j * (2 * sh / (L - 1))) : ang;
+        var lp = P(c.id, Math.cos(la) * R2, Math.sin(la) * R2);
+        nodes.push({ id: c.id, kind: cat.type === 'group' ? 'mleaf' : 'mloose-leaf', gid: cat.type === 'group' ? cat.g.id : null, label: c.t, x: lp.x, y: lp.y, done: c.done, color: col });
+        links.push({ a: cid, b: c.id, color: col, done: c.done });
+      });
+    });
+    return { nodes: nodes, links: links };
+  }
   function fmLinksSVG(){
     var byId = {}; fm.nodes.forEach(function(n){ byId[n.id] = n; });
     var s = '<svg id="fmf-links" width="' + CANVAS + '" height="' + CANVAS + '" style="position:absolute;left:0;top:0;pointer-events:none;overflow:visible">';
@@ -19324,11 +19365,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return s + '</svg>';
   }
   function fmNodeHTML(n){
-    var w = n.kind === 'center' ? 200 : (n.kind === 'branch' ? 156 : 168);
-    var bg = n.kind === 'center' ? '#171717' : 'var(--bg)';
-    var fg = n.kind === 'center' ? '#fff' : 'var(--ink)';
-    var bd = n.kind === 'center' ? '#000' : n.color;
-    var weight = n.kind === 'leaf' ? '400' : '700';
+    var isHub = (n.kind === 'center' || n.kind === 'root');
+    var isCat = (n.kind === 'branch' || n.kind === 'gcat' || n.kind === 'mloose');
+    var isLeaf = (n.kind === 'leaf' || n.kind === 'mleaf' || n.kind === 'mloose-leaf');
+    var w = isHub ? 210 : (isCat ? 172 : 168);
+    var bg = isHub ? '#171717' : 'var(--bg)';
+    var fg = isHub ? '#fff' : 'var(--ink)';
+    var bd = isHub ? '#000' : n.color;
+    var weight = isLeaf ? '400' : '700';
     return '<div class="fmf-node" data-id="' + n.id + '" onpointerdown="fmNodeDown(event,\'' + n.id + '\')" onclick="fmNodeTap(event,\'' + n.id + '\')" '
       + 'style="position:absolute;left:' + rnd(n.x) + 'px;top:' + rnd(n.y) + 'px;transform:translate(-50%,-50%);width:' + w + 'px;box-sizing:border-box;'
       + 'background:' + bg + ';color:' + fg + ';border:2px solid ' + bd + ';border-radius:13px;padding:9px 12px;font-size:13px;line-height:1.35;font-weight:' + weight + ';'
@@ -19337,8 +19381,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   function fmApplyTransform(){ var c = document.getElementById('fmf-canvas'); if (c) c.style.transform = 'translate(' + fm.panX + 'px,' + fm.panY + 'px) scale(' + fm.zoom + ')'; }
   function fmRenderCanvas(){
-    var g = fmGroup(); if (!g) return;
-    var d = fmBuild(g); fm.nodes = d.nodes; fm.links = d.links;
+    var d;
+    if (fm.mode === 'master') d = fmBuildMaster();
+    else { var g = fmGroup(); if (!g) return; d = fmBuild(g); }
+    fm.nodes = d.nodes; fm.links = d.links;
     var canvas = document.getElementById('fmf-canvas'); if (!canvas) return;
     canvas.innerHTML = fmLinksSVG() + fm.nodes.map(fmNodeHTML).join('');
     fmApplyTransform();
@@ -19352,19 +19398,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     svg.innerHTML = lines;
   }
   function fmBtn(onclick, label){ return '<button onclick="' + onclick + '" style="width:46px;height:46px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:18px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.14);display:flex;align-items:center;justify-content:center">' + label + '</button>'; }
-  window.dumpMapFull = function(gid){
-    fm.gid = gid; fm.zoom = 1; fm.panX = 0; fm.panY = 0; fm.drag = null; fm.pointers = {}; fm.pinch = null; fm.suppressClick = false;
-    var g = fmGroup(); if (!g) return;
-    var ex = document.getElementById('dump-fullmap'); if (ex) ex.remove();
-    var ov = document.createElement('div');
-    ov.id = 'dump-fullmap';
-    ov.style.cssText = 'position:fixed;inset:0;z-index:9400;background:var(--bg);display:flex;flex-direction:column';
-    ov.innerHTML =
-      '<div style="padding:calc(12px + var(--sat,0px)) 14px 12px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;align-items:center;gap:10px;flex-shrink:0">'
-      +   '<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(g.t || 'Plan') + '</div>'
-      +   '<div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">Drag nodes · pinch to zoom · tap a node to edit, add, expand</div></div>'
-      +   '<button onclick="dumpInfoModal(\'' + g.id + '\')" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:34px;padding:0 13px;border-radius:17px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">＋ Info</button>'
-      +   '<button onclick="dumpMapFullClose()" aria-label="Close" style="background:rgba(255,255,255,.14);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0">✕</button>'
+  // Shared chrome for a fullscreen canvas (group or master).
+  function fmChrome(title, subtitle, headerBtns){
+    return '<div style="padding:calc(12px + var(--sat,0px)) 14px 12px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;align-items:center;gap:10px;flex-shrink:0">'
+      +   '<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(title) + '</div>'
+      +   '<div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">' + subtitle + '</div></div>'
+      +   headerBtns
       + '</div>'
       + '<div id="fmf-viewport" style="flex:1;position:relative;overflow:hidden;touch-action:none;background:var(--bg-off)">'
       +   '<div id="fmf-canvas" style="position:absolute;left:0;top:0;transform-origin:0 0;width:' + CANVAS + 'px;height:' + CANVAS + 'px"></div>'
@@ -19372,10 +19411,32 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +     fmBtn('fmZoomIn()', '＋') + fmBtn('fmZoomOut()', '－') + fmBtn('fmFit()', '⤢')
       +   '</div>'
       + '</div>';
+  }
+  function fmHeaderBtn(onclick, label){ return '<button onclick="' + onclick + '" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:34px;padding:0 13px;border-radius:17px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0">' + label + '</button>'; }
+  function fmCloseBtn(onclick){ return '<button onclick="' + onclick + '" aria-label="Close" style="background:rgba(255,255,255,.14);border:none;color:#fff;width:34px;height:34px;border-radius:50%;font-size:16px;cursor:pointer;flex-shrink:0">✕</button>'; }
+  function fmMount(html){
+    var ex = document.getElementById('dump-fullmap'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-fullmap';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9400;background:var(--bg);display:flex;flex-direction:column';
+    ov.innerHTML = html;
     document.body.appendChild(ov);
-    fmRenderCanvas();
-    fmBind();
-    setTimeout(fmFit, 30);
+    fmRenderCanvas(); fmBind(); setTimeout(fmFit, 30);
+  }
+  window.dumpMapFull = function(gid, fromMaster){
+    fm.mode = 'group'; fm.gid = gid; fm.fromMaster = !!fromMaster;
+    fm.zoom = 1; fm.panX = 0; fm.panY = 0; fm.drag = null; fm.pointers = {}; fm.pinch = null; fm.suppressClick = false;
+    var g = fmGroup(); if (!g) return;
+    var btns = fmHeaderBtn('dumpInfoModal(\'' + g.id + '\')', '＋ Info')
+      + (fromMaster ? fmHeaderBtn('dumpMasterMap()', '‹ All') : '')
+      + fmCloseBtn('dumpMapFullClose()');
+    fmMount(fmChrome(g.t || 'Plan', 'Drag nodes · pinch to zoom · tap a node to edit, add, expand', btns));
+  };
+  // The MASTER map — every plan as a category compartment in one web.
+  window.dumpMasterMap = function(){
+    fm.mode = 'master'; fm.gid = null; fm.fromMaster = false;
+    fm.zoom = 1; fm.panX = 0; fm.panY = 0; fm.drag = null; fm.pointers = {}; fm.pinch = null; fm.suppressClick = false;
+    fmMount(fmChrome(STATE.dumpMasterTitle || 'Everything', 'Every plan as a category · drag, zoom, tap a category to open', fmCloseBtn('dumpMapFullClose()')));
   };
   window.dumpMapFullClose = function(){ fmUnbind(); var o = document.getElementById('dump-fullmap'); if (o) o.remove(); render(); };
   window.fmZoomIn = function(){ var vp = document.getElementById('fmf-viewport'); if (vp) fmZoomAt(1.2, vp.clientWidth / 2, vp.clientHeight / 2); };
@@ -19466,8 +19527,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (ids.length === 0) fm.drag = null;
   }
   function fmPersistPos(id){
-    var g = fmGroup(); if (!g) return;
     var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    if (fm.mode === 'master'){
+      if (!STATE.dumpMasterPos) STATE.dumpMasterPos = {};
+      STATE.dumpMasterPos[id] = { x: Math.round(n.x), y: Math.round(n.y) };
+      save(); return;
+    }
+    var g = fmGroup(); if (!g) return;
     if (!g.web) g.web = { branches: [] };
     if (!g.web.pos) g.web.pos = {};
     g.web.pos[id] = { x: Math.round(n.x), y: Math.round(n.y) };
@@ -19479,7 +19545,41 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     fmMenu(id);
   };
   function fmShell(){ var ov = document.getElementById('dump-fullmap'); return ov; }
+  function fmMenuBar(title, acts){
+    var bar = document.createElement('div');
+    bar.id = 'fmf-menu';
+    bar.style.cssText = 'position:absolute;left:12px;right:12px;bottom:calc(18px + var(--sab,0px));background:var(--bg);border:1px solid var(--border);border-radius:14px;box-shadow:0 8px 34px rgba(0,0,0,.22);padding:12px;z-index:8';
+    bar.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><div style="flex:1;min-width:0;font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(title) + '</div>'
+      + '<button onclick="fmMenuClose()" aria-label="Close" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer">✕</button></div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">' + acts + '</div>';
+    var ov = fmShell(); if (ov) ov.appendChild(bar);
+  }
+  // Master-map node actions: categories open/collapse/rename, steps toggle,
+  // loose notes can be turned into their own plan.
+  function fmMasterMenu(id){
+    fmMenuClose();
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    var collapsed = STATE.dumpMasterCollapsed || {};
+    var acts = '';
+    if (n.kind === 'gcat'){
+      acts += fmActGold('fmMasterOpen(\'' + n.gid + '\')', '⤢ Open plan');
+      acts += fmAct('fmMasterCollapse(\'' + id + '\')', collapsed[id] ? '▾ Show steps' : '▸ Hide steps');
+      acts += fmAct('fmMasterRename(\'' + id + '\')', '✎ Rename');
+    } else if (n.kind === 'mleaf'){
+      acts += fmAct('fmMasterToggleLeaf(\'' + n.gid + '\',\'' + id + '\')', n.done ? '↺ Undone' : '✓ Done');
+      acts += fmAct('fmMasterRename(\'' + id + '\')', '✎ Rename');
+    } else if (n.kind === 'mloose'){
+      acts += fmAct('fmMasterCollapse(\'' + id + '\')', collapsed[id] ? '▾ Show notes' : '▸ Hide notes');
+    } else if (n.kind === 'mloose-leaf'){
+      acts += fmActGold('fmMasterMakePlan(\'' + id + '\')', '→ Make a plan');
+      acts += fmAct('fmMasterToggleLoose(\'' + id + '\')', n.done ? '↺ Undone' : '✓ Done');
+    } else if (n.kind === 'root'){
+      acts += fmAct('fmMasterRename(\'root\')', '✎ Rename hub');
+    }
+    fmMenuBar(n.label, acts);
+  }
   function fmMenu(id){
+    if (fm.mode === 'master') return fmMasterMenu(id);
     fmMenuClose();
     var g = fmGroup(); var n = fm.nodes.find(function(x){ return x.id === id; }); if (!g || !n) return;
     // Actions vary by node kind: steps check off, ideas promote to actions,
@@ -19512,13 +19612,54 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
   // Rename any node in place (center → plan title, branch → label, leaf → step,
   // idea → idea text).
-  window.fmRenamePrompt = function(id){
-    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+  function fmRenameInto(id, saveFn, current){
     var bar = document.getElementById('fmf-menu'); if (!bar){ fmMenu(id); bar = document.getElementById('fmf-menu'); if (!bar) return; }
     bar.innerHTML = '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px">Rename</div>'
-      + '<textarea id="fmf-rename" rows="2" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();fmRenameSave(\'' + id + '\')}else if(event.key===\'Escape\'){fmMenuClose()}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px;border:1px solid var(--ink);border-radius:10px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;margin-bottom:10px">' + esc(n.label) + '</textarea>'
-      + '<div style="display:flex;gap:8px"><button onclick="fmRenameSave(\'' + id + '\')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px">Save</button><button onclick="fmMenuClose()" class="btn btn-ghost btn-sm" style="border-radius:9px">Cancel</button></div>';
+      + '<textarea id="fmf-rename" rows="2" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();' + saveFn + '(\'' + id + '\')}else if(event.key===\'Escape\'){fmMenuClose()}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px;border:1px solid var(--ink);border-radius:10px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;margin-bottom:10px">' + esc(current) + '</textarea>'
+      + '<div style="display:flex;gap:8px"><button onclick="' + saveFn + '(\'' + id + '\')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px">Save</button><button onclick="fmMenuClose()" class="btn btn-ghost btn-sm" style="border-radius:9px">Cancel</button></div>';
     setTimeout(function(){ var t = document.getElementById('fmf-rename'); if (t){ t.focus(); try { t.setSelectionRange(t.value.length, t.value.length); } catch(_){} } }, 60);
+  }
+  window.fmRenamePrompt = function(id){
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    fmRenameInto(id, 'fmRenameSave', n.label);
+  };
+  // ── Master-map node handlers ─────────────────────────────────────────────
+  window.fmMasterOpen = function(gid){ window.dumpMapFull(gid, true); };
+  window.fmMasterCollapse = function(id){
+    if (!STATE.dumpMasterCollapsed) STATE.dumpMasterCollapsed = {};
+    STATE.dumpMasterCollapsed[id] = !STATE.dumpMasterCollapsed[id];
+    save(); fmMenuClose(); fmRenderCanvas();
+  };
+  window.fmMasterToggleLeaf = function(gid, cid){
+    var g = items().find(function(i){ return i.id === gid && isGroup(i); }); if (!g) return;
+    var c = g.children.find(function(x){ return x.id === cid; }); if (!c) return;
+    c.done = !c.done; syncGroupDone(g); save(); fmMenuClose(); fmRenderCanvas();
+  };
+  window.fmMasterToggleLoose = function(id){
+    var it = items().find(function(x){ return x.id === id; }); if (!it) return;
+    it.done = !it.done; it.doneAt = it.done ? new Date().toISOString() : null; save(); fmMenuClose(); fmRenderCanvas();
+  };
+  window.fmMasterMakePlan = function(id){
+    fmMenuClose();
+    var o = document.getElementById('dump-fullmap'); if (o){ fmUnbind(); o.remove(); }
+    window.dumpExpandItem(id);   // builds a plan + web and jumps to the Map tab
+  };
+  window.fmMasterRename = function(id){
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n) return;
+    var cur = n.kind === 'root' ? (STATE.dumpMasterTitle || 'VENIA')
+      : n.kind === 'gcat' ? ((items().find(function(i){ return i.id === n.gid; }) || {}).t || '')
+      : n.label;
+    fmRenameInto(id, 'fmMasterRenameSave', cur);
+  };
+  window.fmMasterRenameSave = function(id){
+    var t = document.getElementById('fmf-rename'); if (!t) return;
+    var v = t.value.trim(); if (!v){ fmMenuClose(); return; }
+    var n = fm.nodes.find(function(x){ return x.id === id; }); if (!n){ fmMenuClose(); return; }
+    if (n.kind === 'root') STATE.dumpMasterTitle = v;
+    else if (n.kind === 'gcat'){ var g = items().find(function(i){ return i.id === n.gid; }); if (g) g.t = v; }
+    else if (n.kind === 'mleaf'){ var g2 = items().find(function(i){ return i.id === n.gid; }); var c = g2 && g2.children.find(function(x){ return x.id === id; }); if (c) c.t = v; }
+    else if (n.kind === 'mloose-leaf'){ var it = items().find(function(x){ return x.id === id; }); if (it) it.t = v; }
+    save(); fmMenuClose(); fmRenderCanvas();
   };
   window.fmRenameSave = function(id){
     var g = fmGroup(); var t = document.getElementById('fmf-rename'); if (!g || !t) return;
@@ -20001,8 +20142,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // loose notes — so the Map is useful the moment a plan is captured.
       var hasPlans = open.some(function(i){ return isGroup(i) && i.children.length; });
       var mapBtnLabel = map ? '◍ Re-group loose notes' : '◍ Group loose notes into areas';
+      // "Everything" — the master map of every plan as a category. Shown once
+      // there's at least one plan to compartmentalise.
+      var everythingBtn = hasPlans
+        ? '<button onclick="dumpMasterMap()" class="btn btn-gold" style="width:100%;min-height:48px;border-radius:11px;margin-bottom:14px;font-size:12.5px">◫ Everything — all plans in one map</button>'
+        : '';
       body = (map || hasPlans)
-        ? mapHTML()
+        ? everythingBtn + mapHTML()
           + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">' + mapBtnLabel + '</button>'
         : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
