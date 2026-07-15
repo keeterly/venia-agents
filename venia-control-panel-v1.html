@@ -1535,7 +1535,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '78';
+  const BUILD = '79';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5078,6 +5078,100 @@ function save() {
   for (const k of SYNC_KEYS) if (STATE[k] !== undefined) out[k] = STATE[k];
   localStorage.setItem('venia-plm-v2', JSON.stringify(out));
 }
+
+// ── 3-way merge for cross-device sync ────────────────────────────────────────
+// Two phones editing the same workspace used to clobber each other: each push
+// uploaded the whole blob, last write wins. This merges instead, using the
+// last-synced state as a common ancestor (base) so it can tell "they added a
+// record" from "I deleted a record" — additions from both sides survive,
+// deletions still propagate, and only a genuine same-record conflict falls back
+// to newest-wins. Pure functions, exhaustively unit-tested.
+function _mEq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+function _mRecArray(v) { return Array.isArray(v) && v.every(function (x) { return x && typeof x === 'object' && !Array.isArray(x); }); }
+function _mById(arr) {
+  const m = Object.create(null), noid = [];
+  (arr || []).forEach(function (r) { if (r && r.id != null) m[r.id] = r; else if (r != null) noid.push(r); });
+  return { m: m, noid: noid };
+}
+function _mNewer(a, b) {
+  const ta = Date.parse((a && (a.updatedAt || a.createdAt)) || '') || 0;
+  const tb = Date.parse((b && (b.updatedAt || b.createdAt)) || '') || 0;
+  return ta >= tb ? a : b;
+}
+// Merge arrays of {id} records.
+function _mArray(base, local, cloud) {
+  const B = _mById(base).m, L = _mById(local), C = _mById(cloud).m;
+  const out = [], seen = Object.create(null);
+  Object.keys(L.m).forEach(function (id) { seen[id] = 1; });
+  Object.keys(C).forEach(function (id) { seen[id] = 1; });
+  Object.keys(seen).forEach(function (id) {
+    const inL = id in L.m, inC = id in C, inB = id in B;
+    if (inL && inC) {
+      if (_mEq(L.m[id], C[id])) out.push(L.m[id]);
+      else if (inB && _mEq(C[id], B[id])) out.push(L.m[id]);      // only local changed
+      else if (inB && _mEq(L.m[id], B[id])) out.push(C[id]);      // only cloud changed
+      else out.push(_mNewer(L.m[id], C[id]));                     // both changed → newest
+    } else if (inL && !inC) {
+      if (!inB) out.push(L.m[id]);                                // local added (cloud never had it)
+      // else: cloud deleted it → drop
+    } else if (!inL && inC) {
+      if (!inB) out.push(C[id]);                                  // cloud added
+      // else: local deleted it → drop
+    }
+  });
+  L.noid.forEach(function (r) { out.push(r); });                  // keep pusher's id-less rows
+  return out;
+}
+// Merge plain objects (bom/pom maps keyed by style, prefs) per top-level key.
+function _mObject(base, local, cloud) {
+  base = base || {}; local = local || {}; cloud = cloud || {};
+  const out = {}, seen = Object.create(null);
+  Object.keys(local).forEach(function (k) { seen[k] = 1; });
+  Object.keys(cloud).forEach(function (k) { seen[k] = 1; });
+  Object.keys(seen).forEach(function (k) {
+    const inL = k in local, inC = k in cloud, inB = k in base;
+    if (inL && inC) {
+      if (_mEq(local[k], cloud[k])) out[k] = local[k];
+      else if (inB && _mEq(cloud[k], base[k])) out[k] = local[k];
+      else if (inB && _mEq(local[k], base[k])) out[k] = cloud[k];
+      else out[k] = local[k];                                     // both changed → local (pusher)
+    } else if (inL && !inC) { if (!inB) out[k] = local[k]; }
+    else if (!inL && inC) { if (!inB) out[k] = cloud[k]; }
+  });
+  return out;
+}
+// Merge a scalar / non-record value: whichever side changed from base wins.
+function _mScalar(base, local, cloud) {
+  const lChanged = !_mEq(local, base), cChanged = !_mEq(cloud, base);
+  if (lChanged && !cChanged) return local;
+  if (cChanged && !lChanged) return cloud;
+  return lChanged ? local : cloud;                               // both or neither → local
+}
+// Merge two full snapshots against a common ancestor.
+function mergeSnapshots(base, local, cloud) {
+  base = base || {}; local = local || {}; cloud = cloud || {};
+  const out = { _who: local._who || cloud._who };
+  (window.SYNC_KEYS || []).forEach(function (k) {
+    const b = base[k], l = local[k], c = cloud[k];
+    if (l === undefined && c === undefined) return;
+    if (l === undefined) { out[k] = c; return; }
+    if (c === undefined) { out[k] = l; return; }
+    if (_mRecArray(l) || _mRecArray(c)) out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
+    else if ((l && typeof l === 'object' && !Array.isArray(l)) || (c && typeof c === 'object' && !Array.isArray(c))) out[k] = _mObject(b, l, c);
+    else out[k] = _mScalar(b, l, c);
+  });
+  // Standalone-module localStorage bag: per-key changed-side-wins.
+  const bls = base._ls || {}, lls = local._ls || {}, cls = cloud._ls || {}, outls = {};
+  (window.EXTRA_LS_KEYS || []).forEach(function (k) {
+    const inL = k in lls, inC = k in cls, inB = k in bls;
+    if (inL && inC) outls[k] = _mScalar(bls[k], lls[k], cls[k]);
+    else if (inL && !inC) { if (!inB) outls[k] = lls[k]; }
+    else if (!inL && inC) { if (!inB) outls[k] = cls[k]; }
+  });
+  if (Object.keys(outls).length) out._ls = outls;
+  return out;
+}
+window.mergeSnapshots = mergeSnapshots;
 
 // Canonical apparel size run + range expander.
 // Turns "XS-XL", "S–XL", "S,M,L", "0-12" into a real list of sizes.
@@ -17557,6 +17651,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return id;
   }
   function who(){ try { return (getGConfig().authorName)||'Someone'; } catch(e){ return 'Someone'; } }
+  // The last state we know both devices agreed on — the common ancestor the
+  // 3-way merge diffs against to tell additions from deletions.
+  function setBase(snap){ try { localStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
+  function getBase(){ try { var s = localStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
 
   // Lossless snapshot: tech-pack fields all hang off the style objects.
   function snapshot(){
@@ -17605,11 +17703,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var c = sb(); if (!c) return;
     var rev = Date.now();
     try {
+      var localSnap = snapshot();
+      // Read-modify-write: merge our local state onto the CURRENT cloud state so
+      // a partner's concurrent edits to other records aren't overwritten. If the
+      // read fails (offline), fall back to pushing local as-is.
+      var cloudRow = await pullRow();
+      var toPush = (cloudRow && cloudRow.data) ? mergeSnapshots(getBase(), localSnap, cloudRow.data) : localSnap;
       var res = await c.from('venia_workspace').upsert({
-        id: WS_ID, data: snapshot(), updated_by: clientId(),
+        id: WS_ID, data: toPush, updated_by: clientId(),
         updated_at: new Date().toISOString(), rev: rev
       }, { onConflict:'id' });
-      if (!res || !res.error) localStorage.setItem('venia-sync-rev', String(rev));  // watermark: how new our pushes are
+      if (!res || !res.error) { localStorage.setItem('venia-sync-rev', String(rev)); setBase(localSnap); }
     } catch(e){ /* offline — will retry on next save */ }
   }
   function schedulePush(){
@@ -17640,7 +17744,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var el = document.activeElement;
     var editing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
     if (editing){ showReloadPill(row); return; }                       // don't clobber a live edit
-    applySnapshot(row.data);
+    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));     // 3-way merge, not wholesale replace
+    setBase(snapshot());
     rerender();
     if (typeof showToast === 'function') showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
   }
@@ -17653,7 +17758,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     b.id = id;
     b.textContent = (row.data._who||'Partner') + ' updated — tap to load';
     b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + var(--sab,0px));z-index:99998;background:#111;color:#fff;border:none;border-radius:20px;padding:10px 18px;font-size:12px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.35);cursor:pointer;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
-    b.onclick = function(){ applySnapshot(row.data); b.remove(); rerender(); };
+    b.onclick = function(){ applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data)); setBase(snapshot()); b.remove(); rerender(); };
     document.body.appendChild(b);
   }
 
@@ -17678,9 +17783,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // from before this fix have real local data but no watermark — pushing
       // it up beats letting a stale/seed cloud copy overwrite real work.
       if (FRESH_BROWSER || (myRev && cloudRev >= myRev)){
-        if (row.updated_by !== clientId()){ applySnapshot(row.data); rerender(); }
+        if (row.updated_by !== clientId()){
+          // Fresh browser holds only seed data → let cloud win wholesale. A
+          // returning device has real local work → 3-way merge so unpushed local
+          // edits survive alongside the cloud's.
+          if (FRESH_BROWSER) applySnapshot(row.data);
+          else applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
+          setBase(snapshot());
+          rerender();
+        } else { setBase(snapshot()); }
       } else {
-        pushNow();
+        pushNow();                    // our local is newer → push it (pushNow sets base)
       }
     } else {
       pushNow();                      // no (usable) workspace yet → seed it from this device
@@ -17712,7 +17825,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!sb()){ if (typeof showToast==='function') showToast('Connect to Supabase first','warning'); return; }
     if (typeof showToast==='function') showToast('Pulling latest from cloud…','info');
     var row = await pullRow();
-    if (row && row.data){ applySnapshot(row.data); rerender(); showToast('Synced ✓','success'); }
+    if (row && row.data){ applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data)); setBase(snapshot()); rerender(); showToast('Synced ✓','success'); }
     else showToast('Nothing in the cloud yet','info');
   };
 
