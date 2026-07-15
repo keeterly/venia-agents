@@ -1534,7 +1534,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '71';
+  const BUILD = '72';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17376,19 +17376,27 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       '  l NUMERIC, xl NUMERIC, tolerance NUMERIC, comment TEXT',
       ');',
       '',
-      '-- Enable Row Level Security',
-      'ALTER TABLE venia_styles    ENABLE ROW LEVEL SECURITY;',
-      'ALTER TABLE venia_materials ENABLE ROW LEVEL SECURITY;',
-      'ALTER TABLE venia_vendors   ENABLE ROW LEVEL SECURITY;',
-      'ALTER TABLE venia_bom       ENABLE ROW LEVEL SECURITY;',
-      'ALTER TABLE venia_pom       ENABLE ROW LEVEL SECURITY;',
+      '-- The shared workspace (cross-device sync) and factory share tokens.',
+      'CREATE TABLE IF NOT EXISTS venia_workspace (',
+      '  id TEXT PRIMARY KEY, data JSONB,',
+      '  updated_by TEXT, updated_at TIMESTAMPTZ DEFAULT now(), rev BIGINT',
+      ');',
       '',
-      '-- Allow full access via anon key (tighten later with Supabase Auth)',
-      "CREATE POLICY \"anon_all\" ON venia_styles    FOR ALL USING (true) WITH CHECK (true);",
-      "CREATE POLICY \"anon_all\" ON venia_materials FOR ALL USING (true) WITH CHECK (true);",
-      "CREATE POLICY \"anon_all\" ON venia_vendors   FOR ALL USING (true) WITH CHECK (true);",
-      "CREATE POLICY \"anon_all\" ON venia_bom       FOR ALL USING (true) WITH CHECK (true);",
-      "CREATE POLICY \"anon_all\" ON venia_pom       FOR ALL USING (true) WITH CHECK (true);"
+      'CREATE TABLE IF NOT EXISTS venia_shares (',
+      '  token TEXT PRIMARY KEY, style_id TEXT, label TEXT,',
+      '  revoked BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT now()',
+      ');',
+      '',
+      '-- Row Level Security — VENIA team only, scoped to the two accounts. This',
+      '-- matches the live locked database, so re-running this never reopens access.',
+      'DO $$ DECLARE t TEXT; BEGIN',
+      "  FOREACH t IN ARRAY ARRAY['venia_styles','venia_materials','venia_vendors','venia_bom','venia_pom','venia_workspace','venia_shares'] LOOP",
+      "    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', t);",
+      "    EXECUTE format('DROP POLICY IF EXISTS anon_all ON public.%I;', t);",
+      "    EXECUTE format('DROP POLICY IF EXISTS venia_authed ON public.%I;', t);",
+      "    EXECUTE format('CREATE POLICY venia_authed ON public.%I FOR ALL TO authenticated USING ((auth.jwt() ->> ''email'') IN (''keeter@veniacollection.com'',''christine@veniacollection.com'')) WITH CHECK ((auth.jwt() ->> ''email'') IN (''keeter@veniacollection.com'',''christine@veniacollection.com''));', t);",
+      '  END LOOP;',
+      'END $$;'
     ].join('\n');
 
     var overlay = document.createElement('div');
