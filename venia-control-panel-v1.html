@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '86';
+  const BUILD = '87';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18354,21 +18354,29 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // new order is committed to STATE.dump on release (open items reorder; done
   // items keep their place at the end).
   var dnd = null;
+  // Swallow the native scroll/selection while a reorder drag is live (iOS won't
+  // honour touch-action alone once the finger leaves the grip).
+  function dumpTouchBlock(e){ if (dnd && e.cancelable) e.preventDefault(); }
   window.dumpDragStart = function(e, id){
+    if (e.button != null && e.button !== 0) return;   // ignore secondary buttons
     if (e.cancelable) e.preventDefault();
     e.stopPropagation();
     var rowEl = document.querySelector('#dump-scroll .dump-row[data-id="' + id + '"]'); if (!rowEl) return;
-    dnd = { id: id, el: rowEl, startY: e.clientY };
+    dnd = { id: id, el: rowEl, startY: e.clientY, moved: false };
+    rowEl.classList.add('dump-drag-active');
     rowEl.style.transition = 'none'; rowEl.style.position = 'relative'; rowEl.style.zIndex = '50';
-    rowEl.style.opacity = '.94'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
-    document.body.style.userSelect = 'none';
-    try { e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId); } catch(_){}
-    document.addEventListener('pointermove', dumpDragMove);
+    rowEl.style.opacity = '.96'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
+    document.body.classList.add('dump-dragging');
+    try { e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); } catch(_){}
+    document.addEventListener('pointermove', dumpDragMove, { passive: false });
     document.addEventListener('pointerup', dumpDragEnd);
     document.addEventListener('pointercancel', dumpDragEnd);
+    document.addEventListener('touchmove', dumpTouchBlock, { passive: false });
   };
   function dumpDragMove(e){
     if (!dnd) return;
+    if (e.cancelable) e.preventDefault();
+    dnd.moved = true;
     var dy = e.clientY - dnd.startY;
     dnd.el.style.transform = 'translateY(' + dy + 'px)';
     var rows = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row'));
@@ -18385,21 +18393,26 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   }
   function dumpDragEnd(){
-    document.removeEventListener('pointermove', dumpDragMove);
+    document.removeEventListener('pointermove', dumpDragMove, { passive: false });
     document.removeEventListener('pointerup', dumpDragEnd);
     document.removeEventListener('pointercancel', dumpDragEnd);
-    document.body.style.userSelect = '';
+    document.removeEventListener('touchmove', dumpTouchBlock, { passive: false });
+    document.body.classList.remove('dump-dragging');
     if (!dnd) return;
-    var el = dnd.el; el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = '';
+    var el = dnd.el, moved = dnd.moved;
+    el.classList.remove('dump-drag-active');
+    el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = '';
+    dnd = null;
+    if (!moved) return;   // a tap on the grip that never moved — nothing to reorder
     var ids = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row')).map(function(r){ return r.getAttribute('data-id'); });
     var byId = {}; items().forEach(function(it){ byId[it.id] = it; });
     var open = []; ids.forEach(function(id){ if (byId[id]) open.push(byId[id]); });
     var done = items().filter(function(it){ return it.done; });
     STATE.dump = open.concat(done);
-    dnd = null; save(); render();
+    save(); render();
   }
   var dumpGrip = function(id){
-    return '<button class="dump-grip" onpointerdown="dumpDragStart(event,\'' + id + '\')" title="Drag to reorder" aria-label="Reorder" style="background:none;border:none;color:var(--border-mid);font-size:15px;cursor:grab;padding:0 1px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>';
+    return '<button class="dump-grip" onpointerdown="dumpDragStart(event,\'' + id + '\')" title="Drag to reorder" aria-label="Reorder" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:grab;padding:2px 3px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>';
   };
   window.dumpToggle = function(id){
     var it = items().find(function(i){ return i.id === id; }); if (!it) return;
@@ -19826,6 +19839,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '#dump-sheet .btn{transition:transform .1s ease,background .15s ease,border-color .15s ease}'
       + '#dump-sheet .btn:active,#dump-sheet .dump-tab:active{transform:scale(.97)}'
       + '#dump-input:focus{border-color:var(--ink) !important}'
+      // While reordering: kill iOS text-selection, the copy/callout bubble, and
+      // page scroll so the drag is the only gesture in play.
+      + 'body.dump-dragging, body.dump-dragging *{-webkit-user-select:none !important;user-select:none !important;-webkit-touch-callout:none !important}'
+      + 'body.dump-dragging{cursor:grabbing}'
+      + 'body.dump-dragging #dump-scroll{touch-action:none}'
+      + '.dump-grip{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}'
+      + '.dump-row.dump-drag-active{background:var(--bg)}'
       + '#dump-scroll{scroll-behavior:smooth}'
       + '#dump-scroll::-webkit-scrollbar{width:0}'
       // Sharp / editorial corners to match the rest of the app. The Brain Dump
