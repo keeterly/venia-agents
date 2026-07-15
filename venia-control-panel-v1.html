@@ -1530,7 +1530,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '65';
+  const BUILD = '66';
   const BUILD_DATE = '2026.07.15';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2536,18 +2536,22 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
                 <span id="set-conn-shopify-label" style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:700">Not set</span>
               </div>
             </div>
-            <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end;flex-wrap:wrap">
-              <div class="fg"><label class="fl">Store URL</label>
+            <div style="margin-top:14px;font-size:10px;color:var(--muted);line-height:1.8">
+              The Admin token lives <strong>server-side only</strong> — it never enters this browser. In Netlify → Site configuration → Environment variables add
+              <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">SHOPIFY_STORE_DOMAIN</code> (e.g. veniacollection.myshopify.com) and
+              <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">SHOPIFY_ADMIN_TOKEN</code> (the <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">shpat_…</code> token from Admin → Apps → Develop apps), then redeploy and test. The app reads orders through a server proxy that only ever performs read-only requests.
+            </div>
+            <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end;flex-wrap:wrap">
+              <div class="fg"><label class="fl">Store URL (display only)</label>
                 <input class="fi fi-mono" id="set-shopify-domain" placeholder="veniacollection.myshopify.com" style="font-size:10px">
               </div>
-              <div class="fg"><label class="fl">Admin API Access Token</label>
-                <input class="fi fi-mono" type="password" id="set-shopify-token" placeholder="shpat_xxxxxxxxxxxx" style="font-size:10px">
+              <div class="fg"><label class="fl">Admin token — set in Netlify, not here</label>
+                <input class="fi fi-mono" type="password" id="set-shopify-token" placeholder="managed server-side" disabled style="font-size:10px;opacity:.5">
               </div>
             </div>
             <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button class="btn btn-gold btn-sm" onclick="setApiKey('shopify')">Save</button>
+              <button class="btn btn-gold btn-sm" onclick="setApiKey('shopify')">Save domain</button>
               <button class="btn btn-ghost btn-sm" onclick="setTestShopify()">Test Connection</button>
-              <a href="https://admin.shopify.com" target="_blank" style="font-size:9px;color:var(--muted);text-decoration:underline">Admin → Apps → Private apps →</a>
             </div>
           </div>
 
@@ -11306,7 +11310,8 @@ function dbDelete(table, id) { dbSet(table, dbGet(table).filter(r => r.id !== id
 function keysRead()           { try { return JSON.parse(localStorage.getItem(KEYS_KEY)||'{}'); } catch(e){ return {}; } }
 function getKey(name)         { return keysRead()[name]||''; }
 function setKey(name,val)     { const k=keysRead(); k[name]=val; localStorage.setItem(KEYS_KEY,JSON.stringify(k)); }
-window.VENIA_DB = { dbRead, dbWrite, dbGet, dbSet, dbInsert, dbUpdate, dbDelete, getKey, setKey };
+function delKey(name)         { const k=keysRead(); if (name in k){ delete k[name]; localStorage.setItem(KEYS_KEY,JSON.stringify(k)); } }
+window.VENIA_DB = { dbRead, dbWrite, dbGet, dbSet, dbInsert, dbUpdate, dbDelete, getKey, setKey, delKey };
 
 // ── INTERNAL FILTER ──────────────────────────────────────────────────
 const INTERNAL = new Set(['keeter','christine','keeter johnson','christine johnson']);
@@ -11416,7 +11421,7 @@ function cpRenderToday(){
     const el_h = document.getElementById('cpl-stat-hits');
     if (el_l) el_l.textContent = leads.length || '0';
     if (el_h) el_h.textContent = hits.length  || '0';
-    if (getKey('shopify') && getKey('shopify_domain')) cmdLoadShopify();
+    cmdLoadShopify();  // decides live-vs-demo itself, based on the server proxy
   } catch(e){}
 }
 window.cpRenderToday = cpRenderToday;
@@ -11426,7 +11431,20 @@ window.dismissNag = function(k){
   localStorage.setItem('venia-dismissed-nags', JSON.stringify(d));
   buildTodayFocus();
 };
-document.addEventListener('DOMContentLoaded', function(){ setTimeout(cpRenderToday, 200); });
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(cpRenderToday, 200);
+  // Resolve Shopify connection state from the server (the token lives there,
+  // never in the browser), then refresh anything that depends on it.
+  setTimeout(function(){
+    if (typeof shopifyPing !== 'function') return;
+    shopifyPing().then(function(){
+      try { if (typeof setUpdateDots === 'function') setUpdateDots(); } catch(e){}
+      try { if (typeof window.updateInventoryNav === 'function') window.updateInventoryNav(); } catch(e){}
+      try { if (typeof cmdLoadShopify === 'function') cmdLoadShopify(); } catch(e){}
+      try { if (typeof cpRenderToday === 'function') cpRenderToday(); } catch(e){}
+    });
+  }, 250);
+});
 
 function cmdShowSection(id, navEl) {
   document.querySelectorAll('.cmd-section').forEach(s => s.style.display = 'none');
@@ -11476,7 +11494,7 @@ function buildTodayFocus() {
   //    Settings; once dismissed they stay out of the daily focus on this device.
   const dismissedNags = (()=>{ try { return JSON.parse(localStorage.getItem('venia-dismissed-nags')||'[]'); } catch(e){ return []; } })();
   if (!getKey('anthropic') && !dismissedNags.includes('anthropic')) items.push({pri:'high', text:'Claude API key not set — agents are offline', nag:'anthropic'});
-  if (!getKey('shopify') && !dismissedNags.includes('shopify'))     items.push({pri:'low',  text:'Shopify not connected — add key in Settings', nag:'shopify'});
+  if (!shopifyConnected() && !dismissedNags.includes('shopify'))     items.push({pri:'low',  text:'Shopify not connected — set it up in Settings', nag:'shopify'});
   // 4. Active styles
   const active = (STATE.styles||[]).filter(s => s.status === 'active');
   if (active.length) items.push({pri:'low', text:`${active.length} active style${active.length>1?'s':''} live in PLM`});
@@ -11495,15 +11513,59 @@ function buildTodayFocus() {
 }
 
 // ── SHOPIFY ORDERS ───────────────────────────────────────────────────
-async function shopifyFetch(endpoint, opts={}) {
-  const domain = getKey('shopify_domain');
-  const token  = getKey('shopify');
-  if (!domain || !token) throw new Error('Shopify not connected');
-  const url = `https://${domain}/admin/api/2024-01${endpoint}`;
-  const resp = await fetch(url, { headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json', ...opts.headers }, ...opts });
-  if (!resp.ok) throw new Error(resp.statusText);
-  return resp.json();
+// The Shopify Admin token never lives in the browser. All reads go through the
+// server proxy (/api/shopify → netlify/functions/shopify.js), which holds the
+// token in a Netlify env var and only ever issues whitelisted GET reads.
+window._shopifyServerConfigured = false;
+async function shopifyProxy(action, params = {}) {
+  const PATHS = ['/api/shopify', '/.netlify/functions/shopify'];
+  const CANON = 'https://creator.veniacollection.com';
+  const bases = [location.origin]; if (location.origin !== CANON) bases.push(CANON);
+  const bodyStr = JSON.stringify({ action, ...params });
+  let lastErr;
+  for (const base of bases) {
+    for (const path of PATHS) {
+      try {
+        const resp = await fetch(base + path, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyStr,
+        });
+        // A bare 404/405 means the routing swallowed the POST — try the next path/host.
+        if (resp.status === 404 || resp.status === 405 || resp.redirected) { lastErr = new Error('HTTP ' + resp.status); continue; }
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('Shopify HTTP ' + resp.status));
+        return data;
+      } catch (e) { lastErr = e; }
+    }
+  }
+  throw lastErr || new Error('Shopify request failed');
 }
+// Ask the server whether Shopify is configured (never exposes the token).
+async function shopifyPing() {
+  try { const d = await shopifyProxy('ping'); window._shopifyServerConfigured = !!d.configured; }
+  catch (e) { window._shopifyServerConfigured = false; }
+  return window._shopifyServerConfigured;
+}
+function shopifyConnected() { return window._shopifyServerConfigured === true; }
+// Back-compat shim: existing callers pass Shopify endpoint paths. Translate the
+// known read endpoints to proxy actions so no call site needs rewriting.
+async function shopifyFetch(endpoint) {
+  if (endpoint.startsWith('/shop.json'))   return shopifyProxy('shop');
+  if (endpoint.startsWith('/orders.json')) {
+    const q = new URLSearchParams((endpoint.split('?')[1]) || '');
+    return shopifyProxy('orders', { limit: q.get('limit') || 20, status: q.get('status') || 'any' });
+  }
+  if (endpoint.startsWith('/products.json')) {
+    const q = new URLSearchParams((endpoint.split('?')[1]) || '');
+    return shopifyProxy('products', { limit: q.get('limit') || 50 });
+  }
+  throw new Error('Unsupported Shopify endpoint');
+}
+// One-time security migration: if an Admin token was ever pasted into the
+// browser (old client-side path), purge it from localStorage now — it belongs
+// only in the server env var. The non-secret store domain can stay for display.
+(function purgeLegacyShopifyToken(){
+  try { if (typeof getKey === 'function' && getKey('shopify') && String(getKey('shopify')).startsWith('shpat_')) delKey('shopify'); } catch(e){}
+})();
 
 async function cmdLoadShopify() {
   const tableEl = document.getElementById('cmd-orders-table');
@@ -11511,7 +11573,7 @@ async function cmdLoadShopify() {
   const kpiOrd  = document.getElementById('kpi-orders');
   const recentEl= document.getElementById('cmd-recent-orders');
   const tileEl  = document.getElementById('cpl-stat-orders');
-  if (!getKey('shopify') || !getKey('shopify_domain')) {
+  if (!shopifyConnected()) {
     if (tableEl) tableEl.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:20px 0">Connect Shopify in Settings → API Keys</div>';
     if (tileEl) tileEl.textContent = '—';
     return;
@@ -12217,7 +12279,9 @@ function setUpdateDots() {
     {key:'instagram',dot:'set-conn-ig-dot',lbl:'set-conn-ig-label',home:null},
   ];
   dots.forEach(({key,dot,lbl,home})=>{
-    const connected = !!getKey(key);
+    // Shopify connection is server-side now — reflect the proxy ping, not a
+    // browser-held key (there isn't one anymore).
+    const connected = key === 'shopify' ? shopifyConnected() : !!getKey(key);
     const dotEl = document.getElementById(dot);
     const lblEl = document.getElementById(lbl);
     const homeEl = home ? document.getElementById(home) : null;
@@ -12227,22 +12291,35 @@ function setUpdateDots() {
   });
 }
 function setApiKey(name) {
-  const map = {anthropic:'set-anthropic-key', shopify:'set-shopify-token', news:'set-news-key', instagram:'set-ig-token'};
+  // Shopify is special: the Admin token is a powerful read/write credential and
+  // must NEVER be stored in the browser. It lives only in the Netlify env var
+  // SHOPIFY_ADMIN_TOKEN. So even if someone pastes it here, we don't persist it
+  // — we tell them where it goes and purge any stray copy.
+  if (name === 'shopify') {
+    const tokenField = document.getElementById('set-shopify-token');
+    const domain = document.getElementById('set-shopify-domain')?.value.trim();
+    if (domain) setKey('shopify_domain', domain);   // store domain (non-secret) for display only
+    delKey('shopify');                               // never keep a token client-side
+    if (tokenField) tokenField.value = '';
+    setUpdateDots();
+    toast('Shopify domain saved. Set the Admin token as SHOPIFY_ADMIN_TOKEN in Netlify env — never in the browser.', 'info');
+    return;
+  }
+  const map = {anthropic:'set-anthropic-key', news:'set-news-key', instagram:'set-ig-token'};
   const val = document.getElementById(map[name])?.value.trim();
   if (val) setKey(name, val);
-  if (name==='shopify') {
-    const domain = document.getElementById('set-shopify-domain')?.value.trim();
-    if (domain) setKey('shopify_domain', domain);
-  }
   setUpdateDots();
   toast(`${name.charAt(0).toUpperCase()+name.slice(1)} key saved`);
 }
 async function setTestShopify() {
-  const toastEl = document.querySelector('.toast');
+  toast('Testing Shopify link…', 'info');
   try {
+    await shopifyPing();                 // refresh server-configured state first
     const data = await shopifyFetch('/shop.json');
     toast(`Connected: ${data.shop?.name||'OK'}`);
-  } catch(e) { toast('Shopify error: '+e.message, 'error'); }
+    setUpdateDots();
+    if (typeof window.updateInventoryNav === 'function') window.updateInventoryNav();
+  } catch(e) { toast('Shopify: '+e.message, 'error'); }
 }
 function setOpenAddContact() {
   const f = document.getElementById('set-add-contact-form');
@@ -15395,7 +15472,7 @@ const _origCmdLoadShopify = window.cmdLoadShopify;
 window.cmdLoadShopify = async function() {
   const tableEl = document.getElementById('cmd-orders-table');
   const tileEl  = document.getElementById('cpl-stat-orders');
-  if (!getKey('shopify') || !getKey('shopify_domain')) {
+  if (!shopifyConnected()) {
     // Show demo data
     window._shopifyOrders = DEMO_ORDERS;
     window._shopifyIsDemo = true;
@@ -15702,10 +15779,13 @@ window.oeGenerate = async function() {
 (function wireNavState() {
   document.addEventListener('DOMContentLoaded', function() {
     // Inventory only earns a nav slot once Shopify is actually connected —
-    // until then it's all zeros and just noise in the menu.
-    if (typeof getKey === 'function' && getKey('shopify')) {
-      document.querySelectorAll('.nav-inventory').forEach(el => { el.style.display = ''; });
-    }
+    // until then it's all zeros and just noise in the menu. Connection is
+    // server-side now, so re-check after the async ping resolves too.
+    window.updateInventoryNav = function(){
+      const on = (typeof shopifyConnected === 'function') && shopifyConnected();
+      document.querySelectorAll('.nav-inventory').forEach(el => { el.style.display = on ? '' : 'none'; });
+    };
+    window.updateInventoryNav();
     // Restore last active CP screen
     const lastScreen = localStorage.getItem('venia_last_screen');
     if (lastScreen && lastScreen !== 'plm') {
