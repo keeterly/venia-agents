@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '43';
+  const BUILD = '44';
   const BUILD_DATE = '2026.07.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17715,37 +17715,58 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
 
   // ── Voice capture — speak your dump, it transcribes into the box ─────────
+  // iOS Safari (and some Androids) end recognition after every pause and DON'T
+  // honour continuous mode — the old single-session approach cut off and
+  // dropped words. Instead we run a manual restart loop: each session commits
+  // only its finalized text, and we restart until the user taps Stop. That's
+  // stable across Chrome, Safari and iOS.
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var rec = null, recActive = false;
+  var rec = null, listening = false, committed = '';
   function micBtn(on){
-    var b = document.getElementById('dump-mic'); if (!b) return;
-    b.innerHTML = on ? '● Stop' : '🎤';
-    b.style.background = on ? '#c0392b' : '';
-    b.style.color = on ? '#fff' : '';
-    b.style.borderColor = on ? '#c0392b' : '';
+    var b = document.getElementById('dump-mic'); if (b){
+      b.innerHTML = on ? '<span class="dump-mic-dot"></span>Listening…' : '🎤 Speak';
+      b.classList.toggle('rec', on);
+    }
   }
+  function setInput(v){ var t = document.getElementById('dump-input'); if (t){ t.value = v; try { t.scrollTop = t.scrollHeight; } catch(e){} } }
   window.dumpMicSupported = function(){ return !!SR; };
-  window.dumpMic = function(){
-    if (!SR){ showToast('Voice input isn\'t supported on this browser — try Chrome or Safari','warning'); return; }
-    if (recActive){ try { rec && rec.stop(); } catch(e){} return; }
-    var t = document.getElementById('dump-input'); if (!t) return;
-    var base = t.value ? t.value.replace(/\s+$/,'') + ' ' : '';
-    var finalTxt = '';
-    rec = new SR();
-    rec.lang = 'en-US'; rec.continuous = true; rec.interimResults = true;
+
+  function startRec(){
+    try { rec = new SR(); } catch(e){ listening = false; micBtn(false); return; }
+    rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = false;
+    var sessionFinal = '';
     rec.onresult = function(e){
-      var interim = '';
-      for (var k = e.resultIndex; k < e.results.length; k++){
+      var interim = '', fin = '';
+      for (var k = 0; k < e.results.length; k++){
         var r = e.results[k];
-        if (r.isFinal) finalTxt += r[0].transcript + ' ';
-        else interim += r[0].transcript;
+        if (r.isFinal) fin += r[0].transcript + ' '; else interim += r[0].transcript;
       }
-      t.value = base + finalTxt + interim;
+      sessionFinal = fin;
+      setInput((committed + fin + interim).replace(/\s{2,}/g,' '));
     };
-    rec.onerror = function(ev){ recActive = false; micBtn(false); if (ev.error !== 'aborted' && ev.error !== 'no-speech') showToast('Voice error — ' + ev.error, 'error'); };
-    rec.onend = function(){ recActive = false; micBtn(false); var tt = document.getElementById('dump-input'); if (tt){ tt.value = (base + finalTxt).replace(/\s+$/,''); tt.focus(); } };
-    try { rec.start(); recActive = true; micBtn(true); showToast('Listening… tap Stop when done','info'); }
-    catch(e){ recActive = false; micBtn(false); }
+    rec.onerror = function(ev){
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed'){
+        listening = false; micBtn(false);
+        showToast('Allow microphone access, then tap Speak again','warning');
+      }
+      // 'no-speech' / 'aborted' are normal — the onend loop just restarts.
+    };
+    rec.onend = function(){
+      if (sessionFinal) committed = (committed + sessionFinal);
+      setInput(committed.replace(/\s+$/,''));
+      if (listening) setTimeout(function(){ if (listening) startRec(); }, 180);   // brief gap avoids InvalidStateError
+      else { micBtn(false); var t = document.getElementById('dump-input'); if (t) t.focus(); }
+    };
+    try { rec.start(); } catch(e){ /* start() can throw if called too fast; loop retries */ }
+  }
+
+  window.dumpMic = function(){
+    if (!SR){ showToast('Voice input isn\'t supported here — try Chrome or Safari','warning'); return; }
+    if (listening){ listening = false; try { rec && rec.stop(); } catch(e){} return; }   // Stop
+    var t = document.getElementById('dump-input'); if (!t) return;
+    committed = t.value ? t.value.replace(/\s+$/,'') + ' ' : '';
+    listening = true; micBtn(true);
+    startRec();
   };
 
   // ── Visual, focus-first plan view ──────────────────────────────────────
@@ -17858,66 +17879,101 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return h;
   }
 
+  function injectCSS(){
+    if (document.getElementById('dump-css')) return;
+    var s = document.createElement('style');
+    s.id = 'dump-css';
+    s.textContent =
+      '@keyframes dumpPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.7)}}'
+      + '.dump-mic-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#fff;margin-right:8px;animation:dumpPulse 1s ease-in-out infinite;vertical-align:middle}'
+      + '#dump-mic{transition:background .15s,color .15s,border-color .15s}'
+      + '#dump-mic.rec{background:#c0392b !important;color:#fff !important;border-color:#c0392b !important}'
+      + '.dump-tab{transition:background .12s,color .12s}'
+      + '#dump-input:focus{border-color:var(--ink) !important}'
+      + '#dump-scroll::-webkit-scrollbar{width:0}';
+    document.head.appendChild(s);
+  }
+
   function render(){
     var ov = sheet(); if (!ov) return;
+    injectCSS();
     var all = items();
     var open = all.filter(function(i){ return !i.done; });
     var done = all.filter(function(i){ return i.done; });
     var plan = STATE.dumpPlan;
+    var micOK = window.dumpMicSupported && window.dumpMicSupported();
 
+    // Friendly, full-width tab with a count badge.
     var chip = function(id, label, n){
       var on = TAB === id;
-      return '<button onclick="dumpTab(\'' + id + '\')" style="background:' + (on ? 'var(--ink)' : 'none') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';font-size:9px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;padding:6px 12px;cursor:pointer">' + label + (n != null ? ' <span style="font-family:\'DM Mono\',monospace">' + n + '</span>' : '') + '</button>';
+      return '<button class="dump-tab" onclick="dumpTab(\'' + id + '\')" style="flex:1;min-height:42px;background:' + (on ? 'var(--ink)' : 'var(--bg-off)') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';border-radius:10px;font-size:12px;font-weight:600;padding:9px 6px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px">'
+        + label
+        + (n != null && n > 0 ? '<span style="background:' + (on ? 'rgba(255,255,255,.22)' : 'var(--ink)') + ';color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px">' + n + '</span>' : '')
+        + '</button>';
     };
 
+    // A captured thought: round toggle, roomy text, gentle timestamp, delete.
     var row = function(i){
-      return '<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border)">'
-        + '<input type="checkbox" ' + (i.done ? 'checked' : '') + ' onchange="dumpToggle(\'' + i.id + '\')" style="margin-top:2px;cursor:pointer;accent-color:var(--ink);flex-shrink:0;width:16px;height:16px">'
-        + '<div style="flex:1;min-width:0;font-size:12px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word">' + esc(i.t) + '</div>'
-        + '<span style="font-family:\'DM Mono\',monospace;font-size:8px;color:var(--muted);flex-shrink:0;margin-top:3px">' + age(i.d) + '</span>'
-        + '<button onclick="dumpDelete(\'' + i.id + '\')" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;padding:0 2px;flex-shrink:0;line-height:1" title="Delete">✕</button>'
+      return '<div style="display:flex;gap:12px;align-items:flex-start;padding:13px 2px;border-bottom:1px solid var(--border)">'
+        + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:22px;height:22px;border:1.5px solid ' + (i.done?'var(--ink)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--ink)':'transparent') + ';color:#fff;cursor:pointer;font-size:12px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
+        + '<div style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word">' + esc(i.t) + '</div>'
+        + '<span style="font-family:\'DM Mono\',monospace;font-size:9px;color:var(--muted);flex-shrink:0;margin-top:4px">' + age(i.d) + '</span>'
+        + '<button onclick="dumpDelete(\'' + i.id + '\')" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1" title="Delete">✕</button>'
         + '</div>';
+    };
+
+    var emptyState = function(emoji, title, sub){
+      return '<div style="text-align:center;padding:44px 22px;color:var(--muted)">'
+        + '<div style="font-size:40px;margin-bottom:12px;line-height:1">' + emoji + '</div>'
+        + '<div style="font-size:15px;color:var(--ink);font-weight:600;margin-bottom:7px">' + title + '</div>'
+        + '<div style="font-size:12.5px;line-height:1.65">' + sub + '</div></div>';
     };
 
     var body;
     if (TAB === 'plan'){
       body = plan
-        ? '<div style="font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:2px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + planHTML(plan)
-          + '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-top:18px;width:100%" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
-        : '<div style="font-size:11px;color:var(--muted);line-height:1.8;padding:16px 0;text-align:center">No plan yet.<br>Dump your thoughts in the Inbox, then let Eni sort them into priorities, ideas and quick wins.</div>'
-          + '<button class="btn btn-gold btn-sm dump-org-btn" style="width:100%" onclick="dumpOrganize()">✦ Organize with Eni</button>';
+        ? '<div style="font-size:10px;color:var(--muted);letter-spacing:.3px;margin-bottom:6px">Organized ' + plan.count + ' item' + (plan.count > 1 ? 's' : '') + ' · ' + new Date(plan.at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) + '</div>' + planHTML(plan)
+          + '<button class="btn btn-ghost dump-org-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
+        : emptyState('✦', 'Let Eni make sense of it', 'Add a few thoughts to your inbox, then I\'ll sort them into<br>today\'s priorities, meetings, emails and quick wins.')
+          + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>';
     } else if (TAB === 'done'){
-      body = (done.length ? done.map(row).join('') : '<div style="font-size:11px;color:var(--muted);padding:16px 0;text-align:center">Nothing completed yet.</div>')
-        + (done.length ? '<button class="btn btn-ghost btn-sm" style="margin-top:14px" onclick="dumpClearDone()">Clear completed</button>' : '');
+      body = done.length
+        ? done.map(row).join('') + '<button class="btn btn-ghost btn-sm" style="margin-top:16px;border-radius:10px" onclick="dumpClearDone()">Clear completed</button>'
+        : emptyState('🌱', 'Nothing done yet', 'As you check things off, they\'ll gather here<br>so you can see what you\'ve moved forward.');
     } else {
-      body = open.length ? open.map(row).join('')
-        : '<div style="font-size:11px;color:var(--muted);line-height:1.8;padding:16px 0;text-align:center">Empty inbox. Type anything above — an idea, a task, a fabric to source — and hit enter.</div>';
+      body = open.length
+        ? open.map(row).join('')
+          + '<button class="btn btn-gold dump-org-btn" style="width:100%;margin-top:18px;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize ' + open.length + ' into a plan</button>'
+        : emptyState('🧠', 'Your mind, cleared', 'Type or speak anything — an idea, a task, a fabric to source.<br>I\'ll hold onto it and help you sort it when you\'re ready.');
     }
 
     ov.innerHTML =
-      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:86vh;max-height:86vh;display:flex;flex-direction:column;border-radius:14px 14px 0 0;overflow:hidden" onclick="event.stopPropagation()">'
-      + '<div style="padding:14px 16px 12px;background:#0a0a0a;color:#fff;display:flex;justify-content:space-between;align-items:center;flex-shrink:0">'
-      +   '<div><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:#999">Capture anything</div>'
-      +   '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:16px;letter-spacing:2px;text-transform:uppercase">✎ Brain Dump</div></div>'
-      +   '<button onclick="dumpClose()" style="background:none;border:none;color:#999;font-size:18px;cursor:pointer;padding:4px 8px;line-height:1">✕</button>'
-      + '</div>'
-      + '<div style="padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
-      +   '<div style="display:flex;gap:8px;align-items:flex-end">'
-      +     '<textarea id="dump-input" rows="2" placeholder="Idea, task, note… Enter saves. Shift+Enter = new line." onkeydown="dumpKey(event)" style="flex:1;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px 12px;border:1px solid var(--border);background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
-      +     '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">'
-      +       (window.dumpMicSupported && window.dumpMicSupported() ? '<button id="dump-mic" class="btn btn-ghost btn-sm" title="Speak your note" onclick="dumpMic()" style="min-width:52px">🎤</button>' : '')
-      +       '<button class="btn btn-gold btn-sm" onclick="dumpAdd()">Add</button>'
-      +     '</div>'
+      '<div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:560px;height:90vh;max-height:90vh;display:flex;flex-direction:column;border-radius:18px 18px 0 0;overflow:hidden;box-shadow:0 -8px 40px rgba(0,0,0,.28)" onclick="event.stopPropagation()">'
+      // Warm header
+      + '<div style="padding:18px 18px 16px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0">'
+      +   '<div>'
+      +     '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:19px;letter-spacing:.5px;display:flex;align-items:center;gap:8px">✎ Brain Dump</div>'
+      +     '<div style="font-size:11.5px;color:#9a9a9a;margin-top:4px">Capture anything — I\'ll organize it for you.</div>'
       +   '</div>'
-      +   (window.dumpMicSupported && window.dumpMicSupported() ? '<div style="font-size:9px;color:var(--muted);margin-top:6px;letter-spacing:.3px">🎤 Tap to speak — Eni transcribes, then sorts it with everything else.</div>' : '')
+      +   '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:34px;height:34px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>'
       + '</div>'
-      + '<div style="display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0;align-items:center">'
-      +   chip('inbox','Inbox', open.length) + chip('done','Done', done.length) + chip('plan','✦ Plan', null)
-      +   (TAB === 'inbox' && open.length ? '<button class="btn btn-ghost btn-sm dump-org-btn" style="margin-left:auto" onclick="dumpOrganize()">✦ Organize with Eni</button>' : '')
+      // Capture: big field + clear Speak / Add buttons
+      + '<div style="padding:14px 16px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--bg)">'
+      +   '<textarea id="dump-input" rows="2" placeholder="What\'s on your mind?" onkeydown="dumpKey(event)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:13px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.5"></textarea>'
+      +   '<div style="display:flex;gap:8px;margin-top:9px">'
+      +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" style="flex:1;min-height:46px;border-radius:11px;font-size:12px">🎤 Speak</button>' : '')
+      +     '<button class="btn btn-gold" onclick="dumpAdd()" style="flex:1;min-height:46px;border-radius:11px;font-size:12px">＋ Add</button>'
+      +   '</div>'
       + '</div>'
-      + '<div style="flex:1;overflow-y:auto;padding:6px 16px calc(20px + var(--sab,0px))">' + body + '</div>'
+      // Tabs
+      + '<div style="display:flex;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      +   chip('inbox','📥 Inbox', open.length) + chip('done','✓ Done', done.length) + chip('plan','✦ Plan', null)
+      + '</div>'
+      // Scroll body
+      + '<div id="dump-scroll" style="flex:1;overflow-y:auto;padding:12px 16px calc(22px + var(--sab,0px))">' + body + '</div>'
       + '</div>';
 
+    if (listening) micBtn(true);   // keep the Listening state visible across re-renders
     window.dumpBadge();
   }
 
