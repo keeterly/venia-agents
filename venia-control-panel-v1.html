@@ -1504,7 +1504,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '44';
+  const BUILD = '45';
   const BUILD_DATE = '2026.07.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11283,9 +11283,21 @@ async function callClaude(system, userMsg, history=[]) {
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
   const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 2000, system, messages: msgs });
-  let resp;
-  if (key) {
-    // Direct call with a browser-stored key (local use, or if you prefer not to use the proxy)
+
+  // Proxy-first: the Netlify function holds a current key server-side, so this
+  // is both the secure path AND the reliable one. (Previously a browser-stored
+  // key took priority — if that key was ever rotated/revoked, every AI call
+  // failed even though the server key was fine. That was the "Could not
+  // organize" bug.) We only fall back to a stored browser key if the proxy
+  // isn't there at all, e.g. opening the file locally outside Netlify.
+  let resp = null;
+  try {
+    resp = await fetch('/.netlify/functions/claude', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+    });
+  } catch(e){ resp = null; }   // network error reaching the proxy
+
+  if ((!resp || resp.status === 404) && key) {
     resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -11296,14 +11308,15 @@ async function callClaude(system, userMsg, history=[]) {
       },
       body,
     });
-  } else {
-    // Secure path: Netlify Function holds the key server-side — nothing in the browser
-    resp = await fetch('/.netlify/functions/claude', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
-    });
-    if (resp.status === 404) throw new Error('Claude not connected — add a key in Settings → API Keys, or set ANTHROPIC_API_KEY on Netlify');
   }
-  if (!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error(e.error?.message || resp.statusText); }
+
+  if (!resp) throw new Error('No connection to Eni — check your internet and try again.');
+  if (resp.status === 404) throw new Error('Eni isn\'t connected on this site yet — set ANTHROPIC_API_KEY on Netlify, or add a key in Settings → API Keys.');
+  if (!resp.ok) {
+    let detail = resp.statusText || ('HTTP ' + resp.status);
+    try { const e = await resp.json(); if (e && e.error && e.error.message) detail = e.error.message; } catch(_){}
+    throw new Error(detail + ' (' + resp.status + ')');
+  }
   const data = await resp.json();
   return data.content?.[0]?.text || '';
 }
