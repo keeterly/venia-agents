@@ -1,7 +1,7 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v111';
+const CACHE = 'venia-shell-v112';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -16,6 +16,17 @@ self.addEventListener('install', (e) => {
 // The page tells us to activate the waiting worker once the user taps "Update".
 self.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+// Tapping an "Eni finished" notification focuses the app (or opens it fresh).
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) { if ('focus' in c) return c.focus(); }
+      return self.clients.openWindow('/');
+    })
+  );
 });
 
 self.addEventListener('activate', (e) => {

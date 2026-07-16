@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '111';
+  const BUILD = '112';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18690,8 +18690,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
   window.dumpDeleteChild = function(gid, cid){
     var g = findGroup(gid); if (!g) return;
-    g.children = g.children.filter(function(x){ return x.id !== cid; });
+    var idx = g.children.findIndex(function(x){ return x.id === cid; }); if (idx < 0) return;
+    var st = g.children[idx];
+    g.children.splice(idx, 1);
     syncGroupDone(g); save(); render();
+    pushUndo({ kind: 'step', gid: gid, step: st, index: idx, label: 'Deleted step “' + (st.t || '').slice(0, 30) + '…”' });
   };
   window.dumpAddChild = function(gid){
     var g = findGroup(gid); if (!g) return;
@@ -18725,16 +18728,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (g){ var c = g.children.find(function(x){ return x.id === cid; }); if (c && !c.t) g.children = g.children.filter(function(x){ return x.id !== cid; }); }
     editingChildId = null; render();
   };
+  // Deletes stash the removed thing; an Undo bar restores it in place.
+  var undoBuf = null, undoTimer = null;
+  function pushUndo(entry){
+    undoBuf = entry;
+    var ex = document.getElementById('dump-undo'); if (ex) ex.remove();
+    if (undoTimer) clearTimeout(undoTimer);
+    var bar = document.createElement('div');
+    bar.id = 'dump-undo';
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + var(--sab,0px));z-index:9600;background:var(--ink);color:#fff;border-radius:12px;padding:11px 14px;display:flex;align-items:center;gap:14px;box-shadow:0 8px 30px rgba(0,0,0,.3);max-width:88vw';
+    bar.innerHTML = '<span style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(entry.label) + '</span>'
+      + '<button onclick="dumpUndo()" style="background:none;border:none;color:#caa24a;font-size:12.5px;font-weight:800;letter-spacing:.06em;cursor:pointer;flex-shrink:0">UNDO</button>';
+    document.body.appendChild(bar);
+    undoTimer = setTimeout(function(){ var b = document.getElementById('dump-undo'); if (b) b.remove(); undoBuf = null; }, 6000);
+  }
+  window.dumpUndo = function(){
+    var u = undoBuf; undoBuf = null;
+    var b = document.getElementById('dump-undo'); if (b) b.remove();
+    if (!u) return;
+    if (u.kind === 'item'){ items().splice(Math.min(u.index, items().length), 0, u.item); }
+    else if (u.kind === 'step'){
+      var g = items().find(function(x){ return x.id === u.gid && isGroup(x); });
+      if (g) g.children.splice(Math.min(u.index, g.children.length), 0, u.step);
+      else items().unshift({ id: uid(), t: u.step.t, d: new Date().toISOString(), done: false });   // goal gone → save the text as a task
+    }
+    else if (u.kind === 'bulk'){ u.items.forEach(function(it){ items().push(it); }); }
+    save(); render();
+    showToast('Restored','success');
+  };
   window.dumpDelete = function(id){
     var idx = items().findIndex(function(i){ return i.id === id; }); if (idx < 0) return;
+    var it = items()[idx];
     items().splice(idx, 1); save(); render();
+    pushUndo({ kind: 'item', item: it, index: idx, label: 'Deleted “' + (it.t || '').slice(0, 34) + (it.t && it.t.length > 34 ? '…' : '') + '”' });
   };
   window.dumpClearDone = function(){
     var done = items().filter(function(i){ return i.done; });
     if (!done.length) return;
-    if (done.length > 3 && !confirm('Clear ' + done.length + ' completed items?')) return;
     STATE.dump = items().filter(function(i){ return !i.done; });
     save(); render();
+    pushUndo({ kind: 'bulk', items: done, label: 'Cleared ' + done.length + ' completed' });
   };
 
   // Inline editing of a captured thought.
@@ -20248,6 +20281,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '.dump-swipe{position:relative;overflow:hidden;touch-action:pan-y}'
       + '.dump-swipe-bg{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;padding:0 20px;color:#fff;font-size:16px;font-weight:800;opacity:0}'
       + '.dump-swipe-fg{position:relative;background:var(--bg)}'
+      // Eni-at-work: a soft gold shimmer sweeps the row until the brief lands.
+      + '@keyframes dumpWorkSweep{0%{background-position:200% 0}100%{background-position:-200% 0}}'
+      + '.dump-working{background-image:linear-gradient(100deg,rgba(202,162,74,0) 25%,rgba(202,162,74,.18) 45%,rgba(202,162,74,0) 65%) !important;background-size:200% 100% !important;animation:dumpWorkSweep 1.8s linear infinite}'
+      + '.dump-work-run{display:inline-block;animation:dumpPulse 1.2s ease-in-out infinite;color:var(--gold);font-size:12px;padding:0 4px;flex-shrink:0}'
       + '@media (prefers-reduced-motion:reduce){#dump-sheet,#dump-sheet>div,#dump-scroll{animation:none !important}#dump-scroll{scroll-behavior:auto}}';
     document.head.appendChild(s);
   }
@@ -20541,6 +20578,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Eni produces a real work product (live web search when available) in the
   // background. Results persist on the item (synced) behind a 📄 chip.
   var delegRunning = {};
+  // System notification for finished delegate work. Fires only when the app
+  // isn't on screen — the in-app toast covers the visible case. iOS home-screen
+  // PWAs can only notify through the service-worker registration.
+  function delegNotify(title, body){
+    try {
+      if (!window.Notification || Notification.permission !== 'granted') return;
+      if (document.visibilityState === 'visible') return;
+      var opts = { body: body || '', tag: 'venia-deleg-' + Date.now(), icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' };
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistration){
+        navigator.serviceWorker.getRegistration().then(function(reg){
+          if (reg && reg.showNotification) reg.showNotification(title, opts);
+          else { try { new Notification(title, opts); } catch(_){} }
+        }).catch(function(){});
+      } else { try { new Notification(title, opts); } catch(_){} }
+    } catch(_){}
+  }
   function delegTarget(kind, id, gid){
     if (kind === 'step'){ var g = items().find(function(x){ return x.id === gid && isGroup(x); }); return g ? (g.children || []).find(function(c){ return c.id === id; }) : null; }
     return items().find(function(x){ return x.id === id && !isGroup(x); });
@@ -20572,6 +20625,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!q){ showToast('Tell Eni what to produce','info'); return; }
     var o = document.getElementById('dump-delegate'); if (o) o.remove();
     delegRunning[id] = true; render();
+    try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(_){}
     showToast('⚡ Eni is on it — keep working, I\'ll ping you', 'info');
     var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
       + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
@@ -20592,10 +20646,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       t2.work = { q: q, md: out.trim(), at: new Date().toISOString() };
       save(); render();
       showToast('⚡ Done — tap 📄 on “' + (t2.t || '').slice(0, 40) + '”', 'success');
+      delegNotify('⚡ Eni finished', (t2.t || 'Your task') + ' — the brief is ready in Brainstorm');
       logActivity('Eni delivered work — ' + (t2.t || '').slice(0, 50));
     } else {
       render();
       showToast('⚡ Couldn\'t finish — ' + String(err && err.message || 'try again'), 'error');
+      delegNotify('⚡ Eni hit a snag', 'Couldn’t finish “' + ((t2 && t2.t) || 'your task') + '” — tap ⚡ to retry');
     }
   };
   window.dumpWorkView = function(kind, id, gid){
@@ -20630,7 +20686,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     render();
   };
   function workChip(kind, id, gid){
-    if (delegRunning[id]) return '<span title="Eni is working on this" style="flex-shrink:0;font-size:12px;color:var(--gold);padding:0 4px">◐</span>';
+    if (delegRunning[id]) return '<span class="dump-work-run" title="Eni is working on this">⚡</span>';
     var t = delegTarget(kind, id, gid);
     if (t && t.work) return '<button onclick="event.stopPropagation();dumpWorkView(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" title="Eni\'s finished work" style="background:none;border:none;color:var(--gold);font-size:13px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">📄</button>';
     return '';
@@ -21111,9 +21167,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // left to delete; tap to edit.
         return '<div class="dump-swipe" data-sw="step" data-gid="' + i.id + '" data-id="' + c.id + '" style="border-top:1px solid var(--border)">'
           + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-          + '<div class="dump-swipe-fg" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
+          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : '') + '" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
           + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
+          + (c.done || delegRunning[c.id] || c.work ? '' : '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:12px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
           + workChip('step', c.id, i.id)
           + '</div></div>';
       }).join('');
@@ -21166,16 +21223,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // rides on .dump-swipe-fg above the verdict layer.
       var h = '<div class="dump-swipe" data-sw="task" data-id="' + i.id + '" style="' + (rowMenuId === i.id ? '' : 'border-bottom:1px solid var(--border)') + '">'
         + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-        + '<div class="dump-swipe-fg" style="display:flex;gap:9px;align-items:flex-start;padding:13px 2px">'
+        + '<div class="dump-swipe-fg' + (delegRunning[i.id] ? ' dump-working' : '') + '" style="display:flex;gap:9px;align-items:flex-start;padding:13px 2px">'
         + (i.done ? '' : dumpGrip(i.id))
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
+        + (i.done || delegRunning[i.id] || i.work ? '' : '<button onclick="dumpDelegate(\'task\',\'' + i.id + '\',\'\')" title="Have Eni do this for you" style="background:none;border:none;color:var(--gold);font-size:13px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
         + workChip('task', i.id, '')
         + '<button onclick="dumpRowMenu(\'' + i.id + '\')" aria-label="More" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 6px;flex-shrink:0;line-height:1;letter-spacing:1px">⋯</button>'
         + '</div></div>';
       if (rowMenuId === i.id){
         h += '<div style="display:flex;gap:7px;flex-wrap:wrap;padding:0 2px 12px 38px;border-bottom:1px solid var(--border)">'
-          + (i.done ? '' : '<button onclick="dumpDelegate(\'task\',\'' + i.id + '\',\'\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">⚡ Eni: do it</button>')
           + (i.done ? '' : '<button onclick="dumpRowMenu(null);dumpExpandItem(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">✦ Goal</button>')
           + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1d\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Tomorrow</button>')
           + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1w\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Next week</button>')
