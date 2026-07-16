@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '95';
+  const BUILD = '96';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4931,6 +4931,7 @@ let STATE = {
   schedPrefs: null,          // planner prefs {startHour, endHour, calSource}
   schedFixed: null,          // manual fixed commitments [{id,title,start,end}]
   rpg: null,                 // quest/game layer {on, xp, level, claimed, initialized}
+  googleClientId: null,      // Google OAuth client ID (public) — synced so it works across every device/PWA
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -5092,7 +5093,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'schedPrefs', 'schedFixed', 'rpg', 'activityLog', 'samples',
+  'dumpSchedule', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -12381,9 +12382,10 @@ function setInit() {
   // Load saved keys into inputs
   const fields = {anthropic:'set-anthropic-key', shopify:'set-shopify-token', shopify_domain:'set-shopify-domain', news:'set-news-key', instagram:'set-ig-token'};
   Object.entries(fields).forEach(([key,id])=>{const el=document.getElementById(id);if(el&&getKey(key))el.value=getKey(key);});
-  // Google Client ID lives in its own (public) localStorage key.
+  // Google Client ID — synced (STATE) with a localStorage mirror.
+  if (typeof googleClientIdMigrate === 'function') googleClientIdMigrate();
   const gEl = document.getElementById('set-google-clientid');
-  if (gEl) gEl.value = localStorage.getItem('venia-google-client-id') || '';
+  if (gEl) gEl.value = (typeof googleClientId === 'function' ? googleClientId() : '');
   if (typeof setGoogleDot === 'function') setGoogleDot();
   // Update connection dots
   setUpdateDots();
@@ -12495,19 +12497,36 @@ function setApiKey(name) {
   setUpdateDots();
   toast(`${name.charAt(0).toUpperCase()+name.slice(1)} key saved`);
 }
-// The Google OAuth Client ID is public (not a secret) and is read directly from
-// localStorage by Google sign-in and the calendar planner, so store it there.
+// The Google OAuth Client ID is public (not a secret). It's stored in synced
+// STATE so it follows you across every device and home-screen PWA (iOS gives
+// each installed app its own localStorage, which is why it looked "cracked"),
+// and mirrored to localStorage so the sign-in/calendar code can read it fast.
+function googleClientId() {
+  return (typeof STATE !== 'undefined' && STATE && STATE.googleClientId) || localStorage.getItem('venia-google-client-id') || '';
+}
+// Bridge the two stores on load: whichever has it, seed the other. In the
+// context that already had the ID this promotes it into synced STATE, so the
+// Brainstorm app and Christine's phone pick it up automatically.
+function googleClientIdMigrate() {
+  try {
+    const ls = localStorage.getItem('venia-google-client-id');
+    if (typeof STATE === 'undefined' || !STATE) return;
+    if (STATE.googleClientId && !ls) { localStorage.setItem('venia-google-client-id', STATE.googleClientId); }
+    else if (ls && !STATE.googleClientId) { STATE.googleClientId = ls; if (typeof save === 'function') save(); }
+  } catch (e) {}
+}
 function setGoogleClient() {
   const el = document.getElementById('set-google-clientid');
   const val = (el?.value || '').trim();
   if (!val) { toast('Paste your Google Client ID first', 'warning'); return; }
   if (!/\.apps\.googleusercontent\.com\s*$/.test(val)) { toast('That doesn’t look like a Client ID — it should end in .apps.googleusercontent.com', 'warning'); return; }
-  localStorage.setItem('venia-google-client-id', val);
+  if (typeof STATE !== 'undefined' && STATE) { STATE.googleClientId = val; if (typeof save === 'function') save(); }   // synced
+  localStorage.setItem('venia-google-client-id', val);                                                                  // fast local read
   setGoogleDot();
-  toast('Google Client ID saved — open Plan → Schedule → Connect calendar', 'success');
+  toast('Google Client ID saved & synced — open Plan → Schedule → Connect calendar', 'success');
 }
 function setGoogleDot() {
-  const has = !!localStorage.getItem('venia-google-client-id');
+  const has = !!googleClientId();
   const dot = document.getElementById('set-conn-google-dot');
   const lbl = document.getElementById('set-conn-google-label');
   if (dot) dot.style.background = has ? 'var(--green)' : 'var(--border-mid)';
@@ -20093,7 +20112,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // ── Google Calendar (real events to plan around) ─────────────────────────
   var gcalToken = null;
   window.schedConnectCal = function(){
-    var clientId = localStorage.getItem('venia-google-client-id') || '';
+    var clientId = (typeof googleClientId === 'function' ? googleClientId() : localStorage.getItem('venia-google-client-id')) || '';
     if (!clientId){ showToast('Add your Google Client ID in Settings → API Keys first','warning'); return; }
     if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){ showToast('Google library not loaded — check your connection','error'); return; }
     try {
@@ -20614,7 +20633,7 @@ function tpPickFile(styleId, field, label) {
 
 // ── GOOGLE SIGN-IN ────────────────────────────────────────────
 function gSignIn() {
-  const clientId = localStorage.getItem('venia-google-client-id') || '';
+  const clientId = (typeof googleClientId === 'function' ? googleClientId() : localStorage.getItem('venia-google-client-id')) || '';
   if (!clientId) {
     showToast('Add your Google Client ID in Settings → API Keys to enable collaboration','warning');
     // Navigate to settings
