@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '98';
+  const BUILD = '99';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4928,7 +4928,8 @@ let STATE = {
   dumpMasterCollapsed: null, // master-map collapsed categories {cid:true}
   dumpMasterTitle: null,     // master-map hub label (default "VENIA")
   dumpSchedule: null,        // last time-blocked schedule {date, blocks, unscheduled, note, at}
-  schedPrefs: null,          // planner prefs {startHour, endHour, calSource}
+  dumpWeek: null,            // last week plan {start, days:[{date,blocks}], unscheduled, note, at}
+  schedPrefs: null,          // planner prefs {startHour, endHour, calSource, horizon}
   schedFixed: null,          // manual fixed commitments [{id,title,start,end}]
   rpg: null,                 // quest/game layer {on, xp, level, claimed, initialized}
   googleClientId: null,      // Google OAuth client ID (public) — synced so it works across every device/PWA
@@ -5093,7 +5094,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'activityLog', 'samples',
+  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -20242,6 +20243,94 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         : 'Could not add — ' + m, 'error');
     } finally { render(); }
   };
+  // ── WEEK planner — spread tasks across the next 7 days ───────────────────
+  async function gCalEventsForRange(startStr, endStr){
+    var token = await gcalEnsureToken();
+    var tMin = new Date(startStr + 'T00:00:00'), tMax = new Date(endStr + 'T23:59:59');
+    var url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=250'
+      + '&timeMin=' + encodeURIComponent(tMin.toISOString()) + '&timeMax=' + encodeURIComponent(tMax.toISOString());
+    var r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 401){ gcalToken = null; gcalTokenExp = 0; token = await gcalEnsureToken(); r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } }); }
+    if (!r.ok) throw new Error('Calendar read failed (' + r.status + ')');
+    var d = await r.json(), byDate = {};
+    (d.items || []).filter(function(e){ return e.start && e.start.dateTime && e.status !== 'cancelled'; }).forEach(function(e){
+      var ds = new Date(e.start.dateTime), key = ds.getFullYear() + '-' + pad2s(ds.getMonth() + 1) + '-' + pad2s(ds.getDate());
+      (byDate[key] = byDate[key] || []).push({ title: e.summary || '(busy)', start: hhmmFromISO(e.start.dateTime), end: hhmmFromISO(e.end.dateTime) });
+    });
+    return byDate;
+  }
+  window.schedBuildWeek = async function(){
+    var tasks = schedTasks();
+    if (!tasks.length){ showToast('Nothing to schedule — capture some tasks first','info'); return; }
+    var btns = document.querySelectorAll('.sched-week-btn'); btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Planning your week…'; });
+    try {
+      var p = schedPrefs();
+      var base = new Date(); base.setHours(0, 0, 0, 0);
+      var days = []; for (var i = 0; i < 7; i++){ var dd = new Date(base.getTime() + i * 86400000); days.push(dd.getFullYear() + '-' + pad2s(dd.getMonth() + 1) + '-' + pad2s(dd.getDate())); }
+      var calByDate = {};
+      if (p.calSource === 'google'){ try { calByDate = await gCalEventsForRange(days[0], days[6]); } catch(e){ showToast(String(e.message) === 'reconnect' ? 'Reconnect calendar (tap 📅)' : ('Calendar: ' + String(e.message || e)), 'warning'); } }
+      var now = new Date();
+      var nowCtx = 'Right now it is ' + now.toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '.';
+      var taskLines = tasks.map(function(t, n){
+        var line = (n + 1) + '. [' + t.id + '] ' + t.t + (t.plan ? ('  — goal: ' + t.plan) : '');
+        if (t.gid){ var g = items().find(function(x){ return x.id === t.gid; }); if (g && g.due) line += '  (goal due ' + g.due + ')'; }
+        return line;
+      }).join('\n');
+      var dayLines = days.map(function(ds){
+        var d = new Date(ds + 'T00:00:00'), wd = d.toLocaleDateString('en-US', { weekday: 'long' });
+        var ev = calByDate[ds] || [];
+        return ds + ' (' + wd + ')' + (ev.length ? ' — busy: ' + ev.map(function(e){ return e.start + '-' + e.end + ' ' + e.title; }).join('; ') : '');
+      }).join('\n');
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'Plan the founder\'s WEEK: distribute the tasks across the 7 listed days as time-blocked work. '
+        + 'Be deadline-aware — a task whose goal is due lands comfortably BEFORE that due date; front-load anything urgent. Balance the load (don\'t cram one day, don\'t leave the week lopsided), sequence by energy (deep creative work protected, admin/emails batched, vendor calls earlier), and leave breathing room. '
+        + 'Schedule only within working hours ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00 each day, never overlap the listed busy events, and on today only after the current time. Not everything has to fit; put overflow in "unscheduled".\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "days":[{"date":"YYYY-MM-DD","blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if it maps to a task, else empty","kind":"work|meeting|break|admin","why":"a few words"}]}], "unscheduled":[{"t":"task text","reason":"why it didn\'t fit"}], "note":"one short line on the week\'s strategy" }';
+      var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.\nDays (with existing commitments):\n' + dayLines + '\n\nTasks to place across the week:\n' + taskLines + '\n\n' + plmContext();
+      var outp = await callClaude(sys, user);
+      if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(outp);
+      var daysOut = ((data && Array.isArray(data.days)) ? data.days : []).map(function(d){
+        var blocks = ((d && Array.isArray(d.blocks)) ? d.blocks : []).map(function(b){
+          return (b && typeof b === 'object') ? { start: String(b.start || ''), end: String(b.end || ''), title: String(b.title || ''), taskId: String(b.taskId || '').replace(/[\[\]]/g, ''), kind: ['work','meeting','break','admin'].indexOf(b.kind) >= 0 ? b.kind : 'work', why: String(b.why || '') } : null;
+        }).filter(function(b){ return b && b.start && b.title; });
+        blocks.sort(function(a, b){ return minOfHHMM(a.start) - minOfHHMM(b.start); });
+        return { date: String((d && d.date) || ''), blocks: blocks };
+      }).filter(function(d){ return d.date; });
+      var unsch = ((data && Array.isArray(data.unscheduled)) ? data.unscheduled : []).map(function(u){ return { t: String(u.t || ''), reason: String(u.reason || '') }; }).filter(function(u){ return u.t; });
+      STATE.dumpWeek = { start: days[0], days: daysOut, unscheduled: unsch, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString() };
+      save(); render();
+      showToast('◔ Week planned','success');
+      logActivity('Week planned — ' + daysOut.reduce(function(s, d){ return s + d.blocks.length; }, 0) + ' blocks');
+    } catch(e){ showToast('Could not plan the week — ' + String(e.message || e), 'error'); render(); }
+  };
+  window.schedPushWeek = async function(){
+    var w = STATE.dumpWeek;
+    if (!w || !w.days || !w.days.length){ showToast('Plan your week first','info'); return; }
+    if (schedPrefs().calSource !== 'google'){ showToast('Connect your calendar first (tap 📅)','warning'); return; }
+    var btns = document.querySelectorAll('.sched-weekpush-btn'); btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Adding week…'; });
+    try {
+      var added = 0;
+      for (var di = 0; di < w.days.length; di++){
+        var day = w.days[di];
+        await gcalClearPlan(day.date);
+        for (var bi = 0; bi < day.blocks.length; bi++){
+          var b = day.blocks[bi]; if (b.kind === 'meeting') continue;
+          var hm = b.start.length === 4 ? '0' + b.start : b.start;
+          var start = new Date(day.date + 'T' + hm + ':00');
+          var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+          await gcalInsertEvent({ title: b.title, start: start, durMin: dur, notes: b.why || '', dateStr: day.date });
+          added++;
+        }
+      }
+      w.pushedAt = new Date().toISOString(); save();
+      showToast('📅 Added ' + added + ' block' + (added === 1 ? '' : 's') + ' across the week','success');
+      logActivity('Pushed the week to Google Calendar — ' + added + ' blocks');
+    } catch(e){
+      var m = String(e && e.message);
+      showToast(m === 'no_write' ? 'Add the calendar.events scope in Google (Data Access) and reconnect' : m === 'reconnect' ? 'Reconnect your calendar (tap 📅)' : 'Could not add — ' + m, 'error');
+    } finally { render(); }
+  };
   // ── Fixed commitments (manual) ───────────────────────────────────────────
   window.schedAddFixed = function(){
     var title = (document.getElementById('sched-fx-title') || {}).value || '';
@@ -20327,9 +20416,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
   function schedHourOpts(sel){ var o = ''; for (var hh = 5; hh <= 23; hh++){ o += '<option value="' + hh + '"' + (hh === sel ? ' selected' : '') + '>' + fmtHour(hh) + '</option>'; } return o; }
   function schedInputStyle(){ return 'font-size:14px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-off);color:var(--ink);outline:none'; }
+  window.schedSetHorizon = function(v){ schedPrefs().horizon = v; save(); render(); };
   function scheduleHTML(){
-    var p = schedPrefs(), s = STATE.dumpSchedule, taskCount = schedTasks().length;
+    var p = schedPrefs(), s = STATE.dumpSchedule, w = STATE.dumpWeek, taskCount = schedTasks().length;
+    var horizon = p.horizon || 'today';
     var h = '';
+    // Today / Week horizon toggle
+    var hseg = function(v, label){ var on = horizon === v; return '<button onclick="schedSetHorizon(\'' + v + '\')" style="flex:1;min-height:34px;background:' + (on ? 'var(--ink)' : 'var(--bg-off)') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';border-radius:9px;font-size:12px;font-weight:600;cursor:pointer">' + label + '</button>'; };
+    h += '<div style="display:flex;gap:6px;margin-bottom:12px">' + hseg('today', 'Today') + hseg('week', 'This week') + '</div>';
+    // Shared: working hours + calendar connect
     h += '<div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
       + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Hours</span>'
       + '<select onchange="schedSetHour(\'start\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.startHour) + '</select>'
@@ -20339,7 +20434,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           ? '<button onclick="schedDisconnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px;color:var(--green)">📅 Calendar ✓</button>'
           : '<button onclick="schedConnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px">📅 Connect calendar</button>')
       + '</div>';
-    // Fixed commitments
+    if (horizon === 'week'){
+      h += '<button onclick="schedBuildWeek()" class="btn btn-gold sched-week-btn" style="width:100%;min-height:48px;border-radius:11px;margin:2px 0 14px">◔ ' + (w ? 'Re-plan my week' : 'Plan my week') + ' · ' + taskCount + ' task' + (taskCount === 1 ? '' : 's') + '</button>';
+      if (w && w.days && w.days.length) h += schedWeekHTML(w);
+      else h += '<div style="text-align:center;padding:34px 22px;color:var(--muted)"><div style="font-size:38px;margin-bottom:10px">◔</div><div style="font-size:15px;color:var(--ink);font-weight:600;margin-bottom:6px">Plan your week</div><div style="font-size:12.5px;line-height:1.6">Eni spreads your tasks across the next 7 days —<br>deadline-aware, around your calendar and hours.</div></div>';
+      return h;
+    }
+    // Today: fixed commitments + day plan
     var list = (STATE.schedFixed || []);
     h += '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
       + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Fixed commitments' + (p.calSource === 'google' ? ' + your calendar' : '') + '</div>';
@@ -20355,6 +20456,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     h += '<button onclick="schedBuild()" class="btn btn-gold sched-build-btn" style="width:100%;min-height:48px;border-radius:11px;margin:2px 0 14px">◔ ' + (s ? 'Re-plan my day' : 'Plan my day') + ' · ' + taskCount + ' task' + (taskCount === 1 ? '' : 's') + '</button>';
     if (s && s.blocks && s.blocks.length) h += schedAgendaHTML(s);
     else h += '<div style="text-align:center;padding:34px 22px;color:var(--muted)"><div style="font-size:38px;margin-bottom:10px">◔</div><div style="font-size:15px;color:var(--ink);font-weight:600;margin-bottom:6px">Plan your day</div><div style="font-size:12.5px;line-height:1.6">Eni blocks your open tasks into a realistic day around<br>your meetings and hours. Tap “Plan my day”.</div></div>';
+    return h;
+  }
+  // One compact block row, shared by the day agenda and the week view.
+  function schedBlockRow(b, i, openIds, calCb){
+    var kc = b.kind === 'meeting' ? '#9E3B34' : b.kind === 'break' ? '#3F6A50' : b.kind === 'admin' ? '#A67B2C' : 'var(--ink)';
+    var done = b.taskId && !openIds[b.taskId];
+    return '<div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)">'
+      + '<div style="width:50px;flex-shrink:0;text-align:right;font-family:\'DM Mono\',monospace;font-size:11px;color:var(--muted);padding-top:3px">' + esc(fmtHHMM(b.start)) + '</div>'
+      + '<div style="width:3px;flex-shrink:0;background:' + kc + ';border-radius:2px"></div>'
+      + '<div style="flex:1;min-width:0">'
+      +   '<div style="display:flex;align-items:center;gap:8px">'
+      +     (b.taskId ? ('<button onclick="schedToggle(\'' + b.taskId + '\')" title="Mark done" style="flex-shrink:0;width:17px;height:17px;border:1.5px solid ' + (done ? 'var(--ink)' : 'var(--border-mid)') + ';border-radius:50%;background:' + (done ? 'var(--ink)' : 'transparent') + ';color:#fff;font-size:9px;cursor:pointer;display:flex;align-items:center;justify-content:center">' + (done ? '✓' : '') + '</button>') : '<span style="width:8px;height:8px;border-radius:50%;background:' + kc + ';flex-shrink:0"></span>')
+      +     '<span style="flex:1;min-width:0;font-size:13px;font-weight:600;color:' + (done ? 'var(--muted)' : 'var(--ink)') + ';' + (done ? 'text-decoration:line-through;' : '') + 'word-break:break-word">' + esc(b.title) + '</span>'
+      +     '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtHHMM(b.start)) + '–' + esc(fmtHHMM(b.end)) + '</span>'
+      +   '</div>'
+      +   (b.why ? '<div style="font-size:11px;color:var(--muted);line-height:1.4;margin-top:2px">' + esc(b.why) + '</div>' : '')
+      +   (calCb ? '<button onclick="' + calCb + '" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>' : '')
+      + '</div></div>';
+  }
+  function schedWeekHTML(w){
+    var openIds = {}; schedTasks().forEach(function(t){ openIds[t.id] = true; });
+    var h = '';
+    if (w.note) h += '<div style="font-size:13px;color:var(--ink);font-weight:600;line-height:1.4;margin:2px 0 12px;padding-left:11px;border-left:2px solid var(--ink)">' + esc(w.note) + '</div>';
+    if (schedPrefs().calSource === 'google') h += '<button onclick="schedPushWeek()" class="btn btn-gold sched-weekpush-btn" style="width:100%;min-height:44px;border-radius:10px;margin-bottom:12px">📅 ' + (w.pushedAt ? 'Update week in Calendar' : 'Add week to Calendar') + '</button>';
+    w.days.forEach(function(day){
+      var d = new Date(day.date + 'T00:00:00');
+      var label = d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+      var isToday = day.date === todayStr();
+      h += '<div style="display:flex;align-items:center;gap:8px;margin:14px 0 4px;padding-bottom:5px;border-bottom:1px solid ' + (isToday ? 'var(--ink)' : 'var(--border)') + '">'
+        + '<span style="font-size:11px;letter-spacing:.5px;font-weight:800;color:' + (isToday ? 'var(--ink)' : 'var(--muted)') + '">' + esc(label) + (isToday ? ' · Today' : '') + '</span>'
+        + '<span style="flex:1"></span><span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">' + day.blocks.length + '</span></div>';
+      if (!day.blocks.length) h += '<div style="font-size:11px;color:var(--muted);padding:3px 0 4px 8px">Open — nothing scheduled</div>';
+      day.blocks.forEach(function(b, i){ h += schedBlockRow(b, i, openIds, null); });
+    });
+    if (w.unscheduled && w.unscheduled.length){
+      h += '<div style="margin-top:16px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">Didn\'t fit this week</div>';
+      w.unscheduled.forEach(function(u){ h += '<div style="display:flex;gap:8px;padding:5px 0;font-size:12px;color:var(--muted);line-height:1.45"><span style="color:var(--border-mid)">·</span><span style="flex:1">' + esc(u.t) + (u.reason ? (' <span style="opacity:.7">— ' + esc(u.reason) + '</span>') : '') + '</span></div>'; });
+      h += '</div>';
+    }
+    h += '<div style="font-size:10px;color:var(--muted);text-align:center;margin-top:14px">Planned ' + new Date(w.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</div>';
     return h;
   }
   function schedAgendaHTML(s){
