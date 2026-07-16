@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '99';
+  const BUILD = '100';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4933,6 +4933,7 @@ let STATE = {
   schedFixed: null,          // manual fixed commitments [{id,title,start,end}]
   rpg: null,                 // quest/game layer {on, xp, level, claimed, initialized}
   googleClientId: null,      // Google OAuth client ID (public) — synced so it works across every device/PWA
+  board: null,               // Milanote-style freeform canvas {cards:[{id,kind,x,y,text,color,goalId}], pan, zoom}
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -5094,7 +5095,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'activityLog', 'samples',
+  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'board', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -20606,6 +20607,97 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     setTimeout(function(){ var e = document.getElementById('dump-edit-input'); if (e){ e.focus(); try { e.setSelectionRange(0, e.value.length); } catch(_){} } }, 60);
   };
 
+  // ── BOARD — a Milanote-style freeform visual canvas ──────────────────────
+  // Drop note cards and goal cards on an infinite pan/zoom canvas and arrange
+  // them by hand. Positions + content persist in STATE.board (synced).
+  var BD_COLORS = ['#FBF9F4', '#F3E9CE', '#E3ECE0', '#F0E2DC', '#E1E7EE', '#EDE4F0'];
+  var bd = { drag: null, pointers: {}, pinch: null, suppressClick: false, editing: null };
+  function boardState(){ if (!STATE.board) STATE.board = { cards: [], panX: 0, panY: 0, zoom: 1 }; if (!STATE.board.cards) STATE.board.cards = []; return STATE.board; }
+  function bdApplyTransform(){ var b = boardState(), c = document.getElementById('bd-canvas'); if (c) c.style.transform = 'translate(' + (b.panX || 0) + 'px,' + (b.panY || 0) + 'px) scale(' + (b.zoom || 1) + ')'; }
+  function bdCardHTML(c){
+    var del = '<button onpointerdown="event.stopPropagation()" onclick="event.stopPropagation();bdDelete(\'' + c.id + '\')" style="position:absolute;top:-9px;right:-9px;width:20px;height:20px;border-radius:50%;background:var(--ink);color:#fff;border:2px solid var(--bg-off);font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1">✕</button>';
+    if (c.kind === 'goal'){
+      var g = items().find(function(x){ return x.id === c.goalId; });
+      var prog = g ? goalProgress(g) : { pct: 0, done: 0, total: 0 };
+      return '<div class="bd-card" data-id="' + c.id + '" onpointerdown="bdCardDown(event,\'' + c.id + '\')" style="position:absolute;left:' + Math.round(c.x) + 'px;top:' + Math.round(c.y) + 'px;width:190px;box-sizing:border-box;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);cursor:grab;touch-action:none">'
+        + del
+        + '<div style="font-size:8px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:var(--gold);margin-bottom:5px">Goal</div>'
+        + '<div style="font-size:13px;font-weight:700;color:var(--ink);line-height:1.3;word-break:break-word">' + esc(g ? (g.t || 'Goal') : '(deleted goal)') + '</div>'
+        + '<div style="height:5px;background:var(--bg-off);border-radius:99px;overflow:hidden;margin-top:8px"><div style="height:100%;width:' + Math.round(prog.pct * 100) + '%;background:var(--ink)"></div></div>'
+        + '<div style="font-size:10px;color:var(--muted);margin-top:4px">' + prog.done + '/' + prog.total + ' steps</div>'
+        + '</div>';
+    }
+    var col = c.color || BD_COLORS[0];
+    if (bd.editing === c.id){
+      return '<div class="bd-card" data-id="' + c.id + '" style="position:absolute;left:' + Math.round(c.x) + 'px;top:' + Math.round(c.y) + 'px;width:200px;box-sizing:border-box;background:' + col + ';border:1px solid var(--ink);border-radius:12px;padding:9px;box-shadow:0 6px 22px rgba(0,0,0,.18)">'
+        + '<textarea id="bd-edit" rows="3" style="width:100%;box-sizing:border-box;font-size:14px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;border:none;background:transparent;color:#111;outline:none;resize:none;line-height:1.4">' + esc(c.text || '') + '</textarea>'
+        + '<div style="display:flex;gap:5px;margin-top:6px;align-items:center">'
+        + BD_COLORS.map(function(cc){ return '<span onclick="bdColor(\'' + c.id + '\',\'' + cc + '\')" style="width:17px;height:17px;border-radius:50%;background:' + cc + ';border:1px solid rgba(0,0,0,.18);cursor:pointer"></span>'; }).join('')
+        + '<span style="flex:1"></span><button onclick="bdEditSave(\'' + c.id + '\')" class="btn btn-gold btn-sm" style="border-radius:7px">Done</button></div>'
+        + '</div>';
+    }
+    return '<div class="bd-card" data-id="' + c.id + '" onpointerdown="bdCardDown(event,\'' + c.id + '\')" onclick="bdCardTap(event,\'' + c.id + '\')" style="position:absolute;left:' + Math.round(c.x) + 'px;top:' + Math.round(c.y) + 'px;width:190px;box-sizing:border-box;background:' + col + ';border:1px solid rgba(0,0,0,.08);border-radius:12px;padding:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);cursor:grab;touch-action:none">'
+      + del
+      + '<div style="font-size:13.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word;min-height:18px;color:#111">' + (c.text ? esc(c.text) : '<span style="color:rgba(0,0,0,.35)">Tap to write…</span>') + '</div>'
+      + '</div>';
+  }
+  function bdRender(){ var canvas = document.getElementById('bd-canvas'); if (!canvas) return; canvas.innerHTML = boardState().cards.map(bdCardHTML).join(''); bdApplyTransform(); }
+  function bdBtn(onclick, label){ return '<button onclick="' + onclick + '" style="width:44px;height:44px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:18px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.14)">' + label + '</button>'; }
+  window.boardOpen = function(){
+    bd = { drag: null, pointers: {}, pinch: null, suppressClick: false, editing: null };
+    var ex = document.getElementById('dump-board'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-board';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9400;background:var(--bg-off);display:flex;flex-direction:column';
+    ov.innerHTML =
+      '<div style="padding:calc(12px + var(--sat,0px)) 14px 12px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;align-items:center;gap:8px;flex-shrink:0">'
+      + '<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700">▦ Board</div><div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">Drop notes & goals · drag to arrange · pinch to zoom</div></div>'
+      + '<button onclick="bdAddNote()" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">＋ Note</button>'
+      + '<button onclick="bdAddGoalPick()" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">＋ Goal</button>'
+      + '<button onclick="boardClose()" aria-label="Close" style="background:rgba(255,255,255,.14);border:none;color:#fff;width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer">✕</button>'
+      + '</div>'
+      + '<div id="bd-viewport" style="flex:1;position:relative;overflow:hidden;touch-action:none">'
+      + '<div id="bd-canvas" style="position:absolute;left:0;top:0;transform-origin:0 0;width:4000px;height:4000px"></div>'
+      + '<div style="position:absolute;right:14px;bottom:calc(18px + var(--sab,0px));display:flex;flex-direction:column;gap:9px;z-index:5">' + bdBtn('bdZoom(1.2)', '＋') + bdBtn('bdZoom(1/1.2)', '－') + '</div>'
+      + '</div>';
+    document.body.appendChild(ov);
+    bdRender(); bdBind();
+  };
+  window.boardClose = function(){ bdUnbind(); save(); var o = document.getElementById('dump-board'); if (o) o.remove(); render(); };
+  function bdViewCenter(){ var b = boardState(), vp = document.getElementById('bd-viewport'); var w = vp ? vp.clientWidth : 700, h = vp ? vp.clientHeight : 700; return { x: (w / 2 - (b.panX || 0)) / (b.zoom || 1), y: (h / 2 - (b.panY || 0)) / (b.zoom || 1) }; }
+  window.bdAddNote = function(){ var b = boardState(), ctr = bdViewCenter(), n = b.cards.length % 5; var c = { id: uid(), kind: 'note', x: ctr.x - 95 + n * 12, y: ctr.y - 40 + n * 12, text: '', color: BD_COLORS[0] }; b.cards.push(c); bd.editing = c.id; save(); bdRender(); setTimeout(function(){ var e = document.getElementById('bd-edit'); if (e) e.focus(); }, 50); };
+  window.bdAddGoalPick = function(){
+    var goals = items().filter(function(i){ return isGroup(i) && !i.done; });
+    if (!goals.length){ showToast('No goals yet to add','info'); return; }
+    var ex = document.getElementById('bd-pick'); if (ex) ex.remove();
+    var ov = document.createElement('div'); ov.id = 'bd-pick';
+    ov.style.cssText = 'position:absolute;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;z-index:9';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:520px;border-radius:16px 16px 0 0;max-height:70%;overflow:auto;padding:14px calc(14px + var(--sab,0px))" onclick="event.stopPropagation()"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Add a goal to the board</div>'
+      + goals.map(function(g){ return '<button onclick="bdAddGoal(\'' + g.id + '\')" style="display:block;width:100%;text-align:left;background:var(--bg-off);border:1px solid var(--border);border-radius:10px;padding:11px 12px;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--ink);cursor:pointer">' + esc(g.t || 'Goal') + '</button>'; }).join('') + '</div>';
+    document.getElementById('dump-board').appendChild(ov);
+  };
+  window.bdAddGoal = function(goalId){ var b = boardState(), ctr = bdViewCenter(); b.cards.push({ id: uid(), kind: 'goal', goalId: goalId, x: ctr.x - 95, y: ctr.y - 40 }); var p = document.getElementById('bd-pick'); if (p) p.remove(); save(); bdRender(); };
+  window.bdCardTap = function(e, id){ if (bd.suppressClick){ bd.suppressClick = false; return; } e.stopPropagation(); var c = boardState().cards.find(function(x){ return x.id === id; }); if (!c || c.kind !== 'note') return; bd.editing = id; bdRender(); setTimeout(function(){ var el = document.getElementById('bd-edit'); if (el){ el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch(_){} } }, 40); };
+  window.bdEditSave = function(id){ var el = document.getElementById('bd-edit'), c = boardState().cards.find(function(x){ return x.id === id; }); if (c && el){ c.text = el.value; if (!c.text.trim()) boardState().cards = boardState().cards.filter(function(x){ return x.id !== id; }); } bd.editing = null; save(); bdRender(); };
+  window.bdColor = function(id, col){ var c = boardState().cards.find(function(x){ return x.id === id; }); if (!c) return; var el = document.getElementById('bd-edit'); if (el && bd.editing === id) c.text = el.value; c.color = col; save(); bdRender(); setTimeout(function(){ var e = document.getElementById('bd-edit'); if (e) e.focus(); }, 30); };
+  window.bdDelete = function(id){ boardState().cards = boardState().cards.filter(function(x){ return x.id !== id; }); if (bd.editing === id) bd.editing = null; save(); bdRender(); };
+  var bdMoveH, bdUpH, bdWheelH, bdDownH;
+  function bdBind(){ var vp = document.getElementById('bd-viewport'); if (!vp) return; bdDownH = bdVpDown; bdMoveH = bdMove; bdUpH = bdUp; bdWheelH = function(e){ e.preventDefault(); var r = vp.getBoundingClientRect(); bdZoomAt(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - r.left, e.clientY - r.top); }; vp.addEventListener('pointerdown', bdDownH); vp.addEventListener('wheel', bdWheelH, { passive: false }); document.addEventListener('pointermove', bdMoveH); document.addEventListener('pointerup', bdUpH); document.addEventListener('pointercancel', bdUpH); }
+  function bdUnbind(){ var vp = document.getElementById('bd-viewport'); if (vp && bdDownH) vp.removeEventListener('pointerdown', bdDownH); if (vp && bdWheelH) vp.removeEventListener('wheel', bdWheelH); document.removeEventListener('pointermove', bdMoveH); document.removeEventListener('pointerup', bdUpH); document.removeEventListener('pointercancel', bdUpH); }
+  function bdDist(a, b){ var dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
+  function bdVpDown(e){ var b = boardState(); bd.pointers[e.pointerId] = { x: e.clientX, y: e.clientY }; var ids = Object.keys(bd.pointers); if (ids.length === 2){ var p = ids.map(function(k){ return bd.pointers[k]; }); bd.pinch = { d: bdDist(p[0], p[1]) || 1, zoom: b.zoom || 1, mx: (p[0].x + p[1].x) / 2, my: (p[0].y + p[1].y) / 2, panX: b.panX || 0, panY: b.panY || 0 }; bd.drag = null; } else if (ids.length === 1 && !bd.drag){ bd.drag = { type: 'pan', sx: e.clientX, sy: e.clientY, panX: b.panX || 0, panY: b.panY || 0 }; } }
+  window.bdCardDown = function(e, id){ e.stopPropagation(); bd.suppressClick = false; bd.pointers[e.pointerId] = { x: e.clientX, y: e.clientY }; if (Object.keys(bd.pointers).length >= 2){ bdVpDown(e); return; } var c = boardState().cards.find(function(x){ return x.id === id; }); if (!c) return; bd.drag = { type: 'card', id: id, sx: e.clientX, sy: e.clientY, ox: c.x, oy: c.y, moved: false }; try { e.currentTarget.setPointerCapture && e.currentTarget.setPointerCapture(e.pointerId); } catch(_){} };
+  function bdMove(e){ var b = boardState(); if (bd.pointers[e.pointerId]) bd.pointers[e.pointerId] = { x: e.clientX, y: e.clientY }; var ids = Object.keys(bd.pointers);
+    if (bd.pinch && ids.length >= 2){ var p = ids.slice(0, 2).map(function(k){ return bd.pointers[k]; }); var f = bdDist(p[0], p[1]) / bd.pinch.d; var vp = document.getElementById('bd-viewport'), r = vp.getBoundingClientRect(); var nz = Math.max(0.2, Math.min(bd.pinch.zoom * f, 2.5)); var mx = bd.pinch.mx - r.left, my = bd.pinch.my - r.top; var cx = (mx - bd.pinch.panX) / bd.pinch.zoom, cy = (my - bd.pinch.panY) / bd.pinch.zoom; b.zoom = nz; b.panX = mx - cx * nz; b.panY = my - cy * nz; bdApplyTransform(); return; }
+    if (!bd.drag) return;
+    if (bd.drag.type === 'pan'){ b.panX = bd.drag.panX + (e.clientX - bd.drag.sx); b.panY = bd.drag.panY + (e.clientY - bd.drag.sy); bdApplyTransform(); }
+    else if (bd.drag.type === 'card'){ if (Math.abs(e.clientX - bd.drag.sx) + Math.abs(e.clientY - bd.drag.sy) > 4) bd.drag.moved = true; var z = b.zoom || 1; var nx = bd.drag.ox + (e.clientX - bd.drag.sx) / z, ny = bd.drag.oy + (e.clientY - bd.drag.sy) / z; var c = boardState().cards.find(function(x){ return x.id === bd.drag.id; }); if (c){ c.x = nx; c.y = ny; } var el = document.querySelector('#bd-canvas .bd-card[data-id="' + bd.drag.id + '"]'); if (el){ el.style.left = Math.round(nx) + 'px'; el.style.top = Math.round(ny) + 'px'; } }
+  }
+  function bdUp(e){ delete bd.pointers[e.pointerId]; var ids = Object.keys(bd.pointers); if (ids.length < 2) bd.pinch = null; if (bd.drag){ if (bd.drag.type === 'card' && bd.drag.moved) bd.suppressClick = true; save(); } if (ids.length === 0) bd.drag = null; }
+  window.bdZoom = function(f){ var vp = document.getElementById('bd-viewport'); if (vp){ bdZoomAt(f, vp.clientWidth / 2, vp.clientHeight / 2); save(); } };
+  function bdZoomAt(f, sx, sy){ var b = boardState(); var nz = Math.max(0.2, Math.min((b.zoom || 1) * f, 2.5)); var cx = (sx - (b.panX || 0)) / (b.zoom || 1), cy = (sy - (b.panY || 0)) / (b.zoom || 1); b.zoom = nz; b.panX = sx - cx * nz; b.panY = sy - cy * nz; bdApplyTransform(); }
+
   function render(){
     var ov = sheet(); if (!ov) return;
     injectCSS();
@@ -20752,13 +20844,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var mapBtnLabel = map ? '◍ Re-group loose notes' : '◍ Group loose notes into areas';
       // "Everything" — the master map of every plan as a category. Shown once
       // there's at least one plan to compartmentalise.
-      var everythingBtn = hasPlans
-        ? '<button onclick="dumpMasterMap()" class="btn btn-gold" style="width:100%;min-height:48px;border-radius:11px;margin-bottom:14px;font-size:12.5px">◫ Everything — all plans in one map</button>'
-        : '';
+      var everythingBtn = (hasPlans
+        ? '<button onclick="dumpMasterMap()" class="btn btn-gold" style="width:100%;min-height:48px;border-radius:11px;margin-bottom:8px;font-size:12.5px">◫ Everything — all plans in one map</button>'
+        : '')
+        + '<button onclick="boardOpen()" class="btn btn-ghost" style="width:100%;min-height:46px;border-radius:11px;margin-bottom:14px;font-size:12.5px">▦ Board — freeform canvas for ideas</button>';
+      var boardBtn = '<button onclick="boardOpen()" class="btn btn-ghost" style="width:100%;min-height:46px;border-radius:11px;margin-bottom:14px;font-size:12.5px">▦ Board — freeform canvas for ideas</button>';
+      var masterBtn = hasPlans ? '<button onclick="dumpMasterMap()" class="btn btn-gold" style="width:100%;min-height:48px;border-radius:11px;margin-bottom:8px;font-size:12.5px">◫ Everything — all plans in one map</button>' : '';
       body = (map || hasPlans)
-        ? everythingBtn + mapHTML()
+        ? masterBtn + boardBtn + mapHTML()
           + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">' + mapBtnLabel + '</button>'
-        : emptyState('◍', 'Compartmentalize your mind', 'Group your scattered thoughts into clear areas —<br>Product, Sales, Cash, Brand — so nothing blurs together.')
+        : boardBtn + emptyState('◍', 'Compartmentalize your mind', 'Group scattered thoughts into clear areas, or drop notes<br>on the Board above — visual-first, your way.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
     } else if (TAB === 'done'){
       body = done.length
