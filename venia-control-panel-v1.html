@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '104';
+  const BUILD = '105';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20124,7 +20124,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function hhmmFromISO(iso){ var d = new Date(iso); return pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()); }
   function minOfHHMM(s){ var p = String(s || '0:0').split(':'); return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0); }
   function fmtHHMM(s){ var m = minOfHHMM(s), h = Math.floor(m / 60), mm = m % 60, ap = h < 12 ? 'am' : 'pm', h12 = h % 12 || 12; return h12 + (mm ? ':' + pad2s(mm) : '') + ap; }
-  function fmtHour(hh){ return (hh % 12 || 12) + (hh < 12 ? 'am' : 'pm'); }
+  function fmtHour(hh){ var h = ((hh % 24) + 24) % 24; return (h % 12 || 12) + (h < 12 ? 'am' : 'pm'); }   // 26 → 2am (next-day end hours)
   function schedPrefs(){ if (!STATE.schedPrefs) STATE.schedPrefs = { startHour: 9, endHour: 18, calSource: 'none' }; return STATE.schedPrefs; }
   window.schedSetHour = function(which, v){ var p = schedPrefs(); v = parseInt(v, 10); if (which === 'start') p.startHour = v; else p.endHour = v; save(); render(); };
   window.schedSetContext = function(v){ schedPrefs().context = String(v || '').trim(); save(); };   // saved on blur; no re-render (would steal focus)
@@ -20254,9 +20254,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       for (var i = 0; i < s.blocks.length; i++){
         var b = s.blocks[i];
         if (b.kind === 'meeting') continue;
-        var hm = b.start.length === 4 ? '0' + b.start : b.start;
-        var start = new Date(s.date + 'T' + hm + ':00');
-        var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+        var start = schedBlockDate(s.date, b, s.sh, s.eh);
+        var dur = Math.max(15, ((minOfHHMM(b.end) - minOfHHMM(b.start)) + 1440) % 1440);
         await gcalInsertEvent({ title: b.title, start: start, durMin: dur, notes: b.why || '', dateStr: s.date });
         added++;
       }
@@ -20308,12 +20307,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
         + 'Plan the founder\'s WEEK: distribute the tasks across the 7 listed days as time-blocked work. '
         + 'Be deadline-aware — a task whose goal is due lands comfortably BEFORE that due date; front-load anything urgent. Balance the load (don\'t cram one day, don\'t leave the week lopsided), sequence by energy (deep creative work protected, admin/emails batched, vendor calls earlier), and leave breathing room. '
-        + 'Schedule only within working hours ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00 each day, never overlap the listed busy events, and on today only after the current time. '
+        + 'Schedule only within the working window (' + (p.endHour > 23 ? (pad2s(p.startHour) + ':00 through midnight until ' + pad2s(p.endHour % 24) + ':00 — times 00:00–' + pad2s(p.endHour % 24) + ':59 are the late-night end of the SAME day') : (pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00')) + ') each day, never overlap the listed busy events, and on today only after the current time. '
         + 'If "how the day works" rules are given, they are HARD constraints: classify each task as light (emails, calls, planning, quick admin) or deep (design software, focused creative) and place it only where the rules allow — weekends count if the rules say so. '
         + 'Not everything has to fit; put overflow in "unscheduled". Keep every string SHORT: "why" and "reason" are 6 words max.\n\n'
         + 'Respond with ONLY a JSON object (no prose, no code fence): { "days":[{"date":"YYYY-MM-DD","blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if it maps to a task, else empty","kind":"work|meeting|break|admin","why":"≤6 words"}]}], "unscheduled":[{"t":"task text","reason":"≤6 words"}], "note":"one short line on the week\'s strategy" }';
       var dayRules = (p.context || '').trim();
-      var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.'
+      var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + (p.endHour > 23 ? pad2s(p.endHour % 24) + ':00 next morning' : pad2s(p.endHour) + ':00') + '.'
         + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
         + '\nDays (with existing commitments):\n' + dayLines + '\n\nTasks to place across the week (most urgent of ' + all.length + ' open):\n' + taskLines;
       var outp = await callClaude(sys, user);
@@ -20323,11 +20322,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         var blocks = ((d && Array.isArray(d.blocks)) ? d.blocks : []).map(function(b){
           return (b && typeof b === 'object') ? { start: String(b.start || ''), end: String(b.end || ''), title: String(b.title || ''), taskId: String(b.taskId || '').replace(/[\[\]]/g, ''), kind: ['work','meeting','break','admin'].indexOf(b.kind) >= 0 ? b.kind : 'work', why: String(b.why || '') } : null;
         }).filter(function(b){ return b && b.start && b.title; });
-        blocks.sort(function(a, b){ return minOfHHMM(a.start) - minOfHHMM(b.start); });
+        var wk = function(b){ var m = minOfHHMM(b.start); return (p.endHour > 23 && m < p.startHour * 60) ? m + 1440 : m; };
+        blocks.sort(function(a, b){ return wk(a) - wk(b); });
         return { date: String((d && d.date) || ''), blocks: blocks };
       }).filter(function(d){ return d.date; });
       var unsch = ((data && Array.isArray(data.unscheduled)) ? data.unscheduled : []).map(function(u){ return { t: String(u.t || ''), reason: String(u.reason || '') }; }).filter(function(u){ return u.t; });
-      STATE.dumpWeek = { start: days[0], days: daysOut, unscheduled: unsch, omitted: picked.omitted, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString() };
+      STATE.dumpWeek = { start: days[0], days: daysOut, unscheduled: unsch, omitted: picked.omitted, sh: p.startHour, eh: p.endHour, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString() };
       save(); render();
       showToast('◔ Week planned','success');
       logActivity('Week planned — ' + daysOut.reduce(function(s, d){ return s + d.blocks.length; }, 0) + ' blocks');
@@ -20349,9 +20349,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         await gcalClearPlan(day.date);
         for (var bi = 0; bi < day.blocks.length; bi++){
           var b = day.blocks[bi]; if (b.kind === 'meeting') continue;
-          var hm = b.start.length === 4 ? '0' + b.start : b.start;
-          var start = new Date(day.date + 'T' + hm + ':00');
-          var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+          var start = schedBlockDate(day.date, b, w.sh, w.eh);
+          var dur = Math.max(15, ((minOfHHMM(b.end) - minOfHHMM(b.start)) + 1440) % 1440);
           await gcalInsertEvent({ title: b.title, start: start, durMin: dur, notes: b.why || '', dateStr: day.date });
           added++;
         }
@@ -20409,17 +20408,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var nowCtx = 'Right now it is ' + now.toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '.';
       var taskLines = tasks.map(schedTaskLine).join('\n');
       var fixedLines = fixed.length ? fixed.map(function(f){ return '- ' + f.start + '–' + f.end + '  ' + f.title; }).join('\n') : '(none)';
+      var windowTxt = p.endHour > 23
+        ? pad2s(p.startHour) + ':00 through midnight until ' + pad2s(p.endHour % 24) + ':00 (crosses midnight — times 00:00–' + pad2s(p.endHour % 24) + ':59 are the LATE-NIGHT END of this same day)'
+        : pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00';
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
         + 'Build a realistic TIME-BLOCKED schedule for the founder\'s working day from the task list. '
         + 'Estimate a sensible duration for each task; sequence by urgency/deadline and energy — deep creative work (design, linesheets) in a protected focused block, quick admin/emails batched together, factory/vendor calls earlier in the day — and leave short breaks. '
-        + 'Only schedule within the working window ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00, and NEVER overlap the fixed commitments — plan around them. Since this is today, schedule only AFTER the current time. '
+        + 'Only schedule within the working window ' + windowTxt + ', and NEVER overlap the fixed commitments — plan around them. Since this is today, schedule only AFTER the current time. '
         + 'If "how the day works" rules are given, they are HARD constraints: classify each task as light (emails, calls, planning, quick admin — fits day-job gaps) or deep (design software, focused creative — needs real free time) and place it only where the rules allow. '
         + 'Not everything has to fit; put the overflow in "unscheduled". Keep every string SHORT: "why" and "reason" are 6 words max.\n\n'
         + 'Respond with ONLY a JSON object (no prose, no code fence): '
         + '{ "blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if the block maps to a listed task, else empty string","kind":"work|meeting|break|admin","why":"≤6 words"}], '
         + '"unscheduled":[{"taskId":"id","t":"task text","reason":"≤6 words"}], "note":"one short line on the day\'s strategy" }';
       var dayRules = (p.context || '').trim();
-      var user = nowCtx + '\nWorking window: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.'
+      var user = nowCtx + '\nWorking window: ' + windowTxt + '.'
         + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
         + '\nFixed commitments today:\n' + fixedLines + '\n\nTasks to place (most urgent of ' + all.length + ' open):\n' + taskLines;
       var outp = await callClaude(sys, user);
@@ -20428,9 +20430,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var blocks = (data && Array.isArray(data.blocks)) ? data.blocks.map(function(b){
         return (b && typeof b === 'object') ? { start: String(b.start || ''), end: String(b.end || ''), title: String(b.title || ''), taskId: String(b.taskId || '').replace(/[\[\]]/g, ''), kind: ['work','meeting','break','admin'].indexOf(b.kind) >= 0 ? b.kind : 'work', why: String(b.why || '') } : null;
       }).filter(function(b){ return b && b.start && b.title; }) : [];
-      blocks.sort(function(a, b){ return minOfHHMM(a.start) - minOfHHMM(b.start); });
+      var wrapKey = function(b){ var m = minOfHHMM(b.start); return (p.endHour > 23 && m < p.startHour * 60) ? m + 1440 : m; };
+      blocks.sort(function(a, b){ return wrapKey(a) - wrapKey(b); });
       var unsch = (data && Array.isArray(data.unscheduled)) ? data.unscheduled.map(function(u){ return { taskId: String(u.taskId || ''), t: String(u.t || ''), reason: String(u.reason || '') }; }).filter(function(u){ return u.t; }) : [];
-      STATE.dumpSchedule = { date: date, blocks: blocks, unscheduled: unsch, omitted: picked.omitted, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString(), calSource: p.calSource };
+      STATE.dumpSchedule = { date: date, blocks: blocks, unscheduled: unsch, omitted: picked.omitted, sh: p.startHour, eh: p.endHour, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString(), calSource: p.calSource };
       save(); render();
       showToast('◔ Day planned' + calNote, 'success');
       logActivity('Day scheduled — ' + blocks.length + ' blocks');
@@ -20450,11 +20453,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var host = items().find(function(g){ return isGroup(g) && g.children.some(function(c){ return c.id === taskId; }); });
     if (host){ var c = host.children.find(function(x){ return x.id === taskId; }); c.done = !c.done; syncGroupDone(host); save(); render(); }
   };
+  // A block whose time is before the window's start hour belongs to the small
+  // hours AFTER midnight — i.e. the next calendar day (night-owl windows).
+  function schedBlockDate(dateStr, b, sh, eh){
+    var hm = b.start.length === 4 ? '0' + b.start : b.start;
+    var d = new Date(dateStr + 'T' + hm + ':00');
+    if ((eh || 18) > 23 && minOfHHMM(b.start) < (sh == null ? 9 : sh) * 60) d.setDate(d.getDate() + 1);
+    return d;
+  }
   window.schedBlockCal = function(i){
     var s = STATE.dumpSchedule; if (!s || !s.blocks[i]) return;
     var b = s.blocks[i];
-    var hm = b.start.length === 4 ? '0' + b.start : b.start;
-    var start = new Date(s.date + 'T' + hm + ':00');
+    var start = schedBlockDate(s.date, b, s.sh, s.eh);
     var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
     // Connected → write straight into Google Calendar; otherwise ICS/Google link.
     if (schedPrefs().calSource === 'google'){
@@ -20471,7 +20481,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (downloadICS(b.title, start, dur, b.why || 'VENIA schedule')) showToast('Added to calendar','success');
     else openGcal(b.title, start, dur, b.why || '');
   };
-  function schedHourOpts(sel){ var o = ''; for (var hh = 5; hh <= 23; hh++){ o += '<option value="' + hh + '"' + (hh === sel ? ' selected' : '') + '>' + fmtHour(hh) + '</option>'; } return o; }
+  // End hours extend past midnight (24=12am … 27=3am) for night-owl windows.
+  function schedHourOpts(sel, isEnd){ var o = '', last = isEnd ? 27 : 23; for (var hh = 4; hh <= last; hh++){ o += '<option value="' + hh + '"' + (hh === sel ? ' selected' : '') + '>' + fmtHour(hh) + '</option>'; } return o; }
   function schedInputStyle(){ return 'font-size:14px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-off);color:var(--ink);outline:none'; }
   window.schedSetHorizon = function(v){ schedPrefs().horizon = v; save(); render(); };   // legacy no-op path (view now lives in PLANVIEW)
   // Setup (hours / calendar / fixed commitments) is configuration, not a daily
@@ -20494,7 +20505,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Hours</span>'
       + '<select onchange="schedSetHour(\'start\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.startHour) + '</select>'
       + '<span style="color:var(--muted);font-size:12px">to</span>'
-      + '<select onchange="schedSetHour(\'end\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.endHour) + '</select>'
+      + '<select onchange="schedSetHour(\'end\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.endHour, true) + '</select>'
       + (p.calSource === 'google'
           ? '<button onclick="schedDisconnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px;color:var(--green)">📅 Connected ✓</button>'
           : '<button onclick="schedConnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px">📅 Connect calendar</button>')
@@ -20768,11 +20779,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var micOK = window.dumpMicSupported && window.dumpMicSupported();
 
     // Friendly, full-width tab with a count badge.
+    // iOS-style segmented control: quiet well, the active segment floats as a
+    // white chip. Counts are whispered, not badged.
     var chip = function(id, label, n){
       var on = TAB === id;
-      return '<button class="dump-tab" onclick="dumpTab(\'' + id + '\')" style="flex:1;min-height:42px;background:' + (on ? 'var(--ink)' : 'var(--bg-off)') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';border-radius:10px;font-size:12px;font-weight:600;padding:9px 6px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px">'
+      return '<button class="dump-tab" onclick="dumpTab(\'' + id + '\')" style="flex:1;min-height:38px;background:' + (on ? 'var(--bg)' : 'transparent') + ';color:' + (on ? 'var(--ink)' : 'var(--muted)') + ';border:none;border-radius:9px;font-size:13px;font-weight:' + (on ? '700' : '500') + ';padding:8px 6px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;' + (on ? 'box-shadow:0 1px 5px rgba(0,0,0,.13);' : '') + '">'
         + label
-        + (n != null && n > 0 ? '<span style="background:' + (on ? 'rgba(255,255,255,.22)' : 'var(--ink)') + ';color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;padding:0 5px">' + n + '</span>' : '')
+        + (n != null && n > 0 ? '<span style="font-size:11px;font-weight:600;color:' + (on ? 'var(--muted)' : 'var(--border-mid)') + '">' + n + '</span>' : '')
         + '</button>';
     };
 
@@ -20898,8 +20911,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (TAB === 'plan'){
       // One nav level: Today · Week · Priorities (was two stacked seg rows).
       if (PLANVIEW === 'schedule') PLANVIEW = (schedPrefs().horizon === 'week') ? 'week' : 'today';   // migrate old value
-      var planSeg = function(v, label){ var on = PLANVIEW === v; return '<button onclick="dumpPlanView(\'' + v + '\')" style="flex:1;min-height:38px;background:' + (on ? 'var(--ink)' : 'var(--bg-off)') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';border-radius:9px;font-size:12px;font-weight:600;cursor:pointer">' + label + '</button>'; };
-      var seg = '<div style="display:flex;gap:6px;margin-bottom:14px">' + planSeg('today', '◔ Today') + planSeg('week', '▤ Week') + planSeg('priorities', '✦ Priorities') + '</div>';
+      var planSeg = function(v, label){ var on = PLANVIEW === v; return '<button onclick="dumpPlanView(\'' + v + '\')" style="flex:1;min-height:34px;background:' + (on ? 'var(--bg)' : 'transparent') + ';color:' + (on ? 'var(--ink)' : 'var(--muted)') + ';border:none;border-radius:8px;font-size:12.5px;font-weight:' + (on ? '700' : '500') + ';cursor:pointer;' + (on ? 'box-shadow:0 1px 5px rgba(0,0,0,.13);' : '') + '">' + label + '</button>'; };
+      var seg = '<div style="display:flex;gap:2px;margin-bottom:14px;padding:3px;background:var(--bg-off);border-radius:11px">' + planSeg('today', 'Today') + planSeg('week', 'Week') + planSeg('priorities', 'Priorities') + '</div>';
       if (PLANVIEW === 'today' || PLANVIEW === 'week'){
         body = seg + scheduleHTML(PLANVIEW);
       } else {
@@ -20991,8 +21004,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +   '<button onclick="dumpToVenia()" title="Open the full VENIA OS" style="background:rgba(255,255,255,.12);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;margin-right:8px">⤢ OS</button>'
       +   (window.__BRAINSTORM ? '' : '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:32px;height:32px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>')
       + '</div>'
-      // Tabs — the flow order: Capture → Compartmentalize → Prioritize → Complete
-      + '<div style="display:flex;gap:6px;padding:11px 14px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      // Tabs — one segmented control: Capture → Think → Schedule
+      + '<div style="margin:11px 14px;padding:3px;background:var(--bg-off);display:flex;gap:2px;border-radius:12px;flex-shrink:0">'
       +   chip('inbox','Goals', open.length) + chip('map','Canvas', null) + chip('plan','Plan', null)
       + '</div>'
       + captureBlock
