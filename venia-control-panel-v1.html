@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '120';
+  const BUILD = '121';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5094,7 +5094,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples',
+  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -20642,6 +20642,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           return (x.name || '?') + ' (' + (x.category || '?') + (x.gender ? ', ' + x.gender : '') + (x.retail ? ', $' + x.retail : '') + ')';
         }).join('; ') + (sts.length > 24 ? ' — plus ' + (sts.length - 24) + ' more.' : ''));
       }
+      if (STATE.bizSnap && STATE.bizSnap.txt) lines.push(STATE.bizSnap.txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');
+      var pulse = [];
+      if ((STATE.prPulls || []).length) pulse.push((STATE.prPulls || []).length + ' PR pulls');
+      if ((STATE.slBuyers || []).length) pulse.push((STATE.slBuyers || []).length + ' wholesale buyer contacts');
+      if ((STATE.materials || []).length) pulse.push((STATE.materials || []).length + ' materials on file');
+      if (pulse.length) lines.push('OS pulse: ' + pulse.join(', ') + '.');
     } catch(e){}
     var g = (kind === 'step') ? items().find(function(x){ return x.id === gid && isGroup(x); }) : null;
     if (g){
@@ -20659,6 +20665,42 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // row; delegPoll picks finished jobs up whenever the app is next awake — so
   // the phone can be pocketed or the app closed entirely.
   function delegSb(){ return window.__sbClient || null; }
+  // Live commerce numbers for Eni's briefs, via the OS's read-only Shopify
+  // proxy. Computed here, cached 12h in synced STATE so both phones reuse it.
+  async function delegBizSnap(){
+    try {
+      var snap = STATE.bizSnap;
+      if (snap && snap.at && (Date.now() - new Date(snap.at).getTime()) < 12 * 60 * 60 * 1000) return;
+      var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+      var tm = ctrl ? setTimeout(function(){ ctrl.abort(); }, 6000) : null;
+      var r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'orders', limit: 250, status: 'any' }), signal: ctrl ? ctrl.signal : undefined });
+      if (tm) clearTimeout(tm);
+      if (!r || !r.ok) return;
+      var data = await r.json();
+      var orders = (data.orders || []).filter(function(o){ return !o.cancelled_at && o.test !== true; });
+      if (!orders.length) return;
+      var d30 = Date.now() - 30 * 864e5;
+      var rev = 0, rev30 = 0, n30 = 0, oldest = null, top = {};
+      orders.forEach(function(o){
+        var v = parseFloat(o.total_price) || 0, ts = new Date(o.created_at).getTime();
+        rev += v;
+        if (ts >= d30){ rev30 += v; n30++; }
+        if (oldest === null || ts < oldest) oldest = ts;
+        (o.line_items || []).forEach(function(li){ var k = li.title || '?'; top[k] = (top[k] || 0) + (li.quantity || 0); });
+      });
+      var tops = Object.keys(top).sort(function(a, b){ return top[b] - top[a]; }).slice(0, 5)
+        .map(function(k){ return k + ' ×' + top[k]; }).join(', ');
+      var money = function(x){ return '$' + Math.round(x).toLocaleString('en-US'); };
+      STATE.bizSnap = { at: new Date().toISOString(),
+        txt: 'SHOPIFY LIVE (fetched ' + new Date().toISOString().slice(0, 10) + '): '
+          + orders.length + (orders.length >= 250 ? ' most-recent' : '') + ' orders since ' + new Date(oldest).toISOString().slice(0, 10)
+          + ' — ' + money(rev) + ' gross, AOV ' + money(rev / orders.length)
+          + '. Last 30 days: ' + n30 + ' orders, ' + money(rev30)
+          + '. Top sellers: ' + (tops || 'n/a') + '.' };
+      save();
+    } catch(e){}
+  }
   function delegSys(){
     return 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
       + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
@@ -20804,6 +20846,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible'){ delegSweep(); delegPoll(); } });
   setTimeout(function(){ try { delegPoll(); } catch(e){} }, 4000);   // pick up work that finished while the app was closed
+  setTimeout(function(){ try { delegBizSnap(); } catch(e){} }, 8000); // warm the commerce snapshot for the first ⚡ run
   // System notification for finished delegate work. Fires only when the app
   // isn't on screen — the in-app toast covers the visible case. iOS home-screen
   // PWAs can only notify through the service-worker registration.
@@ -20857,6 +20900,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (window.Notification && Notification.permission === 'default') Notification.requestPermission().then(function(res){ if (res === 'granted') delegPushEnsure(); });
       else delegPushEnsure();
     } catch(_){}
+    try { await delegBizSnap(); } catch(e){}
     var sys = delegSys();
     var userMsg = 'CONTEXT:\n' + delegContext(kind, id, gid) + '\n\nTASK:\n' + q;
     // Server-side first: the background worker keeps going with the app closed.
@@ -21035,6 +21079,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     dumpWorkView(kind, id, gid);   // flip the viewer into its updating state
     var sys = delegSys()
       + ' You previously produced the CURRENT BRIEF included in the message. The founder replied with corrections or new information — redo the work accordingly and output the FULL updated brief (a complete replacement, not a diff or commentary). Keep everything that still holds; fix what the reply changes.';
+    try { await delegBizSnap(); } catch(e){}
     var earlier = priorThread.length
       ? '\n\nEARLIER REPLIES (already folded into the current brief):\n' + priorThread.slice(-4).map(function(r){ return '- ' + (r.u || ''); }).join('\n')
       : '';
