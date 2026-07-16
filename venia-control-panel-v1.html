@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '110';
+  const BUILD = '111';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11563,6 +11563,60 @@ async function callClaude(system, userMsg, history=[], model) {
   return text;
 }
 
+// Streaming variant — for LONG work (agent research, deep drafts). Returns the
+// full text once the stream ends; the relay pipes Anthropic's SSE straight
+// through so generation can run past the buffered-function time limit. opts:
+// { model, tools, maxTokens }. Throws on transport/API errors (caller may fall
+// back to callClaude).
+async function callClaudeStream(system, userMsg, opts) {
+  opts = opts || {};
+  const body = JSON.stringify({
+    model: opts.model || 'claude-sonnet-5',
+    max_tokens: opts.maxTokens || 4096,
+    stream: true,
+    system,
+    messages: [{ role: 'user', content: userMsg }],
+    ...(opts.tools ? { tools: opts.tools } : {}),
+  });
+  const PATHS = ['/api/claude', '/.netlify/functions/claude'];
+  const CANON = 'https://creator.veniacollection.com';
+  let resp = null;
+  for (const path of PATHS) {
+    try { resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }); } catch (e) { resp = null; }
+    if (resp && (resp.status === 404 || resp.status === 405 || resp.redirected) && location.origin !== CANON) {
+      try { resp = await fetch(CANON + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }); } catch (e) {}
+    }
+    if (resp && resp.ok) break;
+  }
+  if (!resp) throw new Error('No connection to Eni');
+  if (!resp.ok) {
+    let detail = 'HTTP ' + resp.status;
+    try { const e = await resp.json(); if (e && e.error && e.error.message) detail = e.error.message; } catch (_) {}
+    throw new Error(detail);
+  }
+  // Parse the SSE stream: collect every text delta; surface API error events.
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', out = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const raw = line.slice(5).trim();
+      if (!raw || raw === '[DONE]') continue;
+      let ev; try { ev = JSON.parse(raw); } catch (e) { continue; }
+      if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') out += ev.delta.text;
+      if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
+    }
+  }
+  if (!out.trim()) throw new Error('Eni replied with no text');
+  return out;
+}
+
 function plmContext() {
   const s = window.STATE;
   if (!s) return 'No PLM data loaded.';
@@ -20482,6 +20536,106 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       showToast(m === 'no_write' ? 'Add the calendar.events scope in Google (Data Access) and reconnect' : m === 'reconnect' ? 'Reconnect your calendar (tap 📅)' : 'Could not add — ' + m, 'error');
     } finally { render(); }
   };
+  // ── DELEGATE — hand a task to Eni; the finished brief lands on the item ──
+  // "Research showrooms while I work" — pick a task/step, refine the ask, and
+  // Eni produces a real work product (live web search when available) in the
+  // background. Results persist on the item (synced) behind a 📄 chip.
+  var delegRunning = {};
+  function delegTarget(kind, id, gid){
+    if (kind === 'step'){ var g = items().find(function(x){ return x.id === gid && isGroup(x); }); return g ? (g.children || []).find(function(c){ return c.id === id; }) : null; }
+    return items().find(function(x){ return x.id === id && !isGroup(x); });
+  }
+  window.dumpDelegate = function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t) return;
+    rowMenuId = null;
+    var ex = document.getElementById('dump-delegate'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-delegate';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    var prefill = (t.work && t.work.q) || ('Research: ' + (t.t || '') + '\n\nDeliver a tight, actionable brief for VENIA (luxury womenswear, Los Angeles) — a shortlist with specifics (names, locations/links, realistic costs) and how to approach each.');
+    ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
+      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">⚡ Have Eni do it</div>'
+      + '<div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:4px;line-height:1.35">' + esc((t.t || '').slice(0, 90)) + '</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Eni works on this in the background — with live web search — and the finished brief lands on the item. Keep working.</div>'
+      + '<textarea id="dump-delegate-q" rows="5" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px">' + esc(prefill) + '</textarea>'
+      + '<div style="display:flex;gap:8px">'
+      +   '<button onclick="dumpDelegateRun(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-gold" style="flex:1;min-height:46px;border-radius:11px">⚡ Start working</button>'
+      +   '<button onclick="var o=document.getElementById(\'dump-delegate\');if(o)o.remove()" class="btn btn-ghost" style="min-height:46px;border-radius:11px">Cancel</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+  };
+  window.dumpDelegateRun = async function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t) return;
+    var qEl = document.getElementById('dump-delegate-q');
+    var q = (qEl && qEl.value.trim()) || '';
+    if (!q){ showToast('Tell Eni what to produce','info'); return; }
+    var o = document.getElementById('dump-delegate'); if (o) o.remove();
+    delegRunning[id] = true; render();
+    showToast('⚡ Eni is on it — keep working, I\'ll ping you', 'info');
+    var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
+      + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
+      + 'Use web search when live facts matter (venues, rates, contacts, dates); prefer specific, verifiable details and include links where you found them. '
+      + 'Format as tight markdown: a one-line answer up top, then sections with ## headers and - bullets. No preamble.';
+    var out = null, err = null;
+    try { out = await callClaudeStream(sys, q, { tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }] }); }
+    catch(e1){
+      try { out = await callClaudeStream(sys, q, { tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] }); }
+      catch(e2){
+        try { out = await callClaudeStream(sys, q); }        // no tools, still streamed
+        catch(e3){ try { out = await callClaude(sys, q); } catch(e4){ err = e4; } }   // last resort: buffered
+      }
+    }
+    delete delegRunning[id];
+    var t2 = delegTarget(kind, id, gid);   // re-resolve: the item may have re-rendered/moved
+    if (out && t2){
+      t2.work = { q: q, md: out.trim(), at: new Date().toISOString() };
+      save(); render();
+      showToast('⚡ Done — tap 📄 on “' + (t2.t || '').slice(0, 40) + '”', 'success');
+      logActivity('Eni delivered work — ' + (t2.t || '').slice(0, 50));
+    } else {
+      render();
+      showToast('⚡ Couldn\'t finish — ' + String(err && err.message || 'try again'), 'error');
+    }
+  };
+  window.dumpWorkView = function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t || !t.work) return;
+    var ex = document.getElementById('dump-work'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-work';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:var(--bg);display:flex;flex-direction:column';
+    ov.innerHTML =
+      '<div style="padding:calc(12px + var(--sat,0px)) 14px 10px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0">'
+      +   '<div style="flex:1;min-width:0"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700">⚡ Eni\'s work</div>'
+      +   '<div style="font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">' + esc((t.t || '').slice(0, 90)) + '</div></div>'
+      +   '<button onclick="var o=document.getElementById(\'dump-work\');if(o)o.remove()" aria-label="Close" style="background:var(--bg-off);border:none;color:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0">✕</button>'
+      + '</div>'
+      + '<div style="flex:1;overflow-y:auto;padding:16px 16px calc(24px + var(--sab,0px))">' + md(t.work.md) + '</div>'
+      + '<div style="display:flex;gap:8px;padding:10px 14px calc(12px + var(--sab,0px));border-top:1px solid var(--border);flex-shrink:0">'
+      +   '<button onclick="dumpWorkCopy(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px;min-height:42px">Copy</button>'
+      +   '<button onclick="var o=document.getElementById(\'dump-work\');if(o)o.remove();dumpDelegate(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px">⚡ Redo</button>'
+      +   '<button onclick="dumpWorkRemove(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px;color:var(--muted)">Remove</button>'
+      + '</div>';
+    document.body.appendChild(ov);
+  };
+  window.dumpWorkCopy = function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t || !t.work) return;
+    var done = function(){ showToast('Copied','success'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t.work.md).then(done, done);
+  };
+  window.dumpWorkRemove = function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t) return;
+    delete t.work; save();
+    var o = document.getElementById('dump-work'); if (o) o.remove();
+    render();
+  };
+  function workChip(kind, id, gid){
+    if (delegRunning[id]) return '<span title="Eni is working on this" style="flex-shrink:0;font-size:12px;color:var(--gold);padding:0 4px">◐</span>';
+    var t = delegTarget(kind, id, gid);
+    if (t && t.work) return '<button onclick="event.stopPropagation();dumpWorkView(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" title="Eni\'s finished work" style="background:none;border:none;color:var(--gold);font-size:13px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">📄</button>';
+    return '';
+  }
+
   // ── Fixed commitments (manual) ───────────────────────────────────────────
   window.schedAddFixed = function(){
     var title = (document.getElementById('sched-fx-title') || {}).value || '';
@@ -20949,6 +21103,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 12px 7px 42px;border-top:1px solid var(--border)">'
             + '<textarea id="dump-child-edit" rows="1" oninput="dumpGrow(this)" onkeydown="dumpChildEditKey(event,\'' + i.id + '\',\'' + c.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:7px 9px;border:1px solid var(--ink);border-radius:7px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;overflow:hidden">' + esc(c.t) + '</textarea>'
             + '<button onclick="dumpChildSaveEdit(\'' + i.id + '\',\'' + c.id + '\')" class="btn btn-gold btn-sm" style="border-radius:7px">Save</button>'
+            + '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:14px;cursor:pointer;padding:6px 2px;flex-shrink:0;line-height:1">⚡</button>'
             + '<button onclick="dumpDeleteChild(\'' + i.id + '\',\'' + c.id + '\')" title="Delete step" style="background:none;border:none;color:var(--border-mid);font-size:15px;cursor:pointer;padding:6px 2px;flex-shrink:0;line-height:1">✕</button>'
             + '</div>';
         }
@@ -20959,6 +21114,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<div class="dump-swipe-fg" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
           + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
+          + workChip('step', c.id, i.id)
           + '</div></div>';
       }).join('');
       var footer = '<div style="display:flex;align-items:center;gap:14px;padding:9px 12px 10px 42px;border-top:1px solid var(--border);background:var(--bg-off)">'
@@ -21014,10 +21170,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + (i.done ? '' : dumpGrip(i.id))
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
+        + workChip('task', i.id, '')
         + '<button onclick="dumpRowMenu(\'' + i.id + '\')" aria-label="More" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 6px;flex-shrink:0;line-height:1;letter-spacing:1px">⋯</button>'
         + '</div></div>';
       if (rowMenuId === i.id){
         h += '<div style="display:flex;gap:7px;flex-wrap:wrap;padding:0 2px 12px 38px;border-bottom:1px solid var(--border)">'
+          + (i.done ? '' : '<button onclick="dumpDelegate(\'task\',\'' + i.id + '\',\'\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">⚡ Eni: do it</button>')
           + (i.done ? '' : '<button onclick="dumpRowMenu(null);dumpExpandItem(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">✦ Goal</button>')
           + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1d\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Tomorrow</button>')
           + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1w\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Next week</button>')

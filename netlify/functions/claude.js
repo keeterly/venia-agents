@@ -77,6 +77,18 @@ export default async (req) => {
     },
     body: JSON.stringify(payload),
   });
+
+  // Streaming pass-through: long generations (agent research, big schedules)
+  // exceed the buffered-function time window (the 504s). With stream:true the
+  // first token arrives in ~1s and Netlify happily streams the rest, so the
+  // relay stops being the ceiling on how long Eni may think.
+  if (payload.stream && r.ok && r.body) {
+    return new Response(r.body, {
+      status: r.status,
+      headers: { ...cors, 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' },
+    });
+  }
+
   return new Response(await r.text(), {
     status: r.status,
     headers: { ...cors, 'Content-Type': 'application/json' },
