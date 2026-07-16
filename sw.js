@@ -1,7 +1,7 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v92';
+const CACHE = 'venia-shell-v93';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -35,9 +35,11 @@ self.addEventListener('fetch', (e) => {
 
   // App shell: network-first so updates land when online, cache when offline.
   if (req.mode === 'navigate') {
-    const isBrainstorm = url.pathname === '/brainstorm.html';
+    const isBrainstorm = url.pathname === '/brainstorm.html' || url.pathname === '/brainstorm';
+    // Fetch with redirect:'follow' (fresh Request) so a Netlify .html pretty-URL
+    // 301 can't surface as an unusable opaqueredirect for the navigation.
     e.respondWith(
-      fetch(req)
+      fetch(new Request(req.url, { redirect: 'follow', credentials: 'same-origin' }))
         .then((r) => {
           const copy = r.clone();
           caches.open(CACHE).then((c) => c.put(isBrainstorm ? '/brainstorm.html' : '/venia-control-panel-v1.html', copy));
