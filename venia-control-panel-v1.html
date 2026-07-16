@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '101';
+  const BUILD = '102';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4931,7 +4931,6 @@ let STATE = {
   dumpWeek: null,            // last week plan {start, days:[{date,blocks}], unscheduled, note, at}
   schedPrefs: null,          // planner prefs {startHour, endHour, calSource, horizon}
   schedFixed: null,          // manual fixed commitments [{id,title,start,end}]
-  rpg: null,                 // quest/game layer {on, xp, level, claimed, initialized}
   googleClientId: null,      // Google OAuth client ID (public) — synced so it works across every device/PWA
   board: null,               // Milanote-style freeform canvas {cards:[{id,kind,x,y,text,color,goalId}], pan, zoom}
   prPulls: [],
@@ -5095,7 +5094,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'rpg', 'googleClientId', 'board', 'activityLog', 'samples',
+  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -19454,7 +19453,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   function fmApplyTransform(){ var c = document.getElementById('fmf-canvas'); if (c) c.style.transform = 'translate(' + fm.panX + 'px,' + fm.panY + 'px) scale(' + fm.zoom + ')'; }
   function fmRenderCanvas(){
-    rpgSync();   // map toggles complete real tasks — keep XP in step
     var d;
     if (fm.mode === 'master') d = fmBuildMaster();
     else { var g = fmGroup(); if (!g) return; d = fmBuild(g); }
@@ -20094,6 +20092,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Google Calendar. "Re-plan" rebuilds it as things change.
   var PLANVIEW = 'today';   // plan tab sub-view: 'today' | 'week' | 'priorities'
   window.dumpPlanView = function(v){ PLANVIEW = v; render(); };
+  var doneOpen = false;     // Goals home: completed section expanded?
+  window.dumpDoneToggle = function(){ doneOpen = !doneOpen; render(); };
   function pad2s(n){ return (n < 10 ? '0' : '') + n; }
   function todayStr(){ var d = new Date(); return d.getFullYear() + '-' + pad2s(d.getMonth() + 1) + '-' + pad2s(d.getDate()); }
   function hhmmFromISO(iso){ var d = new Date(iso); return pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()); }
@@ -20572,52 +20572,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return h;
   }
 
-  // ── QUEST LAYER — XP + Levels (toggleable) ───────────────────────────────
-  // Completing steps and tasks earns XP; XP levels you up on a gentle RPG curve.
-  // XP is reconciled from the real done-state (claimed map) so toggling a task
-  // on/off can't farm points — un-completing refunds. Built to grow into
-  // attributes, quests/bosses and streaks later.
-  var XP_STEP = 10, XP_TASK = 15, XP_GOAL = 40;   // step, loose task, whole-goal bonus
-  function rpgState(){ if (!STATE.rpg) STATE.rpg = { on: true, xp: 0, level: 1, claimed: null, initialized: false }; return STATE.rpg; }
-  function rpgLevelForXp(xp){ var L = 1; while (xp >= 25 * L * (L + 1)) L++; return L; }
-  function rpgLevelProgress(xp){ var L = rpgLevelForXp(xp), cur = 25 * (L - 1) * L, next = 25 * L * (L + 1), span = (next - cur) || 1; return { level: L, into: xp - cur, span: span, pct: Math.max(0, Math.min(1, (xp - cur) / span)) }; }
-  function rpgCurrentDone(){
-    var cur = {};
-    items().forEach(function(it){
-      if (isGroup(it)){
-        (it.children || []).forEach(function(c){ if (c.done) cur[c.id] = XP_STEP; });
-        if (it.children.length && it.children.every(function(c){ return c.done; })) cur['goal:' + it.id] = XP_GOAL;
-      } else if (it.done){ cur[it.id] = XP_TASK; }
-    });
-    return cur;
-  }
-  function rpgSync(){
-    var r = rpgState(); if (!r.claimed) r.claimed = {};
-    var cur = rpgCurrentDone();
-    if (!r.initialized){   // first run: adopt the current done-state as baseline, no fanfare
-      r.claimed = cur; var sum = 0; Object.keys(cur).forEach(function(k){ sum += cur[k]; });
-      r.xp = sum; r.level = rpgLevelForXp(r.xp); r.initialized = true; save(); return 0;
-    }
-    var delta = 0;
-    Object.keys(cur).forEach(function(id){ if (r.claimed[id] == null){ r.claimed[id] = cur[id]; delta += cur[id]; } });
-    Object.keys(r.claimed).forEach(function(id){ if (cur[id] == null){ delta -= r.claimed[id]; delete r.claimed[id]; } });
-    if (delta !== 0){
-      var before = r.level; r.xp = Math.max(0, (r.xp || 0) + delta); r.level = rpgLevelForXp(r.xp); save();
-      if (delta > 0 && r.on){ try { showToast(r.level > before ? ('⚔ Level ' + r.level + '!') : ('＋' + delta + ' XP'), 'success'); } catch(e){} }
-    }
-    return delta;
-  }
-  window.rpgToggle = function(){ var r = rpgState(); r.on = !r.on; save(); render(); try { showToast(r.on ? '⚔ Quest mode on' : 'Quest mode off', 'info'); } catch(e){} };
-  function rpgStripHTML(){
-    var r = rpgState(); if (!r.on) return '';
-    var p = rpgLevelProgress(r.xp || 0);
-    return '<div style="display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0">'
-      + '<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:800;color:var(--ink);flex-shrink:0">⚔ Lv ' + p.level + '</span>'
-      + '<div style="flex:1;height:7px;background:var(--bg-off);border:1px solid var(--border);border-radius:99px;overflow:hidden"><div style="height:100%;width:' + Math.round(p.pct * 100) + '%;background:linear-gradient(90deg,#8a6520,#caa24a);transition:width .5s cubic-bezier(.16,1,.3,1)"></div></div>'
-      + '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted);flex-shrink:0">' + p.into + '/' + p.span + '</span>'
-      + '</div>';
-  }
-
   // ── GOALS — a plan is a first-class goal: progress, target date, next step ──
   function goalProgress(g){ var k = g.children || []; var d = k.filter(function(c){ return c.done; }).length; return { done: d, total: k.length, pct: k.length ? d / k.length : 0 }; }
   function goalNext(g){ var c = (g.children || []).find(function(x){ return !x.done; }); return c ? c.t : ''; }
@@ -20741,7 +20695,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function render(){
     var ov = sheet(); if (!ov) return;
     injectCSS();
-    rpgSync();   // reconcile XP from the live done-state before drawing
     var all = items();
     var open = all.filter(function(i){ return !i.done; });
     var done = all.filter(function(i){ return i.done; });
@@ -20897,15 +20850,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<button class="btn btn-ghost dump-map-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpMakeMap()">' + mapBtnLabel + '</button>'
         : boardBtn + emptyState('◍', 'Compartmentalize your mind', 'Group scattered thoughts into clear areas, or drop notes<br>on the Board above — visual-first, your way.')
           + '<button class="btn btn-gold dump-map-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpMakeMap()">◍ Group into a map</button>';
-    } else if (TAB === 'done'){
-      body = done.length
-        ? done.map(row).join('') + '<button class="btn btn-ghost btn-sm" style="margin-top:16px;border-radius:10px" onclick="dumpClearDone()">Clear completed</button>'
-        : emptyState('🌱', 'Nothing done yet', 'As you check things off, they\'ll gather here<br>so you can see what you\'ve moved forward.');
     } else {
-      // GOALS HOME — goals (sorted by urgency) up top, quick tasks below.
+      // GOALS HOME — goals (sorted by urgency) up top, quick tasks below, and
+      // Done folded in as a collapsed section (was its own tab).
       var goals = open.filter(isGroup).slice().sort(goalSort);
       var tasks = open.filter(function(i){ return !isGroup(i); });
-      if (!goals.length && !tasks.length){
+      if (!goals.length && !tasks.length && !done.length){
         body = emptyState('🧠', 'Your mind, cleared', 'Type or speak anything above — an idea, a task, a goal.<br>A heading + steps becomes a goal; one line + <span style="color:var(--gold)">✦</span> lets Eni build one.');
       } else {
         var lbl = function(t, right){ return '<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">' + t + '</div>' + (right || '') + '</div>'; };
@@ -20916,9 +20866,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         h += tasks.length ? tasks.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('')
           : '<div style="font-size:11.5px;color:var(--muted);padding:4px 0">Nothing loose — capture above.</div>';
         h += '<div style="display:flex;gap:8px;margin-top:20px">'
-          + '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpTab(\'map\')">◍ Map</button>'
+          + '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpTab(\'map\')">▦ Canvas</button>'
           + '<button class="btn btn-gold" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpPlanView(\'today\');dumpTab(\'plan\')">◔ Plan my day</button>'
           + '</div>';
+        if (done.length){
+          h += '<button onclick="dumpDoneToggle()" style="display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;border-top:1px solid var(--border);margin-top:18px;padding:13px 2px 4px;cursor:pointer;text-align:left">'
+            + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">✓ Done · ' + done.length + '</span>'
+            + '<span style="flex:1"></span><span style="font-size:12px;color:var(--muted)">' + (doneOpen ? '▾' : '▸') + '</span></button>';
+          if (doneOpen) h += done.map(row).join('') + '<button class="btn btn-ghost btn-sm" style="margin-top:14px;border-radius:10px" onclick="dumpClearDone()">Clear completed</button>';
+        }
         body = h;
       }
     }
@@ -20944,15 +20900,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +     '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:17px;letter-spacing:.5px;display:flex;align-items:center;gap:8px">✎ Brainstorm</div>'
       +     '<div style="font-size:10.5px;color:#9a9a9a;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Capture · map · plan · done</div>'
       +   '</div>'
-      +   '<button onclick="rpgToggle()" title="Quest mode" style="background:' + (rpgState().on ? 'rgba(202,162,74,.22)' : 'rgba(255,255,255,.12)') + ';border:none;color:' + (rpgState().on ? '#caa24a' : '#fff') + ';height:32px;width:32px;border-radius:50%;font-size:14px;cursor:pointer;flex-shrink:0;margin-right:8px;display:flex;align-items:center;justify-content:center">⚔</button>'
       +   '<button onclick="dumpToVenia()" title="Open the full VENIA OS" style="background:rgba(255,255,255,.12);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;margin-right:8px">⤢ OS</button>'
       +   (window.__BRAINSTORM ? '' : '<button onclick="dumpClose()" aria-label="Close" style="background:rgba(255,255,255,.12);border:none;color:#fff;font-size:15px;cursor:pointer;width:32px;height:32px;border-radius:50%;line-height:1;display:flex;align-items:center;justify-content:center;flex-shrink:0">✕</button>')
       + '</div>'
       // Tabs — the flow order: Capture → Compartmentalize → Prioritize → Complete
       + '<div style="display:flex;gap:6px;padding:11px 14px;border-bottom:1px solid var(--border);flex-shrink:0">'
-      +   chip('inbox','Goals', open.length) + chip('map','Map', null) + chip('plan','Plan', null) + chip('done','Done', done.length)
+      +   chip('inbox','Goals', open.length) + chip('map','Canvas', null) + chip('plan','Plan', null)
       + '</div>'
-      + rpgStripHTML()
       + captureBlock
       // Scroll body
       + '<div id="dump-scroll" style="flex:1;overflow-y:auto;padding:14px 16px calc(24px + var(--sab,0px))">' + body + '</div>'
