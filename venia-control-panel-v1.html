@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '96';
+  const BUILD = '97';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20109,32 +20109,72 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     });
     return out;
   }
-  // ── Google Calendar (real events to plan around) ─────────────────────────
-  var gcalToken = null;
-  window.schedConnectCal = function(){
-    var clientId = (typeof googleClientId === 'function' ? googleClientId() : localStorage.getItem('venia-google-client-id')) || '';
-    if (!clientId){ showToast('Add your Google Client ID in Settings → API Keys first','warning'); return; }
-    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){ showToast('Google library not loaded — check your connection','error'); return; }
-    try {
-      var tc = google.accounts.oauth2.initTokenClient({
+  // ── Google Calendar — stay-connected via silent token refresh ────────────
+  // We keep ONE GIS token client and mint access tokens on demand. After the
+  // first consent, refreshes use prompt:'' (silent, no popup) so the planner
+  // "stays connected" — the connected state itself persists in schedPrefs
+  // (synced). Access tokens are ~1h and NEVER stored; we just re-mint quietly.
+  var gcalToken = null, gcalTokenExp = 0, gcalClient = null, gcalPending = null;
+  function gcalGetClient(){
+    var clientId = (typeof googleClientId === 'function' ? googleClientId() : '') || '';
+    if (!clientId || typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
+    if (!gcalClient){
+      gcalClient = google.accounts.oauth2.initTokenClient({
         client_id: clientId,
         scope: 'https://www.googleapis.com/auth/calendar.readonly',
         callback: function(resp){
-          if (resp && resp.access_token){ gcalToken = resp.access_token; schedPrefs().calSource = 'google'; save(); showToast('Calendar connected','success'); render(); }
-          else showToast('Calendar access was declined','warning');
-        }
+          if (resp && resp.access_token){
+            gcalToken = resp.access_token;
+            gcalTokenExp = Date.now() + (((resp.expires_in || 3600) - 60) * 1000);   // 1-min safety buffer
+            if (gcalPending){ var p = gcalPending; gcalPending = null; p.resolve(gcalToken); }
+          } else if (gcalPending){ var p2 = gcalPending; gcalPending = null; p2.reject(new Error((resp && resp.error) || 'no_token')); }
+        },
+        error_callback: function(err){ if (gcalPending){ var p3 = gcalPending; gcalPending = null; p3.reject(new Error((err && err.type) || 'auth_error')); } }
       });
-      tc.requestAccessToken();
-    } catch(e){ showToast('Could not start Google Calendar — ' + String(e.message || e), 'error'); }
+    }
+    return gcalClient;
+  }
+  function gcalRequest(prompt){
+    return new Promise(function(resolve, reject){
+      var c = gcalGetClient(); if (!c){ reject(new Error('no_client')); return; }
+      gcalPending = { resolve: resolve, reject: reject };
+      try { c.requestAccessToken({ prompt: prompt }); } catch(e){ gcalPending = null; reject(e); }
+    });
+  }
+  // A valid token, minting one SILENTLY if the current is missing/expired.
+  function gcalEnsureToken(){
+    if (gcalToken && Date.now() < gcalTokenExp) return Promise.resolve(gcalToken);
+    return gcalRequest('');   // relies on prior consent + an active Google session
+  }
+  window.schedConnectCal = function(){
+    var clientId = (typeof googleClientId === 'function' ? googleClientId() : '') || '';
+    if (!clientId){ showToast('Add your Google Client ID in Settings → API Keys first','warning'); return; }
+    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){ showToast('Google library not loaded — check your connection','error'); return; }
+    // Try silent first (no popup if already granted); fall back to the consent
+    // screen the first time.
+    gcalRequest('').catch(function(){ return gcalRequest('consent'); }).then(function(){
+      schedPrefs().calSource = 'google'; save(); showToast('📅 Calendar connected — it\'ll stay linked','success'); render();
+    }).catch(function(e){
+      showToast('Calendar access was declined' + (e && e.message ? '' : ''), 'warning');
+    });
   };
-  window.schedDisconnectCal = function(){ gcalToken = null; schedPrefs().calSource = 'none'; save(); render(); };
+  window.schedDisconnectCal = function(){
+    try { if (gcalToken && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(gcalToken); } catch(e){}
+    gcalToken = null; gcalTokenExp = 0;
+    schedPrefs().calSource = 'none'; save(); render();
+  };
   async function gCalEventsForDay(dateStr){
-    if (!gcalToken) return [];
+    var token;
+    try { token = await gcalEnsureToken(); } catch(e){ throw new Error('reconnect'); }   // silent refresh blocked → ask to reconnect
     var tMin = new Date(dateStr + 'T00:00:00'), tMax = new Date(dateStr + 'T23:59:59');
     var url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=50'
       + '&timeMin=' + encodeURIComponent(tMin.toISOString()) + '&timeMax=' + encodeURIComponent(tMax.toISOString());
-    var r = await fetch(url, { headers: { Authorization: 'Bearer ' + gcalToken } });
-    if (r.status === 401){ gcalToken = null; schedPrefs().calSource = 'none'; throw new Error('Calendar session expired — reconnect it'); }
+    var r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 401){   // token rejected — mint a fresh one silently and retry once
+      gcalToken = null; gcalTokenExp = 0;
+      try { token = await gcalEnsureToken(); } catch(e){ throw new Error('reconnect'); }
+      r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    }
     if (!r.ok) throw new Error('Calendar read failed (' + r.status + ')');
     var d = await r.json();
     return (d.items || []).filter(function(e){ return e.start && e.start.dateTime && e.status !== 'cancelled'; })
@@ -20163,7 +20203,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var calNote = '';
       if (p.calSource === 'google'){
         try { var ev = await gCalEventsForDay(date); fixed = fixed.concat(ev); calNote = ev.length ? (' · ' + ev.length + ' calendar events') : ''; }
-        catch(e){ showToast(String(e.message || e), 'warning'); }
+        catch(e){ showToast(String(e.message) === 'reconnect' ? 'Calendar needs a quick reconnect — tap 📅 Connect calendar' : ('Calendar: ' + String(e.message || e)), 'warning'); }
       }
       var now = new Date();
       var nowCtx = 'Right now it is ' + now.toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '.';
