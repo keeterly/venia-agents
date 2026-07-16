@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '116';
+  const BUILD = '117';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20645,6 +20645,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // row; delegPoll picks finished jobs up whenever the app is next awake — so
   // the phone can be pocketed or the app closed entirely.
   function delegSb(){ return window.__sbClient || null; }
+  function delegSys(){
+    return 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
+      + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
+      + 'Ground every fact in the CONTEXT section of the message: if it names an event, city or dates, that IS the event, city and dates — never substitute another. '
+      + 'Use web search when live facts matter (venues, rates, contacts, dates); prefer specific, verifiable details and include links where you found them. '
+      + 'Format as tight markdown: a one-line answer up top, then sections with ## headers and - bullets. '
+      + 'When comparing options (flights, hotels, venues, showrooms, rates), lay the comparison out as a markdown table with | pipes | — e.g. | Option | Cost | Location/Dates | Why |. No preamble.';
+  }
   // Web Push: subscribe this installed device and store the subscription so
   // the server worker can ping the phone when a job finishes — even with the
   // app closed. (iOS: requires the app on the home screen, iOS 16.4+.)
@@ -20718,7 +20726,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var t = delegTarget(j.kind, j.item_id, j.gid || '');
       delete delegRunning[j.item_id];
       if (j.status === 'done' && t){
+        var prevThread = (t.work && t.work.thread) || null;
         t.work = { q: j.q, md: String(j.result || '').trim(), at: j.done_at || new Date().toISOString() };
+        if (prevThread) t.work.thread = prevThread;
         save();
         showToast('⚡ Done — tap 📄 on “' + (t.t || '').slice(0, 40) + '”', 'success');
         delegNotify('⚡ Eni finished', (t.t || 'Your task') + ' — the brief is ready in Brainstorm');
@@ -20727,6 +20737,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         showToast('⚡ Couldn\'t finish — ' + String(j.result || 'try again').slice(0, 90), 'error');
       }
       try { await c.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
+      // If the founder is looking at this brief right now, refresh it in place.
+      if (workCur && workCur.id === j.item_id && document.getElementById('dump-work')) dumpWorkView(workCur.kind, workCur.id, workCur.gid);
       changed = true;
     }
     if (changed) render();
@@ -20798,12 +20810,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (window.Notification && Notification.permission === 'default') Notification.requestPermission().then(function(res){ if (res === 'granted') delegPushEnsure(); });
       else delegPushEnsure();
     } catch(_){}
-    var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
-      + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
-      + 'Ground every fact in the CONTEXT section of the message: if it names an event, city or dates, that IS the event, city and dates — never substitute another. '
-      + 'Use web search when live facts matter (venues, rates, contacts, dates); prefer specific, verifiable details and include links where you found them. '
-      + 'Format as tight markdown: a one-line answer up top, then sections with ## headers and - bullets. '
-      + 'When comparing options (flights, hotels, venues, showrooms, rates), lay the comparison out as a markdown table with | pipes | — e.g. | Option | Cost | Location/Dates | Why |. No preamble.';
+    var sys = delegSys();
     var userMsg = 'CONTEXT:\n' + delegContext(kind, id, gid) + '\n\nTASK:\n' + q;
     // Server-side first: the background worker keeps going with the app closed.
     if (await delegQueueServer(kind, id, gid, q, sys, userMsg)){
@@ -20836,9 +20843,31 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       delegNotify('⚡ Eni hit a snag', 'Couldn’t finish “' + ((t2 && t2.t) || 'your task') + '” — tap ⚡ to retry');
     }
   };
+  var workCur = null;   // the item the work viewer is showing (for live refresh)
+  window.dumpWorkClose = function(){ workCur = null; var o = document.getElementById('dump-work'); if (o) o.remove(); };
   window.dumpWorkView = function(kind, id, gid){
     var t = delegTarget(kind, id, gid); if (!t || !t.work) return;
+    workCur = { kind: kind, id: id, gid: gid || '' };
     var ex = document.getElementById('dump-work'); if (ex) ex.remove();
+    var args = '\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\'';
+    var running = !!delegRunning[id];
+    // The conversation so far — each reply Eni has already folded in.
+    var thread = (t.work.thread || []);
+    var threadHTML = thread.length
+      ? '<div style="padding:12px 16px 0">' + thread.map(function(r){
+          return '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:5px"><span style="color:var(--gold);font-weight:700">↩</span> ' + esc((r.u || '').slice(0, 180)) + '</div>';
+        }).join('') + '</div>'
+      : '';
+    var footer = running
+      ? '<div id="dump-work-foot" style="display:flex;align-items:center;gap:10px;padding:14px 16px calc(14px + var(--sab,0px));border-top:1px solid var(--border);flex-shrink:0">'
+        + '<span class="dump-work-run" style="font-size:14px">⚡</span>'
+        + '<span style="font-size:12px;color:var(--muted)">Eni is reworking this brief — it updates right here when done.</span>'
+        + '</div>'
+      : '<div id="dump-work-foot" style="display:flex;gap:8px;padding:10px 14px calc(12px + var(--sab,0px));border-top:1px solid var(--border);flex-shrink:0">'
+        + '<button onclick="dumpWorkReply(' + args + ')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px;min-height:42px">↩ Reply</button>'
+        + '<button onclick="dumpWorkCopy(' + args + ')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px">Copy</button>'
+        + '<button onclick="dumpWorkRemove(' + args + ')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px;color:var(--muted)">Remove</button>'
+        + '</div>';
     var ov = document.createElement('div');
     ov.id = 'dump-work';
     ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:var(--bg);display:flex;flex-direction:column';
@@ -20846,15 +20875,71 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       '<div style="padding:calc(12px + var(--sat,0px)) 14px 10px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0">'
       +   '<div style="flex:1;min-width:0"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700">⚡ Eni\'s work</div>'
       +   '<div style="font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">' + esc((t.t || '').slice(0, 90)) + '</div></div>'
-      +   '<button onclick="var o=document.getElementById(\'dump-work\');if(o)o.remove()" aria-label="Close" style="background:var(--bg-off);border:none;color:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0">✕</button>'
+      +   '<button onclick="dumpWorkClose()" aria-label="Close" style="background:var(--bg-off);border:none;color:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0">✕</button>'
       + '</div>'
+      + threadHTML
       + '<div style="flex:1;overflow-y:auto;padding:16px 16px calc(24px + var(--sab,0px))">' + md(t.work.md) + '</div>'
-      + '<div style="display:flex;gap:8px;padding:10px 14px calc(12px + var(--sab,0px));border-top:1px solid var(--border);flex-shrink:0">'
-      +   '<button onclick="dumpWorkCopy(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-gold btn-sm" style="flex:1;border-radius:9px;min-height:42px">Copy</button>'
-      +   '<button onclick="var o=document.getElementById(\'dump-work\');if(o)o.remove();dumpDelegate(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px">⚡ Redo</button>'
-      +   '<button onclick="dumpWorkRemove(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px;color:var(--muted)">Remove</button>'
-      + '</div>';
+      + footer;
     document.body.appendChild(ov);
+  };
+  // ↩ Reply — talk to the research. The founder's note (a correction, new
+  // info, a nudge) reruns the task agentically with the current brief as
+  // context, and the updated brief replaces this one in place.
+  window.dumpWorkReply = function(kind, id, gid){
+    var foot = document.getElementById('dump-work-foot'); if (!foot) return;
+    var args = '\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\'';
+    foot.innerHTML =
+      '<textarea id="dump-work-reply" rows="2" placeholder="What changed, or what was off? Eni redoes the work with this." oninput="dumpGrow(this)" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px 12px;border:1px solid var(--border);border-radius:11px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;overflow:hidden"></textarea>'
+      + '<button onclick="dumpWorkReplySend(' + args + ')" class="btn btn-gold btn-sm" style="border-radius:9px;min-height:42px;align-self:flex-end">Send</button>'
+      + '<button onclick="dumpWorkView(' + args + ')" class="btn btn-ghost btn-sm" style="border-radius:9px;min-height:42px;align-self:flex-end">✕</button>';
+    var ta = document.getElementById('dump-work-reply'); if (ta) ta.focus();
+  };
+  window.dumpWorkReplySend = async function(kind, id, gid){
+    var t = delegTarget(kind, id, gid); if (!t || !t.work) return;
+    var el = document.getElementById('dump-work-reply');
+    var reply = (el && el.value.trim()) || '';
+    if (!reply){ showToast('Tell Eni what changed', 'info'); return; }
+    var priorThread = (t.work.thread || []);
+    t.work.thread = priorThread.concat([{ u: reply, at: new Date().toISOString() }]);
+    save();
+    delegRunning[id] = Date.now(); render();
+    dumpWorkView(kind, id, gid);   // flip the viewer into its updating state
+    var sys = delegSys()
+      + ' You previously produced the CURRENT BRIEF included in the message. The founder replied with corrections or new information — redo the work accordingly and output the FULL updated brief (a complete replacement, not a diff or commentary). Keep everything that still holds; fix what the reply changes.';
+    var earlier = priorThread.length
+      ? '\n\nEARLIER REPLIES (already folded into the current brief):\n' + priorThread.slice(-4).map(function(r){ return '- ' + (r.u || ''); }).join('\n')
+      : '';
+    var userMsg = 'CONTEXT:\n' + delegContext(kind, id, gid)
+      + '\n\nORIGINAL REQUEST:\n' + (t.work.q || t.t || '')
+      + '\n\nCURRENT BRIEF (your previous output):\n' + String(t.work.md || '').slice(0, 9000)
+      + earlier
+      + '\n\nFOUNDER\'S REPLY — redo the work with this:\n' + reply;
+    if (await delegQueueServer(kind, id, gid, (t.work.q || ('Update: ' + (t.t || ''))), sys, userMsg)){
+      showToast('⚡ Eni is reworking it — updates land right here', 'info');
+      delegWatch();
+      return;
+    }
+    var out = null, err = null;
+    try { out = await callClaudeStream(sys, userMsg, { tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }] }); }
+    catch(e1){
+      try { out = await callClaudeStream(sys, userMsg, { tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] }); }
+      catch(e2){
+        try { out = await callClaudeStream(sys, userMsg); }
+        catch(e3){ try { out = await callClaude(sys, userMsg); } catch(e4){ err = e4; } }
+      }
+    }
+    delete delegRunning[id];
+    var t2 = delegTarget(kind, id, gid);
+    if (out && t2 && t2.work){
+      t2.work.md = out.trim(); t2.work.at = new Date().toISOString();
+      save(); render();
+      showToast('⚡ Brief updated', 'success');
+      delegNotify('⚡ Eni updated the brief', (t2.t || 'Your task'));
+    } else {
+      render();
+      showToast('⚡ Couldn\'t update — ' + String(err && err.message || 'try again'), 'error');
+    }
+    if (workCur && workCur.id === id && document.getElementById('dump-work')) dumpWorkView(kind, id, gid);
   };
   window.dumpWorkCopy = function(kind, id, gid){
     var t = delegTarget(kind, id, gid); if (!t || !t.work) return;
@@ -20864,7 +20949,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpWorkRemove = function(kind, id, gid){
     var t = delegTarget(kind, id, gid); if (!t) return;
     delete t.work; save();
-    var o = document.getElementById('dump-work'); if (o) o.remove();
+    window.dumpWorkClose();
     render();
   };
   function workChip(kind, id, gid){
