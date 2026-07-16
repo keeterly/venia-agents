@@ -1,8 +1,8 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v91';
-const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest'];
+const CACHE = 'venia-shell-v92';
+const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
   // NOTE: no skipWaiting() here. We let the new worker WAIT so the page can
@@ -35,14 +35,18 @@ self.addEventListener('fetch', (e) => {
 
   // App shell: network-first so updates land when online, cache when offline.
   if (req.mode === 'navigate') {
+    const isBrainstorm = url.pathname === '/brainstorm.html';
     e.respondWith(
       fetch(req)
         .then((r) => {
           const copy = r.clone();
-          caches.open(CACHE).then((c) => c.put('/venia-control-panel-v1.html', copy));
+          caches.open(CACHE).then((c) => c.put(isBrainstorm ? '/brainstorm.html' : '/venia-control-panel-v1.html', copy));
           return r;
         })
-        .catch(() => caches.match('/venia-control-panel-v1.html').then((r) => r || caches.match('/')))
+        // Offline: serve the matching shell — the Brainstorm entry keeps its own
+        // identity, everything else falls back to the OS shell.
+        .catch(() => caches.match(isBrainstorm ? '/brainstorm.html' : '/venia-control-panel-v1.html')
+          .then((r) => r || caches.match('/venia-control-panel-v1.html')).then((r) => r || caches.match('/')))
     );
     return;
   }
