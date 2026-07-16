@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '97';
+  const BUILD = '98';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2604,7 +2604,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
               </div>
               <button class="btn btn-gold btn-sm" onclick="setGoogleClient()">Save</button>
             </div>
-            <div style="margin-top:8px;font-size:9px;color:var(--muted);line-height:1.5">Google Cloud → APIs &amp; Services → <strong>Clients</strong> → create a <strong>Web application</strong> client with authorized JS origin <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com</code>. Enable the <strong>Calendar API</strong> and add the <code style="font-family:'DM Mono',monospace">calendar.readonly</code> scope. This ID is public (safe in the browser).</div>
+            <div style="margin-top:8px;font-size:9px;color:var(--muted);line-height:1.5">Google Cloud → APIs &amp; Services → <strong>Clients</strong> → create a <strong>Web application</strong> client with authorized JS origin <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com</code>. Enable the <strong>Calendar API</strong> and add the <code style="font-family:'DM Mono',monospace">calendar.events</code> scope (read + write, so the planner can add events). This ID is public (safe in the browser).</div>
           </div>
 
           <!-- News API -->
@@ -20121,7 +20121,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!gcalClient){
       gcalClient = google.accounts.oauth2.initTokenClient({
         client_id: clientId,
-        scope: 'https://www.googleapis.com/auth/calendar.readonly',
+        // events = read (plan around) + write (push the planned day back).
+        scope: 'https://www.googleapis.com/auth/calendar.events',
         callback: function(resp){
           if (resp && resp.access_token){
             gcalToken = resp.access_token;
@@ -20180,6 +20181,67 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return (d.items || []).filter(function(e){ return e.start && e.start.dateTime && e.status !== 'cancelled'; })
       .map(function(e){ return { title: e.summary || '(busy)', start: hhmmFromISO(e.start.dateTime), end: hhmmFromISO(e.end.dateTime), kind: 'meeting' }; });
   }
+  // ── Writing the planned day INTO Google Calendar ─────────────────────────
+  async function gcalInsertEvent(ev){
+    var token = await gcalEnsureToken();
+    var end = new Date(ev.start.getTime() + (ev.durMin || 30) * 60000);
+    var body = {
+      summary: ev.title,
+      description: (ev.notes ? ev.notes + '\n\n' : '') + '— planned by VENIA Brainstorm',
+      start: { dateTime: ev.start.toISOString() },
+      end: { dateTime: end.toISOString() },
+      extendedProperties: { private: { veniaPlan: ev.dateStr || '' } },   // tag so re-push can replace cleanly
+      colorId: '8'
+    };
+    var doPost = function(tok){ return fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', { method: 'POST', headers: { Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); };
+    var r = await doPost(token);
+    if (r.status === 401){ gcalToken = null; gcalTokenExp = 0; token = await gcalEnsureToken(); r = await doPost(token); }
+    if (r.status === 403) throw new Error('no_write');   // scope not granted for writing
+    if (!r.ok) throw new Error('Calendar write failed (' + r.status + ')');
+    return r.json();
+  }
+  // Remove the VENIA-planned events for a date so re-pushing replaces, not dupes.
+  async function gcalClearPlan(dateStr){
+    var token = await gcalEnsureToken();
+    var url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=250&privateExtendedProperty=' + encodeURIComponent('veniaPlan=' + dateStr);
+    var r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) return 0;
+    var d = await r.json(); var items = d.items || [], n = 0;
+    for (var i = 0; i < items.length; i++){
+      var dr = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events/' + encodeURIComponent(items[i].id), { method: 'DELETE', headers: { Authorization: 'Bearer ' + token } });
+      if (dr.ok || dr.status === 410) n++;
+    }
+    return n;
+  }
+  // "Add my day to Calendar" — writes the planned work blocks as events (skips
+  // meetings, which already live on the calendar), replacing any earlier push.
+  window.schedPushDay = async function(){
+    var s = STATE.dumpSchedule;
+    if (!s || !s.blocks || !s.blocks.length){ showToast('Plan your day first','info'); return; }
+    if (schedPrefs().calSource !== 'google'){ showToast('Connect your calendar first (tap 📅)','warning'); return; }
+    var btns = document.querySelectorAll('.sched-push-btn'); btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Adding to Calendar…'; });
+    try {
+      await gcalClearPlan(s.date);
+      var added = 0;
+      for (var i = 0; i < s.blocks.length; i++){
+        var b = s.blocks[i];
+        if (b.kind === 'meeting') continue;
+        var hm = b.start.length === 4 ? '0' + b.start : b.start;
+        var start = new Date(s.date + 'T' + hm + ':00');
+        var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+        await gcalInsertEvent({ title: b.title, start: start, durMin: dur, notes: b.why || '', dateStr: s.date });
+        added++;
+      }
+      s.pushedAt = new Date().toISOString(); save();
+      showToast('📅 Added ' + added + ' block' + (added === 1 ? '' : 's') + ' to your calendar','success');
+      logActivity('Pushed ' + added + ' schedule blocks to Google Calendar');
+    } catch(e){
+      var m = String(e && e.message);
+      showToast(m === 'no_write' ? 'Add the calendar.events scope in Google (Data Access) and reconnect'
+        : m === 'reconnect' ? 'Reconnect your calendar (tap 📅) to write events'
+        : 'Could not add — ' + m, 'error');
+    } finally { render(); }
+  };
   // ── Fixed commitments (manual) ───────────────────────────────────────────
   window.schedAddFixed = function(){
     var title = (document.getElementById('sched-fx-title') || {}).value || '';
@@ -20248,6 +20310,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var hm = b.start.length === 4 ? '0' + b.start : b.start;
     var start = new Date(s.date + 'T' + hm + ':00');
     var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+    // Connected → write straight into Google Calendar; otherwise ICS/Google link.
+    if (schedPrefs().calSource === 'google'){
+      gcalInsertEvent({ title: b.title, start: start, durMin: dur, notes: b.why || '', dateStr: s.date })
+        .then(function(){ showToast('📅 Added to your calendar','success'); })
+        .catch(function(e){
+          var m = String(e && e.message);
+          if (m === 'no_write') showToast('Add the calendar.events scope in Google, then reconnect','warning');
+          else if (m === 'reconnect') showToast('Reconnect your calendar (tap 📅)','warning');
+          else if (!downloadICS(b.title, start, dur, b.why || '')) openGcal(b.title, start, dur, b.why || '');
+        });
+      return;
+    }
     if (downloadICS(b.title, start, dur, b.why || 'VENIA schedule')) showToast('Added to calendar','success');
     else openGcal(b.title, start, dur, b.why || '');
   };
@@ -20287,6 +20361,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var openIds = {}; schedTasks().forEach(function(t){ openIds[t.id] = true; });
     var h = '';
     if (s.note) h += '<div style="font-size:13px;color:var(--ink);font-weight:600;line-height:1.4;margin:2px 0 12px;padding-left:11px;border-left:2px solid var(--ink)">' + esc(s.note) + '</div>';
+    // Push the whole plan into Google Calendar (Motion-style write-back).
+    if (schedPrefs().calSource === 'google'){
+      h += '<button onclick="schedPushDay()" class="btn btn-gold sched-push-btn" style="width:100%;min-height:44px;border-radius:10px;margin-bottom:12px">📅 ' + (s.pushedAt ? 'Update my calendar' : 'Add my day to Calendar') + '</button>';
+    }
     s.blocks.forEach(function(b, i){
       var kc = b.kind === 'meeting' ? '#9E3B34' : b.kind === 'break' ? '#3F6A50' : b.kind === 'admin' ? '#A67B2C' : 'var(--ink)';
       var done = b.taskId && !openIds[b.taskId];   // its task is checked off / gone
