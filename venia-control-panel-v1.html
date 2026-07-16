@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '113';
+  const BUILD = '114';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18428,16 +18428,40 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
   // Minimal markdown → HTML for the plan (headers, bullets, bold; escaped first)
   function md(t){
-    return String(t||'').split('\n').map(function(line){
+    var out = [], tbl = null;
+    function flushTbl(){
+      if (!tbl || !tbl.length){ tbl = null; return; }
+      var h = '<div style="overflow-x:auto;margin:10px 0;-webkit-overflow-scrolling:touch"><table style="border-collapse:collapse;width:100%;font-size:11.5px;line-height:1.45">';
+      tbl.forEach(function(row, ri){
+        h += '<tr>' + row.map(function(cell){
+          return ri === 0
+            ? '<th style="text-align:left;padding:6px 10px;border-bottom:1.5px solid var(--ink);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink);white-space:nowrap">' + cell + '</th>'
+            : '<td style="padding:7px 10px;border-bottom:1px solid var(--border);color:var(--ink);vertical-align:top">' + cell + '</td>';
+        }).join('') + '</tr>';
+      });
+      out.push(h + '</table></div>'); tbl = null;
+    }
+    String(t||'').split('\n').forEach(function(line){
+      var tm = line.match(/^\s*\|(.+)\|\s*$/);
+      if (tm){
+        var cells = tm[1].split('|').map(function(c){ return esc(c.trim()).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>'); });
+        if (cells.every(function(c){ return /^:?-{2,}:?$/.test(c); })) return;   // |---|---| separator row
+        if (!tbl) tbl = [];
+        tbl.push(cells);
+        return;
+      }
+      flushTbl();
       var l = esc(line);
       var h2 = l.match(/^##+\s+(.*)$/);
-      if (h2) return '<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink);margin:16px 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">' + h2[1] + '</div>';
+      if (h2){ out.push('<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink);margin:16px 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border)">' + h2[1] + '</div>'); return; }
       var b = l.match(/^\s*[-*•]\s+(.*)$/) || l.match(/^\s*\d+[.)]\s+(.*)$/);
       var body = (b ? b[1] : l).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      if (b) return '<div style="display:flex;gap:8px;padding:3px 0;font-size:12px;line-height:1.55;color:var(--ink)"><span style="color:var(--gold);flex-shrink:0">•</span><span>' + body + '</span></div>';
-      if (!l.trim()) return '';
-      return '<div style="font-size:12px;line-height:1.6;color:var(--ink);padding:2px 0">' + body + '</div>';
-    }).join('');
+      if (b){ out.push('<div style="display:flex;gap:8px;padding:3px 0;font-size:12px;line-height:1.55;color:var(--ink)"><span style="color:var(--gold);flex-shrink:0">•</span><span>' + body + '</span></div>'); return; }
+      if (!l.trim()) return;
+      out.push('<div style="font-size:12px;line-height:1.6;color:var(--ink);padding:2px 0">' + body + '</div>');
+    });
+    flushTbl();
+    return out.join('');
   }
 
   window.dumpBadge = function(){
@@ -20597,6 +20621,88 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Eni produces a real work product (live web search when available) in the
   // background. Results persist on the item (synced) behind a 📄 chip.
   var delegRunning = {};   // id → start ms (truthy while Eni works)
+  // What Eni must know before doing a task: today's date, the brand, and —
+  // when the task is a step — the WHOLE goal it belongs to. This is what stops
+  // "book flights" inside a Paris goal from turning into a NYC brief.
+  function delegContext(kind, id, gid){
+    var lines = [
+      'Today: ' + new Date().toDateString() + '.',
+      'VENIA Collection — luxury womenswear label, two founders, based in Los Angeles.'
+    ];
+    var g = (kind === 'step') ? items().find(function(x){ return x.id === gid && isGroup(x); }) : null;
+    if (g){
+      lines.push('This task is ONE STEP of the goal: "' + (g.t || '') + '"' + (g.due ? ' — target date ' + g.due : '') + '.');
+      var sibs = (g.children || []).filter(function(c){ return c.id !== id; })
+        .map(function(c){ return '  - ' + (c.done ? '[done] ' : '') + (c.t || ''); });
+      if (sibs.length) lines.push('The goal\'s other steps, for context:\n' + sibs.join('\n'));
+      lines.push('Everything you produce must serve THIS goal — its event, city and dates. Never substitute a different event or city.');
+    }
+    return lines.join('\n');
+  }
+  // ── Server-side runs ─────────────────────────────────────────────────────
+  // Queue a job row in Supabase + fire the Netlify background worker. The
+  // worker researches for up to 15 minutes and posts the result back to the
+  // row; delegPoll picks finished jobs up whenever the app is next awake — so
+  // the phone can be pocketed or the app closed entirely.
+  function delegSb(){ return window.__sbClient || null; }
+  async function delegQueueServer(kind, id, gid, q, sys, userMsg){
+    var c = delegSb(); if (!c) return false;
+    try {
+      var jobId = uid() + Math.random().toString(36).slice(2);
+      var secret = uid() + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+      var ins = await c.from('venia_agent_jobs').insert({ id: jobId, secret: secret, item_id: id, kind: kind, gid: gid || null, q: q, status: 'queued' });
+      if (ins && ins.error) return false;
+      var r = null;
+      try { r = await fetch('/.netlify/functions/agent-background', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: jobId, secret: secret, sys: sys, q: userMsg }) }); } catch(e){ r = null; }
+      if (!r || (r.status !== 202 && !r.ok)){
+        try { await c.from('venia_agent_jobs').delete().eq('id', jobId); } catch(e){}
+        return false;
+      }
+      return true;
+    } catch(e){ return false; }
+  }
+  var delegPollT = null;
+  async function delegPoll(){
+    var c = delegSb(); if (!c) return;
+    var res = null;
+    try { res = await c.from('venia_agent_jobs').select('*'); } catch(e){ return; }
+    if (!res || res.error) return;
+    var rows = res.data || [], changed = false, waiting = false;
+    for (var k = 0; k < rows.length; k++){
+      var j = rows[k];
+      if (j.status === 'queued'){
+        var age = Date.now() - new Date(j.created_at).getTime();
+        if (age < 16 * 60 * 1000){
+          waiting = true;
+          if (!delegRunning[j.item_id]){ delegRunning[j.item_id] = new Date(j.created_at).getTime() || Date.now(); changed = true; }
+        } else {
+          try { await c.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
+          delete delegRunning[j.item_id];
+          showToast('⚡ A server run timed out — tap ⚡ to retry', 'error');
+          changed = true;
+        }
+        continue;
+      }
+      if (j.status !== 'done' && j.status !== 'error') continue;
+      var t = delegTarget(j.kind, j.item_id, j.gid || '');
+      delete delegRunning[j.item_id];
+      if (j.status === 'done' && t){
+        t.work = { q: j.q, md: String(j.result || '').trim(), at: j.done_at || new Date().toISOString() };
+        save();
+        showToast('⚡ Done — tap 📄 on “' + (t.t || '').slice(0, 40) + '”', 'success');
+        delegNotify('⚡ Eni finished', (t.t || 'Your task') + ' — the brief is ready in Brainstorm');
+        logActivity('Eni delivered work — ' + (t.t || '').slice(0, 50));
+      } else if (j.status === 'error'){
+        showToast('⚡ Couldn\'t finish — ' + String(j.result || 'try again').slice(0, 90), 'error');
+      }
+      try { await c.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
+      changed = true;
+    }
+    if (changed) render();
+    clearTimeout(delegPollT);
+    if (waiting) delegPollT = setTimeout(delegPoll, 15000);
+  }
+  function delegWatch(){ clearTimeout(delegPollT); delegPollT = setTimeout(delegPoll, 12000); }
   // If iOS froze the app long enough that a run died outright, clear its
   // shimmer when the user comes back instead of spinning forever.
   function delegSweep(){
@@ -20606,7 +20712,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     });
     if (stale){ render(); showToast('⚡ A run stalled while the app was asleep — tap ⚡ to retry', 'error'); }
   }
-  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') delegSweep(); });
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible'){ delegSweep(); delegPoll(); } });
+  setTimeout(function(){ try { delegPoll(); } catch(e){} }, 4000);   // pick up work that finished while the app was closed
   // System notification for finished delegate work. Fires only when the app
   // isn't on screen — the in-app toast covers the visible case. iOS home-screen
   // PWAs can only notify through the service-worker registration.
@@ -20636,10 +20743,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
     ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
     var prefill = (t.work && t.work.q) || ('Research: ' + (t.t || '') + '\n\nDeliver a tight, actionable brief for VENIA (luxury womenswear, Los Angeles) — a shortlist with specifics (names, locations/links, realistic costs) and how to approach each.');
+    var ctxGoal = (kind === 'step') ? items().find(function(x){ return x.id === gid && isGroup(x); }) : null;
     ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
       + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">⚡ Have Eni do it</div>'
       + '<div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:4px;line-height:1.35">' + esc((t.t || '').slice(0, 90)) + '</div>'
-      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Eni does the work with live web search — usually a minute or two. Keep the app open; if you switch away, iPhone pauses it and Eni picks back up when you return.</div>'
+      + (ctxGoal ? '<div style="font-size:10.5px;color:var(--muted);margin-bottom:6px">◍ Eni gets the full goal context: <strong style="color:var(--ink)">' + esc((ctxGoal.t || '').slice(0, 60)) + '</strong></div>' : '')
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Eni works on a server with live web search — you can close the app or pocket your phone. The finished brief lands on this item and syncs back the next time you open Brainstorm.</div>'
       + '<textarea id="dump-delegate-q" rows="5" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px">' + esc(prefill) + '</textarea>'
       + '<div style="display:flex;gap:8px">'
       +   '<button onclick="dumpDelegateRun(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-gold" style="flex:1;min-height:46px;border-radius:11px">⚡ Start working</button>'
@@ -20655,18 +20764,28 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var o = document.getElementById('dump-delegate'); if (o) o.remove();
     delegRunning[id] = Date.now(); render();
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(_){}
-    showToast('⚡ Eni is on it — keep working, I\'ll ping you', 'info');
     var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
       + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
+      + 'Ground every fact in the CONTEXT section of the message: if it names an event, city or dates, that IS the event, city and dates — never substitute another. '
       + 'Use web search when live facts matter (venues, rates, contacts, dates); prefer specific, verifiable details and include links where you found them. '
-      + 'Format as tight markdown: a one-line answer up top, then sections with ## headers and - bullets. No preamble.';
+      + 'Format as tight markdown: a one-line answer up top, then sections with ## headers and - bullets. '
+      + 'When comparing options (flights, hotels, venues, showrooms, rates), lay the comparison out as a markdown table with | pipes | — e.g. | Option | Cost | Location/Dates | Why |. No preamble.';
+    var userMsg = 'CONTEXT:\n' + delegContext(kind, id, gid) + '\n\nTASK:\n' + q;
+    // Server-side first: the background worker keeps going with the app closed.
+    if (await delegQueueServer(kind, id, gid, q, sys, userMsg)){
+      showToast('⚡ Eni is on it server-side — you can close the app', 'info');
+      delegWatch();
+      return;
+    }
+    // Fallback (Supabase not signed in / offline): stream in-app — needs the app open.
+    showToast('⚡ Eni is on it — keep the app open', 'info');
     var out = null, err = null;
-    try { out = await callClaudeStream(sys, q, { tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }] }); }
+    try { out = await callClaudeStream(sys, userMsg, { tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 5 }] }); }
     catch(e1){
-      try { out = await callClaudeStream(sys, q, { tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] }); }
+      try { out = await callClaudeStream(sys, userMsg, { tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 }] }); }
       catch(e2){
-        try { out = await callClaudeStream(sys, q); }        // no tools, still streamed
-        catch(e3){ try { out = await callClaude(sys, q); } catch(e4){ err = e4; } }   // last resort: buffered
+        try { out = await callClaudeStream(sys, userMsg); }        // no tools, still streamed
+        catch(e3){ try { out = await callClaude(sys, userMsg); } catch(e4){ err = e4; } }   // last resort: buffered
       }
     }
     delete delegRunning[id];
