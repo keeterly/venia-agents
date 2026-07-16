@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '106';
+  const BUILD = '107';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11500,10 +11500,10 @@ const INTERNAL = new Set(['keeter','christine','keeter johnson','christine johns
 function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim()); }
 
 // ── CALL CLAUDE ──────────────────────────────────────────────────────
-async function callClaude(system, userMsg, history=[]) {
+async function callClaude(system, userMsg, history=[], model) {
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
-  const body = JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 4096, system, messages: msgs });
+  const body = JSON.stringify({ model: model || 'claude-sonnet-5', max_tokens: 4096, system, messages: msgs });
 
   // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
   // path that can't be shadowed by the site's "/" rewrite. We try the relative
@@ -18337,7 +18337,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   var uid = function(){ return 'n' + Date.now() + Math.random().toString(36).slice(2,6); };
   var isGroup = function(i){ return i && Array.isArray(i.children); };
   var items = function(){ if (!STATE.dump) STATE.dump = []; return STATE.dump; };
-  var openItems = function(){ return items().filter(function(i){ return !i.done; }); };
+  // Snoozed ("Later") items sleep until their wake date — invisible to the
+  // planner, maps and Goals list until then.
+  var isSnoozed = function(i){ return !!(i.snooze && !i.done && i.snooze > todayStr()); };
+  var openItems = function(){ return items().filter(function(i){ return !i.done && !isSnoozed(i); }); };
   var norm = function(s){ return String(s||'').trim().toLowerCase().replace(/\s+/g,' '); };
   // A signature of the open inbox — changes on any add / edit / delete / complete.
   // Used to tell when a Plan snapshot has drifted from the live inbox.
@@ -18514,18 +18517,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = ''; el.style.willChange = '';
     dnd = null;
     if (!moved) return;   // a tap on the grip that never moved — nothing to reorder
-    // Only quick tasks carry a grip; goals are sorted by urgency and stay put.
-    // Rebuild as open goals (existing order) + reordered tasks + done.
+    // Honor the DOM order of every draggable row (goals section renders before
+    // the tasks group, so the array stays goals-then-tasks); anything not in
+    // the DOM (done items, collapsed sections) keeps its place at the end.
     var ids = Array.prototype.slice.call(document.querySelectorAll('#dump-scroll .dump-row')).map(function(r){ return r.getAttribute('data-id'); });
     var byId = {}; items().forEach(function(it){ byId[it.id] = it; });
-    var reordered = ids.map(function(id){ return byId[id]; }).filter(Boolean);
-    var openGoals = items().filter(function(it){ return !it.done && isGroup(it); });
-    var doneItems = items().filter(function(it){ return it.done; });
-    STATE.dump = openGoals.concat(reordered).concat(doneItems);
+    var seen = {};
+    var reordered = ids.map(function(id){ seen[id] = true; return byId[id]; }).filter(Boolean);
+    var rest = items().filter(function(it){ return !seen[it.id]; });
+    STATE.dump = reordered.concat(rest);
     save(); render();
   }
   var dumpGrip = function(id){
-    return '<button class="dump-grip" onpointerdown="dumpDragStart(event,\'' + id + '\')" title="Drag to reorder" aria-label="Reorder" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:grab;padding:2px 3px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>';
+    return '<button class="dump-grip" onpointerdown="dumpDragStart(event,\'' + id + '\')" onclick="event.stopPropagation()" title="Drag to reorder" aria-label="Reorder" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:grab;padding:2px 3px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>';
   };
   window.dumpToggle = function(id){
     var it = items().find(function(i){ return i.id === id; }); if (!it) return;
@@ -18546,7 +18550,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     else if (!allDone && g.done){ g.done = false; g.doneAt = null; }
   }
   function findGroup(gid){ return items().find(function(i){ return i.id === gid && isGroup(i); }); }
-  window.dumpGroupCollapse = function(id){ var g = items().find(function(x){ return x.id === id; }); if (!g) return; g.collapsed = !(g.collapsed === undefined ? (g.children && g.children.length > 5) : g.collapsed); save(); render(); };
+  window.dumpGroupCollapse = function(id){ var g = items().find(function(x){ return x.id === id; }); if (!g) return; g.collapsed = !(g.collapsed === undefined ? true : g.collapsed); save(); render(); };
   window.dumpToggleChild = function(gid, cid){
     var g = findGroup(gid); if (!g) return;
     var c = g.children.find(function(x){ return x.id === cid; }); if (!c) return;
@@ -20123,6 +20127,21 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpPlanView = function(v){ PLANVIEW = v; render(); };
   var doneOpen = false;     // Goals home: completed section expanded?
   window.dumpDoneToggle = function(){ doneOpen = !doneOpen; render(); };
+  var laterOpen = false;    // Goals home: snoozed section expanded?
+  window.dumpLaterToggle = function(){ laterOpen = !laterOpen; render(); };
+  // Push a task back: '1d' | '1w' | a YYYY-MM-DD from the date picker.
+  window.dumpSnooze = function(id, when){
+    var it = items().find(function(x){ return x.id === id; }); if (!it) return;
+    var d;
+    if (when === '1d'){ d = new Date(); d.setDate(d.getDate() + 1); }
+    else if (when === '1w'){ d = new Date(); d.setDate(d.getDate() + 7); }
+    else { d = new Date(String(when) + 'T00:00:00'); }
+    if (isNaN(d.getTime())) return;
+    it.snooze = d.getFullYear() + '-' + pad2s(d.getMonth() + 1) + '-' + pad2s(d.getDate());
+    rowMenuId = null; save(); render();
+    showToast('↦ Until ' + d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }), 'success');
+  };
+  window.dumpWake = function(id){ var it = items().find(function(x){ return x.id === id; }); if (!it) return; it.snooze = ''; save(); render(); };
   // Restraint: rows are quiet at rest (checkbox + text). Secondary actions live
   // behind one ⋯ per row, revealed on demand.
   var rowMenuId = null;
@@ -20323,7 +20342,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + (p.endHour > 23 ? pad2s(p.endHour % 24) + ':00 next morning' : pad2s(p.endHour) + ':00') + '.'
         + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
         + '\nDays (with existing commitments):\n' + dayLines + '\n\nTasks to place across the week (most urgent of ' + all.length + ' open):\n' + taskLines;
-      var outp = await callClaude(sys, user);
+      var outp = await callClaude(sys, user, [], isRetry ? 'claude-haiku-4-5' : undefined);   // retry on the fast model
       if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
       var data = extractJSON(outp);
       var daysOut = ((data && Array.isArray(data.days)) ? data.days : []).map(function(d){
@@ -20432,7 +20451,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var user = nowCtx + '\nWorking window: ' + windowTxt + '.'
         + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
         + '\nFixed commitments today:\n' + fixedLines + '\n\nTasks to place (most urgent of ' + all.length + ' open):\n' + taskLines;
-      var outp = await callClaude(sys, user);
+      var outp = await callClaude(sys, user, [], isRetry ? 'claude-haiku-4-5' : undefined);   // retry on the fast model
       if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
       var data = extractJSON(outp);
       var blocks = (data && Array.isArray(data.blocks)) ? data.blocks.map(function(b){
@@ -20571,7 +20590,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +     '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtHHMM(b.start)) + '–' + esc(fmtHHMM(b.end)) + '</span>'
       +   '</div>'
       +   (b.why ? '<div style="font-size:11px;color:var(--muted);line-height:1.4;margin-top:2px">' + esc(b.why) + '</div>' : '')
-      +   (calCb ? '<button onclick="' + calCb + '" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>' : '')
+      +   '<div style="display:flex;gap:14px">'
+      +     (calCb ? '<button onclick="' + calCb + '" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>' : '')
+      +     (b.taskId && !done ? '<button onclick="dumpSnooze(\'' + b.taskId + '\',\'1d\')" title="Push to tomorrow" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">↦ tomorrow</button>' : '')
+      +   '</div>'
       + '</div></div>';
   }
   function schedWeekHTML(w){
@@ -20619,7 +20641,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         +     '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtHHMM(b.start)) + '–' + esc(fmtHHMM(b.end)) + '</span>'
         +   '</div>'
         +   (b.why ? '<div style="font-size:11.5px;color:var(--muted);line-height:1.4;margin-top:2px">' + esc(b.why) + '</div>' : '')
-        +   '<button onclick="schedBlockCal(' + i + ')" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>'
+        +   '<div style="display:flex;gap:14px">'
+      +     '<button onclick="schedBlockCal(' + i + ')" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>'
+      +     (b.taskId && !done ? '<button onclick="dumpSnooze(\'' + b.taskId + '\',\'1d\')" title="Push to tomorrow" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">↦ tomorrow</button>' : '')
+      +   '</div>'
         + '</div></div>';
     });
     if (s.unscheduled && s.unscheduled.length){
@@ -20781,7 +20806,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var ov = sheet(); if (!ov) return;
     injectCSS();
     var all = items();
-    var open = all.filter(function(i){ return !i.done; });
+    var open = all.filter(function(i){ return !i.done && !isSnoozed(i); });
+    var later = all.filter(isSnoozed);
     var done = all.filter(function(i){ return i.done; });
     var plan = STATE.dumpPlan;
     var micOK = window.dumpMicSupported && window.dumpMicSupported();
@@ -20804,9 +20830,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var kids = i.children || [];
       var doneN = kids.filter(function(c){ return c.done; }).length;
       var mono = '\'DM Mono\',monospace';
-      // Big plans (>5 steps) start collapsed so the inbox stays compact; once
-      // you toggle, your choice sticks.
-      var collapsed = (i.collapsed === undefined) ? (kids.length > 5) : !!i.collapsed;
+      // Goals start collapsed — a calm overview; expand the one you're working.
+      var collapsed = (i.collapsed === undefined) ? true : !!i.collapsed;
       var head;
       if (editingId === i.id){
         head = '<div style="display:flex;gap:8px;align-items:flex-start;padding:11px 12px">'
@@ -20817,12 +20842,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // Quiet header: handle · title · count · chevron. The complete-all circle
         // appears only on a DONE goal (to revive it) — completing every step
         // already finishes a goal on its own, and delete lives in the footer.
-        head = '<div style="display:flex;gap:9px;align-items:center;padding:11px 12px;background:var(--bg-off)">'
+        // The whole header is the disclosure — tap anywhere to expand/collapse
+        // (Apple-style big target). Rename lives in the expanded footer.
+        head = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="display:flex;gap:9px;align-items:center;padding:12px;background:var(--bg-off);cursor:pointer">'
           + (i.done ? '' : dumpGrip(i.id))
-          + (i.done ? '<button onclick="dumpToggle(\'' + i.id + '\')" title="Reopen this goal" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid var(--green);border-radius:50%;background:var(--green);color:#fff;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✓</button>' : '')
-          + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to rename" style="flex:1;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:.01em;line-height:1.35;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'cursor:text;word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
+          + (i.done ? '<button onclick="event.stopPropagation();dumpToggle(\'' + i.id + '\')" title="Reopen this goal" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid var(--green);border-radius:50%;background:var(--green);color:#fff;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✓</button>' : '')
+          + '<div style="flex:1;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:.01em;line-height:1.35;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
           + '<span style="flex-shrink:0;font-family:' + mono + ';font-size:10.5px;color:var(--muted)">' + doneN + '/' + kids.length + '</span>'
-          + '<button onclick="dumpGroupCollapse(\'' + i.id + '\')" title="' + (collapsed ? 'Expand steps' : 'Collapse') + '" style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:6px 8px;flex-shrink:0;line-height:1">' + (collapsed ? '▸' : '▾') + '</button>'
+          + '<span style="color:var(--muted);font-size:13px;flex-shrink:0;padding:0 2px">' + (collapsed ? '▸' : '▾') + '</span>'
           + '</div>';
       }
       var childHTML = kids.map(function(c){
@@ -20844,6 +20871,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }).join('');
       var footer = '<div style="display:flex;align-items:center;gap:14px;padding:9px 12px 10px 42px;border-top:1px solid var(--border);background:var(--bg-off)">'
         + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
+        + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">✎ Rename</button>'
         + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
         + '<span style="flex:1"></span>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete goal" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:2px 0;line-height:1">🗑</button>'
@@ -20859,8 +20887,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + (nextStep && collapsed ? '<div style="font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.4"><span style="color:var(--ink);font-weight:600">Next → </span>' + esc(nextStep) + '</div>' : '')
         + '</div>';
       // Collapsed: header + meta + a slim expand hint (no full step list).
-      var collapsedPeek = '<div style="padding:0 12px 9px 42px;font-size:11px;color:var(--muted)">' + prog.done + '/' + kids.length + ' steps · tap ▸ to expand'
-        + (kids.length >= 2 ? ' · <span onclick="dumpTab(\'map\')" style="color:var(--ink);font-weight:600;cursor:pointer">◍ mind map</span>' : '') + '</div>';
+      var collapsedPeek = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="padding:0 12px 10px 42px;font-size:11px;color:var(--muted);cursor:pointer">' + prog.done + '/' + kids.length + ' steps'
+        + (kids.length >= 2 ? ' · <span onclick="event.stopPropagation();dumpTab(\'map\')" style="color:var(--ink);font-weight:600;cursor:pointer">◍ mind map</span>' : '') + '</div>';
       return '<div style="border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
         + head + meta + (collapsed ? collapsedPeek : (childHTML + footer)) + '</div>';
     };
@@ -20896,8 +20924,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '<button onclick="dumpRowMenu(\'' + i.id + '\')" aria-label="More" style="background:none;border:none;color:var(--border-mid);font-size:16px;cursor:pointer;padding:0 6px;flex-shrink:0;line-height:1;letter-spacing:1px">⋯</button>'
         + '</div></div>';
       if (rowMenuId === i.id){
-        h += '<div style="display:flex;gap:8px;padding:0 2px 12px 38px;border-bottom:1px solid var(--border)">'
-          + (i.done ? '' : '<button onclick="dumpRowMenu(null);dumpExpandItem(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">✦ Make it a goal</button>')
+        h += '<div style="display:flex;gap:7px;flex-wrap:wrap;padding:0 2px 12px 38px;border-bottom:1px solid var(--border)">'
+          + (i.done ? '' : '<button onclick="dumpRowMenu(null);dumpExpandItem(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--gold)">✦ Goal</button>')
+          + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1d\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Tomorrow</button>')
+          + (i.done ? '' : '<button onclick="dumpSnooze(\'' + i.id + '\',\'1w\')" class="btn btn-ghost btn-sm" style="border-radius:8px">↦ Next week</button>')
+          + (i.done ? '' : '<label class="btn btn-ghost btn-sm" style="border-radius:8px;position:relative">📅<input type="date" onchange="dumpSnooze(\'' + i.id + '\',this.value)" style="position:absolute;inset:0;opacity:0;width:100%"></label>')
           + '<button onclick="dumpRowMenu(null);dumpDelete(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;color:var(--muted)">✕ Delete</button>'
           + '</div>';
       }
@@ -20969,14 +21000,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } else {
       // GOALS HOME — goals (sorted by urgency) up top, quick tasks below, and
       // Done folded in as a collapsed section (was its own tab).
-      var goals = open.filter(isGroup).slice().sort(goalSort);
+      var goals = open.filter(isGroup);   // manual order — drag to arrange; due chips carry urgency
       var tasks = open.filter(function(i){ return !isGroup(i); });
       if (!goals.length && !tasks.length && !done.length){
         body = emptyState('🧠', 'Your mind, cleared', 'Type or speak anything above — an idea, a task, a goal.<br>A heading + steps becomes a goal; one line + <span style="color:var(--gold)">✦</span> lets Eni build one.');
       } else {
         var lbl = function(t, right){ return '<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">' + t + '</div>' + (right || '') + '</div>'; };
         var h = lbl('Goals', '<button onclick="dumpNewGoal()" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:700;cursor:pointer">＋ New goal</button>');
-        h += goals.length ? goals.map(row).join('')
+        h += goals.length ? '<div>' + goals.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + '</div>'
           : '<div style="font-size:11.5px;color:var(--muted);padding:4px 0 10px;line-height:1.5">No goals yet — tap <strong style="color:var(--gold)">✦</strong> on a task to have Eni shape one, or ＋ New goal.</div>';
         h += lbl('Quick tasks');
         h += tasks.length ? '<div class="dump-group">' + tasks.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + '</div>'
@@ -20985,6 +21016,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpTab(\'map\')">▦ Canvas</button>'
           + '<button class="btn btn-gold" style="flex:1;min-height:46px;border-radius:10px" onclick="dumpPlanView(\'today\');dumpTab(\'plan\')">◔ Plan my day</button>'
           + '</div>';
+        if (later.length){
+          h += '<button onclick="dumpLaterToggle()" style="display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;border-top:1px solid var(--border);margin-top:18px;padding:13px 2px 4px;cursor:pointer;text-align:left">'
+            + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">↦ Later · ' + later.length + '</span>'
+            + '<span style="flex:1"></span><span style="font-size:12px;color:var(--muted)">' + (laterOpen ? '▾' : '▸') + '</span></button>';
+          if (laterOpen){
+            h += '<div class="dump-group">' + later.map(function(i){
+              return '<div style="display:flex;gap:10px;align-items:center;padding:12px 2px;border-bottom:1px solid var(--border)">'
+                + '<span style="flex:1;min-width:0;font-size:13px;color:var(--muted);line-height:1.45;word-break:break-word">' + esc(i.t) + '</span>'
+                + '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtDue(i.snooze)) + '</span>'
+                + '<button onclick="dumpWake(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;flex-shrink:0">↺ Now</button>'
+                + '</div>';
+            }).join('') + '</div>';
+          }
+        }
         if (done.length){
           h += '<button onclick="dumpDoneToggle()" style="display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;border-top:1px solid var(--border);margin-top:18px;padding:13px 2px 4px;cursor:pointer;text-align:left">'
             + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">✓ Done · ' + done.length + '</span>'
