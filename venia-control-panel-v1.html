@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '103';
+  const BUILD = '104';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17926,6 +17926,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
 
   // ── PHOTO UPLOAD → Supabase Storage (public URL slots into the image model) ──
+  // Phone photos are 3–8MB; a moodboard doesn't need that. Best-effort resize
+  // to ≤1400px JPEG before upload — if the browser can't decode the file
+  // (e.g. HEIC on older Safari), the original goes up unchanged.
+  async function compressImage(file){
+    try {
+      var bmp = await createImageBitmap(file);
+      var MAX = 1400, scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+      var w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+      var cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+      var blob = await new Promise(function(res){ cv.toBlob(res, 'image/jpeg', 0.82); });
+      return (blob && blob.size < file.size) ? blob : file;
+    } catch(e){ return file; }
+  }
   function pickAndUpload(keyBase, onDone){
     var c = sb();
     if (!c){ if (typeof showToast==='function') showToast('Connect to Supabase to upload photos','warning'); return; }
@@ -17935,16 +17949,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var file = inp.files && inp.files[0]; if (!file) return;
       if (typeof showToast==='function') showToast('Uploading photo…','info');
       try {
-        var ext = ((file.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')) || 'jpg';
+        var body = await compressImage(file);
+        var compressed = body !== file;
+        var ext = compressed ? 'jpg' : (((file.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')) || 'jpg');
         var path = keyBase + '-' + Date.now() + '.' + ext;
-        var up = await c.storage.from(BUCKET).upload(path, file, { upsert:true, contentType:file.type||'image/jpeg' });
+        var up = await c.storage.from(BUCKET).upload(path, body, { upsert:true, contentType: compressed ? 'image/jpeg' : (file.type||'image/jpeg') });
         if (up.error) throw up.error;
         var url = c.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
-        onDone(url);
+        onDone(url, path);
       } catch(e){ if (typeof showToast==='function') showToast('Upload failed: ' + (e.message||e),'error'); }
     };
     inp.click();
   }
+  // Generic image slots for other modules (the Board uses these).
+  window.veniaUploadImage = function(keyBase, onDone){ pickAndUpload(keyBase, onDone); };
+  window.veniaDeleteImage = function(path){
+    var c = sb(); if (!c || !path) return;
+    try { c.storage.from(BUCKET).remove([path]); } catch(e){}   // best-effort cleanup
+  };
   window.tpUploadPhoto = function(styleId, view){
     pickAndUpload('sketch-'+styleId+'-'+view, function(url){
       var s = STATE.styles.find(function(x){ return x.id===styleId; }); if (!s) return;
@@ -20105,6 +20127,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function fmtHour(hh){ return (hh % 12 || 12) + (hh < 12 ? 'am' : 'pm'); }
   function schedPrefs(){ if (!STATE.schedPrefs) STATE.schedPrefs = { startHour: 9, endHour: 18, calSource: 'none' }; return STATE.schedPrefs; }
   window.schedSetHour = function(which, v){ var p = schedPrefs(); v = parseInt(v, 10); if (which === 'start') p.startHour = v; else p.endHour = v; save(); render(); };
+  window.schedSetContext = function(v){ schedPrefs().context = String(v || '').trim(); save(); };   // saved on blur; no re-render (would steal focus)
   // Every open, actionable item — loose thoughts and every incomplete plan step.
   function schedTasks(){
     var out = [];
@@ -20285,9 +20308,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
         + 'Plan the founder\'s WEEK: distribute the tasks across the 7 listed days as time-blocked work. '
         + 'Be deadline-aware — a task whose goal is due lands comfortably BEFORE that due date; front-load anything urgent. Balance the load (don\'t cram one day, don\'t leave the week lopsided), sequence by energy (deep creative work protected, admin/emails batched, vendor calls earlier), and leave breathing room. '
-        + 'Schedule only within working hours ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00 each day, never overlap the listed busy events, and on today only after the current time. Not everything has to fit; put overflow in "unscheduled". Keep every string SHORT: "why" and "reason" are 6 words max.\n\n'
+        + 'Schedule only within working hours ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00 each day, never overlap the listed busy events, and on today only after the current time. '
+        + 'If "how the day works" rules are given, they are HARD constraints: classify each task as light (emails, calls, planning, quick admin) or deep (design software, focused creative) and place it only where the rules allow — weekends count if the rules say so. '
+        + 'Not everything has to fit; put overflow in "unscheduled". Keep every string SHORT: "why" and "reason" are 6 words max.\n\n'
         + 'Respond with ONLY a JSON object (no prose, no code fence): { "days":[{"date":"YYYY-MM-DD","blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if it maps to a task, else empty","kind":"work|meeting|break|admin","why":"≤6 words"}]}], "unscheduled":[{"t":"task text","reason":"≤6 words"}], "note":"one short line on the week\'s strategy" }';
-      var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.\nDays (with existing commitments):\n' + dayLines + '\n\nTasks to place across the week (most urgent of ' + all.length + ' open):\n' + taskLines;
+      var dayRules = (p.context || '').trim();
+      var user = nowCtx + '\nWorking window each day: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.'
+        + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
+        + '\nDays (with existing commitments):\n' + dayLines + '\n\nTasks to place across the week (most urgent of ' + all.length + ' open):\n' + taskLines;
       var outp = await callClaude(sys, user);
       if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
       var data = extractJSON(outp);
@@ -20385,11 +20413,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + 'Build a realistic TIME-BLOCKED schedule for the founder\'s working day from the task list. '
         + 'Estimate a sensible duration for each task; sequence by urgency/deadline and energy — deep creative work (design, linesheets) in a protected focused block, quick admin/emails batched together, factory/vendor calls earlier in the day — and leave short breaks. '
         + 'Only schedule within the working window ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00, and NEVER overlap the fixed commitments — plan around them. Since this is today, schedule only AFTER the current time. '
+        + 'If "how the day works" rules are given, they are HARD constraints: classify each task as light (emails, calls, planning, quick admin — fits day-job gaps) or deep (design software, focused creative — needs real free time) and place it only where the rules allow. '
         + 'Not everything has to fit; put the overflow in "unscheduled". Keep every string SHORT: "why" and "reason" are 6 words max.\n\n'
         + 'Respond with ONLY a JSON object (no prose, no code fence): '
         + '{ "blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if the block maps to a listed task, else empty string","kind":"work|meeting|break|admin","why":"≤6 words"}], '
         + '"unscheduled":[{"taskId":"id","t":"task text","reason":"≤6 words"}], "note":"one short line on the day\'s strategy" }';
-      var user = nowCtx + '\nWorking window: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.\nFixed commitments today:\n' + fixedLines + '\n\nTasks to place (most urgent of ' + all.length + ' open):\n' + taskLines;
+      var dayRules = (p.context || '').trim();
+      var user = nowCtx + '\nWorking window: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.'
+        + (dayRules ? '\nHow the founder\'s day works (HARD rules — schedule around this):\n' + dayRules : '')
+        + '\nFixed commitments today:\n' + fixedLines + '\n\nTasks to place (most urgent of ' + all.length + ' open):\n' + taskLines;
       var outp = await callClaude(sys, user);
       if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
       var data = extractJSON(outp);
@@ -20452,6 +20484,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var summary = '<button onclick="schedSetupToggle()" style="display:flex;align-items:center;gap:8px;width:100%;background:var(--bg-off);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:10px;cursor:pointer;text-align:left">'
       + '<span style="font-size:12px;color:var(--ink);font-weight:600">' + fmtHour(p.startHour) + '–' + fmtHour(p.endHour) + '</span>'
       + '<span style="font-size:11px;color:' + (p.calSource === 'google' ? 'var(--green)' : 'var(--muted)') + '">📅 ' + (p.calSource === 'google' ? 'Connected' : 'Not connected') + '</span>'
+      + ((p.context || '').trim() ? '<span style="font-size:11px;color:var(--muted)">· day rules ✓</span>' : '')
       + (view === 'today' && fixedN ? '<span style="font-size:11px;color:var(--muted)">· ' + fixedN + ' fixed</span>' : '')
       + '<span style="flex:1"></span><span style="font-size:12px;color:var(--muted)">' + (schedSetupOpen ? '▾' : '⚙') + '</span>'
       + '</button>';
@@ -20465,7 +20498,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + (p.calSource === 'google'
           ? '<button onclick="schedDisconnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px;color:var(--green)">📅 Connected ✓</button>'
           : '<button onclick="schedConnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px">📅 Connect calendar</button>')
-      + '</div>';
+      + '</div>'
+      // One sentence beats a settings system: describe how the day really works
+      // and Eni treats it as hard rules — light tasks in day-job gaps, deep work
+      // only where it's actually possible.
+      + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:12px 0 6px">How your day works</div>'
+      + '<textarea id="sched-context" rows="3" placeholder="e.g. Full-time at adidas 9–5:30 — only light tasks then (emails, planning, quick approvals) in short gaps. Deep work needing my Mac (InDesign, design) fits evenings after 6:30." onblur="schedSetContext(this.value)" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45">' + esc(p.context || '') + '</textarea>';
     if (view === 'today'){
       var list = (STATE.schedFixed || []);
       h += '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:12px 0 6px">Fixed commitments</div>';
@@ -20613,6 +20651,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function bdApplyTransform(){ var b = boardState(), c = document.getElementById('bd-canvas'); if (c) c.style.transform = 'translate(' + (b.panX || 0) + 'px,' + (b.panY || 0) + 'px) scale(' + (b.zoom || 1) + ')'; }
   function bdCardHTML(c){
     var del = '<button onpointerdown="event.stopPropagation()" onclick="event.stopPropagation();bdDelete(\'' + c.id + '\')" style="position:absolute;top:-9px;right:-9px;width:20px;height:20px;border-radius:50%;background:var(--ink);color:#fff;border:2px solid var(--bg-off);font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1">✕</button>';
+    // Image-first: a photo is a full-bleed card — the UI is just the matte.
+    if (c.kind === 'img'){
+      return '<div class="bd-card" data-id="' + c.id + '" onpointerdown="bdCardDown(event,\'' + c.id + '\')" style="position:absolute;left:' + Math.round(c.x) + 'px;top:' + Math.round(c.y) + 'px;width:' + (c.w || 220) + 'px;box-sizing:border-box;background:var(--bg);border-radius:12px;overflow:visible;box-shadow:0 3px 16px rgba(0,0,0,.14);cursor:grab;touch-action:none">'
+        + del
+        + '<img src="' + esc(c.url) + '" alt="" draggable="false" style="width:100%;display:block;border-radius:12px;pointer-events:none;min-height:40px;background:var(--bg-off)">'
+        + '</div>';
+    }
     if (c.kind === 'goal'){
       var g = items().find(function(x){ return x.id === c.goalId; });
       var prog = g ? goalProgress(g) : { pct: 0, done: 0, total: 0 };
@@ -20649,6 +20694,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.innerHTML =
       '<div style="padding:calc(12px + var(--sat,0px)) 14px 12px;background:linear-gradient(135deg,#171717,#0a0a0a);color:#fff;display:flex;align-items:center;gap:8px;flex-shrink:0">'
       + '<div style="flex:1;min-width:0"><div style="font-size:15px;font-weight:700">▦ Board</div><div style="font-size:10.5px;color:#9a9a9a;margin-top:1px">Drop notes & goals · drag to arrange · pinch to zoom</div></div>'
+      + '<button onclick="bdAddImage()" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">＋ Image</button>'
       + '<button onclick="bdAddNote()" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">＋ Note</button>'
       + '<button onclick="bdAddGoalPick()" style="background:rgba(255,255,255,.14);border:none;color:#fff;height:32px;padding:0 12px;border-radius:16px;font-size:12px;font-weight:600;cursor:pointer">＋ Goal</button>'
       + '<button onclick="boardClose()" aria-label="Close" style="background:rgba(255,255,255,.14);border:none;color:#fff;width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer">✕</button>'
@@ -20678,7 +20724,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.bdCardTap = function(e, id){ if (bd.suppressClick){ bd.suppressClick = false; return; } e.stopPropagation(); var c = boardState().cards.find(function(x){ return x.id === id; }); if (!c || c.kind !== 'note') return; bd.editing = id; bdRender(); setTimeout(function(){ var el = document.getElementById('bd-edit'); if (el){ el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch(_){} } }, 40); };
   window.bdEditSave = function(id){ var el = document.getElementById('bd-edit'), c = boardState().cards.find(function(x){ return x.id === id; }); if (c && el){ c.text = el.value; if (!c.text.trim()) boardState().cards = boardState().cards.filter(function(x){ return x.id !== id; }); } bd.editing = null; save(); bdRender(); };
   window.bdColor = function(id, col){ var c = boardState().cards.find(function(x){ return x.id === id; }); if (!c) return; var el = document.getElementById('bd-edit'); if (el && bd.editing === id) c.text = el.value; c.color = col; save(); bdRender(); setTimeout(function(){ var e = document.getElementById('bd-edit'); if (e) e.focus(); }, 30); };
-  window.bdDelete = function(id){ boardState().cards = boardState().cards.filter(function(x){ return x.id !== id; }); if (bd.editing === id) bd.editing = null; save(); bdRender(); };
+  // Add a photo — picked from the camera roll, compressed and uploaded to the
+  // shared venia-photos bucket, then dropped at the view centre as a full-bleed
+  // image card.
+  window.bdAddImage = function(){
+    if (!window.veniaUploadImage){ showToast('Connect Supabase in Settings to add images','warning'); return; }
+    window.veniaUploadImage('board', function(url, path){
+      var b = boardState(), ctr = bdViewCenter();
+      b.cards.push({ id: uid(), kind: 'img', url: url, path: path || '', x: ctr.x - 110, y: ctr.y - 80, w: 220 });
+      save(); bdRender();
+      showToast('Image added','success');
+    });
+  };
+  window.bdDelete = function(id){
+    var c = boardState().cards.find(function(x){ return x.id === id; });
+    if (c && c.kind === 'img' && c.path && window.veniaDeleteImage) window.veniaDeleteImage(c.path);   // free the storage too
+    boardState().cards = boardState().cards.filter(function(x){ return x.id !== id; });
+    if (bd.editing === id) bd.editing = null; save(); bdRender();
+  };
   var bdMoveH, bdUpH, bdWheelH, bdDownH;
   function bdBind(){ var vp = document.getElementById('bd-viewport'); if (!vp) return; bdDownH = bdVpDown; bdMoveH = bdMove; bdUpH = bdUp; bdWheelH = function(e){ e.preventDefault(); var r = vp.getBoundingClientRect(); bdZoomAt(e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - r.left, e.clientY - r.top); }; vp.addEventListener('pointerdown', bdDownH); vp.addEventListener('wheel', bdWheelH, { passive: false }); document.addEventListener('pointermove', bdMoveH); document.addEventListener('pointerup', bdUpH); document.addEventListener('pointercancel', bdUpH); }
   function bdUnbind(){ var vp = document.getElementById('bd-viewport'); if (vp && bdDownH) vp.removeEventListener('pointerdown', bdDownH); if (vp && bdWheelH) vp.removeEventListener('wheel', bdWheelH); document.removeEventListener('pointermove', bdMoveH); document.removeEventListener('pointerup', bdUpH); document.removeEventListener('pointercancel', bdUpH); }
