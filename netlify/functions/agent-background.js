@@ -56,7 +56,7 @@ export default async (req) => {
   const attempt = async (tools) => {
     const body = {
       model: 'claude-sonnet-5',
-      max_tokens: 4096,
+      max_tokens: 8192,
       system: String(sys || ''),
       messages: [{ role: 'user', content: String(q) }],
       ...(tools ? { tools } : {}),

@@ -65,7 +65,7 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: { message: 'Bad JSON' } }),
       { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-  if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 4096) payload.max_tokens = 4096;
+  if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 8192) payload.max_tokens = 8192;
   if (!ALLOWED_MODELS.has(payload.model)) payload.model = DEFAULT_MODEL;   // pin model server-side
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
