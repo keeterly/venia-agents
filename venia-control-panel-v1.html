@@ -1539,8 +1539,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '89';
-  const BUILD_DATE = '2026.07.15';
+  const BUILD = '90';
+  const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -4905,6 +4905,9 @@ let STATE = {
   dumpMasterPos: null,       // master-map node positions {nodeId:{x,y}}
   dumpMasterCollapsed: null, // master-map collapsed categories {cid:true}
   dumpMasterTitle: null,     // master-map hub label (default "VENIA")
+  dumpSchedule: null,        // last time-blocked schedule {date, blocks, unscheduled, note, at}
+  schedPrefs: null,          // planner prefs {startHour, endHour, calSource}
+  schedFixed: null,          // manual fixed commitments [{id,title,start,end}]
   prPulls: [],
   prPitches: [],
   prCoverage: [],
@@ -5065,7 +5068,8 @@ const SYNC_KEYS = [
   // Brand
   'brTone', 'brPrefs',
   // Brain dump + shared
-  'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle', 'activityLog', 'samples',
+  'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
+  'dumpSchedule', 'schedPrefs', 'schedFixed', 'activityLog', 'samples',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -20014,6 +20018,192 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.head.appendChild(s);
   }
 
+  // ── AI DAY PLANNER — a better, context-aware Motion ───────────────────────
+  // Eni blocks every open task + plan step into a realistic time-blocked day,
+  // around your working hours, fixed commitments and (optionally) your real
+  // Google Calendar. "Re-plan" rebuilds it as things change.
+  var PLANVIEW = 'schedule';   // plan tab sub-view: 'schedule' | 'priorities'
+  window.dumpPlanView = function(v){ PLANVIEW = v; render(); };
+  function pad2s(n){ return (n < 10 ? '0' : '') + n; }
+  function todayStr(){ var d = new Date(); return d.getFullYear() + '-' + pad2s(d.getMonth() + 1) + '-' + pad2s(d.getDate()); }
+  function hhmmFromISO(iso){ var d = new Date(iso); return pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()); }
+  function minOfHHMM(s){ var p = String(s || '0:0').split(':'); return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0); }
+  function fmtHHMM(s){ var m = minOfHHMM(s), h = Math.floor(m / 60), mm = m % 60, ap = h < 12 ? 'am' : 'pm', h12 = h % 12 || 12; return h12 + (mm ? ':' + pad2s(mm) : '') + ap; }
+  function fmtHour(hh){ return (hh % 12 || 12) + (hh < 12 ? 'am' : 'pm'); }
+  function schedPrefs(){ if (!STATE.schedPrefs) STATE.schedPrefs = { startHour: 9, endHour: 18, calSource: 'none' }; return STATE.schedPrefs; }
+  window.schedSetHour = function(which, v){ var p = schedPrefs(); v = parseInt(v, 10); if (which === 'start') p.startHour = v; else p.endHour = v; save(); render(); };
+  // Every open, actionable item — loose thoughts and every incomplete plan step.
+  function schedTasks(){
+    var out = [];
+    openItems().forEach(function(it){
+      if (isGroup(it)){ it.children.forEach(function(c){ if (!c.done) out.push({ id: c.id, gid: it.id, t: c.t, plan: it.t }); }); }
+      else out.push({ id: it.id, gid: null, t: it.t, plan: null });
+    });
+    return out;
+  }
+  // ── Google Calendar (real events to plan around) ─────────────────────────
+  var gcalToken = null;
+  window.schedConnectCal = function(){
+    var clientId = localStorage.getItem('venia-google-client-id') || '';
+    if (!clientId){ showToast('Add your Google Client ID in Settings → API Keys first','warning'); return; }
+    if (typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2){ showToast('Google library not loaded — check your connection','error'); return; }
+    try {
+      var tc = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/calendar.readonly',
+        callback: function(resp){
+          if (resp && resp.access_token){ gcalToken = resp.access_token; schedPrefs().calSource = 'google'; save(); showToast('Calendar connected','success'); render(); }
+          else showToast('Calendar access was declined','warning');
+        }
+      });
+      tc.requestAccessToken();
+    } catch(e){ showToast('Could not start Google Calendar — ' + String(e.message || e), 'error'); }
+  };
+  window.schedDisconnectCal = function(){ gcalToken = null; schedPrefs().calSource = 'none'; save(); render(); };
+  async function gCalEventsForDay(dateStr){
+    if (!gcalToken) return [];
+    var tMin = new Date(dateStr + 'T00:00:00'), tMax = new Date(dateStr + 'T23:59:59');
+    var url = 'https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=50'
+      + '&timeMin=' + encodeURIComponent(tMin.toISOString()) + '&timeMax=' + encodeURIComponent(tMax.toISOString());
+    var r = await fetch(url, { headers: { Authorization: 'Bearer ' + gcalToken } });
+    if (r.status === 401){ gcalToken = null; schedPrefs().calSource = 'none'; throw new Error('Calendar session expired — reconnect it'); }
+    if (!r.ok) throw new Error('Calendar read failed (' + r.status + ')');
+    var d = await r.json();
+    return (d.items || []).filter(function(e){ return e.start && e.start.dateTime && e.status !== 'cancelled'; })
+      .map(function(e){ return { title: e.summary || '(busy)', start: hhmmFromISO(e.start.dateTime), end: hhmmFromISO(e.end.dateTime), kind: 'meeting' }; });
+  }
+  // ── Fixed commitments (manual) ───────────────────────────────────────────
+  window.schedAddFixed = function(){
+    var title = (document.getElementById('sched-fx-title') || {}).value || '';
+    var s = (document.getElementById('sched-fx-start') || {}).value || '';
+    var e = (document.getElementById('sched-fx-end') || {}).value || '';
+    title = String(title).trim();
+    if (!title || !s || !e){ showToast('Add a title, start and end time','info'); return; }
+    if (!STATE.schedFixed) STATE.schedFixed = [];
+    STATE.schedFixed.push({ id: uid(), title: title, start: s, end: e });
+    save(); render();
+  };
+  window.schedDelFixed = function(id){ STATE.schedFixed = (STATE.schedFixed || []).filter(function(x){ return x.id !== id; }); save(); render(); };
+  // ── Build / re-plan the day ──────────────────────────────────────────────
+  window.schedBuild = async function(){
+    var tasks = schedTasks();
+    if (!tasks.length){ showToast('Nothing to schedule — capture some tasks first','info'); return; }
+    var btns = document.querySelectorAll('.sched-build-btn'); btns.forEach(function(b){ b.disabled = true; b.textContent = '◐ Planning your day…'; });
+    try {
+      var p = schedPrefs(), date = todayStr();
+      var fixed = (STATE.schedFixed || []).map(function(f){ return { title: f.title, start: f.start, end: f.end, kind: 'meeting' }; });
+      var calNote = '';
+      if (p.calSource === 'google'){
+        try { var ev = await gCalEventsForDay(date); fixed = fixed.concat(ev); calNote = ev.length ? (' · ' + ev.length + ' calendar events') : ''; }
+        catch(e){ showToast(String(e.message || e), 'warning'); }
+      }
+      var now = new Date();
+      var nowCtx = 'Right now it is ' + now.toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '.';
+      var taskLines = tasks.map(function(t, n){ return (n + 1) + '. [' + t.id + '] ' + t.t + (t.plan ? ('  — plan: ' + t.plan) : ''); }).join('\n');
+      var fixedLines = fixed.length ? fixed.map(function(f){ return '- ' + f.start + '–' + f.end + '  ' + f.title; }).join('\n') : '(none)';
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'Build a realistic TIME-BLOCKED schedule for the founder\'s working day from the task list. '
+        + 'Estimate a sensible duration for each task; sequence by urgency/deadline and energy — deep creative work (design, linesheets) in a protected focused block, quick admin/emails batched together, factory/vendor calls earlier in the day — and leave short breaks. '
+        + 'Only schedule within the working window ' + pad2s(p.startHour) + ':00–' + pad2s(p.endHour) + ':00, and NEVER overlap the fixed commitments — plan around them. Since this is today, schedule only AFTER the current time. '
+        + 'Not everything has to fit; put the overflow in "unscheduled" with a one-line reason.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): '
+        + '{ "blocks":[{"start":"HH:MM","end":"HH:MM","title":"short label","taskId":"the [id] if the block maps to a listed task, else empty string","kind":"work|meeting|break|admin","why":"a few words on why now"}], '
+        + '"unscheduled":[{"taskId":"id","t":"task text","reason":"why it didn\'t fit"}], "note":"one short line on the day\'s strategy" }';
+      var user = nowCtx + '\nWorking window: ' + pad2s(p.startHour) + ':00 to ' + pad2s(p.endHour) + ':00.\nFixed commitments today:\n' + fixedLines + '\n\nTasks to place:\n' + taskLines + '\n\n' + plmContext();
+      var outp = await callClaude(sys, user);
+      if (!outp || !outp.trim()) throw new Error('Empty response from Eni');
+      var data = extractJSON(outp);
+      var blocks = (data && Array.isArray(data.blocks)) ? data.blocks.map(function(b){
+        return (b && typeof b === 'object') ? { start: String(b.start || ''), end: String(b.end || ''), title: String(b.title || ''), taskId: String(b.taskId || '').replace(/[\[\]]/g, ''), kind: ['work','meeting','break','admin'].indexOf(b.kind) >= 0 ? b.kind : 'work', why: String(b.why || '') } : null;
+      }).filter(function(b){ return b && b.start && b.title; }) : [];
+      blocks.sort(function(a, b){ return minOfHHMM(a.start) - minOfHHMM(b.start); });
+      var unsch = (data && Array.isArray(data.unscheduled)) ? data.unscheduled.map(function(u){ return { taskId: String(u.taskId || ''), t: String(u.t || ''), reason: String(u.reason || '') }; }).filter(function(u){ return u.t; }) : [];
+      STATE.dumpSchedule = { date: date, blocks: blocks, unscheduled: unsch, note: (data && typeof data.note === 'string') ? data.note : '', at: new Date().toISOString(), calSource: p.calSource };
+      save(); render();
+      showToast('◔ Day planned' + calNote, 'success');
+      logActivity('Day scheduled — ' + blocks.length + ' blocks');
+    } catch(e){
+      showToast('Could not build the schedule — ' + String(e.message || e), 'error');
+      render();
+    }
+  };
+  // Check a scheduled task off (loose item or plan step) — re-plan to reflow.
+  window.schedToggle = function(taskId){
+    var it = items().find(function(x){ return x.id === taskId; });
+    if (it && !isGroup(it)){ it.done = !it.done; it.doneAt = it.done ? new Date().toISOString() : null; save(); render(); return; }
+    var host = items().find(function(g){ return isGroup(g) && g.children.some(function(c){ return c.id === taskId; }); });
+    if (host){ var c = host.children.find(function(x){ return x.id === taskId; }); c.done = !c.done; syncGroupDone(host); save(); render(); }
+  };
+  window.schedBlockCal = function(i){
+    var s = STATE.dumpSchedule; if (!s || !s.blocks[i]) return;
+    var b = s.blocks[i];
+    var hm = b.start.length === 4 ? '0' + b.start : b.start;
+    var start = new Date(s.date + 'T' + hm + ':00');
+    var dur = Math.max(15, minOfHHMM(b.end) - minOfHHMM(b.start));
+    if (downloadICS(b.title, start, dur, b.why || 'VENIA schedule')) showToast('Added to calendar','success');
+    else openGcal(b.title, start, dur, b.why || '');
+  };
+  function schedHourOpts(sel){ var o = ''; for (var hh = 5; hh <= 23; hh++){ o += '<option value="' + hh + '"' + (hh === sel ? ' selected' : '') + '>' + fmtHour(hh) + '</option>'; } return o; }
+  function schedInputStyle(){ return 'font-size:14px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-off);color:var(--ink);outline:none'; }
+  function scheduleHTML(){
+    var p = schedPrefs(), s = STATE.dumpSchedule, taskCount = schedTasks().length;
+    var h = '';
+    h += '<div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+      + '<span style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Hours</span>'
+      + '<select onchange="schedSetHour(\'start\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.startHour) + '</select>'
+      + '<span style="color:var(--muted);font-size:12px">to</span>'
+      + '<select onchange="schedSetHour(\'end\',this.value)" style="' + schedInputStyle() + '">' + schedHourOpts(p.endHour) + '</select>'
+      + (p.calSource === 'google'
+          ? '<button onclick="schedDisconnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px;color:var(--green)">📅 Calendar ✓</button>'
+          : '<button onclick="schedConnectCal()" class="btn btn-ghost btn-sm" style="margin-left:auto;border-radius:8px">📅 Connect calendar</button>')
+      + '</div>';
+    // Fixed commitments
+    var list = (STATE.schedFixed || []);
+    h += '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
+      + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Fixed commitments' + (p.calSource === 'google' ? ' + your calendar' : '') + '</div>';
+    list.forEach(function(f){
+      h += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:var(--ink)"><span style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--muted);flex-shrink:0">' + esc(fmtHHMM(f.start)) + '–' + esc(fmtHHMM(f.end)) + '</span><span style="flex:1;min-width:0">' + esc(f.title) + '</span><button onclick="schedDelFixed(\'' + f.id + '\')" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:pointer;flex-shrink:0">✕</button></div>';
+    });
+    h += '<div style="display:flex;gap:6px;margin-top:8px">'
+      + '<input id="sched-fx-title" placeholder="e.g. Buyer call" style="flex:1;min-width:0;font-size:16px;' + schedInputStyle() + '">'
+      + '<input id="sched-fx-start" type="time" aria-label="Start" style="' + schedInputStyle() + '">'
+      + '<input id="sched-fx-end" type="time" aria-label="End" style="' + schedInputStyle() + '">'
+      + '<button onclick="schedAddFixed()" class="btn btn-ghost btn-sm" style="border-radius:8px;flex-shrink:0">Add</button>'
+      + '</div></div>';
+    h += '<button onclick="schedBuild()" class="btn btn-gold sched-build-btn" style="width:100%;min-height:48px;border-radius:11px;margin:2px 0 14px">◔ ' + (s ? 'Re-plan my day' : 'Plan my day') + ' · ' + taskCount + ' task' + (taskCount === 1 ? '' : 's') + '</button>';
+    if (s && s.blocks && s.blocks.length) h += schedAgendaHTML(s);
+    else h += '<div style="text-align:center;padding:34px 22px;color:var(--muted)"><div style="font-size:38px;margin-bottom:10px">◔</div><div style="font-size:15px;color:var(--ink);font-weight:600;margin-bottom:6px">Plan your day</div><div style="font-size:12.5px;line-height:1.6">Eni blocks your open tasks into a realistic day around<br>your meetings and hours. Tap “Plan my day”.</div></div>';
+    return h;
+  }
+  function schedAgendaHTML(s){
+    var openIds = {}; schedTasks().forEach(function(t){ openIds[t.id] = true; });
+    var h = '';
+    if (s.note) h += '<div style="font-size:13px;color:var(--ink);font-weight:600;line-height:1.4;margin:2px 0 12px;padding-left:11px;border-left:2px solid var(--ink)">' + esc(s.note) + '</div>';
+    s.blocks.forEach(function(b, i){
+      var kc = b.kind === 'meeting' ? '#9E3B34' : b.kind === 'break' ? '#3F6A50' : b.kind === 'admin' ? '#A67B2C' : 'var(--ink)';
+      var done = b.taskId && !openIds[b.taskId];   // its task is checked off / gone
+      h += '<div style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)">'
+        + '<div style="width:50px;flex-shrink:0;text-align:right;font-family:\'DM Mono\',monospace;font-size:11px;color:var(--muted);padding-top:3px">' + esc(fmtHHMM(b.start)) + '</div>'
+        + '<div style="width:3px;flex-shrink:0;background:' + kc + ';border-radius:2px"></div>'
+        + '<div style="flex:1;min-width:0">'
+        +   '<div style="display:flex;align-items:center;gap:8px">'
+        +     (b.taskId ? ('<button onclick="schedToggle(\'' + b.taskId + '\')" title="Mark done" style="flex-shrink:0;width:17px;height:17px;border:1.5px solid ' + (done ? 'var(--ink)' : 'var(--border-mid)') + ';border-radius:50%;background:' + (done ? 'var(--ink)' : 'transparent') + ';color:#fff;font-size:9px;cursor:pointer;display:flex;align-items:center;justify-content:center">' + (done ? '✓' : '') + '</button>') : '<span style="width:8px;height:8px;border-radius:50%;background:' + kc + ';flex-shrink:0"></span>')
+        +     '<span style="flex:1;min-width:0;font-size:13.5px;font-weight:600;color:' + (done ? 'var(--muted)' : 'var(--ink)') + ';' + (done ? 'text-decoration:line-through;' : '') + 'word-break:break-word">' + esc(b.title) + '</span>'
+        +     '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtHHMM(b.start)) + '–' + esc(fmtHHMM(b.end)) + '</span>'
+        +   '</div>'
+        +   (b.why ? '<div style="font-size:11.5px;color:var(--muted);line-height:1.4;margin-top:2px">' + esc(b.why) + '</div>' : '')
+        +   '<button onclick="schedBlockCal(' + i + ')" style="background:none;border:none;color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;padding:5px 0 0">＋ calendar</button>'
+        + '</div></div>';
+    });
+    if (s.unscheduled && s.unscheduled.length){
+      h += '<div style="margin-top:14px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">Didn\'t fit today</div>';
+      s.unscheduled.forEach(function(u){ h += '<div style="display:flex;gap:8px;padding:5px 0;font-size:12px;color:var(--muted);line-height:1.45"><span style="color:var(--border-mid)">·</span><span style="flex:1">' + esc(u.t) + (u.reason ? (' <span style="opacity:.7">— ' + esc(u.reason) + '</span>') : '') + '</span></div>'; });
+      h += '</div>';
+    }
+    h += '<div style="font-size:10px;color:var(--muted);text-align:center;margin-top:14px">Planned ' + new Date(s.at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</div>';
+    return h;
+  }
+
   function render(){
     var ov = sheet(); if (!ov) return;
     injectCSS();
@@ -20131,11 +20321,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '</div>';
     var body;
     if (TAB === 'plan'){
-      body = plan
-        ? metaLine('Organized', plan.count, plan.at) + (planStale ? staleBanner : '') + planHTML(plan)
-          + '<button class="btn btn-ghost dump-org-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
-        : emptyState('✦', 'Let Eni make sense of it', 'Add a few thoughts to your inbox, then I\'ll sort them into<br>today\'s priorities, meetings, emails and quick wins.')
-          + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>';
+      var planSeg = function(v, label){ var on = PLANVIEW === v; return '<button onclick="dumpPlanView(\'' + v + '\')" style="flex:1;min-height:38px;background:' + (on ? 'var(--ink)' : 'var(--bg-off)') + ';color:' + (on ? '#fff' : 'var(--muted)') + ';border:1px solid ' + (on ? 'var(--ink)' : 'var(--border)') + ';border-radius:9px;font-size:12px;font-weight:600;cursor:pointer">' + label + '</button>'; };
+      var seg = '<div style="display:flex;gap:6px;margin-bottom:14px">' + planSeg('schedule', '◔ Schedule') + planSeg('priorities', '✦ Priorities') + '</div>';
+      if (PLANVIEW === 'schedule'){
+        body = seg + scheduleHTML();
+      } else {
+        body = seg + (plan
+          ? metaLine('Organized', plan.count, plan.at) + (planStale ? staleBanner : '') + planHTML(plan)
+            + '<button class="btn btn-ghost dump-org-btn" style="margin-top:20px;width:100%;min-height:44px;border-radius:10px" onclick="dumpOrganize()">✦ Re-organize with Eni</button>'
+          : emptyState('✦', 'Let Eni make sense of it', 'Add a few thoughts to your inbox, then I\'ll sort them into<br>today\'s priorities, meetings, emails and quick wins.')
+            + '<button class="btn btn-gold dump-org-btn" style="width:100%;min-height:46px;border-radius:10px" onclick="dumpOrganize()">✦ Organize with Eni</button>');
+      }
     } else if (TAB === 'map'){
       var map = STATE.dumpMap;
       // Dumped plans show as their own branches even before Eni clusters the
