@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '108';
+  const BUILD = '109';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18439,6 +18439,78 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.dumpKey = function(e){
     if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpAdd(); }
   };
+  // ✦ on the composer: instead of adding another item, Eni reads the note
+  // against everything you already have and ADJUSTS — updates a goal's steps or
+  // date, completes or snoozes things, and only creates when nothing matches.
+  window.dumpSmartAdd = async function(){
+    var t = document.getElementById('dump-input');
+    var v = (t && t.value || '').trim();
+    if (!v){ showToast('Write what changed first — then ✦','info'); return; }
+    var btn = document.getElementById('dump-smart-btn');
+    if (btn){ btn.disabled = true; btn.textContent = '◐'; }
+    try {
+      var inv = [];
+      openItems().forEach(function(it){
+        if (isGroup(it)){
+          inv.push('GOAL [' + it.id + '] ' + (it.t || '').slice(0, 90) + (it.due ? ' (due ' + it.due + ')' : ''));
+          (it.children || []).forEach(function(c){ inv.push('  step [' + c.id + '] ' + (c.done ? '[x] ' : '[ ] ') + (c.t || '').slice(0, 80)); });
+        } else {
+          inv.push('TASK [' + it.id + '] ' + (it.t || '').slice(0, 90));
+        }
+      });
+      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+        + 'The founder wrote a note — new information, an email they received, a decision, a status update. Read it against their CURRENT goals and tasks and return the ADJUSTMENTS it implies. '
+        + 'Prefer updating what exists over creating new items: add/edit/remove/complete steps on the matching goal, set a due date, complete or snooze tasks. Create a new goal or task ONLY if nothing existing matches. Keep step wording short and concrete.\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "actions": [ '
+        + '{"type":"update_goal","goalId":"id","title":"new title or empty","due":"YYYY-MM-DD or empty","addSteps":["..."],"editSteps":[{"id":"step id","t":"new text"}],"completeSteps":["step id"],"removeSteps":["step id"]}, '
+        + '{"type":"complete_task","id":"task id"}, {"type":"snooze_task","id":"task id","until":"YYYY-MM-DD"}, '
+        + '{"type":"new_task","t":"..."}, {"type":"new_goal","title":"...","due":"YYYY-MM-DD or empty","steps":["..."]} '
+        + '], "summary": "one short line describing what you changed" }';
+      var user = 'Current goals & tasks:\n' + (inv.join('\n') || '(none)') + '\n\nThe founder\'s note:\n' + v;
+      var out = await callClaude(sys, user);
+      var data = extractJSON(out || '');
+      var acts = (data && Array.isArray(data.actions)) ? data.actions : null;
+      if (!acts || !acts.length) throw new Error('no_actions');
+      var applied = 0;
+      acts.forEach(function(a){
+        if (!a || typeof a !== 'object') return;
+        if (a.type === 'update_goal'){
+          var g = items().find(function(x){ return x.id === a.goalId && isGroup(x); }); if (!g) return;
+          if (a.title && String(a.title).trim()) g.t = String(a.title).trim();
+          if (a.due && /^\d{4}-\d{2}-\d{2}$/.test(String(a.due))) g.due = String(a.due);
+          (Array.isArray(a.editSteps) ? a.editSteps : []).forEach(function(es){ var c = g.children.find(function(x){ return x.id === (es && es.id); }); if (c && es.t) c.t = String(es.t); });
+          (Array.isArray(a.completeSteps) ? a.completeSteps : []).forEach(function(id){ var c = g.children.find(function(x){ return x.id === id; }); if (c) c.done = true; });
+          (Array.isArray(a.removeSteps) ? a.removeSteps : []).forEach(function(id){ g.children = g.children.filter(function(x){ return x.id !== id; }); });
+          (Array.isArray(a.addSteps) ? a.addSteps : []).forEach(function(st){ if (st) g.children.push({ id: uid(), t: String(st), done: false }); });
+          syncGroupDone(g); applied++;
+        } else if (a.type === 'complete_task'){
+          var it = items().find(function(x){ return x.id === a.id && !isGroup(x); }); if (it){ it.done = true; it.doneAt = new Date().toISOString(); applied++; }
+        } else if (a.type === 'snooze_task'){
+          var it2 = items().find(function(x){ return x.id === a.id && !isGroup(x) ; });
+          if (it2 && a.until && /^\d{4}-\d{2}-\d{2}$/.test(String(a.until))){ it2.snooze = String(a.until); applied++; }
+        } else if (a.type === 'new_task'){
+          if (a.t) { items().unshift({ id: uid(), t: String(a.t), d: new Date().toISOString(), done: false }); applied++; }
+        } else if (a.type === 'new_goal'){
+          if (a.title){
+            var ng = { id: uid(), t: String(a.title), d: new Date().toISOString(), done: false, children: (Array.isArray(a.steps) ? a.steps : []).filter(Boolean).map(function(st){ return { id: uid(), t: String(st), done: false }; }) };
+            if (a.due && /^\d{4}-\d{2}-\d{2}$/.test(String(a.due))) ng.due = String(a.due);
+            items().unshift(ng); applied++;
+          }
+        }
+      });
+      if (!applied) throw new Error('no_actions');
+      save();
+      var t2 = document.getElementById('dump-input'); if (t2){ t2.value = ''; t2.style.height = '46px'; }
+      render();
+      showToast('✦ ' + ((data.summary && String(data.summary).slice(0, 90)) || ('Adjusted ' + applied + ' thing' + (applied === 1 ? '' : 's'))), 'success');
+      logActivity('Eni adjusted goals from a note');
+    } catch(e){
+      // Never lose the thought: if Eni couldn't route it, capture it normally.
+      if (String(e && e.message) === 'no_actions'){ window.dumpAdd(); showToast('Captured as new — Eni saw nothing to adjust', 'info'); }
+      else showToast('Could not adjust — ' + String(e && e.message || e), 'error');
+      render();
+    }
+  };
   // Slim composer that grows with what you type and reveals its tip only while
   // focused — so it's a single line at rest instead of a tall block.
   window.dumpGrow = function(el){ if (!el) return; el.style.height = 'auto'; el.style.height = Math.max(46, Math.min(el.scrollHeight, 240)) + 'px'; };
@@ -19889,12 +19961,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center';
     ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
     ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
-      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">Add info &amp; reshape</div>'
+      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">Tell Eni what changed</div>'
       + '<div style="font-size:14px;font-weight:700;color:var(--ink);margin-bottom:4px">' + esc(g.t || 'Plan') + '</div>'
-      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Dump anything new — a constraint, a decision, extra context. Eni reworks the whole map around it.</div>'
-      + '<textarea id="dump-info-input" rows="4" placeholder="e.g. We only have 6 weeks and a $15k budget — cut anything non-essential and front-load the lender outreach" onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){dumpReprocessMap(\'' + gid + '\')}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px"></textarea>'
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Talk to this goal — paste an email, a decision, a date change. Eni reworks the plan around it.</div>'
+      + '<textarea id="dump-info-input" rows="4" placeholder="e.g. Just got an email — the Marais showroom fell through, but LABBYE offered theirs for Oct 2–4. Adjust the plan and add a thank-you reply." onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){dumpReprocessMap(\'' + gid + '\')}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px"></textarea>'
       + '<div style="display:flex;gap:8px">'
-      +   '<button onclick="dumpReprocessMap(\'' + gid + '\')" class="btn btn-gold dump-reshape-btn" style="flex:1;min-height:46px;border-radius:11px">✦ Reshape map</button>'
+      +   '<button onclick="dumpReprocessMap(\'' + gid + '\')" class="btn btn-gold dump-reshape-btn" style="flex:1;min-height:46px;border-radius:11px">✦ Update goal</button>'
       +   '<button onclick="var o=document.getElementById(\'dump-info-modal\');if(o)o.remove()" class="btn btn-ghost" style="min-height:46px;border-radius:11px">Cancel</button>'
       + '</div></div>';
     document.body.appendChild(ov);
@@ -19914,9 +19986,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var extras = (g.web && g.web.extra || []).map(function(e){ return '- ' + e.t; }).join('\n');
       var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
         + 'Below is an existing plan with its mind-map structure, plus NEW information the founder just added. '
-        + 'Reprocess the ENTIRE plan to reflect the latest thinking: add, remove, merge, rename or reorder steps and branches as needed, and honor the new info (constraints, decisions, scope changes). Keep what still applies. '
-        + 'Use 4–10 steps and 2–4 branches. Preserve the wording of steps you keep so their progress carries over.\n\n'
-        + 'Respond with ONLY a JSON object (no prose, no code fence): { "title": "short plan title", "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
+        + 'Reprocess the ENTIRE plan to reflect the latest thinking: add, remove, merge, rename or reorder steps and branches as needed, and honor the new info (an email, a decision, a constraint, a date change). Keep what still applies. '
+        + 'Use 4–10 steps and 2–4 branches. Preserve the wording of steps you keep so their progress carries over. If the info implies a target date, return it as "due".\n\n'
+        + 'Respond with ONLY a JSON object (no prose, no code fence): { "title": "short plan title", "due": "YYYY-MM-DD or empty", "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
       var user = 'Current plan title: ' + g.t + '\nCurrent steps:\n' + (curSteps || '(none)') + '\nCurrent branches:\n' + (curBr || '(none)') + (extras ? '\nExtra idea notes on the map:\n' + extras : '') + '\n\nNEW INFO:\n' + info + '\n\n' + plmContext();
       var out = await callClaude(sys, user);
       if (!out || !out.trim()) throw new Error('Empty response from Eni');
@@ -19937,6 +20009,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var leftover = kids.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
       if (leftover.length) branches.push({ label: 'Steps', ids: leftover });
       if (data.title && String(data.title).trim()) g.t = String(data.title).trim();
+      if (data.due && /^\d{4}-\d{2}-\d{2}$/.test(String(data.due))) g.due = String(data.due);
       g.children = kids;
       g.web = branches.length ? { branches: branches, at: new Date().toISOString() } : undefined;   // fresh structure — drop stale positions/extras
       syncGroupDone(g);
@@ -20872,6 +20945,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var footer = '<div style="display:flex;align-items:center;gap:14px;padding:9px 12px 10px 42px;border-top:1px solid var(--border);background:var(--bg-off)">'
         + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
         + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">✎ Rename</button>'
+        + '<button onclick="dumpInfoModal(\'' + i.id + '\')" style="background:none;border:none;color:var(--gold);font-size:11.5px;font-weight:700;cursor:pointer;padding:2px 0;letter-spacing:.02em">✦ Update</button>'
         + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
         + '<span style="flex:1"></span>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete goal" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:2px 0;line-height:1">🗑</button>'
@@ -21047,9 +21121,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         +   '<div style="display:flex;gap:8px;align-items:flex-end">'
         +     '<textarea id="dump-input" rows="1" placeholder="＋ What\'s on your mind?" oninput="dumpGrow(this)" onfocus="dumpComposer(true)" onblur="dumpComposer(false)" onkeydown="dumpKey(event)" style="flex:1;min-width:0;box-sizing:border-box;height:46px;max-height:150px;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;overflow-y:auto"></textarea>'
         +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" aria-label="Speak" title="Speak" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:17px;padding:0;display:flex;align-items:center;justify-content:center">🎤</button>' : '')
+        +     '<button id="dump-smart-btn" class="btn btn-ghost" onclick="dumpSmartAdd()" aria-label="Adjust with Eni" title="Adjust goals & tasks from this note" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:16px;padding:0;display:flex;align-items:center;justify-content:center;color:var(--gold)">✦</button>'
         +     '<button class="btn btn-gold" onclick="dumpAdd()" aria-label="Add" title="Add" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:22px;padding:0;display:flex;align-items:center;justify-content:center">＋</button>'
         +   '</div>'
-        +   '<div id="dump-hint" style="display:none;font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.45">Tip: a heading with <strong style="color:var(--ink);font-weight:600">- bullet</strong> lines becomes a checkable plan. Or dump a one-line idea and tap <strong style="color:var(--gold);font-weight:700">✦</strong> to have Eni build the plan + mind-map web. Enter adds · Shift+Enter for a new line.</div>'
+        +   '<div id="dump-hint" style="display:none;font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.45"><strong style="color:var(--ink);font-weight:600">＋</strong> adds it as written · <strong style="color:var(--gold);font-weight:700">✦</strong> has Eni ADJUST what you already have (paste an email, a decision — goals update instead of piling up). A heading with <strong style="color:var(--ink);font-weight:600">- bullets</strong> becomes a goal. Enter adds · Shift+Enter new line.</div>'
         + '</div>'
       : '';
 
