@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '109';
+  const BUILD = '110';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18431,12 +18431,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     added.slice().reverse().forEach(function(it){ items().unshift(it); });
     save();
     TAB = 'inbox';
+    composeOpen = false; composeDraft = '';
     render();
     var t2 = document.getElementById('dump-input'); if (t2){ t2.value = ''; t2.style.height = '46px'; t2.focus(); }
     var groups = added.filter(isGroup).length;
     if (groups) showToast(groups === 1 ? 'Plan captured — tap a step to check it off' : (groups + ' plans captured'), 'success');
   };
   window.dumpKey = function(e){
+    if (composeOpen){ if (e.key === 'Escape') window.dumpComposeClose(); return; }   // writing space: Enter = newline
     if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpAdd(); }
   };
   // ✦ on the composer: instead of adding another item, Eni reads the note
@@ -18501,14 +18503,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (!applied) throw new Error('no_actions');
       save();
       var t2 = document.getElementById('dump-input'); if (t2){ t2.value = ''; t2.style.height = '46px'; }
+      composeOpen = false; composeDraft = '';
       render();
       showToast('✦ ' + ((data.summary && String(data.summary).slice(0, 90)) || ('Adjusted ' + applied + ' thing' + (applied === 1 ? '' : 's'))), 'success');
       logActivity('Eni adjusted goals from a note');
     } catch(e){
-      // Never lose the thought: if Eni couldn't route it, capture it normally.
+      // Never lose the thought: if Eni couldn't route it, capture it normally;
+      // on a real error, keep the note as the compose draft.
       if (String(e && e.message) === 'no_actions'){ window.dumpAdd(); showToast('Captured as new — Eni saw nothing to adjust', 'info'); }
-      else showToast('Could not adjust — ' + String(e && e.message || e), 'error');
+      else { composeDraft = v; showToast('Could not adjust — ' + String(e && e.message || e), 'error'); }
       render();
+    } finally {
+      var b2 = document.getElementById('dump-smart-btn'); if (b2){ b2.disabled = false; b2.textContent = '✦ Adjust'; }
     }
   };
   // Slim composer that grows with what you type and reveals its tip only while
@@ -20219,6 +20225,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // behind one ⋯ per row, revealed on demand.
   var rowMenuId = null;
   window.dumpRowMenu = function(id){ rowMenuId = (rowMenuId === id) ? null : id; render(); };
+  // Compose mode: the capture pill expands into a full writing surface — the
+  // list disappears while you think. Cancel keeps the draft.
+  var composeOpen = false, composeDraft = '';
+  window.dumpComposeOpen = function(){
+    composeOpen = true; render();
+    var e = document.getElementById('dump-input');
+    if (e){ e.focus(); try { e.setSelectionRange(e.value.length, e.value.length); } catch(_){} }
+  };
+  window.dumpComposeClose = function(){
+    var e = document.getElementById('dump-input');
+    composeDraft = e ? e.value : composeDraft;
+    composeOpen = false; render();
+  };
   function pad2s(n){ return (n < 10 ? '0' : '') + n; }
   function todayStr(){ var d = new Date(); return d.getFullYear() + '-' + pad2s(d.getMonth() + 1) + '-' + pad2s(d.getDate()); }
   function hhmmFromISO(iso){ var d = new Date(iso); return pad2s(d.getHours()) + ':' + pad2s(d.getMinutes()); }
@@ -21118,16 +21137,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // get the full height of the sheet instead of being squeezed under it.
     var captureBlock = (TAB === 'inbox')
       ? '<div style="padding:4px 14px 12px;flex-shrink:0;background:var(--bg)">'
-        +   '<div style="display:flex;gap:8px;align-items:flex-end">'
-        +     '<textarea id="dump-input" rows="1" placeholder="＋ What\'s on your mind?" oninput="dumpGrow(this)" onfocus="dumpComposer(true)" onblur="dumpComposer(false)" onkeydown="dumpKey(event)" style="flex:1;min-width:0;box-sizing:border-box;height:46px;max-height:150px;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;overflow-y:auto"></textarea>'
-        +     (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" aria-label="Speak" title="Speak" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:17px;padding:0;display:flex;align-items:center;justify-content:center">🎤</button>' : '')
-        +     '<button id="dump-smart-btn" class="btn btn-ghost" onclick="dumpSmartAdd()" aria-label="Adjust with Eni" title="Adjust goals & tasks from this note" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:16px;padding:0;display:flex;align-items:center;justify-content:center;color:var(--gold)">✦</button>'
-        +     '<button class="btn btn-gold" onclick="dumpAdd()" aria-label="Add" title="Add" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:22px;padding:0;display:flex;align-items:center;justify-content:center">＋</button>'
+        +   '<div style="display:flex;gap:8px;align-items:center">'
+        +     '<div onclick="dumpComposeOpen()" style="flex:1;min-width:0;box-sizing:border-box;height:46px;display:flex;align-items:center;font-size:16px;padding:0 14px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--muted);cursor:text;white-space:nowrap;overflow:hidden">' + (composeDraft ? '<span style="color:var(--ink);text-overflow:ellipsis;overflow:hidden">' + esc(composeDraft.split('\n')[0]) + '</span>' : '＋ What\'s on your mind?') + '</div>'
+        +     (micOK ? '<button class="btn btn-ghost" onclick="dumpComposeOpen();dumpMic()" aria-label="Speak" title="Speak" style="width:46px;height:46px;flex-shrink:0;border-radius:12px;font-size:17px;padding:0;display:flex;align-items:center;justify-content:center">🎤</button>' : '')
         +   '</div>'
-        +   '<div id="dump-hint" style="display:none;font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.45"><strong style="color:var(--ink);font-weight:600">＋</strong> adds it as written · <strong style="color:var(--gold);font-weight:700">✦</strong> has Eni ADJUST what you already have (paste an email, a decision — goals update instead of piling up). A heading with <strong style="color:var(--ink);font-weight:600">- bullets</strong> becomes a goal. Enter adds · Shift+Enter new line.</div>'
         + '</div>'
       : '';
 
+    if (composeOpen){
+      // Full writing space — the list steps aside while you think. Actions sit
+      // at the TOP so the keyboard can never hide them.
+      ov.innerHTML =
+        '<div style="background:var(--bg);width:100%;max-width:720px;height:100dvh;max-height:100dvh;display:flex;flex-direction:column;overflow:hidden" onclick="event.stopPropagation()">'
+        + '<div style="padding:calc(10px + var(--sat,0px)) 14px 10px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0">'
+        +   '<button onclick="dumpComposeClose()" style="background:none;border:none;color:var(--muted);font-size:13px;font-weight:600;cursor:pointer;padding:6px 4px">Cancel</button>'
+        +   '<span style="flex:1"></span>'
+        +   (micOK ? '<button id="dump-mic" class="btn btn-ghost" onclick="dumpMic()" aria-label="Speak" title="Speak" style="width:40px;height:40px;flex-shrink:0;border-radius:11px;font-size:16px;padding:0;display:flex;align-items:center;justify-content:center">🎤</button>' : '')
+        +   '<button id="dump-smart-btn" class="btn btn-ghost" onclick="dumpSmartAdd()" title="Eni adjusts your goals & tasks from this note" style="height:40px;padding:0 13px;flex-shrink:0;border-radius:11px;font-size:12px;font-weight:700;color:var(--gold)">✦ Adjust</button>'
+        +   '<button class="btn btn-gold" onclick="dumpAdd()" title="Add as written" style="height:40px;padding:0 16px;flex-shrink:0;border-radius:11px;font-size:12px;font-weight:700">＋ Add</button>'
+        + '</div>'
+        + '<textarea id="dump-input" placeholder="Write freely — an idea, a plan, an email you got…&#10;&#10;A heading with - bullet lines becomes a goal.&#10;＋ adds it as written · ✦ has Eni adjust what you already have." onkeydown="dumpKey(event)" style="flex:1;width:100%;box-sizing:border-box;border:none;outline:none;resize:none;background:var(--bg);color:var(--ink);font-size:17px;line-height:1.55;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:16px 16px calc(16px + var(--sab,0px))">' + esc(composeDraft) + '</textarea>'
+        + '</div>';
+      if (listening) micBtn(true);
+      return;
+    }
     ov.innerHTML =
       '<div style="background:var(--bg);width:100%;max-width:720px;height:100dvh;max-height:100dvh;display:flex;flex-direction:column;border-radius:0;overflow:hidden" onclick="event.stopPropagation()">'
       // Apple-style large title: light header, controls whisper top-right, and
