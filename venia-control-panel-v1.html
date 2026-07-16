@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '112';
+  const BUILD = '113';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11580,41 +11580,60 @@ async function callClaudeStream(system, userMsg, opts) {
   });
   const PATHS = ['/api/claude', '/.netlify/functions/claude'];
   const CANON = 'https://creator.veniacollection.com';
-  let resp = null;
-  for (const path of PATHS) {
-    try { resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }); } catch (e) { resp = null; }
-    if (resp && (resp.status === 404 || resp.status === 405 || resp.redirected) && location.origin !== CANON) {
-      try { resp = await fetch(CANON + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }); } catch (e) {}
+  // Watchdog. iOS suspends a backgrounded PWA mid-stream; on resume the pending
+  // reader.read() can hang forever WITHOUT rejecting, which left rows shimmering
+  // for good. If the stream goes quiet (60s) or runs too long (4min), abort —
+  // the caller's catch gets control back and can retry fresh.
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const signal = ctrl ? ctrl.signal : undefined;
+  const IDLE = opts.idleMs || 60000, TOTAL = opts.totalMs || 240000;
+  let idleT = null, totalT = null, timedOut = false;
+  const bump = function(){ if (!ctrl) return; clearTimeout(idleT); idleT = setTimeout(function(){ timedOut = true; ctrl.abort(); }, IDLE); };
+  if (ctrl) totalT = setTimeout(function(){ timedOut = true; ctrl.abort(); }, TOTAL);
+  bump();
+  try {
+    let resp = null;
+    for (const path of PATHS) {
+      try { resp = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal }); } catch (e) { if (timedOut) throw e; resp = null; }
+      if (resp && (resp.status === 404 || resp.status === 405 || resp.redirected) && location.origin !== CANON) {
+        try { resp = await fetch(CANON + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal }); } catch (e) { if (timedOut) throw e; }
+      }
+      if (resp && resp.ok) break;
     }
-    if (resp && resp.ok) break;
-  }
-  if (!resp) throw new Error('No connection to Eni');
-  if (!resp.ok) {
-    let detail = 'HTTP ' + resp.status;
-    try { const e = await resp.json(); if (e && e.error && e.error.message) detail = e.error.message; } catch (_) {}
-    throw new Error(detail);
-  }
-  // Parse the SSE stream: collect every text delta; surface API error events.
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '', out = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop();
-    for (const line of lines) {
-      if (!line.startsWith('data:')) continue;
-      const raw = line.slice(5).trim();
-      if (!raw || raw === '[DONE]') continue;
-      let ev; try { ev = JSON.parse(raw); } catch (e) { continue; }
-      if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') out += ev.delta.text;
-      if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
+    if (!resp) throw new Error('No connection to Eni');
+    if (!resp.ok) {
+      let detail = 'HTTP ' + resp.status;
+      try { const e = await resp.json(); if (e && e.error && e.error.message) detail = e.error.message; } catch (_) {}
+      throw new Error(detail);
     }
+    // Parse the SSE stream: collect every text delta; surface API error events.
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', out = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bump();
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === '[DONE]') continue;
+        let ev; try { ev = JSON.parse(raw); } catch (e) { continue; }
+        if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') out += ev.delta.text;
+        if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
+      }
+    }
+    if (!out.trim()) throw new Error('Eni replied with no text');
+    return out;
+  } catch (e) {
+    if (timedOut) throw new Error('The connection went quiet (the app may have been asleep)');
+    throw e;
+  } finally {
+    clearTimeout(idleT); clearTimeout(totalT);
   }
-  if (!out.trim()) throw new Error('Eni replied with no text');
-  return out;
 }
 
 function plmContext() {
@@ -20577,7 +20596,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // "Research showrooms while I work" — pick a task/step, refine the ask, and
   // Eni produces a real work product (live web search when available) in the
   // background. Results persist on the item (synced) behind a 📄 chip.
-  var delegRunning = {};
+  var delegRunning = {};   // id → start ms (truthy while Eni works)
+  // If iOS froze the app long enough that a run died outright, clear its
+  // shimmer when the user comes back instead of spinning forever.
+  function delegSweep(){
+    var now = Date.now(), stale = false;
+    Object.keys(delegRunning).forEach(function(k){
+      if (now - delegRunning[k] > 8 * 60 * 1000){ delete delegRunning[k]; stale = true; }
+    });
+    if (stale){ render(); showToast('⚡ A run stalled while the app was asleep — tap ⚡ to retry', 'error'); }
+  }
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') delegSweep(); });
   // System notification for finished delegate work. Fires only when the app
   // isn't on screen — the in-app toast covers the visible case. iOS home-screen
   // PWAs can only notify through the service-worker registration.
@@ -20610,7 +20639,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
       + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">⚡ Have Eni do it</div>'
       + '<div style="font-size:13px;font-weight:700;color:var(--ink);margin-bottom:4px;line-height:1.35">' + esc((t.t || '').slice(0, 90)) + '</div>'
-      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Eni works on this in the background — with live web search — and the finished brief lands on the item. Keep working.</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Eni does the work with live web search — usually a minute or two. Keep the app open; if you switch away, iPhone pauses it and Eni picks back up when you return.</div>'
       + '<textarea id="dump-delegate-q" rows="5" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px">' + esc(prefill) + '</textarea>'
       + '<div style="display:flex;gap:8px">'
       +   '<button onclick="dumpDelegateRun(\'' + kind + '\',\'' + id + '\',\'' + (gid || '') + '\')" class="btn btn-gold" style="flex:1;min-height:46px;border-radius:11px">⚡ Start working</button>'
@@ -20624,7 +20653,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var q = (qEl && qEl.value.trim()) || '';
     if (!q){ showToast('Tell Eni what to produce','info'); return; }
     var o = document.getElementById('dump-delegate'); if (o) o.remove();
-    delegRunning[id] = true; render();
+    delegRunning[id] = Date.now(); render();
     try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(_){}
     showToast('⚡ Eni is on it — keep working, I\'ll ping you', 'info');
     var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
