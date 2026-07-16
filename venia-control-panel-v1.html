@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '115';
+  const BUILD = '116';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20645,6 +20645,31 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // row; delegPoll picks finished jobs up whenever the app is next awake — so
   // the phone can be pocketed or the app closed entirely.
   function delegSb(){ return window.__sbClient || null; }
+  // Web Push: subscribe this installed device and store the subscription so
+  // the server worker can ping the phone when a job finishes — even with the
+  // app closed. (iOS: requires the app on the home screen, iOS 16.4+.)
+  var VAPID_PUB = 'BMLgyZd8ioZ9GQqCdLjwMrefEkYn9psbZvIO9FD79jFlIVaZK2g_-PKJighOJKOIcUetOMxNQkg4pmRNJlQrKBY';
+  function pushKeyBytes(str){
+    var pad = '='.repeat((4 - str.length % 4) % 4);
+    var raw = atob((str + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    var a = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) a[i] = raw.charCodeAt(i);
+    return a;
+  }
+  async function delegPushEnsure(){
+    try {
+      if (!('serviceWorker' in navigator) || !window.Notification || Notification.permission !== 'granted') return;
+      var c = delegSb(); if (!c) return;
+      var reg = await navigator.serviceWorker.ready;
+      if (!reg || !reg.pushManager) return;
+      var sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: pushKeyBytes(VAPID_PUB) });
+      if (!sub) return;
+      var j = sub.toJSON ? sub.toJSON() : JSON.parse(JSON.stringify(sub));
+      if (!j || !j.endpoint) return;
+      await c.from('venia_push_subs').upsert({ id: j.endpoint, sub: j, label: (navigator.userAgent || '').slice(0, 80) });
+    } catch(e){}
+  }
   async function delegQueueServer(kind, id, gid, q, sys, userMsg){
     var c = delegSb(); if (!c) return false;
     try {
@@ -20652,8 +20677,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var secret = uid() + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
       var ins = await c.from('venia_agent_jobs').insert({ id: jobId, secret: secret, item_id: id, kind: kind, gid: gid || null, q: q, status: 'queued' });
       if (ins && ins.error) return false;
+      var tItem = delegTarget(kind, id, gid);
+      var subs = [];
+      try {
+        var sr = await c.from('venia_push_subs').select('sub');
+        subs = ((sr && sr.data) || []).slice(0, 12).map(function(x){ return x.sub; });
+      } catch(e){}
       var r = null;
-      try { r = await fetch('/.netlify/functions/agent-background', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: jobId, secret: secret, sys: sys, q: userMsg }) }); } catch(e){ r = null; }
+      try { r = await fetch('/.netlify/functions/agent-background', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: jobId, secret: secret, sys: sys, q: userMsg, title: ((tItem && tItem.t) || '').slice(0, 90), push: subs }) }); } catch(e){ r = null; }
       if (!r || (r.status !== 202 && !r.ok)){
         try { await c.from('venia_agent_jobs').delete().eq('id', jobId); } catch(e){}
         return false;
@@ -20763,7 +20794,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!q){ showToast('Tell Eni what to produce','info'); return; }
     var o = document.getElementById('dump-delegate'); if (o) o.remove();
     delegRunning[id] = Date.now(); render();
-    try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(_){}
+    try {
+      if (window.Notification && Notification.permission === 'default') Notification.requestPermission().then(function(res){ if (res === 'granted') delegPushEnsure(); });
+      else delegPushEnsure();
+    } catch(_){}
     var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury womenswear label in Los Angeles. '
       + 'Produce the FINISHED work product the founder asked for — a research brief, shortlist, comparison, or draft — not advice about how to do it. '
       + 'Ground every fact in the CONTEXT section of the message: if it names an event, city or dates, that IS the event, city and dates — never substitute another. '

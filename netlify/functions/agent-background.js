@@ -1,3 +1,5 @@
+import webpush from 'web-push';
+
 // Server-side delegate worker. The "-background" suffix makes Netlify return
 // 202 to the caller immediately and let this run for up to 15 minutes — so the
 // phone can queue a research job and go in a pocket (or the app can be closed)
@@ -45,6 +47,8 @@ export default async (req) => {
   try { p = JSON.parse(await req.text()); } catch (_) { return new Response('', { status: 400 }); }
   const { id, secret, sys, q } = p || {};
   if (!id || !secret || !q) return new Response('', { status: 400 });
+  const pushSubs = Array.isArray(p.push) ? p.push.slice(0, 12) : [];
+  const title = String(p.title || 'Your task').slice(0, 90);
 
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) { await complete(id, secret, 'error', 'ANTHROPIC_API_KEY is not set'); return new Response('', { status: 500 }); }
@@ -82,5 +86,18 @@ export default async (req) => {
     }
   }
   await complete(id, secret, out ? 'done' : 'error', out || String((err && err.message) || 'failed'));
+
+  // Ping the founders' phones (Web Push reaches an installed PWA even when
+  // it's closed and the phone is in a pocket). Failures are per-device and
+  // non-fatal — a dead subscription just 410s.
+  if (pushSubs.length && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PUBLIC_KEY) {
+    try {
+      webpush.setVapidDetails('mailto:keeter@veniacollection.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+      const note = JSON.stringify(out
+        ? { title: '⚡ Eni finished', body: title + ' — the brief is ready in Brainstorm', tag: 'venia-deleg' }
+        : { title: '⚡ Eni hit a snag', body: 'Couldn’t finish “' + title + '” — tap ⚡ to retry', tag: 'venia-deleg' });
+      await Promise.allSettled(pushSubs.map((s) => webpush.sendNotification(s, note)));
+    } catch (_) {}
+  }
   return new Response('', { status: 200 });
 };
