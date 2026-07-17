@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '136';
+  const BUILD = '137';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1852,9 +1852,13 @@ body{padding-top:44px;box-sizing:border-box;}
               <option value="cancelled">Cancelled</option>
             </select>
             <select id="cmd-orders-limit" class="fs" style="min-height:auto;padding:8px;font-size:11px" onchange="cmdLoadShopify()">
-              <option value="20">Last 20</option>
-              <option value="50">Last 50</option>
-              <option value="100">Last 100</option>
+              <option value="50">Last 50 orders</option>
+              <option value="20">Last 20 orders</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="ytd">Year to date</option>
+              <option value="12m">Last 12 months</option>
+              <option value="2y">Since Jan 1 last year</option>
             </select>
             <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdLoadShopify()">↻ Refresh</button>
             <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdExportOrdersCSV()">↓ CSV</button>
@@ -11851,9 +11855,29 @@ async function cmdLoadShopify() {
     return;
   }
   try {
-    const limit = document.getElementById('cmd-orders-limit')?.value || 20;
-    const data = await shopifyFetch(`/orders.json?limit=${limit}&status=any`);
-    const orders = data.orders || [];
+    const sel = document.getElementById('cmd-orders-limit')?.value || '50';
+    const RANGES = {
+      '30d': { min: new Date(Date.now() - 30 * 864e5), label: 'Last 30 days' },
+      '90d': { min: new Date(Date.now() - 90 * 864e5), label: 'Last 90 days' },
+      'ytd': { min: new Date(new Date().getFullYear(), 0, 1), label: 'YTD ' + new Date().getFullYear() },
+      '12m': { min: new Date(Date.now() - 365 * 864e5), label: 'Last 12 months' },
+      '2y':  { min: new Date(new Date().getFullYear() - 1, 0, 1), label: 'Since Jan 1 ' + (new Date().getFullYear() - 1) },
+    };
+    let orders, rangeLabel;
+    if (RANGES[sel]) {
+      const r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ordersAll', created_at_min: RANGES[sel].min.toISOString().slice(0, 10) }) });
+      if (!r.ok) throw new Error('Shopify range pull failed (' + r.status + ')');
+      const d = await r.json();
+      const cut = RANGES[sel].min.getTime();
+      orders = (d.orders || []).filter(o => new Date(o.created_at).getTime() >= cut);
+      rangeLabel = RANGES[sel].label + (d.truncated ? ' (most recent 2,500)' : '');
+    } else {
+      const data = await shopifyFetch(`/orders.json?limit=${sel}&status=any`);
+      orders = data.orders || [];
+      rangeLabel = 'Last ' + orders.length + ' orders';
+    }
+    window._shopifyOrdersLabel = rangeLabel;
     if (tileEl) tileEl.textContent = orders.length;
     if (kpiOrd) kpiOrd.textContent = orders.length;
     const revenue = orders.filter(o=>o.financial_status==='paid').reduce((s,o)=>s+parseFloat(o.total_price||0),0);
@@ -16162,6 +16186,12 @@ window.cmdLoadShopify = async function() {
 
 // Override cmdRenderOrders to add items column + demo notice
 const _origCmdRenderOrders = window.cmdRenderOrders;
+function ordCust(o){
+  const fn = (o && o.customer && o.customer.first_name) || '';
+  const ln = (o && o.customer && o.customer.last_name) || '';
+  const name = ((fn === null ? '' : fn) + ' ' + (ln === null ? '' : ln)).replace(/null/g, '').trim();
+  return name || (o && o.email) || 'Guest';
+}
 window.cmdRenderOrders = function(orders) {
   const el = document.getElementById('cmd-orders-table');
   if (!el) return;
@@ -16169,27 +16199,77 @@ window.cmdRenderOrders = function(orders) {
     el.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:20px 0">No orders found.</div>';
     return;
   }
-  // Revenue summary bar
-  const total = orders.reduce((sum,o)=>{
+  const label = window._shopifyOrdersLabel || 'Selection';
+  // Cancelled/test orders never count toward money metrics.
+  const live = orders.filter(o => !o.cancelled_at && o.test !== true);
+  const total = live.reduce((sum,o)=>{
     const v = parseFloat((o.total_price||'0').toString().replace(/,/g,''));
     return sum + (isNaN(v)?0:v);
   },0);
+  const aov = live.length ? total / live.length : 0;
   const fulfilled  = orders.filter(o=>(o.fulfillment_status||'unfulfilled')==='fulfilled').length;
-  const pending    = orders.filter(o=>!o.fulfillment_status||o.fulfillment_status==='unfulfilled').length;
-  const cancelled  = orders.filter(o=>o.fulfillment_status==='cancelled').length;
-  const summaryBar = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);margin-bottom:16px">
-    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Total Revenue</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--ink)">$${total.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
-    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Orders</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace">${orders.length}</div></div>
-    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;color:var(--green)">Fulfilled</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--green)">${fulfilled}</div></div>
-    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Pending / Cancelled</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--amber)">${pending}</div></div>
+  const money = x => '$' + x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const summaryBar = `<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">${label}</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--border);margin-bottom:16px">
+    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Revenue</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--ink)">${money(total)}</div></div>
+    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Orders</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace">${live.length}</div></div>
+    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">AOV</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace">${money(aov)}</div></div>
+    <div style="background:var(--bg);padding:14px 16px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--green);margin-bottom:4px">Fulfilled</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--green)">${fulfilled}</div></div>
   </div>`;
+  // Analysis blocks — when the window spans more than ~6 weeks, show revenue
+  // by month and top products so trends are readable at a glance.
+  let analysis = '';
+  const times = live.map(o => new Date(o.created_at).getTime());
+  const spanDays = times.length ? (Math.max(...times) - Math.min(...times)) / 864e5 : 0;
+  if (spanDays > 45) {
+    const byMonth = {};
+    live.forEach(o => {
+      const d = new Date(o.created_at);
+      const k = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+      if (!byMonth[k]) byMonth[k] = { n: 0, rev: 0 };
+      byMonth[k].n++; byMonth[k].rev += parseFloat(o.total_price || 0) || 0;
+    });
+    const months = Object.keys(byMonth).sort();
+    const maxRev = Math.max.apply(null, months.map(k => byMonth[k].rev));
+    analysis += `<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:4px 0 8px">Revenue by month</div>
+      <div style="margin-bottom:16px">` + months.map(k => {
+        const m = byMonth[k];
+        const w = maxRev ? Math.max(2, Math.round((m.rev / maxRev) * 100)) : 0;
+        const lbl = new Date(k + '-01T12:00:00').toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+        return `<div style="display:flex;align-items:center;gap:10px;padding:3px 0;font-size:11px">
+          <span style="font-family:'DM Mono',monospace;color:var(--muted);width:56px;flex-shrink:0">${lbl}</span>
+          <div style="flex:1;height:14px;background:var(--bg-off)"><div style="height:100%;width:${w}%;background:var(--ink)"></div></div>
+          <span style="font-family:'DM Mono',monospace;width:120px;text-align:right;flex-shrink:0">$${Math.round(m.rev).toLocaleString('en-US')} · ${m.n}</span>
+        </div>`;
+      }).join('') + `</div>`;
+    const byProd = {};
+    live.forEach(o => (o.line_items || []).forEach(li => {
+      const k = li.title || '?';
+      if (!byProd[k]) byProd[k] = { n: 0, rev: 0 };
+      byProd[k].n += li.quantity || 0;
+      byProd[k].rev += (parseFloat(li.price || 0) || 0) * (li.quantity || 0);
+    }));
+    const prods = Object.keys(byProd).sort((a, b) => byProd[b].rev - byProd[a].rev).slice(0, 6);
+    if (prods.length) {
+      analysis += `<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:4px 0 8px">Top products</div>
+        <div style="margin-bottom:16px">` + prods.map(k => {
+          const p = byProd[k];
+          return `<div style="display:flex;align-items:center;gap:10px;padding:4px 0;border-bottom:1px solid var(--border);font-size:11px">
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${k}</span>
+            <span style="font-family:'DM Mono',monospace;color:var(--muted);flex-shrink:0">×${p.n}</span>
+            <span style="font-family:'DM Mono',monospace;font-weight:700;width:90px;text-align:right;flex-shrink:0">$${Math.round(p.rev).toLocaleString('en-US')}</span>
+          </div>`;
+        }).join('') + `</div>`;
+    }
+  }
+  const summaryBarFull = summaryBar + analysis;
   const statusColor = s => {
     if (!s || s==='unfulfilled') return 'var(--amber)';
     if (s==='fulfilled')  return 'var(--green)';
     if (s==='cancelled')  return 'var(--red)';
     return 'var(--muted)';
   };
-  el.innerHTML = summaryBar + `
+  el.innerHTML = summaryBarFull + `
     <table style="width:100%;border-collapse:collapse;font-size:11px;min-width:620px">
       <thead>
         <tr style="border-bottom:2px solid var(--ink)">
@@ -16202,7 +16282,7 @@ window.cmdRenderOrders = function(orders) {
         ${orders.map(o => {
           const items = (o.line_items||[]).map(i=>i.title||i.name||'').filter(Boolean).join(', ') || '—';
           const date  = o.created_at ? new Date(o.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—';
-          const cust  = o.customer ? (o.customer.first_name+' '+o.customer.last_name).trim() : 'Guest';
+          const cust  = ordCust(o);
           const fs    = o.fulfillment_status || 'unfulfilled';
           const fin   = o.financial_status || '—';
           return `<tr style="border-bottom:1px solid var(--border)" onmouseenter="this.style.background='var(--bg-off)'" onmouseleave="this.style.background=''">
@@ -16229,8 +16309,8 @@ window.cmdFilterOrders = function() {
   const sf = document.getElementById('cmd-orders-status-f')?.value || 'all';
   let orders = window._shopifyOrders || [];
   if (q) orders = orders.filter(o => {
-    const name = ((o.customer?.first_name||'')+' '+(o.customer?.last_name||'')).toLowerCase();
-    return o.name.toLowerCase().includes(q) || name.includes(q) || (o.email||'').toLowerCase().includes(q);
+    const name = ordCust(o).toLowerCase();
+    return (o.name||'').toLowerCase().includes(q) || name.includes(q) || (o.email||'').toLowerCase().includes(q);
   });
   if (sf !== 'all') orders = orders.filter(o => (o.fulfillment_status||'unfulfilled') === sf);
   cmdRenderOrders(orders);
@@ -16242,7 +16322,7 @@ window.cmdExportOrdersCSV = function() {
   if (!orders.length) { toast('No orders to export'); return; }
   const headers = ['Order','Date','Customer','Items','Total','Fulfillment','Financial'];
   const rows = orders.map(o => {
-    const cust = o.customer ? o.customer.first_name+' '+o.customer.last_name : 'Guest';
+    const cust = ordCust(o);
     const items = (o.line_items||[]).map(i=>i.title||'').join(' | ');
     const date  = o.created_at ? new Date(o.created_at).toLocaleDateString() : '';
     return [o.name, date, cust, items, '$'+o.total_price, o.fulfillment_status||'unfulfilled', o.financial_status||''].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',');

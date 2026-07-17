@@ -77,7 +77,7 @@ export default async (req) => {
   // fields, capped at 10 pages / 2,500 orders.
   if (action === 'ordersAll') {
     const min = /^\d{4}-\d{2}-\d{2}/.test(String(body.created_at_min || '')) ? String(body.created_at_min) : null;
-    const fields = 'created_at,total_price,cancelled_at,test,line_items';
+    const fields = 'name,email,created_at,total_price,cancelled_at,test,financial_status,fulfillment_status,customer,line_items';
     let url = `https://${domain}/admin/api/${version}/orders.json?status=any&limit=250&fields=${fields}`
       + (min ? `&created_at_min=${encodeURIComponent(min)}` : '');
     const all = [];
@@ -90,9 +90,12 @@ export default async (req) => {
         }
         const j = await r.json();
         (j.orders || []).forEach((o) => all.push({
+          name: o.name, email: o.email,
           created_at: o.created_at, total_price: o.total_price,
           cancelled_at: o.cancelled_at, test: o.test,
-          line_items: (o.line_items || []).map((li) => ({ title: li.title, quantity: li.quantity })),
+          financial_status: o.financial_status, fulfillment_status: o.fulfillment_status,
+          customer: o.customer ? { first_name: o.customer.first_name, last_name: o.customer.last_name } : null,
+          line_items: (o.line_items || []).map((li) => ({ title: li.title, quantity: li.quantity, price: li.price })),
         }));
         const link = r.headers.get('link') || '';
         const m = link.match(/<([^>]+)>;\s*rel="next"/);
