@@ -1547,8 +1547,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '145';
-  const BUILD_DATE = '2026.07.16';
+  const BUILD = '146';
+  const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -20636,7 +20636,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       var out = await callClaude(sys, user);
       delete delegRunning[gid];
-      if (!delegApplyReshape(gid, out)) throw new Error('Eni didn\'t return a usable plan');
+      agentFlashMark(gid);   // before apply — delegApplyReshape re-renders
+      if (!delegApplyReshape(gid, out)){ delete agentFlash[gid]; throw new Error('Eni didn\'t return a usable plan'); }
       var o2 = document.getElementById('dump-info-modal'); if (o2) o2.remove();
       showToast('✦ Goal reshaped', 'success');
     } catch(e){
@@ -20815,7 +20816,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '@keyframes dumpWorkSweep{0%{background-position:200% 0}100%{background-position:-200% 0}}'
       + '.dump-working{background-image:linear-gradient(100deg,rgba(202,162,74,0) 25%,rgba(202,162,74,.18) 45%,rgba(202,162,74,0) 65%) !important;background-size:200% 100% !important;animation:dumpWorkSweep 1.8s linear infinite}'
       + '.dump-work-run{display:inline-block;animation:dumpPulse 1.2s ease-in-out infinite;color:var(--gold);font-size:12px;padding:0 4px;flex-shrink:0}'
-      + '@media (prefers-reduced-motion:reduce){#dump-sheet,#dump-sheet>div,#dump-scroll{animation:none !important}#dump-scroll{scroll-behavior:auto}}';
+      // Agentic revision, made visible. While Eni rewrites an area its content
+      // dims and a gold sweep passes over it (the universal "AI is revising
+      // this" cue); the moment the new version lands, the area flashes gold
+      // once and the fresh content settles in.
+      + '.agent-revising{position:relative}'
+      + '.agent-revising>*{opacity:.5;transition:opacity .35s ease}'
+      + '.agent-revising::after{content:"";position:absolute;inset:0;pointer-events:none;background-image:linear-gradient(100deg,rgba(202,162,74,0) 32%,rgba(202,162,74,.2) 50%,rgba(202,162,74,0) 68%);background-size:200% 100%;animation:dumpWorkSweep 1.6s linear infinite}'
+      + '@keyframes agentLand{0%{background-color:rgba(202,162,74,.26)}100%{background-color:rgba(202,162,74,0)}}'
+      + '.agent-updated{animation:agentLand 1.8s ease-out}'
+      + '@keyframes agentSettle{0%{opacity:0;transform:translateY(5px)}100%{opacity:1;transform:none}}'
+      + '.agent-fresh>*{animation:agentSettle .55s ease-out}'
+      + '@media (prefers-reduced-motion:reduce){#dump-sheet,#dump-sheet>div,#dump-scroll{animation:none !important}#dump-scroll{scroll-behavior:auto}'
+      +   '.agent-revising::after,.agent-updated,.agent-fresh>*,.dump-working,.dump-work-run{animation:none !important}}';
     document.head.appendChild(s);
   }
 
@@ -21108,6 +21121,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Eni produces a real work product (live web search when available) in the
   // background. Results persist on the item (synced) behind a 📄 chip.
   var delegRunning = {};   // id → start ms (truthy while Eni works)
+  // id → ms an agent revision just landed. Renderers read this (within a short
+  // window) to play the one-time "this area was rewritten" flash on the fresh
+  // content — marked right before the rewrite is applied, expires on its own.
+  var agentFlash = {};
+  function agentFlashMark(id){ if (id) agentFlash[id] = Date.now(); }
+  function agentFlashed(id){ return !!agentFlash[id] && (Date.now() - agentFlash[id] < 3500); }
   // What Eni must know before doing a task: today's date, the brand, and —
   // when the task is a step — the WHOLE goal it belongs to. This is what stops
   // "book flights" inside a Paris goal from turning into a NYC brief.
@@ -21418,7 +21437,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (j.kind === 'reshape'){
         delete delegRunning[j.item_id];
         if (j.status === 'done'){
+          agentFlashMark(j.item_id);   // before apply — delegApplyReshape re-renders
           var okR = delegApplyReshape(j.item_id, j.result);
+          if (!okR) delete agentFlash[j.item_id];
           var gR = delegTarget('reshape', j.item_id, '');
           if (okR){
             showToast('✦ Goal reshaped — ' + ((gR && gR.t) || '').slice(0, 40), 'success');
@@ -21441,6 +21462,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         t.work = { q: j.q, md: pw.md, at: j.done_at || new Date().toISOString() };
         if (pw.actions) t.work.actions = pw.actions;
         if (prevThread) t.work.thread = prevThread;
+        agentFlashMark(j.item_id);
         save();
         showToast('⚡ Done — tap 📄 on “' + (t.t || '').slice(0, 40) + '”', 'success');
         delegNotify('⚡ Eni finished', (t.t || 'Your task') + ' — the brief is ready in Brainstorm');
@@ -21550,6 +21572,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var pw = workParse(out);
       t2.work = { q: q, md: pw.md, at: new Date().toISOString() };
       if (pw.actions) t2.work.actions = pw.actions;
+      agentFlashMark(id);
       save(); render();
       showToast('⚡ Done — tap 📄 on “' + (t2.t || '').slice(0, 40) + '”', 'success');
       delegNotify('⚡ Eni finished', (t2.t || 'Your task') + ' — the brief is ready in Brainstorm');
@@ -21587,7 +21610,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +   '<div style="font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">' + esc((t.t || '').slice(0, 90)) + '</div></div>'
       +   '<button onclick="dumpWorkClose()" aria-label="Close" style="background:var(--bg-off);border:none;color:var(--ink);width:32px;height:32px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0">✕</button>'
       + '</div>'
-      + '<div style="flex:1;overflow-y:auto;padding:6px 18px calc(28px + var(--sab,0px))"><div style="max-width:640px;margin:0 auto">' + md(t.work.md) + workActionsHTML(kind, id, gid, t) + '</div></div>'
+      + '<div style="flex:1;overflow-y:auto;padding:6px 18px calc(28px + var(--sab,0px))"><div class="' + (running ? 'agent-revising' : (agentFlashed(id) ? 'agent-updated agent-fresh' : '')) + '" style="max-width:640px;margin:0 auto">' + md(t.work.md) + workActionsHTML(kind, id, gid, t) + '</div></div>'
       + footer;
     document.body.appendChild(ov);
   };
@@ -21735,6 +21758,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var pw = workParse(out);
       t2.work.md = pw.md; t2.work.at = new Date().toISOString();
       t2.work.actions = pw.actions || undefined;
+      agentFlashMark(id);
       save(); render();
       showToast('⚡ Brief updated', 'success');
       delegNotify('⚡ Eni updated the brief', (t2.t || 'Your task'));
@@ -22275,7 +22299,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // left to delete; tap to edit.
         return '<div class="dump-swipe" data-sw="step" data-gid="' + i.id + '" data-id="' + c.id + '" style="border-top:1px solid var(--border)">'
           + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : '') + '" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
+          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
           + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
           + (c.done || delegRunning[c.id] || c.work ? '' : '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:12px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
@@ -22303,7 +22327,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Collapsed: header + meta + a slim expand hint (no full step list).
       var collapsedPeek = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="padding:0 12px 10px 42px;font-size:11px;color:var(--muted);cursor:pointer">' + prog.done + '/' + kids.length + ' steps'
         + (kids.length >= 2 ? ' · <span onclick="event.stopPropagation();dumpTab(\'map\')" style="color:var(--ink);font-weight:600;cursor:pointer">◍ mind map</span>' : '') + '</div>';
-      return '<div class="' + (delegRunning[i.id] ? 'dump-working' : '') + '" style="border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
+      return '<div class="' + (delegRunning[i.id] ? 'dump-working' : (agentFlashed(i.id) ? 'agent-updated' : '')) + '" style="border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
         + head + meta + (collapsed ? collapsedPeek : (childHTML + footer)) + '</div>';
     };
 
@@ -22331,7 +22355,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // rides on .dump-swipe-fg above the verdict layer.
       var h = '<div class="dump-swipe" data-sw="task" data-id="' + i.id + '" style="' + (rowMenuId === i.id ? '' : 'border-bottom:1px solid var(--border)') + '">'
         + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-        + '<div class="dump-swipe-fg' + (delegRunning[i.id] ? ' dump-working' : '') + '" style="display:flex;gap:9px;align-items:flex-start;padding:13px 2px">'
+        + '<div class="dump-swipe-fg' + (delegRunning[i.id] ? ' dump-working' : (agentFlashed(i.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:9px;align-items:flex-start;padding:13px 2px">'
         + (i.done ? '' : dumpGrip(i.id))
         + '<button onclick="dumpToggle(\'' + i.id + '\')" title="Mark done" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid ' + (i.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (i.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:11px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (i.done?'✓':'') + '</button>'
         + '<div onclick="dumpStartEdit(\'' + i.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13.5px;line-height:1.5;color:' + (i.done ? 'var(--muted)' : 'var(--ink)') + ';' + (i.done ? 'text-decoration:line-through;' : '') + 'white-space:pre-wrap;word-break:break-word;cursor:text">' + esc(i.t) + '</div>'
