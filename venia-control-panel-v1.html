@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '125';
+  const BUILD = '126';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11501,6 +11501,12 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 
 // ── CALL CLAUDE ──────────────────────────────────────────────────────
 async function callClaude(system, userMsg, history=[], model) {
+  // Stream-first: the SSE relay isn't subject to the buffered-function time
+  // window, so long generations (day plans, reshapes, adjustments) stop
+  // 504ing. Any streaming failure falls through to the buffered path below,
+  // which also covers the browser-key direct fallback.
+  try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 4096 }); }
+  catch (e) { /* fall back to buffered */ }
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
   const body = JSON.stringify({ model: model || 'claude-sonnet-5', max_tokens: 4096, system, messages: msgs });
@@ -11570,12 +11576,13 @@ async function callClaude(system, userMsg, history=[], model) {
 // back to callClaude).
 async function callClaudeStream(system, userMsg, opts) {
   opts = opts || {};
+  const msgs = userMsg ? [...(opts.history || []), { role: 'user', content: userMsg }] : (opts.history || []);
   const body = JSON.stringify({
     model: opts.model || 'claude-sonnet-5',
     max_tokens: opts.maxTokens || 8192,
     stream: true,
     system,
-    messages: [{ role: 'user', content: userMsg }],
+    messages: msgs,
     ...(opts.tools ? { tools: opts.tools } : {}),
   });
   const PATHS = ['/api/claude', '/.netlify/functions/claude'];
@@ -18785,7 +18792,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     bar.id = 'dump-undo';
     bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + var(--sab,0px));z-index:9600;background:var(--ink);color:#fff;border-radius:12px;padding:11px 14px;display:flex;align-items:center;gap:14px;box-shadow:0 8px 30px rgba(0,0,0,.3);max-width:88vw';
     bar.innerHTML = '<span style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(entry.label) + '</span>'
-      + '<button onclick="dumpUndo()" style="background:none;border:none;color:#caa24a;font-size:12.5px;font-weight:800;letter-spacing:.06em;cursor:pointer;flex-shrink:0">UNDO</button>';
+      + '<button onclick="dumpUndo()" style="background:none;border:none;color:var(--gold);font-size:12.5px;font-weight:800;letter-spacing:.06em;cursor:pointer;flex-shrink:0">UNDO</button>';
     document.body.appendChild(bar);
     undoTimer = setTimeout(function(){ var b = document.getElementById('dump-undo'); if (b) b.remove(); undoBuf = null; }, 6000);
   }
@@ -20875,8 +20882,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
     return { md: md, actions: actions };
   }
-  var delegPollT = null;
+  var delegPollT = null, delegPollBusy = false;
   async function delegPoll(){
+    if (delegPollBusy) return;
+    delegPollBusy = true;
+    try { await delegPollRun(); } finally { delegPollBusy = false; }
+  }
+  async function delegPollRun(){
     var c = delegSb(); if (!c) return;
     var res = null;
     try { res = await c.from('venia_agent_jobs').select('*'); } catch(e){ return; }
@@ -20946,7 +20958,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function delegSweep(){
     var now = Date.now(), stale = false;
     Object.keys(delegRunning).forEach(function(k){
-      if (now - delegRunning[k] > 8 * 60 * 1000){ delete delegRunning[k]; stale = true; }
+      if (now - delegRunning[k] > 16 * 60 * 1000){ delete delegRunning[k]; stale = true; }
     });
     if (stale){ render(); showToast('⚡ A run stalled while the app was asleep — tap ⚡ to retry', 'error'); }
   }
@@ -20960,7 +20972,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       if (!window.Notification || Notification.permission !== 'granted') return;
       if (document.visibilityState === 'visible') return;
-      var opts = { body: body || '', tag: 'venia-deleg-' + Date.now(), icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' };
+      var opts = { body: body || '', tag: 'venia-deleg', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png' };
       if (navigator.serviceWorker && navigator.serviceWorker.getRegistration){
         navigator.serviceWorker.getRegistration().then(function(reg){
           if (reg && reg.showNotification) reg.showNotification(title, opts);
