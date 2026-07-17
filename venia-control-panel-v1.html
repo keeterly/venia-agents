@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '146';
+  const BUILD = '147';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15343,47 +15343,70 @@ function agSectionData(key, section) {
 // ══════════════════════════════════════════════════════════
 //  SALES — BUYERS CRM
 // ══════════════════════════════════════════════════════════
-const SL_STAGES = { new:'New', warm:'Warm', active:'Active', quoted:'Quoted', closed:'Closed', inactive:'Inactive' };
-const SL_STAGE_COLORS = { new:'var(--muted)', warm:'var(--amber)', active:'var(--blue)', quoted:'var(--ink)', closed:'var(--green)', inactive:'var(--border-mid)' };
+// The B2B pipeline reads in founder language: stores you're REACHING OUT to,
+// stores you're IN CONVERSATION with, and stores you're DOING BUSINESS with.
+// Stage keys are stable (the agent files prospects at 'new'); labels and the
+// phase grouping are presentation only.
+const SL_STAGES = { new:'To Reach', warm:'Talking', quoted:'Quoted', active:'Stockist', closed:'Ordered', inactive:'Dormant' };
+const SL_STAGE_COLORS = { new:'var(--muted)', warm:'var(--amber)', quoted:'var(--blue)', active:'var(--green)', closed:'var(--gold)', inactive:'var(--border-mid)' };
+const SL_PHASES = [
+  { label:'Reaching out',    desc:'stores to contact',         stages:['new'],             empty:'No prospects — add a store, or ask the agent to find &amp; vet stockists.' },
+  { label:'In conversation', desc:'talking · quote out',       stages:['warm','quoted'],   empty:'No open conversations yet.' },
+  { label:'Doing business',  desc:'active wholesale accounts', stages:['active','closed'], empty:'No stockists yet — accounts land here once a store orders.' },
+  { label:'Dormant',         desc:'',                          stages:['inactive'],        empty:'', quiet:true },
+];
 const SL_TYPES = ['Concept store','Department store','Online retail','Boutique','Specialty retail','Showroom'];
+const slEsc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function agBuildBuyersSection() {
   if (!STATE.slBuyers) STATE.slBuyers = [];
   const buyers = STATE.slBuyers;
-  const byStage = (st) => buyers.filter(b => b.stage === st);
-  const stageBar = Object.entries(SL_STAGES).map(([k,v]) => {
-    const count = byStage(k).length;
-    return `<button class="ag-pill ${k==='all'?'ag-pill-active':''}" onclick="slBuyerFilter('${k}',this)">${v} (${count})</button>`;
-  }).join('');
+  const today = new Date().toISOString().slice(0,10);
+  const inStages = (sts) => buyers.filter(b => sts.includes(b.stage || 'new'));
+  const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+  const overdue = buyers.filter(isOverdue).length;
 
-  const renderBuyers = (list) => list.length === 0
-    ? `<div style="padding:40px 20px;text-align:center;color:var(--muted);font-size:11px">No accounts yet — add your first buyer</div>`
-    : list.map(b => `
-      <div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
-        <div>
-          <div class="ag-lr-name">${b.name||'Unnamed Account'}</div>
-          <div class="ag-lr-sub">${b.type||''} · ${b.location||''}</div>
-        </div>
-        <div class="ag-lr-mono" style="font-size:8px">${(b.type||'').toUpperCase()}</div>
-        <div><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[b.stage]||b.stage||'New'}</span></div>
-        <div style="display:flex;gap:6px;align-items:center">
-          <div class="ag-lr-mono" style="font-size:9px">${b.lastContact||'—'}</div>
-          <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button>
-        </div>
-      </div>`).join('');
+  const kpi = (label, val, color) => `<div style="background:var(--bg);padding:14px 16px;flex:1;min-width:110px"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:6px">${label}</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:${color||'var(--ink)'}">${val}</div></div>`;
+
+  const row = (b) => {
+    const od = isOverdue(b);
+    const tier = AGENT_TIER_LABEL[b.tier] ? `<span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px;margin-left:6px">${AGENT_TIER_LABEL[b.tier]}</span>` : '';
+    // The last cell answers "what's next with this store" at a glance: the
+    // planned follow-up (flagged red when overdue), else the last touch.
+    const next = b.nextDate
+      ? `<span style="color:${od?'var(--red)':'var(--muted)'};font-weight:${od?'700':'400'}">${od?'⚑ ':''}${slEsc(b.nextDate)}${b.nextAction?' · '+slEsc(String(b.nextAction).slice(0,28)):''}</span>`
+      : `<span style="color:var(--muted)">last ${slEsc(b.lastContact||'—')}</span>`;
+    return `<div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
+        <div><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}</div></div>
+        <div class="ag-lr-mono" style="font-size:8px">${slEsc((b.type||'').toUpperCase())}</div>
+        <div><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[b.stage]||'To Reach'}</span></div>
+        <div style="display:flex;gap:6px;align-items:center;font-size:9px;font-family:'DM Mono',monospace">${next}<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button></div>
+      </div>`;
+  };
+  // Overdue follow-ups float to the top of each phase; then soonest follow-up,
+  // then most recently touched.
+  const sortRows = (list) => list.slice().sort((a,b) =>
+    (isOverdue(b)-isOverdue(a))
+    || String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'))
+    || String(b.lastContact||'').localeCompare(String(a.lastContact||'')));
+
+  const group = (ph) => {
+    const list = sortRows(inStages(ph.stages));
+    if (!list.length && ph.quiet) return '';
+    return `<div style="margin-bottom:18px">
+      <div style="display:flex;align-items:baseline;gap:8px;margin:0 0 6px"><div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink)">${ph.label}</div><div style="font-size:9px;color:var(--muted)">${list.length}${ph.desc?' · '+ph.desc:''}</div></div>
+      <div class="ag-list">${list.length ? list.map(row).join('') : `<div style="padding:18px;text-align:center;color:var(--muted);font-size:10.5px">${ph.empty}</div>`}</div>
+    </div>`;
+  };
 
   return `
-    <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap">
-      <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class="ag-pill ag-pill-active" onclick="slBuyerFilter('all',this)">All (${buyers.length})</button>
-        ${stageBar}
-      </div>
-      <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenBuyerModal(null)">+ Add Buyer</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px">
+      ${kpi('To reach', inStages(['new']).length)}
+      ${kpi('In conversation', inStages(['warm','quoted']).length)}
+      ${kpi('Stockists', inStages(['active','closed']).length)}
+      ${kpi('Follow-ups due', overdue, overdue ? 'var(--red)' : 'var(--green)')}
     </div>
-    <div class="ag-list">
-      <div class="ag-list-row ag-list-row-h"><div>Account</div><div>Type</div><div>Stage</div><div>Last Contact / Actions</div></div>
-      <div id="sl-buyers-list">${renderBuyers(buyers)}</div>
-    </div>
+    <div id="sl-buyers-list">${SL_PHASES.map(group).join('')}</div>
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Pipeline Actions</h2></div>
       <div class="ag-workflows" style="grid-template-columns:repeat(2,1fr)">
@@ -15395,24 +15418,11 @@ function agBuildBuyersSection() {
     </div>`;
 }
 
-function slBuyerFilter(filter, el) {
-  document.querySelectorAll('#cp-screen-sl .ag-pill').forEach(p => p.classList.remove('ag-pill-active'));
-  if (el) el.classList.add('ag-pill-active');
-  const list = document.getElementById('sl-buyers-list');
-  if (!list) return;
-  const buyers = filter === 'all' ? (STATE.slBuyers||[]) : (STATE.slBuyers||[]).filter(b => b.stage === filter);
-  list.innerHTML = buyers.length === 0
-    ? `<div style="padding:40px 20px;text-align:center;color:var(--muted);font-size:11px">No accounts in this stage</div>`
-    : buyers.map(b => `
-      <div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
-        <div><div class="ag-lr-name">${b.name||'Unnamed'}</div><div class="ag-lr-sub">${b.type||''} · ${b.location||''}</div></div>
-        <div class="ag-lr-mono" style="font-size:8px">${(b.type||'').toUpperCase()}</div>
-        <div><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[b.stage]||b.stage||'New'}</span></div>
-        <div style="display:flex;gap:6px;align-items:center">
-          <div class="ag-lr-mono" style="font-size:9px">${b.lastContact||'—'}</div>
-          <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button>
-        </div>
-      </div>`).join('');
+// Re-render the Buyers section in place after a pipeline change, but only if
+// it's the section on screen (detail modal actions call this).
+function slRefreshBuyers() {
+  if (!isSalesBuyersVisible()) return;
+  try { agNav('sl', 'buyers', document.querySelector('#cp-screen-sl .ag-nav-item[onclick*="buyers"]')); } catch (e) {}
 }
 
 function slOpenBuyerModal(id) {
@@ -15454,6 +15464,10 @@ function slOpenBuyerModal(id) {
         </div>
       </div>
       <div>
+        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Website</div>
+        <input id="sl-b-website" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.website||'')}" placeholder="store.com">
+      </div>
+      <div>
         <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Notes / Last conversation</div>
         <textarea id="sl-b-notes" rows="3" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px;font-family:inherit;resize:vertical" placeholder="Interested in FW26, wants opening order minimum discussion…">${b?.notes||''}</textarea>
       </div>
@@ -15479,16 +15493,20 @@ function slSaveBuyer(existingId) {
     stage:       document.getElementById('sl-b-stage')?.value||'new',
     contactName: (document.getElementById('sl-b-contact')?.value||'').trim(),
     email:       (document.getElementById('sl-b-email')?.value||'').trim(),
+    website:     (document.getElementById('sl-b-website')?.value||'').trim(),
     notes:       (document.getElementById('sl-b-notes')?.value||'').trim(),
-    lastContact: new Date().toISOString().slice(0,10),
   };
   if (!data.name) { showToast('Account name is required'); return; }
   if (existingId) {
+    // Editing details is NOT contact — lastContact only moves when a touch is
+    // logged, so "gone quiet" stays honest.
     const idx = STATE.slBuyers.findIndex(b => b.id === existingId);
     if (idx >= 0) STATE.slBuyers[idx] = { ...STATE.slBuyers[idx], ...data };
   } else {
     data.id = 'BUY' + Date.now();
     data.createdAt = new Date().toISOString();
+    data.lastContact = new Date().toISOString().slice(0,10);
+    data.log = [];
     STATE.slBuyers.unshift(data);
   }
   save();
@@ -15508,16 +15526,115 @@ function slDeleteBuyer(id) {
   showToast('Account removed');
 }
 
+// The account record: everything about one store in one place — where the
+// relationship stands, every touch, the planned next move, and their quotes.
 function slOpenBuyerDetail(id) {
   const b = (STATE.slBuyers||[]).find(x => x.id === id);
   if (!b) return;
-  agentSend('sl', 'I want to work on the ' + (b.name||'this account') + ' account (' + (b.type||'buyer') + ', ' + (b.location||'unknown location') + '). Stage: ' + (b.stage||'new') + '. Notes: ' + (b.notes||'none') + '. What should my next move be? Draft the email I should send them right now.');
+  if (!Array.isArray(b.log)) b.log = [];
+  const today = new Date().toISOString().slice(0,10);
+  const od = b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+  const inp = 'width:100%;box-sizing:border-box;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px';
+  const lbl = 'font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px';
+  const stagePills = Object.entries(SL_STAGES).map(([k,v]) =>
+    `<button class="ag-pill ${b.stage===k?'ag-pill-active':''}" onclick="slSetBuyerStage('${b.id}','${k}')">${v}</button>`).join('');
+  const site = b.website ? (/^https?:/i.test(b.website) ? b.website : 'https://' + b.website) : '';
+  const quotes = (STATE.slQuotes||[]).filter(q => String(q.buyerName||'').trim().toLowerCase() === String(b.name||'').trim().toLowerCase());
+  const quotesHtml = quotes.length
+    ? `<div><div style="${lbl}">Quotes</div>${quotes.map(q =>
+        `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${slEsc(q.season||'')} · ${(q.styles||[]).length} styles</span><span style="font-family:'DM Mono',monospace">$${(q.total||0).toLocaleString()} · ${slEsc(q.status||'draft')}</span></div>`).join('')}</div>`
+    : '';
+  const logHtml = b.log.length
+    ? b.log.slice(0,30).map(e => `<div style="display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);flex-shrink:0;padding-top:1px">${slEsc(e.d)}</span><span style="flex:1;line-height:1.45">${slEsc(e.t)}</span></div>`).join('')
+    : `<div style="font-size:10.5px;color:var(--muted);padding:6px 0">No touches yet — every call, email or DM you log lands here.</div>`;
+  const html = `<div class="modal" style="width:560px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">${slEsc(b.name)||'Account'}</div><button class="modal-close" onclick="closeModal('sl-acct-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:72vh;overflow-y:auto">
+      <div style="font-size:11px;color:var(--muted);line-height:1.6">
+        ${slEsc(b.type)||'—'}${b.location?' · '+slEsc(b.location):''}${site?` · <a href="${slEsc(site)}" target="_blank" rel="noopener" style="color:var(--gold)">site &#x21D7;</a>`:''}
+        ${(b.contactName||b.email)?`<br>${slEsc(b.contactName)||''}${b.contactName&&b.email?' · ':''}${b.email?`<a href="mailto:${slEsc(b.email)}" style="color:var(--gold)">${slEsc(b.email)}</a>`:''}`:''}
+        ${b.fit?`<br><span style="color:var(--ink)">${AGENT_TIER_LABEL[b.tier]?'['+AGENT_TIER_LABEL[b.tier]+' fit] ':''}${slEsc(b.fit)}</span>`:''}
+      </div>
+      <div><div style="${lbl}">Stage</div><div style="display:flex;gap:6px;flex-wrap:wrap">${stagePills}</div></div>
+      <div><div style="${lbl}">Next follow-up${od?' <span style="color:var(--red)">— overdue</span>':''}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="sl-acct-next" type="date" value="${slEsc(b.nextDate||'')}" style="${inp};width:auto">
+          <input id="sl-acct-nexta" type="text" value="${slEsc(b.nextAction||'')}" placeholder="The move — e.g. send FW26 line sheet" style="${inp};flex:1;width:auto;min-width:150px">
+          <button class="btn btn-ghost btn-sm" onclick="slSetBuyerNext('${b.id}')">Set</button>
+        </div></div>
+      <div><div style="${lbl}">Touch log</div>
+        <div style="display:flex;gap:8px;margin-bottom:4px">
+          <input id="sl-acct-log" type="text" placeholder="Log a touch — call, email, DM, meeting…" style="${inp};flex:1;width:auto" onkeydown="if(event.key==='Enter')slLogTouch('${b.id}')">
+          <button class="btn btn-gold btn-sm" onclick="slLogTouch('${b.id}')">Log</button>
+        </div>${logHtml}</div>
+      ${quotesHtml}
+      ${b.notes?`<div><div style="${lbl}">Notes</div><div style="font-size:11px;line-height:1.55">${slEsc(b.notes)}</div></div>`:''}
+      <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-acct-modal');slOpenBuyerModal('${b.id}')">&#x270E; Edit</button>
+        <button class="btn btn-gold btn-sm" onclick="slAskEniBuyer('${b.id}')">&#x2726; Ask the agent for the next move</button>
+      </div>
+    </div>
+  </div>`;
+  let modal = document.getElementById('sl-acct-modal');
+  if (!modal) { modal = document.createElement('div'); modal.className = 'overlay'; modal.id = 'sl-acct-modal'; document.body.appendChild(modal); }
+  modal.innerHTML = html;
+  openModal('sl-acct-modal');
+}
+
+// Moving stage IS a relationship event — it's logged, so the history shows
+// when a store went from prospect to conversation to account.
+function slSetBuyerStage(id, stage) {
+  const b = (STATE.slBuyers||[]).find(x => x.id === id);
+  if (!b || b.stage === stage) return;
+  const from = SL_STAGES[b.stage] || 'To Reach';
+  b.stage = stage;
+  if (!Array.isArray(b.log)) b.log = [];
+  b.log.unshift({ d: new Date().toISOString().slice(0,10), t: 'Stage: ' + from + ' → ' + (SL_STAGES[stage]||stage) });
+  save();
+  slOpenBuyerDetail(id);
+  slRefreshBuyers();
+}
+
+function slLogTouch(id) {
+  const b = (STATE.slBuyers||[]).find(x => x.id === id);
+  if (!b) return;
+  const el = document.getElementById('sl-acct-log');
+  const t = (el && el.value.trim()) || '';
+  if (!t) { showToast('Write what happened first'); return; }
+  if (!Array.isArray(b.log)) b.log = [];
+  const today = new Date().toISOString().slice(0,10);
+  b.log.unshift({ d: today, t });
+  b.lastContact = today;
+  save();
+  slOpenBuyerDetail(id);
+  slRefreshBuyers();
+}
+
+function slSetBuyerNext(id) {
+  const b = (STATE.slBuyers||[]).find(x => x.id === id);
+  if (!b) return;
+  b.nextDate = (document.getElementById('sl-acct-next')?.value || '').trim();
+  b.nextAction = (document.getElementById('sl-acct-nexta')?.value || '').trim();
+  save();
+  slOpenBuyerDetail(id);
+  slRefreshBuyers();
+  showToast(b.nextDate ? 'Follow-up set' : 'Follow-up cleared');
+}
+
+// The agent gets the whole relationship — stage, recent touches, planned next
+// move — so its advice is about THIS store, not generic outreach.
+function slAskEniBuyer(id) {
+  const b = (STATE.slBuyers||[]).find(x => x.id === id);
+  if (!b) return;
+  closeModal('sl-acct-modal');
+  const touches = (b.log||[]).slice(0,4).map(e => e.d + ': ' + e.t).join(' | ');
+  agentSend('sl', 'I want to work the ' + (b.name||'account') + ' account (' + (b.type||'store') + ', ' + (b.location||'location unknown') + '). Stage: ' + (SL_STAGES[b.stage]||'To Reach') + '. Recent touches: ' + (touches||'none yet') + '. Notes: ' + (b.notes||'none') + '. Planned next move: ' + (b.nextAction||'none') + '. What should my next move be? Draft the exact email or DM I should send now.');
 }
 
 function slExportBuyers() {
   if (!STATE.slBuyers || !STATE.slBuyers.length) { showToast('No buyers to export'); return; }
-  const headers = ['Name','Location','Type','Stage','Contact','Email','Notes','Last Contact'];
-  const rows = STATE.slBuyers.map(b => [b.name||'',b.location||'',b.type||'',b.stage||'',b.contactName||'',b.email||'',b.notes||'',(b.lastContact||'').slice(0,10)]);
+  const headers = ['Name','Location','Type','Stage','Tier','Contact','Email','Website','Next follow-up','Next move','Last touch','Notes'];
+  const rows = STATE.slBuyers.map(b => [b.name||'',b.location||'',b.type||'',SL_STAGES[b.stage]||b.stage||'',AGENT_TIER_LABEL[b.tier]||'',b.contactName||'',b.email||'',b.website||'',b.nextDate||'',b.nextAction||'',(b.lastContact||'').slice(0,10),b.notes||'']);
   const csv = [headers,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a'); a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv); a.download='venia-buyers.csv'; a.click();
 }
