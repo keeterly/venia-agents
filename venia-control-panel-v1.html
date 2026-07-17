@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '122';
+  const BUILD = '123';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5094,7 +5094,7 @@ const SYNC_KEYS = [
   'brTone', 'brPrefs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
-  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap',
+  'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -18549,6 +18549,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!v){ showToast('Write what changed first — then ✦','info'); return; }
     var btn = document.getElementById('dump-smart-btn');
     if (btn){ btn.disabled = true; btn.textContent = '◐'; }
+    if (typeof eniMemLearn === 'function') eniMemLearn(v, 'note');   // fire-and-forget
     try {
       var inv = [];
       openItems().forEach(function(it){
@@ -18567,7 +18568,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '{"type":"complete_task","id":"task id"}, {"type":"snooze_task","id":"task id","until":"YYYY-MM-DD"}, '
         + '{"type":"new_task","t":"..."}, {"type":"new_goal","title":"...","due":"YYYY-MM-DD or empty","steps":["..."]} '
         + '], "summary": "one short line describing what you changed" }';
-      var user = 'Current goals & tasks:\n' + (inv.join('\n') || '(none)') + '\n\nThe founder\'s note:\n' + v;
+      var memTxt = ((STATE.eniMemory || []).slice(-12).map(function(m){ return '- ' + m.t; })).join('\n');
+      var user = (memTxt ? 'Known context (Eni\'s long-term memory):\n' + memTxt + '\n\n' : '') + 'Current goals & tasks:\n' + (inv.join('\n') || '(none)') + '\n\nThe founder\'s note:\n' + v;
       var out = await callClaude(sys, user);
       var data = extractJSON(out || '');
       var acts = (data && Array.isArray(data.actions)) ? data.actions : null;
@@ -20650,6 +20652,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if ((STATE.slBuyers || []).length) pulse.push((STATE.slBuyers || []).length + ' wholesale buyer contacts');
       if ((STATE.materials || []).length) pulse.push((STATE.materials || []).length + ' materials on file');
       if (pulse.length) lines.push('OS pulse: ' + pulse.join(', ') + '.');
+      var mem = (STATE.eniMemory || []);
+      if (mem.length) lines.push('MEMORY — things the founders told Eni before (trust and apply these):\n' + mem.slice(-15).map(function(m){ return '- ' + m.t; }).join('\n'));
     } catch(e){}
     var g = (kind === 'step') ? items().find(function(x){ return x.id === gid && isGroup(x); }) : null;
     if (g){
@@ -20667,6 +20671,42 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // row; delegPoll picks finished jobs up whenever the app is next awake — so
   // the phone can be pocketed or the app closed entirely.
   function delegSb(){ return window.__sbClient || null; }
+  // ── Eni's long-term memory ───────────────────────────────────────────────
+  // Replies and notes often carry durable facts ("we showed with CUBE before",
+  // "budget cap €6k", "Audrey handles showroom logistics"). A cheap extraction
+  // pass distills them into short facts that ride along in every future run.
+  function eniMemAdd(facts, src){
+    if (!facts || !facts.length) return;
+    if (!STATE.eniMemory) STATE.eniMemory = [];
+    var mem = STATE.eniMemory, added = 0;
+    facts.forEach(function(f){
+      var t = String(f || '').trim().slice(0, 160);
+      if (t.length < 8) return;
+      var low = t.toLowerCase();
+      var dup = mem.some(function(m){ var ml = (m.t || '').toLowerCase(); return ml === low || ml.indexOf(low) >= 0 || low.indexOf(ml) >= 0; });
+      if (dup) return;
+      mem.push({ id: uid(), t: t, at: new Date().toISOString(), src: src || '' });
+      added++;
+    });
+    if (mem.length > 60) STATE.eniMemory = mem.slice(-60);
+    if (added){ save(); showToast('🧠 Remembered ' + added + ' thing' + (added === 1 ? '' : 's'), 'info'); }
+  }
+  async function eniMemLearn(note, src){
+    try {
+      var txt = String(note || '').trim();
+      if (txt.length < 12) return;
+      var sys = 'Extract durable facts about VENIA Collection, its founders, their preferences, partners, budgets, constraints or history from this note — facts that will still matter weeks from now (e.g. "VENIA previously showed with CUBE Showroom in Paris", "showroom budget cap is €6k", "Audrey handles showroom logistics"). Ignore one-off logistics and temporary states. Respond with ONLY JSON: {"facts":["..."]} — 0 to 3 facts, each a standalone third-person sentence under 120 characters. If nothing durable: {"facts":[]}.';
+      var out = await callClaude(sys, txt, [], 'claude-haiku-4-5');
+      var m = String(out || '').match(/\{[\s\S]*\}/);
+      if (!m) return;
+      var data = JSON.parse(m[0]);
+      eniMemAdd((data && Array.isArray(data.facts)) ? data.facts : [], src);
+    } catch(e){}
+  }
+  window.dumpMemDel = function(id){
+    STATE.eniMemory = (STATE.eniMemory || []).filter(function(m){ return m.id !== id; });
+    save(); render();
+  };
   // Live commerce numbers for Eni's briefs, via the OS's read-only Shopify
   // proxy. Computed here, cached 12h in synced STATE so both phones reuse it.
   async function delegBizSnap(){
@@ -21090,6 +21130,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var priorThread = (t.work.thread || []);
     t.work.thread = priorThread.concat([{ u: reply, at: new Date().toISOString() }]);
     save();
+    eniMemLearn(reply, 'reply');   // fire-and-forget — durable facts stick
     delegRunning[id] = Date.now(); render();
     dumpWorkView(kind, id, gid);   // flip the viewer into its updating state
     var sys = delegSys()
@@ -21314,6 +21355,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '<input id="sched-fx-end" type="time" aria-label="End" style="' + schedInputStyle() + '">'
         + '<button onclick="schedAddFixed()" class="btn btn-ghost btn-sm" style="border-radius:8px;flex-shrink:0">Add</button>'
         + '</div>';
+    }
+    var memList = (STATE.eniMemory || []);
+    h += '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:12px 0 6px">🧠 Eni\'s memory</div>';
+    if (memList.length){
+      memList.slice().reverse().forEach(function(m){
+        h += '<div style="display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-size:12px;color:var(--ink);line-height:1.4"><span style="flex:1;min-width:0">' + esc(m.t) + '</span><button onclick="dumpMemDel(\'' + m.id + '\')" title="Forget" style="background:none;border:none;color:var(--border-mid);font-size:13px;cursor:pointer;flex-shrink:0;padding:0 2px">✕</button></div>';
+      });
+    } else {
+      h += '<div style="font-size:11.5px;color:var(--muted)">Nothing yet — Eni learns automatically from your replies and notes.</div>';
     }
     return h + '</div>';
   }
