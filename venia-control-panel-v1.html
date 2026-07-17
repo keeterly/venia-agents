@@ -1567,7 +1567,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '165';
+  const BUILD = '166';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13944,7 +13944,8 @@ function agentActionSpec(key) {
       + '```venia:action\n'
       + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, Country","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","approach":"Optional first-move suggestion"}]}\n'
       + '```\n'
-      + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.';
+      + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.'
+      + slCrmKnownAccountsHint();
   }
   if (key !== 'pr') return '';   // PR handled below
   return '\n\nACTIONS — you can take ONE real action in VENIA, but only when the user clearly asks for it:\n'
@@ -14270,16 +14271,55 @@ window.slOpenBuyers = function () {
 };
 
 // Execute an add_buyers action: save the prospects and show a confirmation card.
+// Normalize an account name for dupe-matching: lowercase, drop a leading
+// "the", strip punctuation, collapse whitespace. "The Voo Store," == "voo store".
+function slAcctKey(name) {
+  return String(name || '').toLowerCase().replace(/^the\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Soft anti-dupe guard: tell Eni which stores are already in the CRM so she
+// proposes NEW ones instead of re-suggesting saved accounts (capped so the
+// prompt stays lean). The client-side dedup on apply is the hard guarantee.
+function slCrmKnownAccountsHint() {
+  const names = ((window.STATE && STATE.slBuyers) || []).map(b => String(b.name || '').trim()).filter(Boolean);
+  if (!names.length) return '';
+  const shown = names.slice(0, 60);
+  return '\nALREADY IN THE CRM — do NOT propose or re-add any of these; suggest different stores: '
+    + shown.join('; ') + (names.length > shown.length ? '; …and ' + (names.length - shown.length) + ' more' : '') + '.';
+}
+
 function agentRunAddBuyers(action, chatBody) {
-  const built = agentBuildBuyers(action);
-  if (!built.length) { appendAgentNote(chatBody, 'Tell me which stores to add and I\'ll save them as prospects.'); return; }
+  const proposed = agentBuildBuyers(action);
+  if (!proposed.length) { appendAgentNote(chatBody, 'Tell me which stores to add and I\'ll save them as prospects.'); return; }
   if (!STATE.slBuyers) STATE.slBuyers = [];
+  // Guard against duplicates: skip any store already in the CRM, and any repeat
+  // within this same batch. Eni often re-proposes stores she (or you) added
+  // earlier — those must not pile up as copies.
+  const seen = new Set((STATE.slBuyers || []).map(b => slAcctKey(b.name)));
+  const skipped = [];
+  const built = [];
+  proposed.forEach(b => {
+    const key = slAcctKey(b.name);
+    if (!key) return;
+    if (seen.has(key)) { skipped.push(b.name); return; }
+    seen.add(key);
+    built.push(b);
+  });
+  if (!built.length) {
+    appendAgentNote(chatBody, skipped.length === 1
+      ? `“${skipped[0]}” is already in your CRM — nothing to add.`
+      : `Those ${skipped.length} stores are already in your CRM — nothing new to add.`);
+    return;
+  }
   built.forEach(b => STATE.slBuyers.unshift(b));
   save();
-  try { logActivity('Sales: ' + built.length + ' prospect(s) added by agent'); } catch (e) {}
+  try { logActivity('Sales: ' + built.length + ' prospect(s) added by agent' + (skipped.length ? ' (' + skipped.length + ' dupe(s) skipped)' : '')); } catch (e) {}
   if (isSalesBuyersVisible()) window.slOpenBuyers();   // refresh the list only if it's already on screen
 
   const ids = built.map(b => b.id).join(',');
+  const dupeNote = skipped.length
+    ? '<div style="font-size:10px;color:var(--muted);margin-top:6px">' + skipped.length + ' already in your CRM — skipped: ' + escHtml(skipped.slice(0,4).join(', ')) + (skipped.length > 4 ? '…' : '') + '</div>'
+    : '';
   const rows = built.map(b => {
     const tl = AGENT_TIER_LABEL[b.tier] || '';
     const meta = [b.type, b.location].filter(Boolean).join(' · ');
@@ -14298,7 +14338,7 @@ function agentRunAddBuyers(action, chatBody) {
     '<div class="ag-msg-bubble" style="border-color:var(--ink)">' +
       '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + built.length + ' prospect' + (built.length > 1 ? 's' : '') + ' added</div>' +
       '<div style="font-size:10px;color:var(--muted);margin-bottom:2px">Saved to Buyers (CRM) at stage “New” — yours to review and contact.</div>' +
-      rows +
+      rows + dupeNote +
       '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
         '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="slOpenBuyers()">Open CRM</button>' +
         '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoBuyers(\'' + ids + '\', this)">Undo</button>' +
@@ -15658,6 +15698,35 @@ function slMigrateLeads() {
 }
 setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} }, 3000);
 setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} }, 20000);   // again after initial sync settles
+
+// One-time cleanup for duplicates already piled up before the add-buyers dedup
+// guard shipped. CONSERVATIVE: only collapses UNTOUCHED copies of a same-named
+// account (no logged touch, still at "New", no planned follow-up) — a record
+// you've actually worked is never removed. Runs on boot and after sync settles.
+function slDedupeBuyers() {
+  const arr = (window.STATE && STATE.slBuyers) || [];
+  if (arr.length < 2) return 0;
+  const groups = {};
+  arr.forEach(b => { const k = slAcctKey(b.name); if (k) (groups[k] = groups[k] || []).push(b); });
+  const worked = (b) => !!(b.log && b.log.length) || (b.stage && b.stage !== 'new') || !!b.nextDate || !!b.orderId;
+  const removeIds = new Set();
+  Object.keys(groups).forEach(k => {
+    const list = groups[k];
+    if (list.length < 2) return;
+    // Keep a worked record if one exists, else the earliest-created copy.
+    const keeper = list.find(worked) ||
+      list.slice().sort((a,b) => String(a.createdAt||'9999').localeCompare(String(b.createdAt||'9999')))[0];
+    list.forEach(b => { if (b !== keeper && !worked(b)) removeIds.add(b.id); });
+  });
+  if (!removeIds.size) return 0;
+  STATE.slBuyers = arr.filter(b => !removeIds.has(b.id));
+  save();
+  try { logActivity('CRM: cleaned up ' + removeIds.size + ' duplicate prospect(s)'); } catch (e) {}
+  if (isSalesBuyersVisible()) { try { window.slOpenBuyers(); } catch (e) {} }
+  return removeIds.size;
+}
+setTimeout(function(){ try { slDedupeBuyers(); } catch (e) {} }, 3500);
+setTimeout(function(){ try { slDedupeBuyers(); } catch (e) {} }, 21000);
 
 function slExportBuyers() {
   if (!STATE.slBuyers || !STATE.slBuyers.length) { showToast('No buyers to export'); return; }
