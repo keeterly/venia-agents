@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '130';
+  const BUILD = '131';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20779,7 +20779,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function delegBizSnap(){
     try {
       var snap = STATE.bizSnap;
-      if (snap && snap.v === 2 && snap.at && (Date.now() - new Date(snap.at).getTime()) < 12 * 60 * 60 * 1000) return;
+      if (snap && snap.v !== 2) { delete STATE.bizSnap; snap = null; }   // stale v1 text misleads Eni — drop it
+      // Capped-history snapshots retry hourly so granting read_all_orders
+      // in Shopify heals the picture fast; full ones refresh every 12h.
+      var ttl = (snap && snap.capped) ? 1 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
+      if (snap && snap.v === 2 && snap.at && (Date.now() - new Date(snap.at).getTime()) < ttl) return;
       var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
       var tm = ctrl ? setTimeout(function(){ ctrl.abort(); }, 12000) : null;
       var year = new Date().getFullYear();
@@ -20806,15 +20810,33 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var tops = Object.keys(top).sort(function(a, b){ return top[b] - top[a]; }).slice(0, 5)
         .map(function(k){ return k + ' ×' + top[k]; }).join(', ');
       var money = function(x){ return '$' + Math.round(x).toLocaleString('en-US'); };
-      var yoy = prev > 0 ? Math.round(((ytd - prev) / prev) * 100) : null;
-      STATE.bizSnap = { at: new Date().toISOString(), v: 2,
-        txt: 'SHOPIFY LIVE (fetched ' + new Date().toISOString().slice(0, 10) + '): '
+      var oldest = null;
+      orders.forEach(function(o){ var ts = new Date(o.created_at).getTime(); if (oldest === null || ts < oldest) oldest = ts; });
+      // Shopify caps apps WITHOUT the read_all_orders scope at 60 days of
+      // history. If the oldest visible order sits well after what we asked
+      // for, say so plainly instead of dressing a 60-day window up as YTD.
+      // The 60-day-cap signature: nothing older than ~70 days despite asking
+      // for 18 months. (A genuinely young store's YTD math is unaffected.)
+      var capped = oldest !== null && oldest > (Date.now() - 70 * 864e5);
+      var oldestStr = oldest !== null ? new Date(oldest).toISOString().slice(0, 10) : '?';
+      var txt;
+      if (capped && oldest > jan1){
+        txt = 'SHOPIFY LIVE (fetched ' + new Date().toISOString().slice(0, 10) + '): Shopify only returned orders back to ' + oldestStr
+          + ' — the Admin API token lacks the read_all_orders scope (Shopify\'s default is 60 days of history), so YTD and YoY CANNOT be computed yet. '
+          + 'Visible window ' + oldestStr + '→today: ' + (ytdN + prevN) + ' orders, ' + money(ytd + prev) + ' gross, AOV ' + money((ytd + prev) / Math.max(1, ytdN + prevN))
+          + '. Last 30 days: ' + n30 + ' orders, ' + money(r30)
+          + '. Top sellers in window: ' + (tops || 'n/a') + '.';
+      } else {
+        var yoy = prev > 0 ? Math.round(((ytd - prev) / prev) * 100) : null;
+        txt = 'SHOPIFY LIVE (fetched ' + new Date().toISOString().slice(0, 10) + '): '
           + 'YTD ' + year + ': ' + money(ytd) + ' across ' + ytdN + ' orders (AOV ' + money(ytd / Math.max(1, ytdN)) + ')'
           + (yoy !== null ? ', ' + (yoy >= 0 ? '+' : '') + yoy + '% vs the same period ' + (year - 1) + ' (' + money(prev) + ', ' + prevN + ' orders)' : '')
-          + '. Trailing 12 months: ' + money(t12)
+          + (capped ? '' : '. Trailing 12 months: ' + money(t12))
           + '. Last 30 days: ' + n30 + ' orders, ' + money(r30)
-          + '. Top sellers since Jan ' + (year - 1) + ': ' + (tops || 'n/a') + '.'
-          + (data.truncated ? ' (History beyond the most recent 2,500 orders not included.)' : '') };
+          + '. Top sellers since ' + oldestStr + ': ' + (tops || 'n/a') + '.'
+          + (data.truncated ? ' (History beyond the most recent 2,500 orders not included.)' : '');
+      }
+      STATE.bizSnap = { at: new Date().toISOString(), v: 2, capped: capped, txt: txt };
       save();
     } catch(e){}
   }
