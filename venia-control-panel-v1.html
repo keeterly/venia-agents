@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '123';
+  const BUILD = '124';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20103,7 +20103,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.innerHTML = '<div style="background:var(--bg);width:100%;max-width:560px;border-radius:18px 18px 0 0;padding:18px 16px calc(20px + var(--sab,0px));box-shadow:0 -8px 40px rgba(0,0,0,.3)" onclick="event.stopPropagation()">'
       + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:6px">Tell Eni what changed</div>'
       + '<div style="font-size:14px;font-weight:700;color:var(--ink);margin-bottom:4px">' + esc(g.t || 'Plan') + '</div>'
-      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Talk to this goal — paste an email, a decision, a date change. Eni reworks the plan around it.</div>'
+      + '<div style="font-size:11.5px;color:var(--muted);line-height:1.45;margin-bottom:12px">Talk to this goal — paste an email, a decision, a date change. Eni reworks the plan on a server — you can close the app; it lands when done.</div>'
       + '<textarea id="dump-info-input" rows="4" placeholder="e.g. Just got an email — the Marais showroom fell through, but LABBYE offered theirs for Oct 2–4. Adjust the plan and add a thank-you reply." onkeydown="if((event.metaKey||event.ctrlKey)&&event.key===\'Enter\'){dumpReprocessMap(\'' + gid + '\')}" style="width:100%;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;margin-bottom:12px"></textarea>'
       + '<div style="display:flex;gap:8px">'
       +   '<button onclick="dumpReprocessMap(\'' + gid + '\')" class="btn btn-gold dump-reshape-btn" style="flex:1;min-height:46px;border-radius:11px">✦ Update goal</button>'
@@ -20112,55 +20112,80 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.body.appendChild(ov);
     setTimeout(function(){ var t = document.getElementById('dump-info-input'); if (t) t.focus(); }, 100);
   };
+  // Apply a reshape result (strict JSON from Eni) to the goal — shared by the
+  // server job pipeline and the in-app fallback. Progress on kept steps carries.
+  function delegApplyReshape(gid, out){
+    var g = items().find(function(i){ return i.id === gid && isGroup(i); });
+    if (!g || !out || !String(out).trim()) return false;
+    var data = extractJSON(String(out));
+    var steps = (data && Array.isArray(data.steps)) ? data.steps.filter(Boolean).map(String) : null;
+    if (!steps || !steps.length) return false;
+    var oldDone = {}; (g.children || []).forEach(function(c){ oldDone[norm(c.t)] = c.done; });
+    var kids = steps.map(function(st){ return { id: uid(), t: st, done: !!oldDone[norm(st)] }; });
+    var byNorm = {}; kids.forEach(function(c){ var k = norm(c.t); if (byNorm[k] == null) byNorm[k] = c.id; });
+    var used = {};
+    var brs = (data && Array.isArray(data.branches)) ? data.branches : [];
+    var branches = brs.map(function(b){
+      var strs = (b && Array.isArray(b.steps)) ? b.steps.filter(Boolean).map(String) : [];
+      var ids = [];
+      strs.forEach(function(str){ var cid = byNorm[norm(str)]; if (cid && !used[cid]){ used[cid] = true; ids.push(cid); } });
+      return { label: String((b && b.label) || 'Branch'), ids: ids };
+    }).filter(function(b){ return b.ids.length; });
+    var leftover = kids.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
+    if (leftover.length) branches.push({ label: 'Steps', ids: leftover });
+    if (data.title && String(data.title).trim()) g.t = String(data.title).trim();
+    if (data.due && /^\d{4}-\d{2}-\d{2}$/.test(String(data.due))) g.due = String(data.due);
+    g.children = kids;
+    g.web = branches.length ? { branches: branches, at: new Date().toISOString() } : undefined;   // fresh structure — drop stale positions/extras
+    syncGroupDone(g);
+    save();
+    logActivity('Goal reshaped with new info — ' + (g.t || '').slice(0, 40));
+    if (document.getElementById('dump-fullmap') && fm.gid === gid){ fmRenderCanvas(); fmFit(); } else { render(); }
+    return true;
+  }
   window.dumpReprocessMap = async function(gid){
     var g = items().find(function(i){ return i.id === gid && isGroup(i); }); if (!g) return;
     var inp = document.getElementById('dump-info-input'); var info = (inp && inp.value || '').trim();
     if (!info){ showToast('Add some info first','info'); return; }
     var btn = document.querySelector('.dump-reshape-btn'); if (btn){ btn.disabled = true; btn.textContent = '◐ Reshaping…'; }
+    var curSteps = (g.children || []).map(function(c){ return '- [' + (c.done ? 'x' : ' ') + '] ' + c.t; }).join('\n');
+    var curBr = (g.web && g.web.branches || []).map(function(b){
+      var names = (b.ids || []).map(function(id){ var c = g.children.find(function(x){ return x.id === id; }); return c ? c.t : null; }).filter(Boolean);
+      return '  • ' + b.label + ': ' + names.join('; ');
+    }).join('\n');
+    var extras = (g.web && g.web.extra || []).map(function(e){ return '- ' + e.t; }).join('\n');
+    var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
+      + 'Below is an existing plan with its mind-map structure, plus NEW information the founder just added. '
+      + 'Reprocess the ENTIRE plan to reflect the latest thinking: add, remove, merge, rename or reorder steps and branches as needed, and honor the new info (an email, a decision, a constraint, a date change). Keep what still applies. '
+      + 'Use 4–10 steps and 2–4 branches. Preserve the wording of steps you keep so their progress carries over. If the info implies a target date, return it as "due".\n\n'
+      + 'Respond with ONLY a JSON object (no prose, no code fence): { "title": "short plan title", "due": "YYYY-MM-DD or empty", "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
+    var memTxt = ((STATE.eniMemory || []).slice(-12).map(function(m){ return '- ' + m.t; })).join('\n');
+    var user = 'Current plan title: ' + g.t + '\nCurrent steps:\n' + (curSteps || '(none)') + '\nCurrent branches:\n' + (curBr || '(none)') + (extras ? '\nExtra idea notes on the map:\n' + extras : '')
+      + (memTxt ? '\n\nKnown context (Eni\'s long-term memory):\n' + memTxt : '')
+      + '\n\nNEW INFO:\n' + info + '\n\n' + plmContext();
+    eniMemLearn(info, 'goal-update');   // durable facts in the note stick
+    delegRunning[gid] = Date.now();
+    // Server-side first — the reshape survives closing the app; the goal
+    // updates (and pings the phones) whenever a device next wakes.
+    if (await delegQueueServer('reshape', gid, '', info, sys, user)){
+      var o1 = document.getElementById('dump-info-modal'); if (o1) o1.remove();
+      showToast('✦ Eni is reshaping server-side — you can close the app', 'info');
+      delegWatch(); render();
+      return;
+    }
+    // Fallback: in-app (needs the app open).
+    render();
     try {
-      var curSteps = (g.children || []).map(function(c){ return '- [' + (c.done ? 'x' : ' ') + '] ' + c.t; }).join('\n');
-      var curBr = (g.web && g.web.branches || []).map(function(b){
-        var names = (b.ids || []).map(function(id){ var c = g.children.find(function(x){ return x.id === id; }); return c ? c.t : null; }).filter(Boolean);
-        return '  • ' + b.label + ': ' + names.join('; ');
-      }).join('\n');
-      var extras = (g.web && g.web.extra || []).map(function(e){ return '- ' + e.t; }).join('\n');
-      var sys = 'You are Eni, the operations brain for VENIA Collection — a two-person luxury fashion label in Los Angeles. '
-        + 'Below is an existing plan with its mind-map structure, plus NEW information the founder just added. '
-        + 'Reprocess the ENTIRE plan to reflect the latest thinking: add, remove, merge, rename or reorder steps and branches as needed, and honor the new info (an email, a decision, a constraint, a date change). Keep what still applies. '
-        + 'Use 4–10 steps and 2–4 branches. Preserve the wording of steps you keep so their progress carries over. If the info implies a target date, return it as "due".\n\n'
-        + 'Respond with ONLY a JSON object (no prose, no code fence): { "title": "short plan title", "due": "YYYY-MM-DD or empty", "steps": ["step", ...], "branches": [ { "label": "name", "steps": ["exact step", ...] } ] }';
-      var user = 'Current plan title: ' + g.t + '\nCurrent steps:\n' + (curSteps || '(none)') + '\nCurrent branches:\n' + (curBr || '(none)') + (extras ? '\nExtra idea notes on the map:\n' + extras : '') + '\n\nNEW INFO:\n' + info + '\n\n' + plmContext();
       var out = await callClaude(sys, user);
-      if (!out || !out.trim()) throw new Error('Empty response from Eni');
-      var data = extractJSON(out);
-      var steps = (data && Array.isArray(data.steps)) ? data.steps.filter(Boolean).map(String) : null;
-      if (!steps || !steps.length) throw new Error('Eni didn\'t return steps');
-      var oldDone = {}; (g.children || []).forEach(function(c){ oldDone[norm(c.t)] = c.done; });
-      var kids = steps.map(function(s){ return { id: uid(), t: s, done: !!oldDone[norm(s)] }; });
-      var byNorm = {}; kids.forEach(function(c){ var k = norm(c.t); if (byNorm[k] == null) byNorm[k] = c.id; });
-      var used = {};
-      var brs = (data && Array.isArray(data.branches)) ? data.branches : [];
-      var branches = brs.map(function(b){
-        var strs = (b && Array.isArray(b.steps)) ? b.steps.filter(Boolean).map(String) : [];
-        var ids = [];
-        strs.forEach(function(str){ var cid = byNorm[norm(str)]; if (cid && !used[cid]){ used[cid] = true; ids.push(cid); } });
-        return { label: String((b && b.label) || 'Branch'), ids: ids };
-      }).filter(function(b){ return b.ids.length; });
-      var leftover = kids.filter(function(c){ return !used[c.id]; }).map(function(c){ return c.id; });
-      if (leftover.length) branches.push({ label: 'Steps', ids: leftover });
-      if (data.title && String(data.title).trim()) g.t = String(data.title).trim();
-      if (data.due && /^\d{4}-\d{2}-\d{2}$/.test(String(data.due))) g.due = String(data.due);
-      g.children = kids;
-      g.web = branches.length ? { branches: branches, at: new Date().toISOString() } : undefined;   // fresh structure — drop stale positions/extras
-      syncGroupDone(g);
-      save();
-      var o = document.getElementById('dump-info-modal'); if (o) o.remove();
-      showToast('✦ Map reshaped','success');
-      logActivity('Mind map reshaped with new info — ' + (g.t || '').slice(0, 40));
-      if (document.getElementById('dump-fullmap')){ fm.gid = gid; fmRenderCanvas(); fmFit(); } else { render(); }
+      delete delegRunning[gid];
+      if (!delegApplyReshape(gid, out)) throw new Error('Eni didn\'t return a usable plan');
+      var o2 = document.getElementById('dump-info-modal'); if (o2) o2.remove();
+      showToast('✦ Goal reshaped', 'success');
     } catch(e){
+      delete delegRunning[gid];
+      render();
       showToast('Could not reshape — ' + String(e.message || e), 'error');
-      var b = document.querySelector('.dump-reshape-btn'); if (b){ b.disabled = false; b.textContent = '✦ Reshape map'; }
+      var b = document.querySelector('.dump-reshape-btn'); if (b){ b.disabled = false; b.textContent = '✦ Update goal'; }
     }
   };
 
@@ -20865,6 +20890,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         continue;
       }
       if (j.status !== 'done' && j.status !== 'error') continue;
+      if (j.kind === 'reshape'){
+        delete delegRunning[j.item_id];
+        if (j.status === 'done'){
+          var okR = delegApplyReshape(j.item_id, j.result);
+          var gR = delegTarget('reshape', j.item_id, '');
+          if (okR){
+            showToast('✦ Goal reshaped — ' + ((gR && gR.t) || '').slice(0, 40), 'success');
+            delegNotify('✦ Eni reshaped the goal', ((gR && gR.t) || 'Your goal') + ' — open Brainstorm to see the new plan');
+          } else if (gR){
+            showToast('✦ Reshape came back unusable — try ＋ Info again', 'error');
+          }
+        } else {
+          showToast('✦ Couldn\'t reshape — ' + String(j.result || 'try again').slice(0, 90), 'error');
+        }
+        try { await c.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
+        changed = true;
+        continue;
+      }
       var t = delegTarget(j.kind, j.item_id, j.gid || '');
       delete delegRunning[j.item_id];
       if (j.status === 'done' && t){
@@ -20920,6 +20963,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   function delegTarget(kind, id, gid){
     if (kind === 'step'){ var g = items().find(function(x){ return x.id === gid && isGroup(x); }); return g ? (g.children || []).find(function(c){ return c.id === id; }) : null; }
+    if (kind === 'reshape') return items().find(function(x){ return x.id === id && isGroup(x); });
     return items().find(function(x){ return x.id === id && !isGroup(x); });
   }
   window.dumpDelegate = function(kind, id, gid){
@@ -21710,7 +21754,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Collapsed: header + meta + a slim expand hint (no full step list).
       var collapsedPeek = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="padding:0 12px 10px 42px;font-size:11px;color:var(--muted);cursor:pointer">' + prog.done + '/' + kids.length + ' steps'
         + (kids.length >= 2 ? ' · <span onclick="event.stopPropagation();dumpTab(\'map\')" style="color:var(--ink);font-weight:600;cursor:pointer">◍ mind map</span>' : '') + '</div>';
-      return '<div style="border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
+      return '<div class="' + (delegRunning[i.id] ? 'dump-working' : '') + '" style="border-radius:12px;margin:10px 0;overflow:hidden;background:var(--bg)">'
         + head + meta + (collapsed ? collapsedPeek : (childHTML + footer)) + '</div>';
     };
 
