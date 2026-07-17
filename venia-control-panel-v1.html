@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '137';
+  const BUILD = '138';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3741,6 +3741,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <th onclick="sortStyles('status')">Stage ↕</th>
           <th>Drop</th>
           <th onclick="sortStyles('retail')">Retail ↕</th>
+          <th title="Live Shopify — units · revenue since Jan 1 last year">Sold</th>
           <th onclick="sortStyles('priority')">Priority ↕</th>
         </tr></thead>
         <tbody id="styles-table"></tbody></table>
@@ -5638,7 +5639,7 @@ function renderStyles() {
   });
   const tb = document.getElementById('styles-table');
   if (!tb) return;
-  if (!list.length) { tb.innerHTML = `<tr><td colspan="9"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles found</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); return; }
+  if (!list.length) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles found</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); return; }
   tb.innerHTML = list.map(s => `
     <tr onclick="openDp('${s.id}')" style="background:${BULK_SELECTED.has(s.id)?'var(--bg-hover)':''}">
       <td onclick="event.stopPropagation()" style="text-align:center;width:32px">
@@ -5651,9 +5652,11 @@ function renderStyles() {
       <td>${stageBadge(s.status)}</td>
       <td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>
       <td style="font-family:'DM Mono',monospace;font-size:10px">${s.retail?'$'+s.retail:'—'}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>
       <td>${priorityDot(s.priority)}</td>
     </tr>`).join('');
 
+  setTimeout(plmSalesRefresh, 0);
   updateBulkBar();
   // Archive-season button: only when a specific season is picked in a live view.
   const asBtn = document.getElementById('btn-archive-season');
@@ -7598,6 +7601,7 @@ function renderMobileStyleCards(list, containerId) {
         <div class="mob-style-card-bottom">
           <div class="mob-price">${s.retail ? '$'+s.retail : '—'}</div>
           <div class="mob-margin">${margin !== null ? margin+'% margin' : ''}</div>
+          <div class="mob-margin" style="flex:none;text-align:right">${(()=>{ const ss = typeof styleSalesFor === 'function' ? styleSalesFor(s) : null; return ss && ss.u ? 'sold ×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : ''; })()}</div>
           <div>${priorityDot(s.priority)}</div>
         </div>
       </div>`;
@@ -11842,6 +11846,44 @@ async function shopifyFetch(endpoint) {
 (function purgeLegacyShopifyToken(){
   try { if (typeof getKey === 'function' && getKey('shopify') && String(getKey('shopify')).startsWith('shpat_')) delKey('shopify'); } catch(e){}
 })();
+
+// ── Per-style sales attribution ──────────────────────────────────────
+// One cached pull (since Jan 1 last year) aggregated per product title,
+// joined to the line plan by normalized name. Refreshes every 12h.
+function plmSalesNorm(t){ return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function styleSalesFor(st){
+  const m = (STATE.styleSales && STATE.styleSales.map) || null;
+  return (m && st && m[plmSalesNorm(st.name)]) || null;
+}
+let _plmSalesBusy = false;
+async function plmSalesRefresh() {
+  if (_plmSalesBusy) return;
+  const ss = STATE.styleSales;
+  if (ss && ss.at && (Date.now() - new Date(ss.at).getTime()) < 12 * 60 * 60 * 1000) return;
+  if (typeof shopifyConnected === 'function' && !shopifyConnected()) return;
+  _plmSalesBusy = true;
+  try {
+    const min = (new Date().getFullYear() - 1) + '-01-01';
+    const r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'ordersAll', created_at_min: min }) });
+    if (!r.ok) return;
+    const d = await r.json();
+    const map = {};
+    (d.orders || []).filter(o => !o.cancelled_at && o.test !== true).forEach(o => {
+      (o.line_items || []).forEach(li => {
+        const k = plmSalesNorm(li.title);
+        if (!k) return;
+        if (!map[k]) map[k] = { u: 0, r: 0, last: '' };
+        map[k].u += li.quantity || 0;
+        map[k].r += (parseFloat(li.price || 0) || 0) * (li.quantity || 0);
+        if ((o.created_at || '') > map[k].last) map[k].last = o.created_at;
+      });
+    });
+    STATE.styleSales = { at: new Date().toISOString(), since: min, map: map };
+    // Live views re-draw once the numbers land.
+    try { if (STATE.currentPage === 'styles' && typeof renderStyles === 'function') renderStyles(); } catch(e){}
+  } catch(e){} finally { _plmSalesBusy = false; }
+}
 
 async function cmdLoadShopify() {
   const tableEl = document.getElementById('cmd-orders-table');
@@ -20843,7 +20885,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         lines.push('VENIA LINE PLAN (source of truth — use these numbers, not estimates): '
           + sts.length + ' styles — ' + Object.keys(byStatus).map(function(k){ return byStatus[k] + ' ' + k; }).join(', ') + '.');
         lines.push('Styles: ' + sts.slice(0, 24).map(function(x){
-          return (x.name || '?') + ' (' + (x.category || '?') + (x.gender ? ', ' + x.gender : '') + (x.retail ? ', $' + x.retail : '') + ')';
+          var ss = (typeof styleSalesFor === 'function') ? styleSalesFor(x) : null;
+          return (x.name || '?') + ' (' + (x.category || '?') + (x.gender ? ', ' + x.gender : '') + (x.retail ? ', $' + x.retail : '')
+            + (ss && ss.u ? ', sold ' + ss.u + ' units / $' + Math.round(ss.r).toLocaleString('en-US') + ' since Jan ' + (new Date().getFullYear() - 1) : '') + ')';
         }).join('; ') + (sts.length > 24 ? ' — plus ' + (sts.length - 24) + ' more.' : ''));
       }
       if (bsVeniaOn() && STATE.bizSnap && STATE.bizSnap.txt) lines.push(STATE.bizSnap.txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');
