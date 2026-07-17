@@ -78,9 +78,16 @@ export default async (req) => {
   if (action === 'ordersAll') {
     const min = /^\d{4}-\d{2}-\d{2}/.test(String(body.created_at_min || '')) ? String(body.created_at_min) : null;
     const fields = 'name,email,created_at,total_price,cancelled_at,test,financial_status,fulfillment_status,customer,line_items';
-    let url = `https://${domain}/admin/api/${version}/orders.json?status=any&limit=250&fields=${fields}`
-      + (min ? `&created_at_min=${encodeURIComponent(min)}` : '');
+    // Continuation: a prior call that filled its 10-page window returns `next`
+    // (Shopify's page_info cursor); pass it back to resume where it stopped —
+    // full history in resumable chunks, no function-timeout risk.
+    const cont = /^[A-Za-z0-9_=-]+$/.test(String(body.page_info || '')) ? String(body.page_info) : null;
+    let url = cont
+      ? `https://${domain}/admin/api/${version}/orders.json?limit=250&fields=${fields}&page_info=${encodeURIComponent(cont)}`
+      : `https://${domain}/admin/api/${version}/orders.json?status=any&limit=250&fields=${fields}`
+        + (min ? `&created_at_min=${encodeURIComponent(min)}` : '');
     const all = [];
+    let next = null;
     try {
       for (let page = 0; page < 10 && url; page++) {
         const r = await fetch(url, { method: 'GET', headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } });
@@ -100,8 +107,10 @@ export default async (req) => {
         const link = r.headers.get('link') || '';
         const m = link.match(/<([^>]+)>;\s*rel="next"/);
         url = m ? m[1] : null;
+        if (url) { try { next = new URL(url).searchParams.get('page_info'); } catch (_) { next = null; } }
+        else next = null;
       }
-      return json({ orders: all, truncated: !!url }, 200, cors);
+      return json({ orders: all, truncated: !!url, next: url ? next : null }, 200, cors);
     } catch (e) {
       return json({ error: String(e && e.message || e) }, 502, cors);
     }

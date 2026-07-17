@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '138';
+  const BUILD = '139';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1859,6 +1859,7 @@ body{padding-top:44px;box-sizing:border-box;}
               <option value="ytd">Year to date</option>
               <option value="12m">Last 12 months</option>
               <option value="2y">Since Jan 1 last year</option>
+              <option value="all">All time</option>
             </select>
             <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdLoadShopify()">↻ Refresh</button>
             <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdExportOrdersCSV()">↓ CSV</button>
@@ -11904,16 +11905,29 @@ async function cmdLoadShopify() {
       'ytd': { min: new Date(new Date().getFullYear(), 0, 1), label: 'YTD ' + new Date().getFullYear() },
       '12m': { min: new Date(Date.now() - 365 * 864e5), label: 'Last 12 months' },
       '2y':  { min: new Date(new Date().getFullYear() - 1, 0, 1), label: 'Since Jan 1 ' + (new Date().getFullYear() - 1) },
+      'all': { min: new Date(0), label: 'All time' },
     };
     let orders, rangeLabel;
     if (RANGES[sel]) {
-      const r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'ordersAll', created_at_min: RANGES[sel].min.toISOString().slice(0, 10) }) });
-      if (!r.ok) throw new Error('Shopify range pull failed (' + r.status + ')');
-      const d = await r.json();
+      // Follow the proxy's continuation cursor so deep histories come through
+      // whole — up to ~25k orders across 10 resumable chunks.
+      orders = [];
+      let pageInfo = null, chunks = 0, truncated = false;
+      do {
+        const bodyReq = pageInfo
+          ? { action: 'ordersAll', page_info: pageInfo }
+          : (sel === 'all' ? { action: 'ordersAll' } : { action: 'ordersAll', created_at_min: RANGES[sel].min.toISOString().slice(0, 10) });
+        const r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyReq) });
+        if (!r.ok) throw new Error('Shopify range pull failed (' + r.status + ')');
+        const d = await r.json();
+        orders = orders.concat(d.orders || []);
+        pageInfo = d.next || null;
+        truncated = !!d.truncated && !pageInfo;
+        chunks++;
+      } while (pageInfo && chunks < 10);
       const cut = RANGES[sel].min.getTime();
-      orders = (d.orders || []).filter(o => new Date(o.created_at).getTime() >= cut);
-      rangeLabel = RANGES[sel].label + (d.truncated ? ' (most recent 2,500)' : '');
+      if (cut > 0) orders = orders.filter(o => new Date(o.created_at).getTime() >= cut);
+      rangeLabel = RANGES[sel].label + (truncated || (pageInfo && chunks >= 10) ? ' (partial — very deep history)' : '');
     } else {
       const data = await shopifyFetch(`/orders.json?limit=${sel}&status=any`);
       orders = data.orders || [];
