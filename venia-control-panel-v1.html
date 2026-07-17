@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '141';
+  const BUILD = '142';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5023,6 +5023,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
+  'googleApiKey', 'driveFolder',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -9361,30 +9362,135 @@ function deleteComment(styleId, commentId) {
 }
 
 // ── Google Drive page ─────────────────────────────────────────────────────
+// ── GOOGLE DRIVE — real picker + Shared-Drive-only writes ─────────────────
+// Scope is drive.file: the app can read exactly the files the founders PICK
+// (the Google Picker grants per-file access, Shared Drives included) and can
+// create files — which we only ever do inside the designated Shared Drive
+// folder. Reading is pick-anything; writing is the new drive, nowhere else.
+function driveApiKey(){ return (STATE.googleApiKey || localStorage.getItem('venia-google-apikey') || '').trim(); }
+window.setDriveApiKey = function(v){
+  v = String(v || '').trim();
+  STATE.googleApiKey = v || null;
+  try { localStorage.setItem('venia-google-apikey', v); } catch(e){}
+  save(); showToast(v ? 'API key saved' : 'API key cleared', 'success');
+  if (STATE.currentPage === 'gdrive') renderGDrivePage();
+};
+function driveReady(){ return !!(googleClientId() && driveApiKey()); }
+let _driveTok = null;
+function driveToken(interactive){
+  return new Promise((resolve, reject) => {
+    if (_driveTok && _driveTok.exp > Date.now() + 30000) return resolve(_driveTok.token);
+    if (!window.google || !google.accounts || !google.accounts.oauth2) return reject(new Error('Google library not loaded'));
+    if (!window._driveTC){
+      window._driveTC = google.accounts.oauth2.initTokenClient({
+        client_id: googleClientId(),
+        scope: 'https://www.googleapis.com/auth/drive.file',
+        callback: () => {},
+      });
+    }
+    const c = window._driveTC;
+    c.callback = (r) => {
+      if (r && r.access_token){ _driveTok = { token: r.access_token, exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000 }; resolve(r.access_token); }
+      else reject(new Error((r && r.error) || 'no token'));
+    };
+    try { c.requestAccessToken({ prompt: interactive ? 'consent' : '' }); } catch(e){ reject(e); }
+  });
+}
+async function driveTokenSmart(){ try { return await driveToken(false); } catch(e){ return driveToken(true); } }
+let _pickerLoaded = false;
+function loadPicker(){
+  return new Promise((resolve, reject) => {
+    if (_pickerLoaded && window.google && google.picker) return resolve();
+    const go = () => window.gapi.load('picker', { callback: () => { _pickerLoaded = true; resolve(); }, onerror: () => reject(new Error('Picker failed to load')) });
+    if (window.gapi && window.gapi.load) return go();
+    const sc = document.createElement('script');
+    sc.src = 'https://apis.google.com/js/api.js';
+    sc.onload = go; sc.onerror = () => reject(new Error('Google API script failed to load'));
+    document.head.appendChild(sc);
+  });
+}
+window.drivePick = async function(opts){
+  const tok = await driveTokenSmart();
+  await loadPicker();
+  return new Promise((resolve) => {
+    let view;
+    if (opts && opts.folders){
+      view = new google.picker.DocsView(google.picker.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true).setEnableDrives(true);
+    } else {
+      view = new google.picker.DocsView().setIncludeFolders(true).setEnableDrives(true);
+    }
+    new google.picker.PickerBuilder()
+      .setOAuthToken(tok)
+      .setDeveloperKey(driveApiKey())
+      .addView(view)
+      .enableFeature(google.picker.Feature.SUPPORT_DRIVES)
+      .setCallback((data) => {
+        if (data.action === google.picker.Action.PICKED) resolve((data.docs && data.docs[0]) || null);
+        else if (data.action === google.picker.Action.CANCEL) resolve(null);
+      })
+      .build()
+      .setVisible(true);
+  });
+};
+window.driveChooseFolder = async function(){
+  try {
+    const doc = await window.drivePick({ folders: true });
+    if (!doc) return;
+    STATE.driveFolder = { id: doc.id, name: doc.name };
+    save(); showToast('Uploads will go to “' + doc.name + '”', 'success');
+    if (STATE.currentPage === 'gdrive') renderGDrivePage();
+  } catch(e){ showToast('Could not open the picker — ' + (e.message || e), 'error'); }
+};
+window.driveUpload = async function(file, cb){
+  try {
+    if (!file) return;
+    if (!STATE.driveFolder || !STATE.driveFolder.id){ showToast('Choose the Shared Drive folder first (Product → Drive)', 'warning'); return; }
+    const tok = await driveTokenSmart();
+    // The ONLY write path — and it always targets the designated folder.
+    const fd = new FormData();
+    fd.append('metadata', new Blob([JSON.stringify({ name: file.name, parents: [STATE.driveFolder.id] })], { type: 'application/json' }));
+    fd.append('file', file);
+    const r = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + tok }, body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+    showToast('Uploaded to Drive — ' + j.name, 'success');
+    if (cb) cb(j);
+    return j;
+  } catch(e){ showToast('Upload failed — ' + (e.message || e), 'error'); }
+};
+window.driveUploadFromInput = function(input){
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (f) window.driveUpload(f);
+};
+
 function renderGDrivePage() {
   const el = document.getElementById('gdrive-content');
   if (!el) return;
-  const connected = gIsConnected();
+  const hasClient = !!googleClientId();
+  const hasKey = !!driveApiKey();
+  const folder = STATE.driveFolder;
+  const row = (ok, label, extra) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:11px">
+    <span style="color:${ok ? 'var(--green)' : 'var(--muted)'};width:16px;flex-shrink:0">${ok ? '✓' : '○'}</span>
+    <span style="flex:1;min-width:0">${label}</span>${extra || ''}</div>`;
   el.innerHTML = `
-    <div style="max-width:560px;padding:32px 0">
-      <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:16px;font-weight:700">Google Drive Integration</div>
-      ${connected ? `
-        <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border:1px solid var(--green);background:var(--bg-off);margin-bottom:20px">
-          <span style="color:var(--green);font-size:16px">✓</span>
-          <div>
-            <div style="font-size:11px;font-weight:600">Connected as ${STATE.googleUser?.name || 'Google User'}</div>
-            <div style="font-size:10px;color:var(--muted)">${STATE.googleUser?.email || ''}</div>
-          </div>
-          <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="gSignOut()">Sign out</button>
-        </div>
-      ` : `
-        <div style="padding:12px 16px;border:1px solid var(--border);background:var(--bg-off);margin-bottom:20px;font-size:11px;color:var(--muted)">
-          Sign in with Google to attach Drive files to styles — tech pack sketches, CLO3D files, samples photos.
-        </div>
-        <button class="btn btn-gold btn-sm" onclick="gSignIn()">Connect Google Drive</button>
-      `}
-      <div style="margin-top:24px;font-size:10px;color:var(--muted);line-height:1.8">
-        Once connected, you can paste Drive links directly into Tech Pack sketch fields, or use the "Browse Drive" button to pick files.
+    <div style="max-width:560px;padding:24px 0">
+      <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;font-weight:700">Google Drive — Shared Drive</div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">Pick files from anywhere you can see (Shared Drives included). Uploads write <strong>only</strong> to the designated Shared Drive folder — never anywhere else.</div>
+      ${row(hasClient, 'Google Client ID (Settings → API Keys)')}
+      ${row(hasKey, 'Picker API key', `<input class="fi" style="width:190px;font-size:10px;padding:6px 8px" placeholder="AIza…" value="${hasKey ? '••••••••' : ''}" onchange="setDriveApiKey(this.value)">`)}
+      ${row(!!(folder && folder.id), folder && folder.id ? 'Uploads go to “' + folder.name + '”' : 'Shared Drive folder not chosen', `<button class="btn btn-ghost btn-sm" onclick="driveChooseFolder()">${folder && folder.id ? 'Change' : 'Choose folder'}</button>`)}
+      <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+        <label class="btn btn-gold btn-sm" style="cursor:pointer">⬆ Upload a file<input type="file" style="display:none" onchange="driveUploadFromInput(this)"></label>
+        <button class="btn btn-ghost btn-sm" onclick="drivePick().then(d=>{ if(d) showToast('Picked: '+d.name,'success'); })">📂 Test the picker</button>
+      </div>
+      <div style="margin-top:22px;font-size:10px;color:var(--muted);line-height:1.8">
+        <strong>One-time setup:</strong> in the same Google Cloud project as your Client ID —
+        1) enable the <em>Google Picker API</em> and <em>Drive API</em> (APIs &amp; Services → Library);
+        2) create an <em>API key</em> (Credentials → Create credentials → API key) and paste it above;
+        3) tap “Choose folder” and pick the new Shared Drive folder.
+        Tech Pack “📎 Attach link” buttons then open the real picker automatically.
       </div>
     </div>`;
 }
@@ -22310,15 +22416,21 @@ function gSignOut() {
 }
 
 function tpPickFile(styleId, field, label) {
-  // Google Drive picker — requires Drive API to be loaded
+  const apply = (url, name) => {
+    const s = STATE.styles.find(x => x.id === styleId);
+    if (!s || !url) return;
+    s[field] = url;
+    save();
+    openDp(styleId);
+    showToast(label + (name ? ' — ' + name : ' link saved'), 'success');
+  };
+  if (typeof driveReady === 'function' && driveReady()) {
+    window.drivePick().then(doc => { if (doc) apply(doc.url, doc.name); })
+      .catch(() => { const url = prompt('Paste a Google Drive or public file URL for "' + label + '":'); apply(url); });
+    return;
+  }
   const url = prompt('Paste a Google Drive or public file URL for "' + label + '":');
-  if (!url) return;
-  const s = STATE.styles.find(x => x.id === styleId);
-  if (!s) return;
-  s[field] = url;
-  save();
-  openDp(styleId);
-  showToast(label + ' link saved','success');
+  apply(url);
 }
 
 // ── GOOGLE SIGN-IN ────────────────────────────────────────────
