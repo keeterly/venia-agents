@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '124';
+  const BUILD = '125';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20737,34 +20737,42 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function delegBizSnap(){
     try {
       var snap = STATE.bizSnap;
-      if (snap && snap.at && (Date.now() - new Date(snap.at).getTime()) < 12 * 60 * 60 * 1000) return;
+      if (snap && snap.v === 2 && snap.at && (Date.now() - new Date(snap.at).getTime()) < 12 * 60 * 60 * 1000) return;
       var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      var tm = ctrl ? setTimeout(function(){ ctrl.abort(); }, 6000) : null;
+      var tm = ctrl ? setTimeout(function(){ ctrl.abort(); }, 12000) : null;
+      var year = new Date().getFullYear();
+      // Pull since Jan 1 of LAST year (paginated server-side) so year-to-date
+      // AND year-over-year both come from real orders.
       var r = await fetch('/api/shopify', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'orders', limit: 250, status: 'any' }), signal: ctrl ? ctrl.signal : undefined });
+        body: JSON.stringify({ action: 'ordersAll', created_at_min: (year - 1) + '-01-01' }), signal: ctrl ? ctrl.signal : undefined });
       if (tm) clearTimeout(tm);
       if (!r || !r.ok) return;
       var data = await r.json();
       var orders = (data.orders || []).filter(function(o){ return !o.cancelled_at && o.test !== true; });
       if (!orders.length) return;
-      var d30 = Date.now() - 30 * 864e5;
-      var rev = 0, rev30 = 0, n30 = 0, oldest = null, top = {};
+      var now = Date.now(), jan1 = new Date(year, 0, 1).getTime(), d30 = now - 30 * 864e5, d365 = now - 365 * 864e5;
+      var pJan1 = new Date(year - 1, 0, 1).getTime(), pCut = pJan1 + (now - jan1);   // same day-of-year last year
+      var ytd = 0, ytdN = 0, prev = 0, prevN = 0, r30 = 0, n30 = 0, t12 = 0, top = {};
       orders.forEach(function(o){
         var v = parseFloat(o.total_price) || 0, ts = new Date(o.created_at).getTime();
-        rev += v;
-        if (ts >= d30){ rev30 += v; n30++; }
-        if (oldest === null || ts < oldest) oldest = ts;
+        if (ts >= jan1){ ytd += v; ytdN++; }
+        else if (ts >= pJan1 && ts < pCut){ prev += v; prevN++; }
+        if (ts >= d30){ r30 += v; n30++; }
+        if (ts >= d365) t12 += v;
         (o.line_items || []).forEach(function(li){ var k = li.title || '?'; top[k] = (top[k] || 0) + (li.quantity || 0); });
       });
       var tops = Object.keys(top).sort(function(a, b){ return top[b] - top[a]; }).slice(0, 5)
         .map(function(k){ return k + ' ×' + top[k]; }).join(', ');
       var money = function(x){ return '$' + Math.round(x).toLocaleString('en-US'); };
-      STATE.bizSnap = { at: new Date().toISOString(),
+      var yoy = prev > 0 ? Math.round(((ytd - prev) / prev) * 100) : null;
+      STATE.bizSnap = { at: new Date().toISOString(), v: 2,
         txt: 'SHOPIFY LIVE (fetched ' + new Date().toISOString().slice(0, 10) + '): '
-          + orders.length + (orders.length >= 250 ? ' most-recent' : '') + ' orders since ' + new Date(oldest).toISOString().slice(0, 10)
-          + ' — ' + money(rev) + ' gross, AOV ' + money(rev / orders.length)
-          + '. Last 30 days: ' + n30 + ' orders, ' + money(rev30)
-          + '. Top sellers: ' + (tops || 'n/a') + '.' };
+          + 'YTD ' + year + ': ' + money(ytd) + ' across ' + ytdN + ' orders (AOV ' + money(ytd / Math.max(1, ytdN)) + ')'
+          + (yoy !== null ? ', ' + (yoy >= 0 ? '+' : '') + yoy + '% vs the same period ' + (year - 1) + ' (' + money(prev) + ', ' + prevN + ' orders)' : '')
+          + '. Trailing 12 months: ' + money(t12)
+          + '. Last 30 days: ' + n30 + ' orders, ' + money(r30)
+          + '. Top sellers since Jan ' + (year - 1) + ': ' + (tops || 'n/a') + '.'
+          + (data.truncated ? ' (History beyond the most recent 2,500 orders not included.)' : '') };
       save();
     } catch(e){}
   }

@@ -71,6 +71,39 @@ export default async (req) => {
     return json({ error: 'Shopify not configured — set SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN in Netlify environment variables.' }, 400, cors);
   }
 
+  // Aggregated order history: loops Shopify's pagination server-side so the
+  // client gets ONE slim payload covering a whole date range (year-to-date,
+  // trailing 12 months…) instead of a single 250-order page. Read-only, slim
+  // fields, capped at 10 pages / 2,500 orders.
+  if (action === 'ordersAll') {
+    const min = /^\d{4}-\d{2}-\d{2}/.test(String(body.created_at_min || '')) ? String(body.created_at_min) : null;
+    const fields = 'created_at,total_price,cancelled_at,test,line_items';
+    let url = `https://${domain}/admin/api/${version}/orders.json?status=any&limit=250&fields=${fields}`
+      + (min ? `&created_at_min=${encodeURIComponent(min)}` : '');
+    const all = [];
+    try {
+      for (let page = 0; page < 10 && url; page++) {
+        const r = await fetch(url, { method: 'GET', headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } });
+        if (!r.ok) {
+          if (r.status === 401 || r.status === 403) return json({ error: `Shopify rejected the credentials (${r.status}).` }, 401, cors);
+          return json({ error: `Shopify ${r.status} ${r.statusText} (API ${version})` }, 502, cors);
+        }
+        const j = await r.json();
+        (j.orders || []).forEach((o) => all.push({
+          created_at: o.created_at, total_price: o.total_price,
+          cancelled_at: o.cancelled_at, test: o.test,
+          line_items: (o.line_items || []).map((li) => ({ title: li.title, quantity: li.quantity })),
+        }));
+        const link = r.headers.get('link') || '';
+        const m = link.match(/<([^>]+)>;\s*rel="next"/);
+        url = m ? m[1] : null;
+      }
+      return json({ orders: all, truncated: !!url }, 200, cors);
+    } catch (e) {
+      return json({ error: String(e && e.message || e) }, 502, cors);
+    }
+  }
+
   // Map each allowed action to a fixed GET endpoint. The client cannot ask for
   // anything outside this table — no raw paths, no writes.
   let endpoint;
