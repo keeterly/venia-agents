@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '126';
+  const BUILD = '127';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20722,19 +20722,40 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     });
     if (mem.length > 60) STATE.eniMemory = mem.slice(-60);
     if (added){ save(); showToast('🧠 Remembered ' + added + ' thing' + (added === 1 ? '' : 's'), 'info'); }
+    return added;
   }
   async function eniMemLearn(note, src){
     try {
-      var txt = String(note || '').trim();
-      if (txt.length < 12) return;
-      var sys = 'Extract durable facts about VENIA Collection, its founders, their preferences, partners, budgets, constraints or history from this note — facts that will still matter weeks from now (e.g. "VENIA previously showed with CUBE Showroom in Paris", "showroom budget cap is €6k", "Audrey handles showroom logistics"). Ignore one-off logistics and temporary states. Respond with ONLY JSON: {"facts":["..."]} — 0 to 3 facts, each a standalone third-person sentence under 120 characters. If nothing durable: {"facts":[]}.';
+      var txt = String(note || '').trim().slice(0, 9000);
+      if (txt.length < 12) return 0;
+      // Big pastes (a conversation, meeting notes) may carry more than a
+      // reply does — let the distiller keep proportionally more.
+      var maxFacts = txt.length > 600 ? 8 : 3;
+      var sys = 'Extract durable facts about VENIA Collection, its founders, their preferences, partners, budgets, constraints or history from this note — facts that will still matter weeks from now (e.g. "VENIA previously showed with CUBE Showroom in Paris", "showroom budget cap is €6k", "Audrey handles showroom logistics"). Ignore one-off logistics and temporary states. Respond with ONLY JSON: {"facts":["..."]} — 0 to ' + maxFacts + ' facts, each a standalone third-person sentence under 120 characters. If nothing durable: {"facts":[]}.';
       var out = await callClaude(sys, txt, [], 'claude-haiku-4-5');
       var m = String(out || '').match(/\{[\s\S]*\}/);
-      if (!m) return;
+      if (!m) return 0;
       var data = JSON.parse(m[0]);
-      eniMemAdd((data && Array.isArray(data.facts)) ? data.facts : [], src);
-    } catch(e){}
+      return eniMemAdd((data && Array.isArray(data.facts)) ? data.facts : [], src);
+    } catch(e){ return 0; }
   }
+  // Manual dump-to-memory: paste anything — a decision, a ChatGPT answer,
+  // meeting notes — and Eni distills the durable facts into memory.
+  window.dumpMemDump = async function(){
+    var el = document.getElementById('dump-mem-input');
+    var v = (el && el.value.trim()) || '';
+    if (!v){ showToast('Paste or write something first', 'info'); return; }
+    var btn = document.getElementById('dump-mem-btn');
+    if (btn){ btn.disabled = true; btn.textContent = '◐'; }
+    var n = await eniMemLearn(v, 'manual');
+    var b2 = document.getElementById('dump-mem-btn'); if (b2){ b2.disabled = false; b2.textContent = '🧠 Remember'; }
+    if (n > 0){
+      var el2 = document.getElementById('dump-mem-input'); if (el2) el2.value = '';
+      render();
+    } else {
+      showToast('Nothing durable found — try stating the facts directly', 'info');
+    }
+  };
   window.dumpMemDel = function(id){
     STATE.eniMemory = (STATE.eniMemory || []).filter(function(m){ return m.id !== id; });
     save(); render();
@@ -21422,12 +21443,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
     var memList = (STATE.eniMemory || []);
     h += '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:12px 0 6px">🧠 Eni\'s memory</div>';
+    h += '<div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:8px">'
+      + '<textarea id="dump-mem-input" rows="2" placeholder="Dump anything Eni should remember — a decision, a paste from ChatGPT or Claude, meeting notes. Eni keeps the durable facts." oninput="dumpGrow(this)" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.45;overflow:hidden"></textarea>'
+      + '<button id="dump-mem-btn" onclick="dumpMemDump()" class="btn btn-gold btn-sm" style="border-radius:9px;min-height:42px;flex-shrink:0;white-space:nowrap">🧠 Remember</button>'
+      + '</div>';
     if (memList.length){
       memList.slice().reverse().forEach(function(m){
         h += '<div style="display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-size:12px;color:var(--ink);line-height:1.4"><span style="flex:1;min-width:0">' + esc(m.t) + '</span><button onclick="dumpMemDel(\'' + m.id + '\')" title="Forget" style="background:none;border:none;color:var(--border-mid);font-size:13px;cursor:pointer;flex-shrink:0;padding:0 2px">✕</button></div>';
       });
     } else {
-      h += '<div style="font-size:11.5px;color:var(--muted)">Nothing yet — Eni learns automatically from your replies and notes.</div>';
+      h += '<div style="font-size:11.5px;color:var(--muted)">Nothing yet — Eni learns from your replies and notes, or dump something above.</div>';
     }
     return h + '</div>';
   }
