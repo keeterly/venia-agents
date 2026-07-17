@@ -1282,6 +1282,21 @@ body{padding-top:44px;box-sizing:border-box;}
 /* Buyers CRM rows carry no separate TYPE column (it's in the sub-line), so
    they run three columns: name · stage · what's-next+Edit. */
 #sl-buyers-list .ag-list-row{grid-template-columns:1fr 120px 260px}
+
+/* Buyers CRM filter bar */
+.sl-filter{margin:0 0 16px}
+.sl-filter-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:9px}
+.sl-filter-q{flex:1 1 200px;min-width:0;height:38px;padding:0 12px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:12px;font-family:inherit;letter-spacing:.2px}
+.sl-filter-q::placeholder{color:var(--muted)}
+.sl-filter-q:focus{outline:none;border-color:var(--ink)}
+.sl-filter-tier{height:38px;padding:0 10px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:11px;font-family:inherit;cursor:pointer}
+.sl-filter-tier:focus{outline:none;border-color:var(--ink)}
+.sl-filter-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.sl-chip{font-size:9px;letter-spacing:1px;text-transform:uppercase;font-weight:600;padding:6px 11px;border:1px solid var(--border);background:var(--bg);color:var(--muted);cursor:pointer;transition:background .12s,color .12s,border-color .12s;white-space:nowrap}
+.sl-chip:hover{border-color:var(--ink);color:var(--ink)}
+.sl-chip.on{background:var(--ink);color:var(--white);border-color:var(--ink)}
+.sl-chip-due.on{background:var(--red);border-color:var(--red);color:var(--white)}
+.sl-filter-count{font-size:9px;color:var(--muted);margin-left:auto;font-family:'DM Mono',monospace;letter-spacing:.5px;white-space:nowrap}
 .ag-list-row-h{
   background:var(--bg-off);
   font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);
@@ -1539,7 +1554,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '163';
+  const BUILD = '164';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13863,9 +13878,7 @@ async function agentSend(key, message) {
   skAppend('user', message);
   SK.history.eni.push({ role: 'user', content: message });
   if (SK.history.eni.length > 40) SK.history.eni = SK.history.eni.slice(-40);
-  const think = document.createElement('div');
-  think.className = 'sk-msg agent';
-  think.innerHTML = `<div class="sk-msg-who">Eni</div><div class="sk-think"><span></span><span></span><span></span></div>`;
+  const think = skMakeWorking('Eni', skWorkSteps(message, key));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
 
   try {
@@ -13880,11 +13893,14 @@ async function agentSend(key, message) {
       : (clean || (action ? "Done — here's what I set up:" : reply));
     SK.history.eni.push({ role: 'assistant', content: shown });
     skSaveHistory();
-    const t = think.querySelector('.sk-think');
+    if (action && think.__note) think.__note('Applying changes…');
+    think.__done && think.__done();
+    const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
     if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); } }
   } catch (err) {
-    const t = think.querySelector('.sk-think');
+    think.__done && think.__done();
+    const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
   }
   body.scrollTop = body.scrollHeight;
@@ -15181,16 +15197,44 @@ function agBuildSalesOverview() {
     ${quotes.length ? `<div class="ag-list">${quoteRows}</div>` : `<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No quotes yet — create one with + New Quote once a store is interested.</div>`}`;
 }
 
-function agBuildBuyersSection() {
-  if (!STATE.slBuyers) STATE.slBuyers = [];
-  const buyers = STATE.slBuyers;
+// ── BUYERS CRM: filtering ───────────────────────────────────────────────────
+// Sales-focused filters: free-text search (name / city / type / contact),
+// pipeline stage, tier, and a "follow-ups due" quick toggle. State is module-
+// level so it survives a re-render; the bar reflects the active state.
+let SL_FILTER = { q: '', stage: '', tier: '', due: false };
+function slBuyerFilterActive() {
+  const f = SL_FILTER;
+  return !!(f.q || f.stage || f.tier || f.due);
+}
+function slBuyerMatches(b) {
+  const f = SL_FILTER;
+  if (f.stage && (b.stage || 'new') !== f.stage) return false;
+  if (f.tier && (b.tier || '') !== f.tier) return false;
+  if (f.due) {
+    const today = new Date().toISOString().slice(0,10);
+    const od = b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+    if (!od) return false;
+  }
+  if (f.q) {
+    const hay = [b.name, b.location, b.type, b.contactName, b.contact, b.email, b.notes]
+      .map(x => String(x || '').toLowerCase()).join(' ');
+    if (!f.q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))) return false;
+  }
+  return true;
+}
+
+// Builds the phase-grouped list from the CURRENT filter. Used for the first
+// render and every live filter update, so behaviour stays identical.
+function slBuyersListHTML() {
+  const all = (STATE.slBuyers || []);
+  const buyers = all.filter(slBuyerMatches);
+  const active = slBuyerFilterActive();
   const today = new Date().toISOString().slice(0,10);
-  const inStages = (sts) => buyers.filter(b => sts.includes(b.stage || 'new'));
   const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
-  const overdue = buyers.filter(isOverdue).length;
-
-  const kpi = (label, val, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${label}</div><div class="ag-stat-v"${color?' style="color:'+color+'"':''}>${val}</div><div class="ag-stat-s">${sub}</div></div>`;
-
+  const sortRows = (list) => list.slice().sort((a,b) =>
+    (isOverdue(b)-isOverdue(a))
+    || String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'))
+    || String(b.lastContact||'').localeCompare(String(a.lastContact||'')));
   const row = (b) => {
     const od = isOverdue(b);
     const tier = AGENT_TIER_LABEL[b.tier] ? `<span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px;margin-left:6px">${AGENT_TIER_LABEL[b.tier]}</span>` : '';
@@ -15207,22 +15251,68 @@ function agBuildBuyersSection() {
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:9px;font-family:'DM Mono',monospace">${next}<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button></div>
       </div>`;
   };
-  // Overdue follow-ups float to the top of each phase; then soonest follow-up,
-  // then most recently touched.
-  const sortRows = (list) => list.slice().sort((a,b) =>
-    (isOverdue(b)-isOverdue(a))
-    || String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'))
-    || String(b.lastContact||'').localeCompare(String(a.lastContact||'')));
-
   const group = (ph) => {
-    const list = sortRows(inStages(ph.stages));
-    if (!list.length && ph.quiet) return '';
+    const list = sortRows(buyers.filter(b => ph.stages.includes(b.stage || 'new')));
+    // When a filter is on, drop empty groups entirely (no empty-state noise);
+    // otherwise keep the section shells so the pipeline shape is always visible.
+    if (!list.length && (ph.quiet || active)) return '';
     return `<div style="margin-bottom:18px">
       <div style="display:flex;align-items:baseline;gap:8px;margin:0 0 6px"><div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink)">${ph.label}</div><div style="font-size:9px;color:var(--muted)">${list.length}${ph.desc?' · '+ph.desc:''}</div></div>
       <div class="ag-list">${list.length ? list.map(row).join('') : `<div style="padding:18px;text-align:center;color:var(--muted);font-size:10.5px">${ph.empty}</div>`}</div>
     </div>`;
   };
+  if (active && !buyers.length) {
+    return `<div style="padding:30px 18px;text-align:center;color:var(--muted);font-size:11px">No accounts match this filter.<br><a onclick="slClearBuyerFilter()" style="color:var(--ink);cursor:pointer;text-decoration:underline;display:inline-block;margin-top:8px">Clear filters</a></div>`;
+  }
+  return SL_PHASES.map(group).join('');
+}
 
+function slFilterBarHTML() {
+  const total = (STATE.slBuyers || []).length;
+  const n = (STATE.slBuyers || []).filter(slBuyerMatches).length;
+  const countTxt = slBuyerFilterActive() ? `${n} of ${total}` : `${total} account${total!==1?'s':''}`;
+  return `
+    <div class="sl-filter-row">
+      <input id="sl-filter-q" class="sl-filter-q" placeholder="Search name, city or type…" value="${slEsc(SL_FILTER.q)}" oninput="slSearchBuyers(this.value)" autocomplete="off">
+      <select id="sl-filter-tier" class="sl-filter-tier" onchange="slSetTierFilter(this.value)" title="Tier">
+        <option value="">All tiers</option>
+        ${Object.entries(AGENT_TIER_LABEL).map(([k,v]) => `<option value="${k}"${SL_FILTER.tier===k?' selected':''}>${v}</option>`).join('')}
+      </select>
+      <button class="sl-chip sl-chip-due${SL_FILTER.due?' on':''}" onclick="slToggleDueFilter()" title="Only accounts with an overdue follow-up">⚑ Due</button>
+    </div>
+    <div class="sl-filter-chips">
+      <button class="sl-chip${!SL_FILTER.stage?' on':''}" onclick="slSetStageFilter('')">All stages</button>
+      ${Object.entries(SL_STAGES).map(([k,v]) => `<button class="sl-chip${SL_FILTER.stage===k?' on':''}" onclick="slSetStageFilter('${k}')">${v}</button>`).join('')}
+      <span class="sl-filter-count" id="sl-filter-count">${countTxt}</span>
+    </div>`;
+}
+// Search re-renders only the list + count so the input keeps focus mid-type.
+function slSearchBuyers(v) { SL_FILTER.q = v; slRenderBuyerList(); slUpdateFilterCount(); }
+function slSetTierFilter(v) { SL_FILTER.tier = v; slRenderBuyerList(); slUpdateFilterCount(); }
+// Stage / due toggles rebuild the bar (to flip chip states) then the list.
+function slSetStageFilter(k) { SL_FILTER.stage = (SL_FILTER.stage === k ? '' : k); slRerenderFilterBar(); }
+function slToggleDueFilter() { SL_FILTER.due = !SL_FILTER.due; slRerenderFilterBar(); }
+function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false }; slRerenderFilterBar(); }
+function slRenderBuyerList() { const el = document.getElementById('sl-buyers-list'); if (el) el.innerHTML = slBuyersListHTML(); }
+function slRerenderFilterBar() { const bar = document.getElementById('sl-filter-bar'); if (bar) bar.innerHTML = ((STATE.slBuyers||[]).length ? slFilterBarHTML() : ''); slRenderBuyerList(); }
+function slUpdateFilterCount() {
+  const c = document.getElementById('sl-filter-count'); if (!c) return;
+  const total = (STATE.slBuyers || []).length;
+  const n = (STATE.slBuyers || []).filter(slBuyerMatches).length;
+  c.textContent = slBuyerFilterActive() ? `${n} of ${total}` : `${total} account${total!==1?'s':''}`;
+}
+
+function agBuildBuyersSection() {
+  if (!STATE.slBuyers) STATE.slBuyers = [];
+  const buyers = STATE.slBuyers;
+  const today = new Date().toISOString().slice(0,10);
+  const inStages = (sts) => buyers.filter(b => sts.includes(b.stage || 'new'));
+  const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+  const overdue = buyers.filter(isOverdue).length;
+
+  const kpi = (label, val, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${label}</div><div class="ag-stat-v"${color?' style="color:'+color+'"':''}>${val}</div><div class="ag-stat-s">${sub}</div></div>`;
+
+  const total = buyers.length;
   return `
     <div class="ag-stats">
       ${kpi('To reach', inStages(['new']).length, 'stores to contact')}
@@ -15230,7 +15320,8 @@ function agBuildBuyersSection() {
       ${kpi('Stockists', inStages(['active','closed']).length, 'doing business')}
       ${kpi('Follow-ups due', overdue, overdue ? 'chase these first' : 'all current', overdue ? 'var(--red)' : 'var(--green)')}
     </div>
-    <div id="sl-buyers-list">${SL_PHASES.map(group).join('')}</div>
+    <div id="sl-filter-bar" class="sl-filter">${total ? slFilterBarHTML() : ''}</div>
+    <div id="sl-buyers-list">${slBuyersListHTML()}</div>
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Pipeline Actions</h2></div>
       <div class="ag-workflows" style="grid-template-columns:repeat(2,1fr)">
@@ -22991,6 +23082,14 @@ function gSignIn() {
 .sk-think span{width:6px;height:6px;border-radius:50%;background:#666;animation:skBlink 1.2s infinite}
 .sk-think span:nth-child(2){animation-delay:.2s}.sk-think span:nth-child(3){animation-delay:.4s}
 @keyframes skBlink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+/* "Working on…" state — a labelled, shimmering progress line that shows what
+   the agent is doing (Sidekick-style), instead of anonymous blinking dots. */
+.sk-work{display:inline-block;min-width:190px;max-width:100%;padding:12px 14px;background:#161616;border:1px solid #232323;border-radius:3px 13px 13px 13px}
+.sk-work-bar{height:2px;background:#2b2b2b;overflow:hidden;position:relative;margin-bottom:9px}
+.sk-work-bar i{position:absolute;top:0;height:100%;width:42%;left:-42%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:skWork 1.15s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes skWork{0%{left:-42%}100%{left:100%}}
+.sk-work-label{font-size:11px;color:#c4c4c4;letter-spacing:.3px;line-height:1.4;transition:opacity .18s}
+@media (prefers-reduced-motion: reduce){.sk-work-bar i{animation:none;left:0;width:100%;opacity:.35}.sk-work-label{transition:none}}
 .sk-suggest{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
 .sk-chip{background:#151515;border:1px solid #262626;color:#bbb;font-size:10px;padding:6px 11px;border-radius:14px;
   cursor:pointer;transition:all .15s;text-align:left}
@@ -23421,6 +23520,49 @@ function skHeroGo(){
   skToggle(true);
   if (v) skSend(v);
 }
+// A short, intent-aware sequence of status lines so you can see WHAT the agent
+// is doing while a request is in flight — not just that something is happening.
+function skWorkSteps(message, agKey){
+  const m = String(message||'').toLowerCase();
+  let mid;
+  if (agKey==='sl' && /\b(find|scout|source|suggest|research|vet|stockist|store|account|buyer|prospect|target)\b/.test(m))
+    mid = ['Scouting stores that fit VENIA…', 'Vetting each for fit and tier…'];
+  else if (agKey==='sl' && /\b(follow|chase|re-?engage|silent|pipeline|score|rank|close|quote)\b/.test(m))
+    mid = ['Reading the pipeline…', 'Ranking who needs you first…'];
+  else if (/\b(draft|write|email|pitch|message|reply|caption|copy|sequence|line ?sheet|note)\b/.test(m))
+    mid = ['Drafting in VENIA’s voice…', 'Tightening the copy…'];
+  else if (agKey==='pr' && /\b(pull|press|placement|editor|feature|sample|stylist)\b/.test(m))
+    mid = ['Lining up the pull…', 'Checking the styles…'];
+  else if (/\b(plan|calendar|schedule|content|campaign|post)\b/.test(m))
+    mid = ['Mapping it out…'];
+  else
+    mid = ['Thinking it through…'];
+  return ['Reading your workspace…', ...mid, 'Writing it up…'];
+}
+// Build the animated working bubble. Returns the element plus helpers to update
+// the label ("Applying changes…") and stop the timer when the reply lands.
+function skMakeWorking(whoLabel, steps){
+  const el = document.createElement('div');
+  el.className = 'sk-msg agent';
+  el.innerHTML = `<div class="sk-msg-who">${whoLabel}</div><div class="sk-work"><div class="sk-work-bar"><i></i></div><div class="sk-work-label">${escHtml(steps[0])}</div></div>`;
+  const label = el.querySelector('.sk-work-label');
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const setLabel = (t) => {
+    if (!label) return;
+    if (reduce){ label.textContent = t; return; }
+    label.style.opacity = '0';
+    setTimeout(() => { label.textContent = t; label.style.opacity = '1'; }, 170);
+  };
+  let i = 0;
+  el.__timer = setInterval(() => {
+    if (i >= steps.length - 1){ clearInterval(el.__timer); return; }
+    setLabel(steps[++i]);
+  }, 1500);
+  el.__note = (t) => { clearInterval(el.__timer); setLabel(t); };
+  el.__done = () => clearInterval(el.__timer);
+  return el;
+}
+
 async function skSend(preset){
   const field = document.getElementById('sk-field');
   const msg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
@@ -23433,20 +23575,18 @@ async function skSend(preset){
   SK.history[SK.agent].push({role:'user', content:msg});
   if (SK.history[SK.agent].length > 40) SK.history[SK.agent] = SK.history[SK.agent].slice(-40);
   const body = document.getElementById('sk-body');
-  const think = document.createElement('div');
-  think.className = 'sk-msg agent';
-  think.innerHTML = `<div class="sk-msg-who">${SK.agent==='eni'?'Eni':'Nigma'}</div><div class="sk-think"><span></span><span></span><span></span></div>`;
+  // On an agent workspace, the dock inherits that agent's ACTION powers —
+  // it can file prospects, log placements, etc., exactly like the old
+  // side-column chat could.
+  const scrId = (document.querySelector('.cp-screen.active') || {}).id || '';
+  const agKey = scrId.replace('cp-screen-', '');
+  const hasActions = ['pr','mk','sl','br'].includes(agKey) && typeof agentActionSpec === 'function';
+  const think = skMakeWorking(SK.agent==='eni'?'Eni':'Nigma', skWorkSteps(msg, agKey));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
   try {
     const info = skSectionInfo();
     const persona = SK.agent==='eni' ? ENI_SYS : NIGMA_SYS;
     const voice = (window.STATE && STATE.prPrefs && STATE.prPrefs.voiceNotes) || '';
-    // On an agent workspace, the dock inherits that agent's ACTION powers —
-    // it can file prospects, log placements, etc., exactly like the old
-    // side-column chat could.
-    const scrId = (document.querySelector('.cp-screen.active') || {}).id || '';
-    const agKey = scrId.replace('cp-screen-', '');
-    const hasActions = ['pr','mk','sl','br'].includes(agKey) && typeof agentActionSpec === 'function';
     const system = persona + '\n\n' + SK_VENIA_BRIEF + '\n\n'
       + (typeof plmContext==='function' ? plmContext() : '')
       + '\n\nWHERE THE USER IS RIGHT NOW: ' + info.label + '. ' + info.guide
@@ -23464,10 +23604,12 @@ async function skSend(preset){
     }
     SK.history[SK.agent].push({role:'assistant', content:shown});
     skSaveHistory();
-    const t = think.querySelector('.sk-think'); if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
+    think.__done && think.__done();
+    const t = think.querySelector('.sk-work'); if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
     if (action) { try { agentRunAction(agKey, action, body); } catch(e){ console.warn('agent action failed', e); } }
   } catch(err){
-    const t = think.querySelector('.sk-think');
+    think.__done && think.__done();
+    const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">⚠ ${escHtml(err.message||'Something went wrong')}</span><div style="font-size:10px;color:#888;margin-top:6px">Add your Claude API key in Settings → API Keys. <a style="color:#bbb;cursor:pointer;text-decoration:underline" onclick="skToggle();cpGoto('set')">Open Settings →</a></div></div>`;
   }
   if (body) body.scrollTop = body.scrollHeight;
