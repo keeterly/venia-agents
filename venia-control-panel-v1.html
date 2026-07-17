@@ -1539,7 +1539,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '131';
+  const BUILD = '132';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5060,11 +5060,12 @@ function init() {
     if (!STATE.mkCalendar) STATE.mkCalendar = [];
     if (!STATE.prPrefs)    STATE.prPrefs    = {};
   } else {
-    STATE.styles = SEED_STYLES.map(s => ({...s}));
-    STATE.materials = SEED_MATERIALS.map(m => ({...m}));
-    STATE.vendors = SEED_VENDORS.map(v => ({...v}));
-    STATE.bom = JSON.parse(JSON.stringify(SEED_BOM));
-    STATE.pom = JSON.parse(JSON.stringify(SEED_POM));
+    // Real data only — the demo seed era is over. A fresh workspace is empty.
+    STATE.styles = [];
+    STATE.materials = [];
+    STATE.vendors = [];
+    STATE.bom = {};
+    STATE.pom = {};
     STATE.activityLog = [];
     save();
   }
@@ -16249,6 +16250,7 @@ window.cmdExportOrdersCSV = function() {
 //  SALES PIPELINE — Kanban view + pre-seeded buyer leads
 // ══════════════════════════════════════════════════════════
 function cmdSeedDemoLeads() {
+  return; // demo leads retired — the pipeline holds real buyers only
   const existing = dbGet('leads');
   if (existing.length > 0) return; // don't overwrite real data
   const demoLeads = [
@@ -16478,18 +16480,83 @@ window.setExportContactsCSV = function() {
 // ══════════════════════════════════════════════════════════
 //  SEED demo PR hits if empty
 // ══════════════════════════════════════════════════════════
-(function seedDemoHits() {
-  document.addEventListener('DOMContentLoaded', function() {
-    if (dbGet('hits').length > 0) return;
-    const demoHits = [
-      {person:'Alternative Press',source:'https://altpress.com',desc:'VENIA featured in "LA Labels to Know: Spring 2026" roundup',date:'2026-04-15'},
-      {person:'i-D Magazine',source:'https://i-d.vice.com',desc:'Chelsea Wolfe styling credits — VENIA Void Coat in editorial shoot',date:'2026-03-28'},
-      {person:'The FADER',source:'https://thefader.com',desc:'Porter Robinson tour wardrobe feature — VENIA Arc Jacket highlighted',date:'2026-03-10'},
-      {person:'Hypebeast',source:'https://hypebeast.com',desc:'Landon Barker VENIA look at Coachella weekend 1',date:'2026-04-14'},
-    ];
-    demoHits.forEach(h => dbInsert('hits', h));
-  });
-})();
+// (Demo PR hits seeder removed — real coverage only.)
+// ══════════════════════════════════════════════════════════
+//  PURGE SEEDED DEMO DATA — exact fingerprints only
+//  Removes the demo records earlier builds seeded (styles, materials,
+//  vendors, BOM/POM, buyer leads, PR hits, brand watch). Idempotent and
+//  re-run each boot, so records resurrected by a sync merge from another
+//  device get scrubbed again. Real records are untouched: user-created
+//  rows carry timestamp ids and never match these fingerprints.
+// ══════════════════════════════════════════════════════════
+window.veniaPurgeDemoData = function() {
+  var removed = 0;
+  try {
+    var sIds = ['STY001','STY002','STY003','STY004','STY005','STY006','STY007','STY008','STY009','STY010','STY011','STY012'];
+    var sNames = ['HAMLET CLOAK','HEATHCLIFF PANTS','RACKET PANT','TUMULT SHIRT','MISTRAL TANK','ANTIGONE SKIRT','JULIET BLOUSE','WAVE TOP','FUJIN HARNESS','ZIYOU JACKET','ARIEL COAT','OPHELIA DRESS'];
+    if (Array.isArray(STATE.styles)) {
+      var b1 = STATE.styles.length;
+      STATE.styles = STATE.styles.filter(function(x){ return !(x && sIds.indexOf(x.id) >= 0 && sNames.indexOf(x.name) >= 0); });
+      removed += b1 - STATE.styles.length;
+      sIds.forEach(function(id){
+        if (STATE.bom && STATE.bom[id]) { delete STATE.bom[id]; removed++; }
+        if (STATE.pom && STATE.pom[id]) { delete STATE.pom[id]; removed++; }
+      });
+    }
+    var mNames = ['2x2 Rib Knit','Wool Crepe','Silk Charmeuse','Nylon Ripstop','Boucle Wool','Self Binding Tape','Care Label','Hang Tag','Branded Dust Bag','YKK Invisible Zip','Vegetable Leather Strap','Brass Buckle 38mm'];
+    if (Array.isArray(STATE.materials)) {
+      var b2 = STATE.materials.length;
+      STATE.materials = STATE.materials.filter(function(x){ return !(x && /^MAT\d{3}$/.test(x.id || '') && mNames.indexOf(x.name) >= 0); });
+      removed += b2 - STATE.materials.length;
+    }
+    var vNames = ['Atelier Primo','Korea Mills','Silk Route Co.','Leather Works LA','Label Depot','Global Trim Co.','Packstudio'];
+    if (Array.isArray(STATE.vendors)) {
+      var b3 = STATE.vendors.length;
+      STATE.vendors = STATE.vendors.filter(function(x){ return !(x && /^VEN\d{3}$/.test(x.id || '') && vNames.indexOf(x.name) >= 0); });
+      removed += b3 - STATE.vendors.length;
+    }
+    // Demo buyer leads (name|company pairs from the retired seeder).
+    var demoLeads = ['Caroline Huang|SSENSE','Marc Dupuis|L\'Eclaireur Paris','Keiko Mori|Dover Street Market','Alex Torres|Revolve','Sophie Laurent|Net-a-Porter','James Osei|Nordstrom','Hana Park|Selfridges','Remi Blanc|Centre Commercial','Valentina Cruz|Patron of the New','Tariq Nouri|Assembly New York','Ingrid Holm|Antonioli','Cass Whitfield|Voo Store Berlin','Michelle Kwon|Goop','Dani Ferreira|Farfetch','Yara Okafor|The Webster'];
+    try {
+      var leads = dbGet('leads');
+      var keep = leads.filter(function(l){ return demoLeads.indexOf(((l && l.name) || '') + '|' + ((l && l.biz) || '')) < 0; });
+      if (keep.length !== leads.length) { dbSet('leads', keep); removed += leads.length - keep.length; }
+    } catch(e){}
+    // Demo PR hits (person|date pairs from the retired seeder).
+    var demoHits = ['Alternative Press|2026-04-15','i-D Magazine|2026-03-28','The FADER|2026-03-10','Hypebeast|2026-04-14'];
+    try {
+      var hits = dbGet('hits');
+      var keepH = hits.filter(function(h){ return demoHits.indexOf(((h && h.person) || '') + '|' + ((h && h.date) || '')) < 0; });
+      if (keepH.length !== hits.length) { dbSet('hits', keepH); removed += hits.length - keepH.length; }
+    } catch(e){}
+    // Brand watch demo entries (brand|link pairs).
+    var demoWatch = ['SSENSE|https://ssense.com','Toteme|https://instagram.com/toteme','Khaite|https://net-a-porter.com','The Row|https://therow.com','Lemaire|https://ssense.com/lemaire'];
+    try {
+      var bw = JSON.parse(localStorage.getItem('venia-brand-watch') || 'null');
+      if (Array.isArray(bw)) {
+        var keepW = bw.filter(function(w){ return demoWatch.indexOf(((w && w.brand) || '') + '|' + ((w && w.link) || '')) < 0; });
+        if (keepW.length !== bw.length) {
+          localStorage.setItem('venia-brand-watch', JSON.stringify(keepW));
+          if (window._brandWatchData) window._brandWatchData = keepW;
+          removed += bw.length - keepW.length;
+        }
+      }
+    } catch(e){}
+    if (removed > 0) {
+      try { if (typeof buildSkus === 'function') buildSkus(); } catch(e){}
+      save();
+      try { if (typeof logActivity === 'function') logActivity('Removed ' + removed + ' seeded demo records — workspace is real data only'); } catch(e){}
+      try { showToast('Removed ' + removed + ' demo records — real data only now', 'success'); } catch(e){}
+      try { if (typeof renderPage === 'function' && STATE.currentPage) renderPage(STATE.currentPage); } catch(e){}
+      try { if (typeof updateSidebarBadges === 'function') updateSidebarBadges(); } catch(e){}
+    }
+  } catch(e){}
+  return removed;
+};
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(window.veniaPurgeDemoData, 2500);     // after local state loads
+  setTimeout(window.veniaPurgeDemoData, 15000);    // after cloud sync settles
+});
 
 
 // ════════════════════════════════════════════════════════════
@@ -17317,7 +17384,7 @@ const SEED_BRAND_WATCH = [
 
 function initBrandWatch() {
   const saved = JSON.parse(localStorage.getItem('venia-brand-watch')||'null');
-  window._brandWatchData = saved || SEED_BRAND_WATCH.map(b=>({...b}));
+  window._brandWatchData = saved || [];
   renderBrandWatch();
 }
 
