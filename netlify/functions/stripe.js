@@ -98,6 +98,39 @@ export default async (req) => {
       if (s.error) return json({ error: s.error.message }, 400);
       return json({ id: s.id, url: s.url });
     }
+    // Wholesale invoicing: find-or-create the customer, build the invoice,
+    // finalize and send — one call from the client, secret stays here.
+    if (body.action === 'invoice') {
+      const amt = Math.round(Number(body.amount) * 100);
+      if (!amt || amt < 50) return json({ error: 'Amount must be at least $0.50' }, 400, cors);
+      if (amt > 20000000) return json({ error: 'Amount too large' }, 400, cors);   // $200k sanity cap
+      const email = String(body.email || '').trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json({ error: 'A valid buyer email is required' }, 400, cors);
+      const search = await call('customers/search?query=' + encodeURIComponent("email:'" + email.replace(/'/g, '') + "'"), {}, 'GET');
+      let customerId = search.data && search.data[0] && search.data[0].id;
+      if (!customerId) {
+        const cust = await call('customers', { email, name: String(body.name || ''), description: 'VENIA wholesale account' });
+        if (cust.error) return json({ error: cust.error.message }, 400, cors);
+        customerId = cust.id;
+      }
+      const item = await call('invoiceitems', {
+        customer: customerId, amount: amt, currency: 'usd',
+        description: String(body.description || 'VENIA wholesale order').slice(0, 300),
+      });
+      if (item.error) return json({ error: item.error.message }, 400, cors);
+      const inv = await call('invoices', {
+        customer: customerId, collection_method: 'send_invoice',
+        days_until_due: String(Math.min(parseInt(body.days, 10) || 14, 60)),
+        description: String(body.description || '').slice(0, 300),
+        footer: 'VENIA Collection | veniacollection.com',
+      });
+      if (inv.error) return json({ error: inv.error.message }, 400, cors);
+      const fin = await call('invoices/' + encodeURIComponent(inv.id) + '/finalize', {});
+      if (fin.error) return json({ error: fin.error.message }, 400, cors);
+      const sent = await call('invoices/' + encodeURIComponent(inv.id) + '/send', {});
+      if (sent.error) return json({ error: sent.error.message }, 400, cors);
+      return json({ id: inv.id, hosted_invoice_url: fin.hosted_invoice_url || sent.hosted_invoice_url || '' });
+    }
     if (body.action === 'status') {
       const s = await call('checkout/sessions/' + encodeURIComponent(body.id), {}, 'GET');
       if (s.error) return json({ error: s.error.message }, 400);
