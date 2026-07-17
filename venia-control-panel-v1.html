@@ -1297,6 +1297,19 @@ body{padding-top:44px;box-sizing:border-box;}
 .sl-chip.on{background:var(--ink);color:var(--white);border-color:var(--ink)}
 .sl-chip-due.on{background:var(--red);border-color:var(--red);color:var(--white)}
 .sl-filter-count{font-size:9px;color:var(--muted);margin-left:auto;font-family:'DM Mono',monospace;letter-spacing:.5px;white-space:nowrap}
+
+/* Agent workspace shimmer — while Eni works on something that will change the
+   screen, the actual work area shimmers (Sidekick-style); when the change lands
+   it flashes so you can see exactly what she touched. Self-contained so it never
+   depends on the Brainstorm-injected animation styles. */
+@keyframes wsSweep{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.ws-working{position:relative}
+.ws-working::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:6;
+  background-image:linear-gradient(100deg,rgba(202,162,74,0) 30%,rgba(202,162,74,.18) 50%,rgba(202,162,74,0) 70%);
+  background-size:200% 100%;animation:wsSweep 1.5s linear infinite}
+@keyframes wsLand{0%{background-color:rgba(202,162,74,.22)}100%{background-color:rgba(202,162,74,0)}}
+.ws-landed{animation:wsLand 1.9s ease-out}
+@media (prefers-reduced-motion:reduce){.ws-working::after{animation:none;opacity:.28}.ws-landed{animation:none}}
 .ag-list-row-h{
   background:var(--bg-off);
   font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);
@@ -1554,7 +1567,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '164';
+  const BUILD = '165';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13880,6 +13893,7 @@ async function agentSend(key, message) {
   if (SK.history.eni.length > 40) SK.history.eni = SK.history.eni.slice(-40);
   const think = skMakeWorking('Eni', skWorkSteps(message, key));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
+  const workKey = agentBeginWork(key, message);
 
   try {
     const sysPrompt = agent.system + '\n\n' + plmContext() + agentActionSpec(key) + agentPrefsText(key);
@@ -13898,8 +13912,10 @@ async function agentSend(key, message) {
     const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
     if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); } }
+    agentEndWork(workKey, !!action);
   } catch (err) {
     think.__done && think.__done();
+    agentEndWork(workKey, false);
     const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
   }
@@ -14059,6 +14075,46 @@ function agentRunAction(key, action, chatBody) {
   if (!action || !action.type) return;
   if (key === 'pr' && action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
   if (key === 'sl' && action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
+}
+
+// ── Workspace shimmer (Sidekick-style) ──────────────────────────────────────
+// While Eni works on a request that will change the current screen, the actual
+// work area shimmers; when the change lands, it flashes. Purely visual — the
+// data path (agentRunAction) is unchanged.
+function agentWorkRegion(agKey){
+  // .cp-screen is position:fixed, so offsetParent is unreliable — key off the
+  // active class + computed display instead.
+  const scr = document.getElementById('cp-screen-' + agKey);
+  if (!scr || !scr.classList.contains('active')) return null;
+  // Prefer a visible relocated panel (.agx-section), else the main content area.
+  const vis = (el) => el && getComputedStyle(el).display !== 'none';
+  const agx = [...scr.querySelectorAll('.agx-section')].find(vis);
+  return agx || scr.querySelector('.ag-content') || scr;
+}
+// Only shimmer when the request actually looks like it will edit the workspace —
+// not for questions/advice (nothing changes, so no false "working on this" cue).
+function agentEditIntent(msg){
+  return /\b(add|find|scout|source|create|make|draft|write|log|save|build|update|set|schedule|plan|move|file|generate|enter|record|book|send|re-?engage|follow up|reach out)\b/i.test(String(msg||''));
+}
+function agentBeginWork(agKey, msg){
+  if (!['pr','mk','sl'].includes(agKey)) return null;   // screens with real actions
+  if (!agentEditIntent(msg)) return null;
+  const el = agentWorkRegion(agKey);
+  if (el) el.classList.add('ws-working');
+  return agKey;
+}
+function agentEndWork(agKey, changed){
+  document.querySelectorAll('.ws-working').forEach(e => e.classList.remove('ws-working'));
+  if (!changed || !agKey) return;
+  // The action may have re-rendered the area — re-resolve, then flash it.
+  setTimeout(() => {
+    const el = agentWorkRegion(agKey);
+    if (!el) return;
+    el.classList.remove('ws-landed');
+    void el.offsetWidth;                 // restart the animation if re-applied
+    el.classList.add('ws-landed');
+    setTimeout(() => el.classList.remove('ws-landed'), 2000);
+  }, 90);
 }
 
 // Execute a create_pull action and show a confirmation card with Open / Undo.
@@ -23583,6 +23639,7 @@ async function skSend(preset){
   const hasActions = ['pr','mk','sl','br'].includes(agKey) && typeof agentActionSpec === 'function';
   const think = skMakeWorking(SK.agent==='eni'?'Eni':'Nigma', skWorkSteps(msg, agKey));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
+  const workKey = hasActions ? agentBeginWork(agKey, msg) : null;
   try {
     const info = skSectionInfo();
     const persona = SK.agent==='eni' ? ENI_SYS : NIGMA_SYS;
@@ -23604,11 +23661,14 @@ async function skSend(preset){
     }
     SK.history[SK.agent].push({role:'assistant', content:shown});
     skSaveHistory();
+    if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
     const t = think.querySelector('.sk-work'); if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
     if (action) { try { agentRunAction(agKey, action, body); } catch(e){ console.warn('agent action failed', e); } }
+    agentEndWork(workKey, !!action);
   } catch(err){
     think.__done && think.__done();
+    agentEndWork(workKey, false);
     const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">⚠ ${escHtml(err.message||'Something went wrong')}</span><div style="font-size:10px;color:#888;margin-top:6px">Add your Claude API key in Settings → API Keys. <a style="color:#bbb;cursor:pointer;text-decoration:underline" onclick="skToggle();cpGoto('set')">Open Settings →</a></div></div>`;
   }
