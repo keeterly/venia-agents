@@ -1526,7 +1526,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '160';
+  const BUILD = '161';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11529,26 +11529,104 @@ function buildTodayFocus() {
     const days = Math.floor((now - new Date(b.nextDate + 'T00:00:00')) / 86400000);
     items.push({pri: days >= 7 ? 'high' : 'med', text:`Follow up ${b.name}${b.nextAction ? ' — ' + b.nextAction : ''} (${days}d overdue)`});
   });
-  // 3. Missing API keys — dismissible setup nags. Connection state lives in
+  // 3. Sample rounds past their ETA with no result logged.
+  (STATE.styles||[]).forEach(s => {
+    try {
+      if (typeof sampleOverdue === 'function' && sampleOverdue(s)) {
+        items.push({pri:'high', text:`Sample overdue — ${s.name||s.styleId} (chase the factory)`,
+                    act:"cpGoto('plm');goTo('samples')"});
+      }
+    } catch(e){}
+  });
+  // 4. Timeline: styles late against their drop-date workback.
+  (STATE.styles||[]).filter(s => s.status !== 'archived' && s.drop).forEach(s => {
+    try {
+      const sched = typeof tlSchedule === 'function' ? tlSchedule(s) : null;
+      if (!sched) return;
+      const KEYS = ['fabric','proto','sms','top'];
+      for (const k of KEYS) {
+        if (sched[k] < now && !(typeof tlDone === 'function' && tlDone(s, k))) {
+          const days = Math.floor((now - sched[k]) / 86400000);
+          items.push({pri: days > 14 ? 'high' : 'med', text:`Timeline: ${s.name||s.styleId} is ${days}d behind on ${k.toUpperCase()} for the ${s.drop} drop`,
+                      act:"cpGoto('plm');goTo('timeline')"});
+          break;   // one line per style — the worst milestone
+        }
+      }
+    } catch(e){}
+  });
+  // 5. Quotes that went quiet (sent, no movement in 7+ days).
+  (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
+    const at = new Date(q.createdAt || 0);
+    const days = Math.floor((now - at) / 86400000);
+    if (days >= 7) items.push({pri:'med', text:`Quote to ${q.buyerName} is quiet — $${Math.round(q.total||0).toLocaleString()}, sent ${days}d ago`,
+                               act:"cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)"});
+  });
+  // 6. Wholesale deliveries due or past due. Calendar-day distance (vs midnight),
+  //    so "today" is 0 and "yesterday" is -1 regardless of the time of day.
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  (STATE.slOrders || dbGet('slOrders') || []).forEach(o => {
+    if (!o.deliveryDate || ['delivered','cancelled'].includes(o.status)) return;
+    const days = Math.round((new Date(o.deliveryDate + 'T00:00:00') - midnight) / 86400000);
+    if (days < 0) items.push({pri:'high', text:`Wholesale order #${o.id} (${o.account}) delivery is ${-days}d past due`,
+                              act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
+    else if (days <= 7) items.push({pri:'med', text:`Wholesale delivery in ${days}d — #${o.id} (${o.account})`,
+                                    act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
+  });
+  // 7. Content going out in the next 48h.
+  (STATE.mkCalendar||[]).forEach(e => {
+    const d = new Date(e.date + 'T00:00:00');
+    const days = Math.round((d - midnight) / 86400000);
+    if (days >= 0 && days <= 1 && e.status !== 'posted') {
+      items.push({pri:'low', text:`Content ${days === 0 ? 'today' : 'tomorrow'} — ${e.title||'planned post'} (${e.platform||''})`,
+                  act:"cpGoto('mk');setTimeout(function(){agNavGo('mk','calendar')},150)"});
+    }
+  });
+  // 8. Missing API keys — dismissible setup nags. Connection state lives in
   //    Settings; once dismissed they stay out of the daily focus on this device.
   const dismissedNags = (()=>{ try { return JSON.parse(localStorage.getItem('venia-dismissed-nags')||'[]'); } catch(e){ return []; } })();
   // (No Claude-key nag: the server relay powers the agents without a browser key.)
   if (!shopifyConnected() && !dismissedNags.includes('shopify'))     items.push({pri:'low',  text:'Shopify not connected — set it up in Settings', nag:'shopify'});
-  // 4. Active styles
+  // 9. Active styles
   const active = (STATE.styles||[]).filter(s => s.status === 'active');
   if (active.length) items.push({pri:'low', text:`${active.length} active style${active.length>1?'s':''} live in PLM`});
+  const order = { high: 0, med: 1, low: 2 };
+  items.sort((a,b) => (order[a.pri] ?? 2) - (order[b.pri] ?? 2));
   const colMap = {high:'var(--red)', med:'var(--amber)', low:'var(--muted)'};
   const html = !items.length
     ? '<span style="color:var(--muted)">All clear — nothing urgent today.</span>'
     : items.map(i =>
-        `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)">
+        `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)${i.act?';cursor:pointer':''}"${i.act?` onclick="${i.act.replace(/"/g,'&quot;')}"`:''}>
           <div style="width:3px;min-height:16px;background:${colMap[i.pri]};flex-shrink:0;border-radius:2px"></div>
           <div style="font-size:11px;color:var(--ink);line-height:1.5;flex:1">${i.text}</div>
-          ${i.nag?`<button onclick="dismissNag('${i.nag}')" title="Dismiss — reconnect any time in Settings" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;flex-shrink:0">✕</button>`:''}
+          ${i.act?`<div style="font-size:10px;color:var(--muted);flex-shrink:0">→</div>`:''}
+          ${i.nag?`<button onclick="event.stopPropagation();dismissNag('${i.nag}')" title="Dismiss — reconnect any time in Settings" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;flex-shrink:0">✕</button>`:''}
         </div>`
       ).join('');
   if (container) container.innerHTML = html;
   if (homeEl) homeEl.innerHTML = html;
+  // Once a day per device: surface the urgent count as a notification so
+  // deadlines reach you even if you weren't planning to look.
+  try { todayDigestNotify(items); } catch(e){}
+}
+
+// One local digest notification per day per device (no server involved):
+// fires on the first app open of the day when anything urgent is waiting.
+function todayDigestNotify(items) {
+  const urgent = (items||[]).filter(i => i.pri === 'high' || i.pri === 'med');
+  if (!urgent.length) return;
+  if (!window.Notification || Notification.permission !== 'granted') return;
+  const today = new Date().toISOString().slice(0,10);
+  if (localStorage.getItem('venia-digest-day') === today) return;
+  localStorage.setItem('venia-digest-day', today);
+  const title = urgent.length + ' thing' + (urgent.length > 1 ? 's' : '') + ' need' + (urgent.length > 1 ? '' : 's') + ' you today';
+  const body = urgent.slice(0,3).map(i => '• ' + i.text).join('\n');
+  try {
+    if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+      navigator.serviceWorker.ready.then(reg => reg.showNotification(title, { body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'venia-digest' }));
+    } else {
+      new Notification(title, { body });
+    }
+  } catch(e){}
 }
 
 // ── SHOPIFY ORDERS ───────────────────────────────────────────────────
