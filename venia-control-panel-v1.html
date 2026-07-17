@@ -1547,7 +1547,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '144';
+  const BUILD = '145';
   const BUILD_DATE = '2026.07.16';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18107,6 +18107,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<pre id="sb-sql-pre" style="flex:1;overflow:auto;padding:16px 20px;margin:0;font-family:\'DM Mono\',monospace;font-size:10px;line-height:1.75;color:var(--soft);white-space:pre;background:var(--bg-off)"></pre>'
       + '<div style="padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end">'
       + '<button onclick="navigator.clipboard.writeText(document.getElementById(\'sb-sql-pre\').textContent).then(function(){showToast(\'SQL copied\',\'success\')})" class="btn btn-gold btn-sm">Copy SQL</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="showSyncStatus()">⇅ Sync status</button>'
       + '<a href="https://supabase.com/dashboard" target="_blank" class="btn btn-ghost btn-sm">Open Supabase ↗</a>'
       + '</div>'
       + '</div>';
@@ -18225,6 +18226,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } finally { applyingRemote = false; }
   }
 
+  // Every leg records into __syncStat so the Sync Status panel (and the
+  // founders, cross-device) can see exactly where sync is stuck.
+  window.__syncStat = { build: (window.VENIA_BUILD || '?'), pull: null, push: null, apply: null, realtime: 'not started', decision: null };
+  var _syncErrToasted = false;
+  function syncFail(kind, msg){
+    window.__syncStat[kind] = { t: new Date().toISOString(), ok: false, err: String(msg || 'unknown').slice(0, 140) };
+    if (!_syncErrToasted && typeof showToast === 'function'){
+      _syncErrToasted = true;
+      showToast('⇅ Sync ' + kind + ' failed — ' + String(msg || '').slice(0, 80) + (/(jwt|auth|policy|denied|401|403)/i.test(String(msg)) ? ' · try signing in again' : ''), 'error');
+    }
+  }
   async function pushNow(){
     if (window.VENIA_SHARE) return;   // share view is strictly read-only — never write the workspace
     // Never push before the first pull decision: a fresh browser seeds demo
@@ -18244,8 +18256,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         id: WS_ID, data: toPush, updated_by: clientId(),
         updated_at: new Date().toISOString(), rev: rev
       }, { onConflict:'id' });
-      if (!res || !res.error) { localStorage.setItem('venia-sync-rev', String(rev)); setBase(localSnap); }
-    } catch(e){ /* offline — will retry on next save */ }
+      if (!res || !res.error) {
+        localStorage.setItem('venia-sync-rev', String(rev)); setBase(localSnap);
+        window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length };
+      } else {
+        syncFail('push', res.error.message || res.error.code);
+      }
+    } catch(e){ syncFail('push', e && e.message); }
   }
   function schedulePush(){
     if (applyingRemote) return;                 // don't echo a state we just pulled
@@ -18258,9 +18275,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var c = sb(); if (!c) return null;
     try {
       var res = await c.from('venia_workspace').select('*').eq('id', WS_ID).maybeSingle();
-      if (res.error || !res.data) return null;
+      if (res.error){ syncFail('pull', res.error.message || res.error.code); return null; }
+      if (!res.data){ window.__syncStat.pull = { t: new Date().toISOString(), ok: true, empty: true }; return null; }
+      window.__syncStat.pull = { t: new Date().toISOString(), ok: true, items: ((res.data.data || {}).dump || []).length, cloudAt: res.data.updated_at, by: res.data.updated_by };
       return res.data;
-    } catch(e){ return null; }
+    } catch(e){ syncFail('pull', e && e.message); return null; }
   }
 
   function rerender(){
@@ -18297,13 +18316,62 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var c = sb(); if (!c || channel) return;
     channel = c.channel('venia_ws_live')
       .on('postgres_changes', { event:'*', schema:'public', table:'venia_workspace', filter:'id=eq.'+WS_ID },
-          function(payload){ onRemote(payload.new); })
-      .subscribe();
+          function(payload){ window.__syncStat.realtime = 'event ' + new Date().toISOString(); onRemote(payload.new); })
+      .subscribe(function(status){ window.__syncStat.realtime = status + ' ' + new Date().toISOString(); });
   }
+  // Realtime is best-effort (laptops sleep, sockets drop) — a quiet periodic
+  // pull guarantees convergence even when the socket is dead.
+  async function pullAndMergeSilent(){
+    if (window.VENIA_SHARE || !window.__sbSyncDone) return;
+    // Never merge mid-edit — but only a VISIBLE field counts. A hidden field
+    // (e.g. the auth gate's passcode input after unlock) can hold stale focus
+    // forever, and treating it as "editing" would silently kill convergence.
+    var el = document.activeElement;
+    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.getClientRects().length > 0) return;
+    var row = await pullRow();
+    if (row && row.data && row.updated_by !== clientId()){
+      applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
+      setBase(snapshot());
+      window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: 'poll' };
+      rerender();
+    }
+  }
+  setInterval(pullAndMergeSilent, 4 * 60 * 1000);
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') setTimeout(pullAndMergeSilent, 800); });
+  // The status panel: every leg, timestamps, and one-tap pull/push.
+  window.showSyncStatus = function(){
+    var st = window.__syncStat || {};
+    var u = window.veniaAuthUser;
+    var fmtLeg = function(name, leg){
+      if (!leg) return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted);flex-shrink:0">' + name + '</span><span style="color:var(--muted)">never ran</span></div>';
+      return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted);flex-shrink:0">' + name + '</span>'
+        + '<span style="color:' + (leg.ok ? 'var(--green)' : 'var(--red)') + ';flex-shrink:0">' + (leg.ok ? '✓' : '✕') + '</span>'
+        + '<span style="flex:1;min-width:0;word-break:break-word">' + (leg.err ? leg.err : (leg.items != null ? leg.items + ' Brainstorm items' : 'ok') + (leg.by ? ' · by ' + leg.by : '') + (leg.via ? ' · ' + leg.via : '')) + '</span>'
+        + '<span style="font-family:\'DM Mono\',monospace;font-size:9px;color:var(--muted);flex-shrink:0">' + String(leg.t || '').slice(11, 19) + '</span></div>';
+    };
+    var ex = document.getElementById('sync-status'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'sync-status';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99997;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px';
+    ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
+    ov.innerHTML = '<div style="background:var(--bg);max-width:480px;width:100%;padding:18px;max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">'
+      + '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px">⇅ Sync status · Build ' + (st.build || '?') + '</div>'
+      + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Signed in</span><span style="color:' + (u ? 'var(--green)' : 'var(--red)') + '">' + (u ? (u.email || 'yes') : 'NO — sync cannot work; sign in') + '</span></div>'
+      + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Realtime</span><span>' + (st.realtime || '—') + '</span></div>'
+      + fmtLeg('Pull', st.pull) + fmtLeg('Push', st.push) + fmtLeg('Applied', st.apply)
+      + (st.decision ? '<div style="font-size:10px;color:var(--muted);padding:8px 0;line-height:1.6">Boot decision: ' + st.decision + '</div>' : '')
+      + '<div style="display:flex;gap:8px;margin-top:14px">'
+      + '<button class="btn btn-gold btn-sm" style="flex:1" onclick="supabaseSync().then(function(){ showSyncStatus(); })">⇣ Pull now</button>'
+      + '<button class="btn btn-ghost btn-sm" style="flex:1" onclick="sbFlushNow().then(function(){ showSyncStatus(); })">⇡ Push now</button>'
+      + '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'sync-status\').remove()">Close</button>'
+      + '</div></div>';
+    document.body.appendChild(ov);
+  };
 
   async function initialSync(){
     var row = await pullRow();
     window.__sbSyncDone = true;       // decision point reached — pushes may flow from here on
+    var _logDecision = function(d){ window.__syncStat.decision = d; };
     var myRev = parseInt(localStorage.getItem('venia-sync-rev')||'0', 10);
     // "Usable cloud" used to mean styles.length > 0 — written when styles were
     // always seeded. Post-purge an empty line plan is legitimate, and a device
@@ -18325,6 +18393,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // (i.e. a partner device wrote after us). Otherwise local wins: devices
       // from before this fix have real local data but no watermark — pushing
       // it up beats letting a stale/seed cloud copy overwrite real work.
+      _logDecision('cloudOk=true, fresh=' + !!FRESH_BROWSER + ', myRev=' + myRev + ', cloudRev=' + cloudRev + (FRESH_BROWSER || (myRev && cloudRev >= myRev) ? ' → apply cloud' : ' → local wins, push'));
       if (FRESH_BROWSER || (myRev && cloudRev >= myRev)){
         if (row.updated_by !== clientId()){
           // Fresh browser holds only seed data → let cloud win wholesale. A
@@ -18339,6 +18408,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         pushNow();                    // our local is newer → push it (pushNow sets base)
       }
     } else {
+      _logDecision('cloudOk=false (no usable cloud content) → pushing local');
       pushNow();                      // no (usable) workspace yet → seed it from this device
     }
   }
