@@ -1592,7 +1592,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '173';
+  const BUILD = '174';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4778,12 +4778,20 @@ function buildSkus() {
   STATE.skus = [];
   STATE.styles.forEach(s => {
     if (s.status === 'archived') return;
-    if (!s.colors || !s.sizes) return;
-    const colors = s.colors.split(',').map(c => c.trim()).filter(Boolean);
+    if (!s.sizes) return;
+    // Structured colorways drive SKU codes when present — their article code
+    // carries fabric + color (VN-SS27-O01-WML-BLK). Legacy colors-string styles
+    // keep the old 3-letter slice so their SKU strings don't churn.
+    const cwList = (s.colorways||[]).filter(cw => cw.name);
+    const colors = cwList.length
+      ? cwList.map(cw => ({ name: cw.name, code: (cw.code || cw.name.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3)).toUpperCase() }))
+      : String(s.colors||'').split(',').map(c => c.trim()).filter(Boolean).map(c => ({ name: c, code: c.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3) }));
+    if (!colors.length) return;
     const sizes = expandSizes(s.sizes);
-    colors.forEach(color => {
+    colors.forEach(colorObj => {
+      const color = colorObj.name;
       sizes.forEach(size => {
-        const cCode = color.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3);
+        const cCode = colorObj.code;
         const sCode = size.replace(/\//,'').toUpperCase();
         STATE.skus.push({
           sku: `${s.styleId}-${cCode}-${sCode}`,
@@ -9470,7 +9478,58 @@ function openColorwayModal(styleId) {
     </div>`;
   document.body.appendChild(modal);
   setTimeout(() => modal.classList.add('open'), 10);
+  // Fill article codes + previews for every row (respects hand-typed codes).
+  setTimeout(() => { (s.colorways||[]).forEach((cw,i) => { try { cwAutoCode(styleId, i); } catch(e){} }); }, 30);
 }
+
+// 3-letter abbreviation for article codes. Single word: first letter + first
+// interior consonant + last letter — the shape fashion color codes take
+// (Black→BLK, Bone→BNE, Ivory→IVY, Navy→NVY). Multi-word: word initials plus a
+// consonant ("Wool melton 520g" → WML, "Silk charmeuse" → SCH).
+function abbr3(str){
+  const words = String(str||'').split(/[^A-Za-z]+/).filter(Boolean);
+  if (!words.length) return '';
+  let out;
+  if (words.length >= 2) {
+    out = words[0][0] + words[1][0];
+    const rest = (words[1].slice(1) + words[0].slice(1)).replace(/[aeiou]/gi,'');
+    out += rest[0] || words[1][1] || '';
+  } else {
+    const w = words[0];
+    if (w.length <= 3) out = w;
+    else {
+      const mid = w.slice(1, -1).replace(/[aeiou]/gi,'');
+      out = w[0] + (mid[0] || w[1]) + w[w.length-1];
+    }
+  }
+  return out.slice(0,3).toUpperCase();
+}
+// Article code for a colorway: FABRIC-COLOR when a fabric is known (linked dye
+// material first, else the style's primary fabric), plain COLOR otherwise.
+function cwBuildCode(styleId, name, matId){
+  const s = (STATE.styles||[]).find(x=>x.id===styleId);
+  const mat = matId ? (STATE.materials||[]).find(m=>m.id===matId) : null;
+  const fab = abbr3(mat ? mat.name : (s && s.fabric) || '');
+  const col = abbr3(name);
+  if (!col) return '';
+  return fab ? fab + '-' + col : col;
+}
+// Auto-fill the code unless the user has typed their own; always refresh the
+// full article-number preview (styleId-CODE).
+window.cwAutoCode = function(styleId, i){
+  const codeEl = document.getElementById(`cw-code-${i}`);
+  if (!codeEl) return;
+  const name = document.getElementById(`cw-name-${i}`)?.value || '';
+  const matId = document.getElementById(`cw-mat-${i}`)?.value || '';
+  if (codeEl.dataset.manual !== '1') codeEl.value = cwBuildCode(styleId, name, matId);
+  cwCodePreview(styleId, i);
+};
+window.cwCodePreview = function(styleId, i){
+  const s = (STATE.styles||[]).find(x=>x.id===styleId);
+  const el = document.getElementById(`cw-artnum-${i}`);
+  const code = document.getElementById(`cw-code-${i}`)?.value.trim();
+  if (el) el.textContent = (s && code) ? '→ ' + (s.styleId||'') + '-' + code.toUpperCase() : '';
+};
 
 function cwRowHtml(styleId, cw, i) {
   const lots = cw.matId ? (STATE.materials.find(m=>m.id===cw.matId)||{}).lots||[] : [];
@@ -9481,13 +9540,13 @@ function cwRowHtml(styleId, cw, i) {
         <input type="color" id="cw-hex-${i}" value="${cw.hex||'#cccccc'}" style="width:36px;height:36px;border:1px solid var(--border);cursor:pointer;padding:2px">
       </div>
       <div class="fg"><label class="fl">Colorway Name</label>
-        <input class="fi" id="cw-name-${i}" value="${cw.name||''}" placeholder="e.g. Sulfur, Black, Ivory">
+        <input class="fi" id="cw-name-${i}" value="${cw.name||''}" placeholder="e.g. Sulfur, Black, Ivory" oninput="cwAutoCode('${styleId}',${i})">
       </div>
       <div class="fg"><label class="fl">Pantone / Ref</label>
         <input class="fi fi-mono" id="cw-pantone-${i}" value="${cw.pantone||''}" placeholder="PMS 7548C">
       </div>
       <div class="fg"><label class="fl">Dye Material</label>
-        <select class="fs" id="cw-mat-${i}" onchange="cwUpdateLotOpts(${i},this.value,'${styleId}')">
+        <select class="fs" id="cw-mat-${i}" onchange="cwUpdateLotOpts(${i},this.value,'${styleId}');cwAutoCode('${styleId}',${i})">
           <option value="">— Link material —</option>
           ${STATE.materials.filter(m=>['Fabric','Lining'].includes(m.type)).map(m=>`<option value="${m.id}" ${cw.matId===m.id?'selected':''}>${m.name}</option>`).join('')}
         </select>
@@ -9506,8 +9565,14 @@ function cwRowHtml(styleId, cw, i) {
       <button onclick="cwRemoveRow('${styleId}',${i})" style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:4px;margin-top:16px">×</button>
     </div>
     <div id="cw-shrink-${i}" style="margin-top:8px"></div>
-    <div class="fg" style="margin-top:8px"><label class="fl">Notes</label>
-      <input class="fi" id="cw-notes-${i}" value="${cw.notes||''}" placeholder="Lab dip ref, dyehouse, special instructions…">
+    <div style="display:flex;gap:10px;align-items:flex-end;margin-top:8px;flex-wrap:wrap">
+      <div class="fg" style="width:130px;flex-shrink:0"><label class="fl">Article Code</label>
+        <input class="fi fi-mono" id="cw-code-${i}" value="${cw.code||''}" placeholder="WML-BLK" data-manual="${cw.codeManual?'1':''}" oninput="this.dataset.manual='1';cwCodePreview('${styleId}',${i})" title="Fabric + colorway. Auto-builds from the linked material and color — type to override.">
+      </div>
+      <div id="cw-artnum-${i}" style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);padding-bottom:9px;white-space:nowrap"></div>
+      <div class="fg" style="flex:1;min-width:180px"><label class="fl">Notes</label>
+        <input class="fi" id="cw-notes-${i}" value="${cw.notes||''}" placeholder="Lab dip ref, dyehouse, special instructions…">
+      </div>
     </div>
   </div>`;
 }
@@ -9575,6 +9640,11 @@ function cwSaveAll(styleId) {
       cw.lotNo = document.getElementById(`cw-lot-${i}`)?.value || '';
       cw.status = document.getElementById(`cw-status-${i}`)?.value || 'pending';
       cw.notes = document.getElementById(`cw-notes-${i}`)?.value || '';
+      // Article code: hand-typed wins (and stays sticky); else build from
+      // fabric + color so SKUs read WML-BLK instead of a bare color slice.
+      const codeEl = document.getElementById(`cw-code-${i}`);
+      cw.codeManual = !!(codeEl && codeEl.dataset.manual === '1' && codeEl.value.trim());
+      cw.code = (codeEl && codeEl.value.trim().toUpperCase()) || cwBuildCode(styleId, cw.name, cw.matId);
     }
   });
   // Keep the legacy colors text + SKUs in sync with the structured colorways
