@@ -1592,7 +1592,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '169';
+  const BUILD = '170';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3159,6 +3159,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <div class="nav-item" data-page="materials" onclick="cpGoto('plm');goTo('materials',this);closeDrawer()"><span class="ni">▣</span>Materials</div>
       <div class="nav-item" data-page="vendors" onclick="cpGoto('plm');goTo('vendors',this);closeDrawer()"><span class="ni">◎</span>Vendors</div>
       <div class="nav-item" data-page="costs" onclick="cpGoto('plm');goTo('costs',this);closeDrawer()"><span class="ni">◆</span>Cost Sheets</div>
+      <div class="nav-item" data-page="production" onclick="cpGoto('plm');goTo('production',this);closeDrawer()"><span class="ni">▲</span>Production</div>
     </div>
     <div class="nav-group">
       <div class="nav-label">Sell</div>
@@ -3231,6 +3232,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <div class="nav-item" data-page="materials" onclick="goTo('materials',this)"><span class="ni">▣</span>Materials</div>
       <div class="nav-item" data-page="vendors" onclick="goTo('vendors',this)"><span class="ni">◎</span>Vendors</div>
       <div class="nav-item" data-page="costs" onclick="goTo('costs',this)"><span class="ni">◆</span>Cost Sheets<span class="nav-badge" id="nb-costs" style="margin-left:auto;font-size:8px;color:var(--muted);font-family:'DM Mono',monospace"></span></div>
+      <div class="nav-item" data-page="production" onclick="goTo('production',this)"><span class="ni">▲</span>Production</div>
     </div>
     <div class="nav-group">
       <div class="nav-label">Sell</div>
@@ -3683,6 +3685,11 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:18px">One home for the wholesale toolkit — line sheets, buyers and quotes together.</div>
         <button class="btn btn-gold btn-sm" onclick="cpGoto('sl');setTimeout(function(){agNavSl('linesheets')},160)">Open Sales › Line Sheets →</button>
       </div>
+    </div>
+
+    <!-- ── PRODUCTION POs ── -->
+    <div class="page" id="page-production">
+      <div id="production-content"></div>
     </div>
 
     <!-- ── INVENTORY / REORDER ── -->
@@ -4631,7 +4638,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -4899,6 +4906,7 @@ function renderPage(page) {
     case 'fitnotes': renderFitNotes(); break;
     case 'linesheet': break;   // static "moved to Sales" stub — nothing to render
     case 'inventory': renderInventory(); break;
+    case 'production': renderProduction(); break;
     case 'activity': renderActivity(); break;
     case 'techpack': renderTechPackPage(); break;
     case 'pr': renderPR(); break;
@@ -7668,6 +7676,282 @@ function filterInv(filter,el){
 }
 function setStock(id, qty) { const s=STATE.styles.find(x=>x.id===id); if(s){s.stock=parseInt(qty)||0; save(); logActivity(`Stock updated: ${s.name} → ${s.stock} units`);} }
 function setReorderQty(id,qty){const s=STATE.styles.find(x=>x.id===id);if(s){s.reorderQty=parseInt(qty)||0;save();}}
+
+// ═══════════════════════════════════════════════
+//  PRODUCTION POs — factory buys, payments, receiving
+//  The missing leg between "sold" and "stocked": consolidate demand into a
+//  per-size factory PO, track deposit/balance, receive goods into stock.
+// ═══════════════════════════════════════════════
+const PO_STATUSES = { draft:'Draft', placed:'Placed', production:'In production', shipped:'Shipped', received:'Received', cancelled:'Cancelled' };
+const PO_STATUS_COLORS = { draft:'var(--muted)', placed:'var(--blue)', production:'var(--amber)', shipped:'var(--purple)', received:'var(--green)', cancelled:'var(--border-mid)' };
+function poList(){ if (!STATE.pos) STATE.pos = []; return STATE.pos; }
+function poDeposit(po){ return Math.round((po.total||0) * (po.depositPct!=null?po.depositPct:30)) / 100 * 1; }
+function poAmounts(po){
+  const dep = Math.round((po.total||0) * ((po.depositPct!=null?po.depositPct:30)/100));
+  return { dep, bal: Math.round((po.total||0) - dep) };
+}
+function poOpen(po){ return !['received','cancelled'].includes(po.status); }
+function poOwed(po){
+  if (!poOpen(po) && po.status !== 'received') return 0;   // cancelled owes nothing
+  const { dep, bal } = poAmounts(po);
+  return (po.depositPaidAt ? 0 : dep) + (po.balancePaidAt ? 0 : bal);
+}
+
+function renderProduction(){
+  const el = document.getElementById('production-content');
+  if (!el) return;
+  const pos = poList();
+  const open = pos.filter(poOpen);
+  const unitsOnOrder = open.reduce((s,po)=>s+(po.units||0),0);
+  const owed = pos.filter(po=>poOpen(po)).reduce((s,po)=>s+poOwed(po),0);
+  const y0 = new Date(new Date().getFullYear(),0,1).toISOString();
+  const paidYtd = pos.reduce((s,po)=>{
+    const { dep, bal } = poAmounts(po);
+    return s + (po.depositPaidAt && po.depositPaidAt>=y0 ? dep:0) + (po.balancePaidAt && po.balancePaidAt>=y0 ? bal:0);
+  },0);
+  const rows = pos.slice().sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).map(po=>{
+    const { dep, bal } = poAmounts(po);
+    const pay = (paidAt, amt, tag) => `<span title="${tag} $${amt.toLocaleString()}" style="font-family:'DM Mono',monospace;font-size:9px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
+    return `<tr onclick="poOpenModal('${po.id}')" style="cursor:pointer">
+      <td><div class="t-name">${po.id}</div><div class="t-id">${slEsc(po.vendor||'—')}</div></td>
+      <td style="font-size:10px">${slEsc(po.season||'—')}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px">${po.units||0}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px">${slMoneyC(po.currency, po.total||0)}</td>
+      <td style="white-space:nowrap;display:flex;gap:8px;padding-top:14px">${pay(po.depositPaidAt, dep, 'D')}${pay(po.balancePaidAt, bal, 'B')}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${slEsc(po.exFactory||'—')}</td>
+      <td><span style="font-size:8px;letter-spacing:1.5px;text-transform:uppercase;font-weight:600;color:${PO_STATUS_COLORS[po.status]||'var(--muted)'}">${PO_STATUSES[po.status]||po.status||''}</span></td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `
+    <div class="stats-row stats-4" style="margin-bottom:20px">
+      <div class="stat-card"><div class="stat-label">Open POs</div><div class="stat-val">${open.length}</div><div class="stat-sub">${pos.length} all time</div></div>
+      <div class="stat-card"><div class="stat-label">Units on order</div><div class="stat-val">${unitsOnOrder.toLocaleString()}</div><div class="stat-sub">not yet received</div></div>
+      <div class="stat-card"><div class="stat-label">Owed to factories</div><div class="stat-val" style="color:${owed>0?'var(--amber)':'var(--ink)'}">$${Math.round(owed).toLocaleString()}</div><div class="stat-sub">unpaid deposits + balances</div></div>
+      <div class="stat-card"><div class="stat-label">Paid YTD</div><div class="stat-val">$${Math.round(paidYtd).toLocaleString()}</div><div class="stat-sub">production cash out</div></div>
+    </div>
+    <div class="sec-head"><div class="sec-title">Purchase Orders</div>
+      <div class="sec-actions"><button class="btn btn-gold btn-sm" onclick="poOpenModal(null)">+ New PO</button></div></div>
+    ${pos.length ? `<div class="tbl-wrap"><table><thead><tr>
+      <th>PO / Factory</th><th>Season</th><th>Units</th><th>Total</th><th>Payments</th><th>Ex-factory</th><th>Status</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`
+    : `<div class="empty"><div class="empty-icon">▲</div><div class="empty-text">No purchase orders yet.<br><span style="font-size:10px">Build one from your won wholesale orders — quantities per size roll up automatically.</span></div></div>`}`;
+}
+
+function poStyleOpts(sel){
+  return `<option value="">— style —</option>` + (STATE.styles||[]).filter(s=>s.status!=='archived').map(s=>
+    `<option value="${s.id}" data-cost="${landedCost(s)||0}" data-name="${slEsc(s.styleId ? s.styleId+' '+(s.name||'') : (s.name||''))}" ${sel===s.id?'selected':''}>${slEsc((s.styleId||'')+' — '+(s.name||''))} ($${landedCost(s)||0} landed)</option>`).join('');
+}
+function poItemRowHTML(it){
+  it = it || {};
+  const style = it.styleId ? (STATE.styles||[]).find(s=>s.id===it.styleId) : null;
+  const sizes = slQuoteSizesFor(style);
+  const vals = it.sizes || {};
+  return `<div class="sl-q-item" data-styleid="${it.styleId||''}">
+    <div class="sl-qi-top">
+      <select class="sl-qi-style" onchange="poStyleChanged(this)">${poStyleOpts(it.styleId)}</select>
+      <button type="button" class="sl-qi-del" title="Remove line" onclick="this.closest('.sl-q-item').remove();poRecalc()">✕</button>
+    </div>
+    <div class="sl-qi-mid">
+      <label class="sl-qi-field sl-qi-color-f"><span>Colorway</span><input class="sl-qi-color" type="text" value="${slEsc(it.color||'')}" placeholder="${style&&style.colors?slEsc(style.colors):'Colorway'}" oninput="poRecalc()"></label>
+      <label class="sl-qi-field sl-qi-ws-f"><span>Unit cost</span><input class="sl-qi-ws" type="number" min="0" step="0.01" value="${it.cost!=null?it.cost:''}" placeholder="0.00" oninput="poRecalc()"></label>
+      <div class="sl-qi-linetotal"><span>Line</span><b>—</b></div>
+    </div>
+    <div class="sl-qi-sizes-wrap">
+      <span class="sl-qi-sizes-lbl">Size run</span>
+      <div class="sl-qi-sizes">${sizes.map(sz=>slQuoteSzCell(sz, vals[sz]).replace('slQuoteRecalc()','poRecalc()')).join('')}</div>
+      <span class="sl-qi-units">0 units</span>
+    </div>
+  </div>`;
+}
+window.poStyleChanged = function(sel){
+  const row = sel.closest('.sl-q-item');
+  const opt = sel.selectedOptions[0];
+  if (opt && opt.dataset.cost) row.querySelector('.sl-qi-ws').value = opt.dataset.cost;
+  row.dataset.styleid = sel.value;
+  const prev = {};
+  row.querySelectorAll('.sl-qi-sz').forEach(i=>{ if(i.value) prev[i.dataset.size]=i.value; });
+  const style = (STATE.styles||[]).find(s=>s.id===sel.value);
+  const holder = row.querySelector('.sl-qi-sizes');
+  if (holder) holder.innerHTML = slQuoteSizesFor(style).map(sz=>slQuoteSzCell(sz, prev[sz]).replace('slQuoteRecalc()','poRecalc()')).join('');
+  poRecalc();
+};
+window.poAddItem = function(it){
+  const wrap = document.getElementById('po-items');
+  if (wrap){ wrap.insertAdjacentHTML('beforeend', poItemRowHTML(it)); poRecalc(); }
+};
+window.poReadItems = function(){
+  return [...document.querySelectorAll('#po-items .sl-q-item')].map(r=>{
+    const sel = r.querySelector('.sl-qi-style');
+    const opt = sel && sel.selectedOptions[0];
+    const sizes = {}; let units = 0;
+    r.querySelectorAll('.sl-qi-sz').forEach(i=>{ const n=parseInt(i.value,10)||0; if(n>0){ sizes[i.dataset.size]=n; units+=n; } });
+    return { styleId: sel?sel.value:'', name: opt?(opt.dataset.name||''):'',
+      color: (r.querySelector('.sl-qi-color')||{}).value ? r.querySelector('.sl-qi-color').value.trim() : '',
+      sizes, qty: units, cost: parseFloat(r.querySelector('.sl-qi-ws').value)||0 };
+  }).filter(it=>it.styleId && it.qty>0);
+};
+window.poRecalc = function(){
+  const cur = (document.getElementById('po-currency')||{}).value || 'USD';
+  let units=0, total=0;
+  document.querySelectorAll('#po-items .sl-q-item').forEach(r=>{
+    let u=0; r.querySelectorAll('.sl-qi-sz').forEach(i=>u+=parseInt(i.value,10)||0);
+    const c = parseFloat(r.querySelector('.sl-qi-ws').value)||0;
+    units+=u; total+=u*c;
+    const uEl=r.querySelector('.sl-qi-units'); if(uEl) uEl.textContent = u+(u===1?' unit':' units');
+    const lt=r.querySelector('.sl-qi-linetotal b'); if(lt) lt.textContent = (u&&c)?slMoneyC(cur,u*c):'—';
+  });
+  const t=document.getElementById('po-total-view'); if(t) t.textContent = units+(units===1?' unit · ':' units · ')+slMoneyC(cur,total);
+  const pct = parseFloat((document.getElementById('po-deposit-pct')||{}).value)||0;
+  const split=document.getElementById('po-split-view');
+  if (split) split.textContent = pct>0 ? `deposit ${slMoneyC(cur, total*pct/100)} · balance ${slMoneyC(cur, total*(100-pct)/100)}` : '';
+};
+// Consolidate the season's won demand (accepted quotes, size-level) into PO lines.
+window.poPullDemand = function(){
+  const season = (document.getElementById('po-season')?.value||'').trim();
+  const won = (STATE.slQuotes||[]).filter(q=>q.status==='accepted' && (!season || String(q.season||'').trim()===season));
+  const byStyle = {};
+  won.forEach(q=>(q.items||[]).forEach(it=>{
+    if (!it.styleId) return;
+    const k = it.styleId + '|' + (it.color||'');
+    if (!byStyle[k]) byStyle[k] = { styleId: it.styleId, name: it.name, color: it.color||'', sizes:{}, qty:0 };
+    const tgt = byStyle[k];
+    if (it.sizes && Object.keys(it.sizes).length) Object.entries(it.sizes).forEach(([sz,n])=>{ tgt.sizes[sz]=(tgt.sizes[sz]||0)+n; tgt.qty+=n; });
+    else if (it.qty) { const s0 = Object.keys(tgt.sizes)[0]; tgt.sizes[s0||'M']=(tgt.sizes[s0||'M']||0)+it.qty; tgt.qty+=it.qty; }
+  }));
+  const lines = Object.values(byStyle);
+  if (!lines.length){ showToast('No accepted quotes' + (season?' for '+season:'') + ' to pull from'); return; }
+  const wrap = document.getElementById('po-items'); if (wrap) wrap.innerHTML = '';
+  lines.forEach(l=>{
+    const st = (STATE.styles||[]).find(s=>s.id===l.styleId);
+    poAddItem({ styleId:l.styleId, name:l.name, color:l.color, sizes:l.sizes, cost: st?(landedCost(st)||0):0 });
+  });
+  showToast(lines.length + ' style' + (lines.length>1?'s':'') + ' pulled from won orders — add buffer stock on top');
+};
+window.poOpenModal = function(id){
+  const po = id ? poList().find(p=>p.id===id) : null;
+  const cur = (po&&po.currency)||'USD';
+  const fld='width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px';
+  const lbl='font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
+  const factories = (STATE.vendors||[]).map(v=>`<option value="${slEsc(v.name)}"></option>`).join('');
+  const curOpts = Object.keys(SL_CURRENCIES).map(c=>`<option value="${c}" ${cur===c?'selected':''}>${c} ${SL_CURRENCIES[c]}</option>`).join('');
+  const stOpts = Object.entries(PO_STATUSES).map(([k,v])=>`<option value="${k}" ${(po?po.status:'draft')===k?'selected':''}>${v}</option>`).join('');
+  const { dep, bal } = po ? poAmounts(po) : { dep:0, bal:0 };
+  const payRow = (tag, amt, due, paidAt, dueId, btnFn) => `
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+      <span style="font-size:10px;font-weight:700;width:64px">${tag}</span>
+      <span style="font-family:'DM Mono',monospace;font-size:12px">${slMoneyC(cur,amt)}</span>
+      <input id="${dueId}" type="date" value="${slEsc(due||'')}" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px;font-size:10px" title="Due date">
+      ${paidAt
+        ? `<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:auto">✓ paid ${slEsc(String(paidAt).slice(0,10))}</span>`
+        : `<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="${btnFn}('${po?po.id:''}')">Mark paid</button>`}
+    </div>`;
+  const ex0 = document.getElementById('po-modal'); if (ex0) ex0.remove();
+  const ov = document.createElement('div');
+  ov.className='overlay'; ov.id='po-modal';
+  ov.innerHTML = `<div class="modal" style="width:640px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">${po?po.id:'New Purchase Order'}</div><button class="modal-close" onclick="closeModal('po-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:12px;max-height:82vh;overflow-y:auto">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px">
+        <div><div style="${lbl}">Factory / vendor</div><input id="po-vendor" list="po-vendor-list" type="text" style="${fld}" value="${slEsc(po?.vendor||'')}" placeholder="Factory name"><datalist id="po-vendor-list">${factories}</datalist></div>
+        <div><div style="${lbl}">Season</div><input id="po-season" type="text" style="${fld}" value="${slEsc(po?.season||(typeof RP_SEASON==='string'&&RP_SEASON?RP_SEASON:''))}" placeholder="FW26"></div>
+        <div><div style="${lbl}">Currency</div><select id="po-currency" style="${fld}" onchange="poRecalc()">${curOpts}</select></div>
+      </div>
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap">
+          <div style="${lbl};margin:0">Order lines — style · colorway · size run · unit cost</div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-sm" onclick="poPullDemand()" title="Sum the size runs from this season's accepted quotes">⇊ From won orders</button>
+            <button class="btn btn-ghost btn-sm" onclick="poAddItem()">+ Add style</button>
+          </div>
+        </div>
+        <div id="po-items">${(po?.items||[]).map(poItemRowHTML).join('')}</div>
+        <div style="display:flex;justify-content:flex-end;align-items:baseline;gap:10px;padding-top:8px;margin-top:6px;border-top:1px solid var(--border)">
+          <span id="po-split-view" style="font-size:9.5px;color:var(--muted);font-family:'DM Mono',monospace"></span>
+          <span style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Total</span>
+          <span id="po-total-view" style="font-family:'DM Mono',monospace;font-size:16px;font-weight:600">${slMoneyC(cur, po?.total||0)}</span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div><div style="${lbl}">Deposit %</div><input id="po-deposit-pct" type="number" min="0" max="100" style="${fld}" value="${po?(po.depositPct!=null?po.depositPct:30):30}" oninput="poRecalc()"></div>
+        <div><div style="${lbl}">Ex-factory date</div><input id="po-exfactory" type="date" style="${fld}" value="${slEsc(po?.exFactory||'')}"></div>
+        <div><div style="${lbl}">Status</div><select id="po-status" style="${fld}">${stOpts}</select></div>
+      </div>
+      ${po ? `<div>
+        <div style="${lbl};margin-bottom:2px">Payment schedule</div>
+        ${payRow('Deposit', dep, po.depositDue, po.depositPaidAt, 'po-dep-due', 'poMarkDepositPaid')}
+        ${payRow('Balance', bal, po.balanceDue, po.balancePaidAt, 'po-bal-due', 'poMarkBalancePaid')}
+      </div>` : ''}
+      <div><div style="${lbl}">Notes</div><textarea id="po-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(po?.notes||'')}</textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px">
+        ${po&&poOpen(po)&&po.status!=='draft' ? `<button class="btn btn-ghost btn-sm" onclick="poReceive('${po.id}')">⇣ Receive into stock</button>` : ''}
+        ${po ? `<button class="btn btn-ghost btn-sm" onclick="poDelete('${po.id}')">Delete</button>` : ''}
+        <button class="btn btn-ghost" onclick="closeModal('po-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="poSave('${po?po.id:''}')">Save</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  openModal('po-modal');
+  if (!po) poAddItem();
+  poRecalc();
+};
+window.poSave = function(existingId){
+  const items = poReadItems();
+  const units = items.reduce((s,it)=>s+it.qty,0);
+  const total = Math.round(items.reduce((s,it)=>s+it.qty*it.cost,0)*100)/100;
+  const data = {
+    vendor: (document.getElementById('po-vendor')?.value||'').trim(),
+    season: (document.getElementById('po-season')?.value||'').trim(),
+    currency: document.getElementById('po-currency')?.value||'USD',
+    depositPct: Math.min(Math.max(parseFloat(document.getElementById('po-deposit-pct')?.value)||0,0),100),
+    exFactory: document.getElementById('po-exfactory')?.value||'',
+    status: document.getElementById('po-status')?.value||'draft',
+    notes: (document.getElementById('po-notes')?.value||'').trim(),
+    items, units, total,
+    updatedAt: new Date().toISOString(),
+  };
+  const depDue = document.getElementById('po-dep-due'); if (depDue) data.depositDue = depDue.value||'';
+  const balDue = document.getElementById('po-bal-due'); if (balDue) data.balanceDue = balDue.value||'';
+  if (!data.vendor){ showToast('Name the factory'); return; }
+  if (!items.length){ showToast('Add at least one style with units'); return; }
+  const pos = poList();
+  if (existingId){
+    const idx = pos.findIndex(p=>p.id===existingId);
+    if (idx>=0) pos[idx] = { ...pos[idx], ...data };
+  } else {
+    data.id = 'PO-' + Date.now().toString(36).toUpperCase();
+    data.createdAt = new Date().toISOString();
+    pos.unshift(data);
+  }
+  save();
+  closeModal('po-modal');
+  try { logActivity('Production PO ' + (existingId||data.id) + ' saved — ' + data.vendor + ' · ' + units + ' units'); } catch(e){}
+  renderProduction();
+  showToast(existingId ? 'PO updated' : 'PO ' + data.id + ' created');
+};
+window.poMarkDepositPaid = function(id){ const po = poList().find(p=>p.id===id); if(!po) return; po.depositPaidAt = new Date().toISOString(); po.updatedAt = po.depositPaidAt; save(); try{logActivity('PO '+id+' deposit paid');}catch(e){} poOpenModal(id); renderProduction(); };
+window.poMarkBalancePaid = function(id){ const po = poList().find(p=>p.id===id); if(!po) return; po.balancePaidAt = new Date().toISOString(); po.updatedAt = po.balancePaidAt; save(); try{logActivity('PO '+id+' balance paid');}catch(e){} poOpenModal(id); renderProduction(); };
+window.poReceive = function(id){
+  const po = poList().find(p=>p.id===id); if(!po) return;
+  if (!confirm('Receive PO ' + id + ' — add ' + (po.units||0) + ' units into stock?')) return;
+  (po.items||[]).forEach(it=>{
+    const s = (STATE.styles||[]).find(x=>x.id===it.styleId);
+    if (s) s.stock = (s.stock||0) + (it.qty||0);
+  });
+  po.status = 'received';
+  po.receivedAt = new Date().toISOString();
+  po.updatedAt = po.receivedAt;
+  save();
+  try { logActivity('PO ' + id + ' received — ' + (po.units||0) + ' units into stock'); } catch(e){}
+  closeModal('po-modal');
+  renderProduction();
+  showToast((po.units||0) + ' units received into stock', 'success');
+};
+window.poDelete = function(id){
+  if (!confirm('Delete ' + id + '?')) return;
+  STATE.pos = poList().filter(p=>p.id!==id);
+  save(); closeModal('po-modal'); renderProduction();
+};
 
 // ═══════════════════════════════════════════════
 //  ACTIVITY LOG
@@ -11812,6 +12096,27 @@ function buildTodayFocus() {
                               act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
     else if (days <= 7) items.push({pri:'med', text:`Wholesale delivery in ${days}d — #${o.id} (${o.account})`,
                                     act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
+  });
+  // 6b. Production POs: factory payments coming due, and ex-factory dates near.
+  (STATE.pos||[]).filter(po => !['received','cancelled'].includes(po.status)).forEach(po => {
+    const dep = Math.round((po.total||0)*((po.depositPct!=null?po.depositPct:30)/100));
+    const bal = Math.round((po.total||0)-dep);
+    const payDays = (d) => Math.round((new Date(d + 'T00:00:00') - midnight) / 86400000);
+    const act = "cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)";
+    if (po.depositDue && !po.depositPaidAt) {
+      const dd = payDays(po.depositDue);
+      if (dd < 0) items.push({pri:'high', text:`Factory deposit ${-dd}d overdue — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
+      else if (dd <= 7) items.push({pri:'med', text:`Factory deposit due in ${dd}d — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
+    }
+    if (po.balanceDue && !po.balancePaidAt) {
+      const bd = payDays(po.balanceDue);
+      if (bd < 0) items.push({pri:'high', text:`Factory balance ${-bd}d overdue — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
+      else if (bd <= 7) items.push({pri:'med', text:`Factory balance due in ${bd}d — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
+    }
+    if (po.exFactory && ['placed','production'].includes(po.status)) {
+      const xd = payDays(po.exFactory);
+      if (xd >= 0 && xd <= 7) items.push({pri:'med', text:`PO ${po.id} ships ex-factory in ${xd}d — ${po.units||0} units (${po.vendor})`, act});
+    }
   });
   // 7. Content going out in the next 48h.
   (STATE.mkCalendar||[]).forEach(e => {
@@ -17036,8 +17341,24 @@ function cmdMoneyData() {
   try { const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null'); if (bdg) Object.values(bdg).forEach(r => { spend += parseFloat(r.spent) || 0; }); } catch(e){}
   const revYtd = (p.ytd || 0) + wsYtd;
   const cogsYtd = dtcCogsYtd + wsCogsYtd;
+  // Production cash (POs): what's been paid to factories this year and what's
+  // still committed. Cash-flow lines — NOT subtracted from operating, because
+  // COGS above already carries landed cost against units sold.
+  let poPaidYtd = 0, poCommitted = 0;
+  try {
+    (STATE.pos||[]).forEach(po => {
+      const dep = Math.round((po.total||0)*((po.depositPct!=null?po.depositPct:30)/100));
+      const bal = Math.round((po.total||0)-dep);
+      if (po.depositPaidAt && po.depositPaidAt >= jan1iso) poPaidYtd += dep;
+      if (po.balancePaidAt && po.balancePaidAt >= jan1iso) poPaidYtd += bal;
+      if (!['received','cancelled'].includes(po.status)) {
+        if (!po.depositPaidAt) poCommitted += dep;
+        if (!po.balancePaidAt) poCommitted += bal;
+      }
+    });
+  } catch(e){}
   return { p, wsYtd, wsAll, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend,
-           revYtd, cogsYtd, operating: revYtd - cogsYtd - spend, rows,
+           revYtd, cogsYtd, operating: revYtd - cogsYtd - spend, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
 }
 window.cmdRenderMoney = function() {
@@ -17078,6 +17399,12 @@ window.cmdRenderMoney = function() {
       ${line('Quotes out (sent)', d.pipeSent, 'awaiting reply')}
       ${line('Accepted, not yet ordered', d.pipeAccepted, 'one tap from an order')}
     </div>
+    ${(d.poPaidYtd || d.poCommitted) ? `
+    <div class="ag-sec-head"><h2 class="ag-sec-title">Production cash — factories</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)">POs →</button></div></div>
+    <div style="max-width:560px;margin-bottom:24px">
+      ${line('Paid to factories YTD', d.poPaidYtd, 'deposits + balances')}
+      ${line('Committed, not yet paid', d.poCommitted, 'open POs')}
+    </div>` : ''}
     <div class="ag-sec-head"><h2 class="ag-sec-title">Style profitability${d.hasSales ? '' : ' — needs Shopify'}</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdShowSection('cmd-budget',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=budget]'))">Budget →</button></div></div>
     ${d.rows.length ? `<div class="ag-list"><div class="ag-list-row ag-list-row-h"><div>Style</div><div>Units</div><div>Revenue</div><div>Gross profit</div></div>${styleRows}</div>`
       : `<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No per-style sales yet — this fills from live Shopify data.</div>`}`;
