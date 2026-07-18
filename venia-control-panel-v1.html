@@ -1599,7 +1599,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '187';
+  const BUILD = '188';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20261,12 +20261,49 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return { id: uid(), t: lines.join('\n'), d: new Date().toISOString(), done: false };
   }
 
+  // Natural-language due dates: "by friday", "due jul 31", "tomorrow",
+  // "next week", "in 2 weeks" at the END of a line set the due date and are
+  // stripped from the text. Returns {due:'YYYY-MM-DD'|null, text:cleaned}.
+  function parseNLDate(text){
+    var t = String(text||''), due = null, m;
+    var iso = function(d){ return d.toISOString().slice(0,10); };
+    var today = function(){ var d = new Date(); d.setHours(12,0,0,0); return d; };
+    var WD = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+    var MO = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    var tail = /(?:\s*[,—–-]?\s*)(?:by|due|before|until)?\s*(today|tonight|tomorrow|next week|end of month|eom|in\s+(\d+)\s+(day|days|week|weeks)|(?:next\s+)?(sun|mon|tue|tues|wed|thu|thur|thurs|fri|sat)[a-z]*|(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})|(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*)\s*$/i;
+    m = t.match(tail);
+    if (m){
+      var d = today(), phrase = m[1].toLowerCase();
+      if (phrase === 'today' || phrase === 'tonight'){ due = iso(d); }
+      else if (phrase === 'tomorrow'){ d.setDate(d.getDate()+1); due = iso(d); }
+      else if (phrase === 'next week'){ d.setDate(d.getDate()+7); due = iso(d); }
+      else if (phrase === 'end of month' || phrase === 'eom'){ d = new Date(d.getFullYear(), d.getMonth()+1, 0, 12); due = iso(d); }
+      else if (m[2]){ d.setDate(d.getDate() + parseInt(m[2],10) * (/week/.test(m[3]) ? 7 : 1)); due = iso(d); }
+      else if (m[4]){
+        var wd = { sun:0, mon:1, tue:2, tues:2, wed:3, thu:4, thur:4, thurs:4, fri:5, sat:6 }[m[4].toLowerCase()];
+        var delta = (wd - d.getDay() + 7) % 7 || 7;   // "friday" = the NEXT friday, never today
+        d.setDate(d.getDate() + delta); due = iso(d);
+      }
+      else if (m[5] && m[6]){ var mi = MO.indexOf(m[5].toLowerCase().slice(0,3)); d = new Date(d.getFullYear(), mi, parseInt(m[6],10), 12); if (d < today()) d.setFullYear(d.getFullYear()+1); due = iso(d); }
+      else if (m[7] && m[8]){ var mi2 = MO.indexOf(m[8].toLowerCase().slice(0,3)); d = new Date(d.getFullYear(), mi2, parseInt(m[7],10), 12); if (d < today()) d.setFullYear(d.getFullYear()+1); due = iso(d); }
+      if (due) t = t.slice(0, m.index).replace(/[\s,—–-]+$/,'').trim() || t;
+    }
+    return { due: due, text: t };
+  }
+  window.parseNLDate = parseNLDate;
   window.dumpAdd = function(){
     var t = document.getElementById('dump-input');
     var v = (t && t.value || '').trim();
     if (!v) return;
     // Blank lines separate blocks, so several plans/thoughts can land at once.
-    var added = v.split(/\n\s*\n/).map(parseDumpBlock).filter(Boolean);
+    var added = v.split(/\n\s*\n/).map(function(block){
+      var lines = block.split('\n');
+      var nl = parseNLDate(lines[0]);
+      if (nl.due){ lines[0] = nl.text; block = lines.join('\n'); }
+      var it = parseDumpBlock(block);
+      if (it && nl.due) it.due = nl.due;
+      return it;
+    }).filter(Boolean);
     if (!added.length) return;
     // Unshift in reverse so the first block typed ends up on top of the inbox.
     added.slice().reverse().forEach(function(it){ items().unshift(it); });
@@ -23758,6 +23795,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '</label>';
   }
   window.dumpSetDue = function(id, val){ var g = items().find(function(x){ return x.id === id; }); if (!g) return; g.due = val || ''; save(); render(); };
+  window.dumpGoalSearch = function(v){
+    window.__dumpGoalQ = String(v || '').trim();
+    clearTimeout(window.__dumpGoalQT);
+    window.__dumpGoalQT = setTimeout(function(){
+      var el = document.getElementById('dump-goal-q');
+      var pos = el ? el.selectionStart : 0;
+      render();
+      var el2 = document.getElementById('dump-goal-q');
+      if (el2){ el2.focus(); try { el2.setSelectionRange(pos, pos); } catch(_){} }
+    }, 160);
+  };
   window.dumpNewGoal = function(){
     var g = { id: uid(), t: 'New goal', d: new Date().toISOString(), done: false, children: [] };
     items().unshift(g);
@@ -24109,13 +24157,33 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } else {
       // GOALS HOME — goals (sorted by urgency) up top, quick tasks below, and
       // Done folded in as a collapsed section (was its own tab).
-      var goals = open.filter(isGroup);   // manual order — drag to arrange; due chips carry urgency
+      // Urgency-first: overdue, then today, then soonest due, then undated —
+      // manual drag order is preserved WITHIN each band (stable sort).
+      var goals = open.filter(isGroup).map(function(g, gi){ return { g: g, gi: gi }; })
+        .sort(function(a, b){
+          var td = new Date().toISOString().slice(0,10);
+          var rank = function(x){ var d = x.g.due; if (!d) return 4; if (d < td) return 0; if (d === td) return 1; return 2; };
+          var ra = rank(a), rb = rank(b);
+          if (ra !== rb) return ra - rb;
+          if (ra === 2 && a.g.due !== b.g.due) return a.g.due < b.g.due ? -1 : 1;
+          return a.gi - b.gi;
+        }).map(function(x){ return x.g; });
       var tasks = open.filter(function(i){ return !isGroup(i); });
       if (!goals.length && !tasks.length && !done.length){
         body = emptyState('🧠', 'Your mind, cleared', 'Type or speak anything above — an idea, a task, a goal.<br>A heading + steps becomes a goal; one line + <span style="color:var(--gold)">✦</span> lets Eni build one.');
       } else {
         var lbl = function(t, right){ return '<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">' + t + '</div>' + (right || '') + '</div>'; };
         var h = lbl('Goals', '<button onclick="dumpNewGoal()" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:700;cursor:pointer">＋ New goal</button>');
+        if (goals.length > 8){
+          h += '<input id="dump-goal-q" value="' + esc(window.__dumpGoalQ || '') + '" placeholder="Find a goal…" oninput="dumpGoalSearch(this.value)" style="width:100%;box-sizing:border-box;margin:2px 0 8px;padding:8px 11px;border:1px solid var(--border);border-radius:9px;background:var(--bg);color:var(--ink);font-size:12px;outline:none">';
+        }
+        if (window.__dumpGoalQ){
+          var q = window.__dumpGoalQ.toLowerCase();
+          var hit = function(g){ return (g.t || '').toLowerCase().indexOf(q) >= 0 || (g.children || []).some(function(c){ return (c.t || '').toLowerCase().indexOf(q) >= 0; }); };
+          var keep = {};
+          goals.forEach(function(g){ if (hit(g)){ keep[g.id] = 1; var p = g; while (p && p.parentId){ keep[p.parentId] = 1; p = goals.filter(function(x){ return x.id === p.parentId; })[0]; } } });
+          goals = goals.filter(function(g){ return keep[g.id]; });
+        }
         var kidsOfGoal = function(pid){ return goals.filter(function(g){ return g.parentId === pid; }); };
         var topGoals = goals.filter(function(g){ return !g.parentId || !goals.some(function(p){ return p.id === g.parentId; }); });
         var goalRowRec = function(i, depth){
