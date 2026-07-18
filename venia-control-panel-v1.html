@@ -1599,7 +1599,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '181';
+  const BUILD = '182';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20447,6 +20447,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var reordered = ids.map(function(id){ seen[id] = true; return byId[id]; }).filter(Boolean);
     var rest = items().filter(function(it){ return !seen[it.id]; });
     STATE.dump = reordered.concat(rest);
+    window.__dumpSquelch = Date.now();
     save(); render();
   }
   var dumpGrip = function(id){
@@ -20471,7 +20472,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     else if (!allDone && g.done){ g.done = false; g.doneAt = null; }
   }
   function findGroup(gid){ return items().find(function(i){ return i.id === gid && isGroup(i); }); }
-  window.dumpGroupCollapse = function(id){ var g = items().find(function(x){ return x.id === id; }); if (!g) return; g.collapsed = !(g.collapsed === undefined ? true : g.collapsed); save(); render(); };
+  window.dumpGroupCollapse = function(id){ if (window.__dumpSquelch && Date.now() - window.__dumpSquelch < 450) return; var g = items().find(function(x){ return x.id === id; }); if (!g) return; g.collapsed = !(g.collapsed === undefined ? true : g.collapsed); save(); render(); };
   window.dumpToggleChild = function(gid, cid){
     var g = findGroup(gid); if (!g) return;
     var c = g.children.find(function(x){ return x.id === cid; }); if (!c) return;
@@ -20533,6 +20534,39 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // siblings, honor DOM order on drop. Nesting (parentId) is preserved — order
   // changes only within each step's own sibling group.
   var sdnd = null;
+  // Press-and-hold anywhere on a card to lift it into a drag (the ⠿ grip stays
+  // as the instant handle). A short tap still edits / collapses; moving before
+  // the hold fires means scroll or swipe, so we stand down.
+  var holdT = null, holdPt = null;
+  function holdCancel(){
+    if (holdT){ clearTimeout(holdT); holdT = null; }
+    holdPt = null;
+    document.removeEventListener('pointermove', holdWatch);
+    document.removeEventListener('pointerup', holdCancel);
+    document.removeEventListener('pointercancel', holdCancel);
+  }
+  function holdWatch(e){
+    if (!holdPt) return;
+    if (Math.abs(e.clientX - holdPt.x) > 8 || Math.abs(e.clientY - holdPt.y) > 8) holdCancel();
+  }
+  function holdArm(e, fire){
+    if (e.button != null && e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('button,textarea,input,select,a')) return;
+    holdCancel();
+    holdPt = { x: e.clientX, y: e.clientY };
+    var snap = { clientX: e.clientX, clientY: e.clientY, button: 0,
+      preventDefault: function(){}, stopPropagation: function(){} };
+    holdT = setTimeout(function(){ holdCancel(); fire(snap); }, 260);
+    document.addEventListener('pointermove', holdWatch);
+    document.addEventListener('pointerup', holdCancel);
+    document.addEventListener('pointercancel', holdCancel);
+  }
+  window.dumpStepHold = function(e, gid, cid){
+    holdArm(e, function(snap){ window.dumpStepDragStart(snap, gid, cid); });
+  };
+  window.dumpGoalHold = function(e, id){
+    holdArm(e, function(snap){ window.dumpDragStart(snap, id); });
+  };
   window.dumpStepDragStart = function(e, gid, cid){
     if (e.button != null && e.button !== 0) return;
     if (e.cancelable) e.preventDefault();
@@ -20623,6 +20657,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Drop-INTO: become the target's last sub-step.
       me.parentId = nestId;
       g.children = g.children.filter(function(c){ return c.id !== me.id; }); g.children.push(me);
+      window.__dumpSquelch = Date.now();
       dumpStepClearTarget(); save(); render();
       showToast('Nested — drag it back out any time', 'success');
       return;
@@ -20644,6 +20679,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var seen = {};
     var reordered = ids.map(function(id){ seen[id] = true; return byId[id]; }).filter(Boolean);
     g.children = reordered.concat(g.children.filter(function(c){ return !seen[c.id]; }));
+    window.__dumpSquelch = Date.now();
     dumpStepClearTarget(); save(); render();
   }
   // Nest a step under a sibling step (sub-task) — mirrors goal nesting.
@@ -20677,6 +20713,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     showToast(pid ? 'Nested — it indents under its parent step' : 'Moved to top level', 'success');
   };
   window.dumpChildStartEdit = function(gid, cid){
+    if (window.__dumpSquelch && Date.now() - window.__dumpSquelch < 450) return;
     editingChildId = cid; render();
     setTimeout(function(){ var e = document.getElementById('dump-child-edit'); if (e){ window.dumpGrow(e); e.focus(); try { e.setSelectionRange(e.value.length, e.value.length); } catch(_){} } }, 60);
   };
@@ -23833,10 +23870,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // already finishes a goal on its own, and delete lives in the footer.
         // The whole header is the disclosure — tap anywhere to expand/collapse
         // (Apple-style big target). Rename lives in the expanded footer.
-        head = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="display:flex;gap:9px;align-items:center;padding:12px;background:var(--bg-off);cursor:pointer">'
+        head = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" onpointerdown="dumpGoalHold(event,\'' + i.id + '\')" style="display:flex;gap:8px;align-items:center;padding:9px 12px;background:var(--bg-off);cursor:pointer">'
           + (i.done ? '' : dumpGrip(i.id))
           + (i.done ? '<button onclick="event.stopPropagation();dumpToggle(\'' + i.id + '\')" title="Reopen this goal" style="flex-shrink:0;width:20px;height:20px;border:1.5px solid var(--green);border-radius:50%;background:var(--green);color:#fff;cursor:pointer;font-size:11px;line-height:1;display:flex;align-items:center;justify-content:center">✓</button>' : '')
-          + '<div style="flex:1;min-width:0;font-size:13.5px;font-weight:700;letter-spacing:.01em;line-height:1.35;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
+          + '<div style="flex:1;min-width:0;font-size:13px;font-weight:700;letter-spacing:.01em;line-height:1.3;color:' + (i.done?'var(--muted)':'var(--ink)') + ';' + (i.done?'text-decoration:line-through;':'') + 'word-break:break-word">' + esc(i.t || 'Untitled plan') + '</div>'
           + '<span style="flex-shrink:0;font-family:' + mono + ';font-size:10.5px;color:var(--muted)">' + doneN + '/' + kids.length + '</span>'
           + '<span style="color:var(--muted);font-size:13px;flex-shrink:0;padding:0 2px">' + (collapsed ? '▸' : '▾') + '</span>'
           + '</div>';
@@ -23856,9 +23893,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // left to delete; tap to edit.
         return '<div class="dump-swipe" data-sw="step" data-gid="' + i.id + '" data-id="' + c.id + '" style="border-top:1px solid var(--border)">'
           + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:10px;align-items:flex-start;padding:6px 12px 6px ' + stepPad + 'px">'
+          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" onpointerdown="dumpStepHold(event,\'' + i.id + '\',\'' + c.id + '\')" style="display:flex;gap:10px;align-items:flex-start;padding:6px 12px 6px ' + stepPad + 'px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
-          + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
+          + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:12.5px;line-height:1.38;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
           + '<button class="dump-grip" onpointerdown="dumpStepDragStart(event,\'' + i.id + '\',\'' + c.id + '\')" onclick="event.stopPropagation()" title="Drag to reorder" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:grab;padding:0 3px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>'
           + '<button onclick="dumpChildNestPick(\'' + i.id + '\',\'' + c.id + '\')" title="Nest under another step" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:0 3px;flex-shrink:0;line-height:1;align-self:center">⇢</button>'
           + (c.done || delegRunning[c.id] || c.work ? '' : '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:12px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
@@ -23873,11 +23910,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             }).join('');
       }).join('');
       var footer = '<div style="display:flex;align-items:center;gap:12px;padding:6px 12px 7px 42px;border-top:1px solid var(--border);background:var(--bg-off);flex-wrap:wrap;row-gap:2px">'
-        + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
-        + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">✎ Rename</button>'
-        + '<button onclick="dumpInfoModal(\'' + i.id + '\')" style="background:none;border:none;color:var(--gold);font-size:11.5px;font-weight:700;cursor:pointer;padding:2px 0;letter-spacing:.02em">✦ Update</button>'
-        + '<button onclick="dumpNestPick(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">⇱ Nest</button>'
-        + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
+        + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">＋ step</button>'
+        + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">✎ Rename</button>'
+        + '<button onclick="dumpInfoModal(\'' + i.id + '\')" style="background:none;border:none;color:var(--gold);font-size:11px;font-weight:700;cursor:pointer;padding:1px 0;letter-spacing:.02em">✦ Update</button>'
+        + '<button onclick="dumpNestPick(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">⇱ Nest</button>'
+        + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
         + '<span style="flex:1"></span>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete goal" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:2px 0;line-height:1">🗑</button>'
         + '</div>';
@@ -23889,7 +23926,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         +   '<div style="flex:1;height:6px;background:var(--bg-off);border:1px solid var(--border);border-radius:99px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + (prog.pct >= 1 ? '#3F6A50' : 'var(--ink)') + ';transition:width .4s cubic-bezier(.16,1,.3,1)"></div></div>'
         +   goalDueChip(i)
         + '</div>'
-        + (nextStep && collapsed ? '<div style="font-size:11.5px;color:var(--muted);margin-top:7px;line-height:1.4"><span style="color:var(--ink);font-weight:600">Next → </span>' + esc(nextStep) + '</div>' : '')
+        + (nextStep && collapsed ? '<div style="font-size:11px;color:var(--muted);margin-top:4px;line-height:1.35"><span style="color:var(--ink);font-weight:600">Next → </span>' + esc(nextStep) + '</div>' : '')
         + '</div>';
       // Collapsed: header + meta + a slim expand hint (no full step list).
       var collapsedPeek = '<div onclick="dumpGroupCollapse(\'' + i.id + '\')" style="padding:0 12px 10px 42px;font-size:11px;color:var(--muted);cursor:pointer">' + prog.done + '/' + kids.length + ' steps'
