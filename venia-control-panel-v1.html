@@ -1597,7 +1597,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '178';
+  const BUILD = '179';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20490,6 +20490,42 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     editingChildId = c.id; save(); render();
     setTimeout(function(){ var e = document.getElementById('dump-child-edit'); if (e) e.focus(); }, 60);
   };
+  // Nest a goal under another goal (sub-goal). Cycles are blocked; "Top level"
+  // un-nests. Sub-goals cascade in the list view, indented under their parent.
+  window.dumpNestPick = function(id){
+    var g = items().find(function(x){ return x.id === id; }); if (!g) return;
+    var isDesc = function(candidate){
+      var p = candidate;
+      while (p){ if (p.id === id) return true; p = items().find(function(x){ return x.id === p.parentId; }); }
+      return false;
+    };
+    var opts = items().filter(function(x){ return isGroup(x) && x.id !== id && !x.done && !isDesc(x); });
+    var ex = document.getElementById('dump-nest-pick'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-nest-pick'; ov.className = 'overlay open';
+    ov.innerHTML = '<div class="modal" style="width:420px;max-width:92vw"><div class="modal-head"><div class="modal-title">Nest under…</div>'
+      + '<button class="modal-close" onclick="document.getElementById(\'dump-nest-pick\').remove()">✕</button></div>'
+      + '<div class="modal-body" style="padding:14px 18px;display:flex;flex-direction:column;gap:2px;max-height:60vh;overflow-y:auto">'
+      + '<button onclick="dumpNestSet(\'' + id + '\',\'\')" class="btn btn-ghost btn-sm" style="justify-content:flex-start;text-align:left;border-radius:9px' + (!g.parentId ? ';font-weight:700' : '') + '">— Top level' + (!g.parentId ? ' (current)' : '') + '</button>'
+      + opts.map(function(o){ return '<button onclick="dumpNestSet(\'' + id + '\',\'' + o.id + '\')" class="btn btn-ghost btn-sm" style="justify-content:flex-start;text-align:left;border-radius:9px' + (g.parentId === o.id ? ';font-weight:700' : '') + '">' + esc((o.t || 'Untitled').slice(0, 60)) + (g.parentId === o.id ? ' (current)' : '') + '</button>'; }).join('')
+      + '</div></div>';
+    document.body.appendChild(ov);
+  };
+  window.dumpNestSet = function(id, pid){
+    var g = items().find(function(x){ return x.id === id; }); if (!g) return;
+    if (pid) g.parentId = pid; else delete g.parentId;
+    var ex = document.getElementById('dump-nest-pick'); if (ex) ex.remove();
+    save(); render();
+    showToast(pid ? 'Nested — it cascades under its parent now' : 'Moved to top level', 'success');
+  };
+  window.dumpMoveChild = function(gid, cid, dir){
+    var g = findGroup(gid); if (!g) return;
+    var idx = g.children.findIndex(function(x){ return x.id === cid; }); if (idx < 0) return;
+    var j = idx + dir;
+    if (j < 0 || j >= g.children.length) return;
+    var tmp = g.children[idx]; g.children[idx] = g.children[j]; g.children[j] = tmp;
+    save(); render();
+  };
   window.dumpChildStartEdit = function(gid, cid){
     editingChildId = cid; render();
     setTimeout(function(){ var e = document.getElementById('dump-child-edit'); if (e){ window.dumpGrow(e); e.focus(); try { e.setSelectionRange(e.value.length, e.value.length); } catch(_){} } }, 60);
@@ -21423,7 +21459,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var fg = isHub ? '#fff' : 'var(--ink)';
     var bd = isHub ? '#000' : n.color;
     var weight = isLeaf ? '400' : '700';
-    return '<div class="fmf-node" data-id="' + n.id + '" onpointerdown="fmNodeDown(event,\'' + n.id + '\')" onclick="fmNodeTap(event,\'' + n.id + '\')" '
+    var rec = dumpRecById(n.id);
+    var fmt = (rec && rec.fmt) || {};
+    if (fmt.c) bd = fmt.c;
+    if (fmt.b) weight = '700';
+    return '<div class="fmf-node" data-id="' + n.id + '" onpointerdown="fmNodeDown(event,\'' + n.id + '\')" onclick="fmNodeTap(event,\'' + n.id + '\')" ondblclick="fmNodeDbl(event,\'' + n.id + '\')" '
       + 'style="position:absolute;left:' + rnd(n.x) + 'px;top:' + rnd(n.y) + 'px;transform:translate(-50%,-50%);width:' + w + 'px;box-sizing:border-box;'
       + 'background:' + bg + ';color:' + fg + ';border:2px solid ' + bd + ';border-radius:13px;padding:9px 12px;font-size:13px;line-height:1.35;font-weight:' + weight + ';'
       + 'box-shadow:0 2px 12px rgba(0,0,0,.10);cursor:grab;touch-action:none;' + (n.done ? 'opacity:.55;text-decoration:line-through;' : '') + '">'
@@ -21615,9 +21655,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       acts += fmActGold('fmMasterOpen(\'' + n.gid + '\')', '⤢ Open plan');
       acts += fmAct('fmMasterCollapse(\'' + id + '\')', collapsed[id] ? '▾ Show steps' : '▸ Hide steps');
       acts += fmAct('fmMasterRename(\'' + id + '\')', '✎ Rename');
+      acts += fmAct('fmMasterAddStep(\'' + n.gid + '\')', '＋ Add step');
+      acts += fmAct('fmStyleMenu(\'' + id + '\')', '🎨 Style');
     } else if (n.kind === 'mleaf'){
       acts += fmAct('fmMasterToggleLeaf(\'' + n.gid + '\',\'' + id + '\')', n.done ? '↺ Undone' : '✓ Done');
       acts += fmAct('fmMasterRename(\'' + id + '\')', '✎ Rename');
+      acts += fmAct('fmStyleMenu(\'' + id + '\')', '🎨 Style');
     } else if (n.kind === 'mloose'){
       acts += fmAct('fmMasterCollapse(\'' + id + '\')', collapsed[id] ? '▾ Show notes' : '▸ Hide notes');
     } else if (n.kind === 'mloose-leaf'){
@@ -21641,6 +21684,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (n.kind === 'branch' || n.kind === 'center') acts += fmAct('fmAddStep(\'' + id + '\')', '＋ Add step');
     else acts += fmAct('fmAddIdea(\'' + id + '\')', '＋ Add idea');
     acts += fmAct('fmExpandNode(\'' + id + '\')', '✦ Expand');
+    acts += fmAct('fmStyleMenu(\'' + id + '\')', '🎨 Style');
     if (n.kind === 'branch') acts += fmAct('dumpWebBranch(\'' + g.id + '\',' + n.bi + ');fmRenderCanvas()', '✓ Toggle branch');
     if (n.kind !== 'center') acts += fmActMuted('fmDeleteNode(\'' + id + '\')', '🗑 Delete');
     var bar = document.createElement('div');
@@ -21652,6 +21696,56 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var ov = fmShell(); if (ov) ov.appendChild(bar);
   }
   window.fmMenuClose = function(){ var m = document.getElementById('fmf-menu'); if (m) m.remove(); };
+  // Find the live record (goal or step) behind a map node id.
+  function dumpRecById(id){
+    var all = items();
+    for (var i = 0; i < all.length; i++){
+      if (all[i].id === id) return all[i];
+      var c = (all[i].children || []).find(function(x){ return x.id === id; });
+      if (c) return c;
+    }
+    return null;
+  }
+  // Double-click (or double-tap) a node = edit it in place.
+  window.fmNodeDbl = function(e, id){
+    e.preventDefault(); e.stopPropagation();
+    if (fm.mode === 'master'){ if (typeof window.fmMasterRename === 'function') window.fmMasterRename(id); }
+    else window.fmRenamePrompt(id);
+  };
+  // Node formatting: a small swatch row + bold toggle, stored on the record
+  // (fmt = {c, b}) so it renders everywhere the node does.
+  var FM_SWATCHES = ['', '#C0392B', '#C08A2E', '#3F6A50', '#2E5FA3', '#7B4FA0'];
+  window.fmStyleMenu = function(id){
+    var rec = dumpRecById(id); if (!rec){ showToast('This node has no editable record'); return; }
+    var bar = document.getElementById('fmf-menu'); if (!bar) return;
+    var cur = rec.fmt || {};
+    var sw = FM_SWATCHES.map(function(c){
+      return '<button onclick="fmStyleSet(\'' + id + '\',\'' + c + '\',null)" title="' + (c || 'Default') + '" style="width:34px;height:34px;border-radius:50%;cursor:pointer;border:2px solid ' + (cur.c === c || (!cur.c && !c) ? 'var(--ink)' : 'var(--border)') + ';background:' + (c || 'var(--bg-off)') + '">' + (c ? '' : '✕') + '</button>';
+    }).join('');
+    bar.innerHTML = '<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700;margin-bottom:8px">Node style</div>'
+      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' + sw
+      + '<button onclick="fmStyleSet(\'' + id + '\',null,true)" style="width:34px;height:34px;border-radius:9px;cursor:pointer;border:2px solid ' + (cur.b ? 'var(--ink)' : 'var(--border)') + ';background:var(--bg);font-weight:900">B</button>'
+      + '<span style="flex:1"></span><button onclick="fmMenuClose()" class="btn btn-ghost btn-sm" style="border-radius:9px">Done</button></div>';
+  };
+  window.fmStyleSet = function(id, color, toggleBold){
+    var rec = dumpRecById(id); if (!rec) return;
+    rec.fmt = rec.fmt || {};
+    if (color !== null && color !== undefined) rec.fmt.c = color || '';
+    if (toggleBold) rec.fmt.b = !rec.fmt.b;
+    if (!rec.fmt.c && !rec.fmt.b) delete rec.fmt;
+    save(); fmRenderCanvas(); window.fmStyleMenu(id);
+  };
+  // Add a step to a goal straight from the master map.
+  window.fmMasterAddStep = function(gid){
+    var g = items().find(function(x){ return x.id === gid; }); if (!g) return;
+    var t = prompt('New step for “' + (g.t || '').slice(0, 40) + '”');
+    if (!t || !t.trim()) return;
+    g.children = g.children || [];
+    g.children.push({ id: uid(), t: t.trim(), done: false });
+    g.done = false; g.doneAt = null;
+    save(); fmMenuClose(); fmRenderCanvas();
+    showToast('Step added — it\u2019s in the list view too', 'success');
+  };
   function fmAct(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-ghost btn-sm" style="border-radius:9px">' + label + '</button>'; }
   function fmActGold(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-gold btn-sm" style="border-radius:9px">' + label + '</button>'; }
   function fmActMuted(onclick, label){ return '<button onclick="' + onclick + '" class="btn btn-ghost btn-sm" style="border-radius:9px;color:var(--muted)">' + label + '</button>'; }
@@ -23584,6 +23678,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
           + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
+          + '<span style="display:flex;flex-direction:column;gap:1px;flex-shrink:0">'
+          +   '<button onclick="dumpMoveChild(\'' + i.id + '\',\'' + c.id + '\',-1)" title="Move up" style="background:none;border:none;color:var(--border-mid);font-size:9px;cursor:pointer;padding:1px 3px;line-height:1">▲</button>'
+          +   '<button onclick="dumpMoveChild(\'' + i.id + '\',\'' + c.id + '\',1)" title="Move down" style="background:none;border:none;color:var(--border-mid);font-size:9px;cursor:pointer;padding:1px 3px;line-height:1">▼</button>'
+          + '</span>'
           + (c.done || delegRunning[c.id] || c.work ? '' : '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:12px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
           + workChip('step', c.id, i.id)
           + '</div></div>';
@@ -23592,6 +23690,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
         + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">✎ Rename</button>'
         + '<button onclick="dumpInfoModal(\'' + i.id + '\')" style="background:none;border:none;color:var(--gold);font-size:11.5px;font-weight:700;cursor:pointer;padding:2px 0;letter-spacing:.02em">✦ Update</button>'
+        + '<button onclick="dumpNestPick(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">⇱ Nest</button>'
         + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
         + '<span style="flex:1"></span>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete goal" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:2px 0;line-height:1">🗑</button>'
@@ -23729,7 +23828,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       } else {
         var lbl = function(t, right){ return '<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px"><div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">' + t + '</div>' + (right || '') + '</div>'; };
         var h = lbl('Goals', '<button onclick="dumpNewGoal()" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:700;cursor:pointer">＋ New goal</button>');
-        h += goals.length ? '<div>' + goals.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + '</div>'
+        var kidsOfGoal = function(pid){ return goals.filter(function(g){ return g.parentId === pid; }); };
+        var topGoals = goals.filter(function(g){ return !g.parentId || !goals.some(function(p){ return p.id === g.parentId; }); });
+        var goalRowRec = function(i, depth){
+          var out = '<div class="dump-row" data-id="' + i.id + '"' + (depth ? ' style="margin-left:' + Math.min(depth, 3) * 16 + 'px"' : '') + '>' + row(i) + '</div>';
+          kidsOfGoal(i.id).forEach(function(k){ out += goalRowRec(k, depth + 1); });
+          return out;
+        };
+        h += goals.length ? '<div>' + topGoals.map(function(i){ return goalRowRec(i, 0); }).join('') + '</div>'
           : '<div style="font-size:11.5px;color:var(--muted);padding:4px 0 10px;line-height:1.5">No goals yet — tap <strong style="color:var(--gold)">✦</strong> on a task to have Eni shape one, or ＋ New goal.</div>';
         h += lbl('Quick tasks');
         h += tasks.length ? '<div class="dump-group">' + tasks.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + '</div>'
