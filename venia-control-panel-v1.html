@@ -1592,7 +1592,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '172';
+  const BUILD = '173';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3880,14 +3880,12 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <div class="form-section-title">Style Identity</div>
             <div class="form-grid">
               <div class="fg"><label class="fl">Style Name *</label><input class="fi" id="sm-name" placeholder="e.g. HAMLET CLOAK"></div>
-              <div class="fg sm-adv"><label class="fl">Style ID (auto)</label><input class="fi fi-mono" id="sm-sid" placeholder="VN-SS26-001" readonly style="color:var(--muted)"></div>
+              <div class="fg"><label class="fl">Style ID (auto)</label><input class="fi fi-mono" id="sm-sid" placeholder="VN-SS27-O01" readonly style="color:var(--muted)" title="Season + category class + sequence. Colorways extend it into article numbers (VN-SS27-O01-BLK)."></div>
               <div class="fg"><label class="fl">Season *</label>
-                <select class="fs" id="sm-season">
-                  <option>SS25</option><option>FW25</option><option selected>SS26</option><option>FW26</option><option>Resort 26</option>
-                </select>
+                <select class="fs" id="sm-season" onchange="smPreviewSid()"></select>
               </div>
               <div class="fg"><label class="fl">Category *</label>
-                <select class="fs" id="sm-cat">
+                <select class="fs" id="sm-cat" onchange="smPreviewSid()">
                   <option value="Tops">Tops</option><option value="Bottoms">Bottoms</option><option value="Outerwear">Outerwear</option><option value="Dresses">Dresses</option><option value="Accessories">Accessories</option>
                 </select>
               </div>
@@ -6802,6 +6800,45 @@ function smTab(tab, el) {
   if (panel) panel.classList.add('active');
 }
 
+// ── STYLE NUMBERING ─────────────────────────────────────────────────────────
+// Style numbers are built from what the style IS: VN-{SEASON}-{CLASS}{SEQ},
+// e.g. VN-SS27-O01 = SS27 · Outerwear · first of its class that season.
+// Colorways extend it into article numbers (VN-SS27-O01-BLK) and sizes into
+// SKUs (VN-SS27-O01-BLK-M) — the style→article→SKU chain wholesale expects.
+const STYLE_CAT_CODES = { Tops:'T', Bottoms:'B', Outerwear:'O', Dresses:'D', Accessories:'A' };
+function genStyleId(season, category){
+  const seasonCode = String(season||'').replace(/\s+/g,'').toUpperCase() || 'TBD';
+  const cat = STYLE_CAT_CODES[category] || 'X';
+  const prefix = `VN-${seasonCode}-${cat}`;
+  // Next sequence = highest existing in this season+class + 1 (collision-safe
+  // even after deletes, unlike counting).
+  let maxSeq = 0;
+  (STATE.styles||[]).forEach(s => {
+    const m = String(s.styleId||'').toUpperCase().match(new RegExp('^' + prefix + '(\\d+)$'));
+    if (m) maxSeq = Math.max(maxSeq, parseInt(m[1],10));
+  });
+  return prefix + String(maxSeq+1).padStart(2,'0');
+}
+// Season choices: every season already in the line or range plan, plus the next
+// few upcoming ones — so SS27 exists the day you start planning it.
+function smSeasonOptions(){
+  const set = new Set();
+  (STATE.styles||[]).forEach(s => { if (s.season) set.add(String(s.season).trim()); });
+  Object.keys(STATE.rangePlan||{}).forEach(k => set.add(k));
+  const y = new Date().getFullYear() % 100;
+  [`SS${y}`,`FW${y}`,`SS${y+1}`,`FW${y+1}`,`SS${y+2}`].forEach(c => set.add(c));
+  return [...set].filter(Boolean).sort((a,b)=>rpSeasonRank(b)-rpSeasonRank(a));
+}
+function smPreviewSid(){
+  // Only preview while creating — an existing style keeps its number (renaming
+  // IDs would orphan factory shares, quotes and POs that reference it).
+  if (document.getElementById('sm-id').value) return;
+  const season = document.getElementById('sm-season')?.value;
+  const cat = document.getElementById('sm-cat')?.value;
+  const el = document.getElementById('sm-sid');
+  if (el) el.value = genStyleId(season, cat);
+}
+
 function openStyleModal(id=null) {
   // Always start on tab 1
   document.querySelectorAll('#style-modal .modal-tab').forEach((t,i) => t.classList.toggle('active', i===0));
@@ -6812,6 +6849,16 @@ function openStyleModal(id=null) {
   document.getElementById('style-modal').classList.toggle('sm-quick', !isEdit);
   document.getElementById('style-modal-title').textContent = isEdit ? 'Edit Style' : 'New Style';
   document.getElementById('sm-id').value = id||'';
+
+  // Season options are live data, not a hardcoded list (SS27 appears the day
+  // it's planned). Ensure the edited style's own season is always present.
+  const seasonSel = document.getElementById('sm-season');
+  if (seasonSel) {
+    const opts = smSeasonOptions();
+    const editing = isEdit ? (STATE.styles.find(x=>x.id===id)||{}).season : null;
+    if (editing && !opts.includes(editing)) opts.unshift(editing);
+    seasonSel.innerHTML = opts.map(o=>`<option value="${o}">${o}</option>`).join('');
+  }
 
   // Clear all fields
   const allFields = ['sm-name','sm-cogs','sm-ws','sm-retail','sm-fabric','sm-fabric2','sm-colors',
@@ -6866,14 +6913,14 @@ function openStyleModal(id=null) {
   } else {
     document.getElementById('sm-gender').value='womens';
     document.getElementById('sm-status').value='concept';
-    document.getElementById('sm-season').value='SS26';
     document.getElementById('sm-priority').value='mid';
     document.getElementById('sm-sample').value='Proto';
     document.getElementById('sm-clo-status').value='none';
     document.getElementById('sm-cat').value='Tops';
-    document.getElementById('sm-sid').value='Auto-generated';
     document.getElementById('sm-fabric-state').value='finished';
     document.getElementById('sm-dye-tech').value='none';
+    // Newest season leads; the ID preview shows what this style will be named.
+    smPreviewSid();
   }
   openModal('style-modal');
 }
@@ -6947,9 +6994,7 @@ function saveStyle() {
     logActivity(`Style updated: ${name}`);
     toast(name+' updated');
   } else {
-    const seasonCode = season.replace(' ','').toUpperCase();
-    const num = String(STATE.styles.filter(s=>s.season===season).length+1).padStart(3,'0');
-    data.styleId = `VN-${seasonCode}-${num}`;
+    data.styleId = genStyleId(season, cat);
     data.id = 'STY'+Date.now();
     data.notes = [];
     // Quick-create starts minimal — seed a default size run so the style isn't an
