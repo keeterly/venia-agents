@@ -1597,7 +1597,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '179';
+  const BUILD = '180';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20503,6 +20503,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var ex = document.getElementById('dump-nest-pick'); if (ex) ex.remove();
     var ov = document.createElement('div');
     ov.id = 'dump-nest-pick'; ov.className = 'overlay open';
+    ov.style.zIndex = '100000';   // the Brainstorm surface out-stacks .overlay
     ov.innerHTML = '<div class="modal" style="width:420px;max-width:92vw"><div class="modal-head"><div class="modal-title">Nest under…</div>'
       + '<button class="modal-close" onclick="document.getElementById(\'dump-nest-pick\').remove()">✕</button></div>'
       + '<div class="modal-body" style="padding:14px 18px;display:flex;flex-direction:column;gap:2px;max-height:60vh;overflow-y:auto">'
@@ -20525,6 +20526,94 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (j < 0 || j >= g.children.length) return;
     var tmp = g.children[idx]; g.children[idx] = g.children[j]; g.children[j] = tmp;
     save(); render();
+  };
+  // Drag-reorder steps with the same physics as goals: pin to finger, reflow
+  // siblings, honor DOM order on drop. Nesting (parentId) is preserved — order
+  // changes only within each step's own sibling group.
+  var sdnd = null;
+  window.dumpStepDragStart = function(e, gid, cid){
+    if (e.button != null && e.button !== 0) return;
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    var rowEl = document.querySelector('.dump-swipe[data-sw="step"][data-gid="' + gid + '"][data-id="' + cid + '"]'); if (!rowEl) return;
+    rowEl.style.transform = '';
+    var natTop = rowEl.getBoundingClientRect().top;
+    var rows = Array.prototype.slice.call(document.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + gid + '"]'));
+    var tail = rows.length ? rows[rows.length - 1].nextElementSibling : null;
+    sdnd = { gid: gid, cid: cid, el: rowEl, grabY: e.clientY - natTop, startY: e.clientY, tail: tail, moved: false };
+    rowEl.style.transition = 'none'; rowEl.style.position = 'relative'; rowEl.style.zIndex = '50';
+    rowEl.style.willChange = 'transform'; rowEl.style.opacity = '.97'; rowEl.style.boxShadow = '0 10px 26px rgba(0,0,0,.18)';
+    document.body.classList.add('dump-dragging');
+    document.addEventListener('pointermove', dumpStepDragMove, { passive: false });
+    document.addEventListener('pointerup', dumpStepDragEnd);
+    document.addEventListener('pointercancel', dumpStepDragEnd);
+  };
+  function dumpStepDragMove(e){
+    if (!sdnd) return;
+    if (e.cancelable) e.preventDefault();
+    if (Math.abs(e.clientY - sdnd.startY) > 3) sdnd.moved = true;
+    var fingerY = e.clientY;
+    var container = sdnd.el.parentNode;
+    var rows = Array.prototype.slice.call(container.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + sdnd.gid + '"]'));
+    var ref = null;
+    for (var k = 0; k < rows.length; k++){
+      var r = rows[k]; if (r === sdnd.el) continue;
+      var rect = r.getBoundingClientRect();
+      if (fingerY < rect.top + rect.height / 2){ ref = r; break; }
+    }
+    if (ref === null) ref = sdnd.tail;
+    if (ref !== sdnd.el.nextElementSibling) container.insertBefore(sdnd.el, ref);
+    sdnd.el.style.transform = '';
+    var natTop = sdnd.el.getBoundingClientRect().top;
+    sdnd.el.style.transform = 'translateY(' + (fingerY - sdnd.grabY - natTop) + 'px)';
+  }
+  function dumpStepDragEnd(){
+    document.removeEventListener('pointermove', dumpStepDragMove, { passive: false });
+    document.removeEventListener('pointerup', dumpStepDragEnd);
+    document.removeEventListener('pointercancel', dumpStepDragEnd);
+    document.body.classList.remove('dump-dragging');
+    if (!sdnd) return;
+    var gid = sdnd.gid, el = sdnd.el, moved = sdnd.moved;
+    el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = ''; el.style.willChange = '';
+    sdnd = null;
+    if (!moved) return;
+    var g = findGroup(gid); if (!g) return;
+    var ids = Array.prototype.slice.call(document.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + gid + '"]')).map(function(r){ return r.getAttribute('data-id'); });
+    var byId = {}; g.children.forEach(function(c){ byId[c.id] = c; });
+    var seen = {};
+    var reordered = ids.map(function(id){ seen[id] = true; return byId[id]; }).filter(Boolean);
+    g.children = reordered.concat(g.children.filter(function(c){ return !seen[c.id]; }));
+    save(); render();
+  }
+  // Nest a step under a sibling step (sub-task) — mirrors goal nesting.
+  window.dumpChildNestPick = function(gid, cid){
+    var g = findGroup(gid); if (!g) return;
+    var me = g.children.find(function(x){ return x.id === cid; }); if (!me) return;
+    var isDesc = function(cand){
+      var p = cand;
+      while (p){ if (p.id === cid) return true; p = g.children.find(function(x){ return x.id === p.parentId; }); }
+      return false;
+    };
+    var opts = g.children.filter(function(x){ return x.id !== cid && !isDesc(x); });
+    var ex = document.getElementById('dump-nest-pick'); if (ex) ex.remove();
+    var ov = document.createElement('div');
+    ov.id = 'dump-nest-pick'; ov.className = 'overlay open';
+    ov.style.zIndex = '100000';
+    ov.innerHTML = '<div class="modal" style="width:420px;max-width:92vw"><div class="modal-head"><div class="modal-title">Nest step under…</div>'
+      + '<button class="modal-close" onclick="document.getElementById(\'dump-nest-pick\').remove()">✕</button></div>'
+      + '<div class="modal-body" style="padding:14px 18px;display:flex;flex-direction:column;gap:2px;max-height:60vh;overflow-y:auto">'
+      + '<button onclick="dumpChildNestSet(\'' + gid + '\',\'' + cid + '\',\'\')" class="btn btn-ghost btn-sm" style="justify-content:flex-start;text-align:left;border-radius:9px' + (!me.parentId ? ';font-weight:700' : '') + '">— Top level' + (!me.parentId ? ' (current)' : '') + '</button>'
+      + opts.map(function(o){ return '<button onclick="dumpChildNestSet(\'' + gid + '\',\'' + cid + '\',\'' + o.id + '\')" class="btn btn-ghost btn-sm" style="justify-content:flex-start;text-align:left;border-radius:9px' + (me.parentId === o.id ? ';font-weight:700' : '') + '">' + esc((o.t || 'Untitled').slice(0, 60)) + (me.parentId === o.id ? ' (current)' : '') + '</button>'; }).join('')
+      + '</div></div>';
+    document.body.appendChild(ov);
+  };
+  window.dumpChildNestSet = function(gid, cid, pid){
+    var g = findGroup(gid); if (!g) return;
+    var c = g.children.find(function(x){ return x.id === cid; }); if (!c) return;
+    if (pid) c.parentId = pid; else delete c.parentId;
+    var ex = document.getElementById('dump-nest-pick'); if (ex) ex.remove();
+    save(); render();
+    showToast(pid ? 'Nested — it indents under its parent step' : 'Moved to top level', 'success');
   };
   window.dumpChildStartEdit = function(gid, cid){
     editingChildId = cid; render();
@@ -21378,22 +21467,37 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         var bp = P('b' + bi, Math.cos(ang) * 260, Math.sin(ang) * 260);
         nodes.push({ id: 'b' + bi, kind: 'branch', bi: bi, label: br.label, x: bp.x, y: bp.y, color: col });
         links.push({ a: 'center', b: 'b' + bi, color: col });
-        var leaves = (br.ids || []).map(function(id){ return g.children.find(function(c){ return c.id === id; }); }).filter(Boolean);
+        var leaves = (br.ids || []).map(function(id){ return g.children.find(function(c){ return c.id === id; }); }).filter(Boolean).filter(function(c){ return !c.parentId; });
         var L = leaves.length, sh = (Math.PI / B) * 0.9;
         leaves.forEach(function(c, j){
           var la = L > 1 ? (ang - sh + j * (2 * sh / (L - 1))) : ang;
           var lp = P(c.id, Math.cos(la) * 500, Math.sin(la) * 500);
           nodes.push({ id: c.id, kind: 'leaf', label: c.t, x: lp.x, y: lp.y, done: c.done, color: col });
           links.push({ a: 'b' + bi, b: c.id, color: col, done: c.done });
+          var subs = (g.children || []).filter(function(sc){ return sc.parentId === c.id; });
+          subs.forEach(function(sc, si){
+            var sa = la + (si - (subs.length - 1) / 2) * 0.3;
+            var sp = P(sc.id, Math.cos(sa) * 720, Math.sin(sa) * 720);
+            nodes.push({ id: sc.id, kind: 'leaf', label: sc.t, x: sp.x, y: sp.y, done: sc.done, color: col });
+            links.push({ a: c.id, b: sc.id, color: col, done: sc.done });
+          });
         });
       });
     } else {
-      var kids = g.children || [], k = kids.length;
+      var kidsAll = g.children || [];
+      var kids = kidsAll.filter(function(c){ return !c.parentId; }), k = kids.length;
       kids.forEach(function(c, i){
         var ang = -Math.PI / 2 + i * (2 * Math.PI / Math.max(1, k)), col = MAP_COLORS[i % MAP_COLORS.length];
         var lp = P(c.id, Math.cos(ang) * 320, Math.sin(ang) * 320);
         nodes.push({ id: c.id, kind: 'leaf', label: c.t, x: lp.x, y: lp.y, done: c.done, color: col });
         links.push({ a: 'center', b: c.id, color: col, done: c.done });
+        var subs = kidsAll.filter(function(sc){ return sc.parentId === c.id; });
+        subs.forEach(function(sc, si){
+          var sa = ang + (si - (subs.length - 1) / 2) * 0.35;
+          var sp = P(sc.id, Math.cos(sa) * 540, Math.sin(sa) * 540);
+          nodes.push({ id: sc.id, kind: 'leaf', label: sc.t, x: sp.x, y: sp.y, done: sc.done, color: col });
+          links.push({ a: c.id, b: sc.id, color: col, done: sc.done });
+        });
       });
     }
     (g.web && g.web.extra || []).forEach(function(ex){
@@ -21679,6 +21783,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // branches toggle; everything can be renamed, extended, or deleted.
     var acts = '';
     if (n.kind === 'leaf') acts += fmAct('fmToggleLeaf(\'' + id + '\')', n.done ? '↺ Undone' : '✓ Done');
+    if (n.kind === 'leaf') acts += fmAct('fmAddSubStep(\'' + id + '\')', '＋ Sub-step');
     if (n.kind === 'extra') acts += fmActGold('fmPromoteIdea(\'' + id + '\')', '→ Turn into action');
     acts += fmAct('fmRenamePrompt(\'' + id + '\')', '✎ Rename');
     if (n.kind === 'branch' || n.kind === 'center') acts += fmAct('fmAddStep(\'' + id + '\')', '＋ Add step');
@@ -21736,6 +21841,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     save(); fmRenderCanvas(); window.fmStyleMenu(id);
   };
   // Add a step to a goal straight from the master map.
+  // Add a sub-step under a step, straight from the map (LECLAIREUR under
+  // "Buyer invitations"). Lands in the goal's children with parentId, so it
+  // nests in the list view too.
+  window.fmAddSubStep = function(id){
+    var g = fmGroup(); if (!g) return;
+    var parent = (g.children || []).find(function(x){ return x.id === id; }); if (!parent) return;
+    var t = prompt('New sub-step under “' + (parent.t || '').slice(0, 40) + '”');
+    if (!t || !t.trim()) return;
+    g.children.push({ id: uid(), t: t.trim(), done: false, parentId: id });
+    g.done = false; g.doneAt = null;
+    save(); fmMenuClose(); fmRenderCanvas();
+    showToast('Sub-step added — nested in the list too', 'success');
+  };
   window.fmMasterAddStep = function(gid){
     var g = items().find(function(x){ return x.id === gid; }); if (!g) return;
     var t = prompt('New step for “' + (g.t || '').slice(0, 40) + '”');
@@ -23662,9 +23780,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<span style="color:var(--muted);font-size:13px;flex-shrink:0;padding:0 2px">' + (collapsed ? '▸' : '▾') + '</span>'
           + '</div>';
       }
-      var childHTML = kids.map(function(c){
+      var stepKidsOf = function(pid){ return kids.filter(function(x){ return x.parentId === pid; }); };
+      var childRow = function(c, depth){
+        var stepPad = 42 + Math.min(depth, 2) * 22;
         if (editingChildId === c.id){
-          return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 12px 7px 42px;border-top:1px solid var(--border)">'
+          return '<div style="display:flex;gap:8px;align-items:flex-start;padding:7px 12px 7px ' + stepPad + 'px;border-top:1px solid var(--border)">'
             + '<textarea id="dump-child-edit" rows="1" oninput="dumpGrow(this)" onkeydown="dumpChildEditKey(event,\'' + i.id + '\',\'' + c.id + '\')" style="flex:1;min-width:0;box-sizing:border-box;font-size:16px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;padding:7px 9px;border:1px solid var(--ink);border-radius:7px;background:var(--bg-off);color:var(--ink);outline:none;resize:none;line-height:1.4;overflow:hidden">' + esc(c.t) + '</textarea>'
             + '<button onclick="dumpChildSaveEdit(\'' + i.id + '\',\'' + c.id + '\')" class="btn btn-gold btn-sm" style="border-radius:7px">Save</button>'
             + '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:14px;cursor:pointer;padding:6px 2px;flex-shrink:0;line-height:1">⚡</button>'
@@ -23675,18 +23795,23 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // left to delete; tap to edit.
         return '<div class="dump-swipe" data-sw="step" data-gid="' + i.id + '" data-id="' + c.id + '" style="border-top:1px solid var(--border)">'
           + '<div class="dump-swipe-bg"><span>✓</span><span>✕</span></div>'
-          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:10px;align-items:flex-start;padding:9px 12px 9px 42px">'
+          + '<div class="dump-swipe-fg' + (delegRunning[c.id] ? ' dump-working' : (agentFlashed(c.id) ? ' agent-updated' : '')) + '" style="display:flex;gap:10px;align-items:flex-start;padding:6px 12px 6px ' + stepPad + 'px">'
           + '<button onclick="dumpToggleChild(\'' + i.id + '\',\'' + c.id + '\')" title="Mark step done" style="flex-shrink:0;width:18px;height:18px;border:1.5px solid ' + (c.done?'var(--green)':'var(--border-mid)') + ';border-radius:50%;background:' + (c.done?'var(--green)':'transparent') + ';color:#fff;cursor:pointer;font-size:10px;line-height:1;margin-top:1px;display:flex;align-items:center;justify-content:center">' + (c.done?'✓':'') + '</button>'
           + '<div onclick="dumpChildStartEdit(\'' + i.id + '\',\'' + c.id + '\')" title="Tap to edit" style="flex:1;min-width:0;font-size:13px;line-height:1.45;color:' + (c.done?'var(--muted)':'var(--ink)') + ';' + (c.done?'text-decoration:line-through;':'') + 'cursor:text;white-space:pre-wrap;word-break:break-word">' + esc(c.t) + '</div>'
-          + '<span style="display:flex;flex-direction:column;gap:1px;flex-shrink:0">'
-          +   '<button onclick="dumpMoveChild(\'' + i.id + '\',\'' + c.id + '\',-1)" title="Move up" style="background:none;border:none;color:var(--border-mid);font-size:9px;cursor:pointer;padding:1px 3px;line-height:1">▲</button>'
-          +   '<button onclick="dumpMoveChild(\'' + i.id + '\',\'' + c.id + '\',1)" title="Move down" style="background:none;border:none;color:var(--border-mid);font-size:9px;cursor:pointer;padding:1px 3px;line-height:1">▼</button>'
-          + '</span>'
+          + '<button class="dump-grip" onpointerdown="dumpStepDragStart(event,\'' + i.id + '\',\'' + c.id + '\')" onclick="event.stopPropagation()" title="Drag to reorder" style="background:none;border:none;color:var(--border-mid);font-size:14px;cursor:grab;padding:0 3px;flex-shrink:0;touch-action:none;line-height:1;align-self:center">⠿</button>'
+          + '<button onclick="dumpChildNestPick(\'' + i.id + '\',\'' + c.id + '\')" title="Nest under another step" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:0 3px;flex-shrink:0;line-height:1;align-self:center">⇢</button>'
           + (c.done || delegRunning[c.id] || c.work ? '' : '<button onclick="dumpDelegate(\'step\',\'' + c.id + '\',\'' + i.id + '\')" title="Have Eni do this step" style="background:none;border:none;color:var(--gold);font-size:12px;cursor:pointer;padding:0 4px;flex-shrink:0;line-height:1">⚡</button>')
           + workChip('step', c.id, i.id)
           + '</div></div>';
+      };
+      var topSteps = kids.filter(function(c){ return !c.parentId || !kids.some(function(p){ return p.id === c.parentId; }); });
+      var childHTML = topSteps.map(function(c){
+        return childRow(c, 0)
+          + stepKidsOf(c.id).map(function(k){
+              return childRow(k, 1) + stepKidsOf(k.id).map(function(k2){ return childRow(k2, 2); }).join('');
+            }).join('');
       }).join('');
-      var footer = '<div style="display:flex;align-items:center;gap:14px;padding:9px 12px 10px 42px;border-top:1px solid var(--border);background:var(--bg-off)">'
+      var footer = '<div style="display:flex;align-items:center;gap:12px;padding:6px 12px 7px 42px;border-top:1px solid var(--border);background:var(--bg-off);flex-wrap:wrap;row-gap:2px">'
         + '<button onclick="dumpAddChild(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">＋ step</button>'
         + '<button onclick="dumpStartEdit(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 0;letter-spacing:.02em">✎ Rename</button>'
         + '<button onclick="dumpInfoModal(\'' + i.id + '\')" style="background:none;border:none;color:var(--gold);font-size:11.5px;font-weight:700;cursor:pointer;padding:2px 0;letter-spacing:.02em">✦ Update</button>'
@@ -23698,7 +23823,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Goal meta — progress toward the outcome, its target date, and (when
       // collapsed) the very next step. This is what makes a plan a real goal.
       var prog = goalProgress(i), pct = Math.round(prog.pct * 100), nextStep = goalNext(i);
-      var meta = (editingId === i.id) ? '' : '<div style="padding:3px 12px 10px 42px">'
+      var meta = (editingId === i.id) ? '' : '<div style="padding:2px 12px 7px 42px">'
         + '<div style="display:flex;align-items:center;gap:9px">'
         +   '<div style="flex:1;height:6px;background:var(--bg-off);border:1px solid var(--border);border-radius:99px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + (prog.pct >= 1 ? '#3F6A50' : 'var(--ink)') + ';transition:width .4s cubic-bezier(.16,1,.3,1)"></div></div>'
         +   goalDueChip(i)
