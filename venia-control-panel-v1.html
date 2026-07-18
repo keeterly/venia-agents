@@ -1597,7 +1597,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '176';
+  const BUILD = '177';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3506,6 +3506,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button class="pill" onclick="filterVendor('Trim Supplier',this)">Trims</button>
         <button class="pill" onclick="filterVendor('Label',this)">Labels</button>
         <button class="pill" onclick="filterVendor('Agent',this)">Agents</button>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto;white-space:nowrap" onclick="plmSourceVendors()" title="Eni scouts real manufacturers and files them here">✦ Source vendors</button>
       </div>
       <div class="vendor-grid" id="vendor-grid"></div>
     </div>
@@ -5549,7 +5550,7 @@ function renderArticles(filter='all') {
   else if (filter==='production') list=list.filter(s=>s.status==='production');
 
   const tb = document.getElementById('art-table');
-  if (!list.length) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><div class="empty-icon">◇</div><div class="empty-text">No SKUs yet</div></div></td></tr>`; return; }
+  if (!list.length) { tb.innerHTML = `<tr><td colspan="10"><div class="empty" style="position:sticky;left:0;max-width:92vw"><div class="empty-icon">◇</div><div class="empty-text">No SKUs yet — they generate from a style's colorways × sizes.</div></div></td></tr>`; return; }
   tb.innerHTML = list.map(sk => `
     <tr>
       <td><span class="t-mono" style="font-size:9px">${sk.sku}</span></td>
@@ -7402,9 +7403,9 @@ function renderMobileStyleCards(list, containerId) {
           ${stageBadge(s.status)}
         </div>
         <div class="mob-style-card-meta">
-          <span class="b-tag">${s.category}</span>
-          <span class="b-tag" style="text-transform:capitalize">${s.gender}</span>
-          <span style="font-size:9px;color:var(--muted)">${s.season}</span>
+          <span class="b-tag">${s.category||''}</span>
+          ${s.gender ? `<span class="b-tag" style="text-transform:capitalize">${s.gender}</span>` : ''}
+          <span style="font-size:9px;color:var(--muted)">${s.season||''}</span>
           ${s.drop ? `<span style="font-size:9px;color:var(--muted)">Drop: ${s.drop}</span>` : ''}
         </div>
         <div class="mob-style-card-bottom">
@@ -14599,6 +14600,18 @@ function agentActionSpec(key) {
       + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.'
       + slCrmKnownAccountsHint();
   }
+  if (key === 'plm') {
+    return '\n\nVENDOR SOURCING — you are also VENIA\'s production scout.\n'
+      + 'When the user asks you to find, source, research, or vet manufacturers / factories / mills / suppliers, propose REAL, currently-operating companies that fit VENIA (small-batch friendly, premium quality; womenswear outerwear/tailoring capability; Europe-lean — Portugal, Italy, Poland, Turkey — unless asked otherwise). For each give a one-line fit rationale, the country/city, and what they are known for (MOQ note if you know it).\n'
+      + 'ACTION — add_vendors: save sourced companies into the Vendors library.\n'
+      + 'When the user asks you to save / add them (or clearly agrees to), do BOTH:\n'
+      + '1) One short sentence naming what you are adding.\n'
+      + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
+      + '```venia:action\n'
+      + '{"type":"add_vendors","vendors":[{"name":"Company name","type":"Factory","location":"City, Country","specialty":"One line on what they are known for + why they fit VENIA","moq":"e.g. 50–100 pcs/style, if known","website":"","contactName":"","email":""}]}\n'
+      + '```\n'
+      + 'Rules: real companies only. NEVER invent an email, contact name, MOQ or website you do not actually know — leave them "". "type" must be one of: Factory, Fabric Supplier, Trim Supplier, Label, Agent, Logistics. Emit the block ONLY when the user wants them saved — if they only asked for ideas, list them and offer to add the best fits.';
+  }
   if (key !== 'pr') return '';   // PR handled below
   return '\n\nACTIONS — you can take ONE real action in VENIA, but only when the user clearly asks for it:\n'
     + '• create_pull — log a new press / sample pull in the workspace.\n'
@@ -14728,13 +14741,89 @@ function agentRunAction(key, action, chatBody) {
   if (!action || !action.type) return;
   if (key === 'pr' && action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
   if (key === 'sl' && action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
+  if (key === 'plm' && action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
 }
+
+// Execute an add_vendors action: dedupe against the library, save, confirm.
+const VENDOR_OK_TYPES = ['Factory','Fabric Supplier','Trim Supplier','Label','Agent','Logistics'];
+function agentRunAddVendors(action, chatBody) {
+  const list = Array.isArray(action.vendors) ? action.vendors : [];
+  const now = Date.now();
+  if (!STATE.vendors) STATE.vendors = [];
+  const seen = new Set(STATE.vendors.map(v => slAcctKey(v.name)));
+  const skipped = [], built = [];
+  list.forEach((x, i) => {
+    const name = String(x && x.name || '').trim();
+    if (!name) return;
+    const key = slAcctKey(name);
+    if (seen.has(key)) { skipped.push(name); return; }
+    seen.add(key);
+    let type = String(x.type||'').trim();
+    if (!VENDOR_OK_TYPES.some(t => t.toLowerCase() === type.toLowerCase())) type = 'Factory';
+    const noteParts = [];
+    if (x.specialty) noteParts.push(String(x.specialty).trim());
+    if (x.moq) noteParts.push('MOQ: ' + String(x.moq).trim());
+    built.push({ id:'VEN'+now+i, name, type,
+      location: String(x.location||'').trim(), website: String(x.website||'').trim(),
+      contact: String(x.contactName||'').trim(), email: String(x.email||'').trim(),
+      notes: noteParts.join(' · '), source: 'Agent — vendor sourcing', addedByAgent: true,
+      createdAt: new Date().toISOString() });
+  });
+  if (!built.length) {
+    appendAgentNote(chatBody, skipped.length
+      ? `Those ${skipped.length === 1 ? 'is' : skipped.length + ' are'} already in your Vendors library — nothing new to add.`
+      : 'Tell me which manufacturers to add and I\'ll save them to Vendors.');
+    return;
+  }
+  built.forEach(v => STATE.vendors.unshift(v));
+  save();
+  try { logActivity('Sourcing: ' + built.length + ' vendor(s) added by agent'); } catch(e){}
+  try { if (STATE.currentPage === 'vendors') renderVendors(); } catch(e){}
+  const ids = built.map(v => v.id).join(',');
+  const rows = built.map(v => `<div style="padding:8px 0;border-top:1px solid var(--border)">
+      <div style="font-size:12px;font-weight:700">${escHtml(v.name)} <span style="font-size:8px;letter-spacing:1px;border:1px solid var(--ink);padding:1px 5px;margin-left:4px">${escHtml(v.type.toUpperCase())}</span></div>
+      ${v.location?`<div style="font-size:10px;color:var(--muted);margin-top:1px">${escHtml(v.location)}</div>`:''}
+      ${v.notes?`<div style="font-size:10px;margin-top:3px">${escHtml(v.notes)}</div>`:''}
+    </div>`).join('');
+  const dupeNote = skipped.length ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">Already in the library — skipped: ${escHtml(skipped.slice(0,4).join(', '))}${skipped.length>4?'…':''}</div>` : '';
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + built.length + ' vendor' + (built.length>1?'s':'') + ' added</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-bottom:2px">Saved to Sourcing → Vendors — verify capability and reach out on your terms.</div>'
+    + rows + dupeNote
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="cpGoto(\'plm\');setTimeout(function(){goTo(\'vendors\',document.querySelector(\'[data-page=vendors]\'))},150)">Open Vendors</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoVendors(\'' + ids + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoVendors = function(idsStr, btn){
+  const ids = String(idsStr||'').split(',').filter(Boolean);
+  if (STATE.vendors) STATE.vendors = STATE.vendors.filter(v => !ids.includes(v.id));
+  save();
+  try { if (STATE.currentPage === 'vendors') renderVendors(); } catch(e){}
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Vendors removed.</div>'; }
+};
+// Entry point from the Vendors page: opens the dock mid-request.
+window.plmSourceVendors = function(){
+  const msg = 'Source 5 additional manufacturers or suppliers for VENIA — small-batch friendly, premium womenswear capability (outerwear and tailoring first), Europe preferred. Give a one-line fit rationale, location, and known MOQ for each, then add the best fits to my Vendors library.';
+  try { skToggle(true); } catch(e){}
+  setTimeout(function(){ try { skSend(msg); } catch(e){} }, 150);
+};
 
 // ── Workspace shimmer (Sidekick-style) ──────────────────────────────────────
 // While Eni works on a request that will change the current screen, the actual
 // work area shimmers; when the change lands, it flashes. Purely visual — the
 // data path (agentRunAction) is unchanged.
 function agentWorkRegion(agKey){
+  // PLM has no cp-screen element — its work area is the active .page.
+  if (agKey === 'plm') {
+    const pg = document.querySelector('#content .page.active');
+    return pg || document.getElementById('content');
+  }
   // .cp-screen is position:fixed, so offsetParent is unreliable — key off the
   // active class + computed display instead.
   const scr = document.getElementById('cp-screen-' + agKey);
@@ -14750,7 +14839,7 @@ function agentEditIntent(msg){
   return /\b(add|find|scout|source|create|make|draft|write|log|save|build|update|set|schedule|plan|move|file|generate|enter|record|book|send|re-?engage|follow up|reach out)\b/i.test(String(msg||''));
 }
 function agentBeginWork(agKey, msg){
-  if (!['pr','mk','sl'].includes(agKey)) return null;   // screens with real actions
+  if (!['pr','mk','sl','plm'].includes(agKey)) return null;   // screens with real actions
   if (!agentEditIntent(msg)) return null;
   const el = agentWorkRegion(agKey);
   if (el) el.classList.add('ws-working');
@@ -24462,9 +24551,11 @@ async function skSend(preset){
   // On an agent workspace, the dock inherits that agent's ACTION powers —
   // it can file prospects, log placements, etc., exactly like the old
   // side-column chat could.
+  // PLM is the one surface without a .cp-screen element — no active screen
+  // means the product workspace is showing.
   const scrId = (document.querySelector('.cp-screen.active') || {}).id || '';
-  const agKey = scrId.replace('cp-screen-', '');
-  const hasActions = ['pr','mk','sl','br'].includes(agKey) && typeof agentActionSpec === 'function';
+  const agKey = scrId ? scrId.replace('cp-screen-', '') : 'plm';
+  const hasActions = ['pr','mk','sl','br','plm'].includes(agKey) && typeof agentActionSpec === 'function';
   const think = skMakeWorking(SK.agent==='eni'?'Eni':'Nigma', skWorkSteps(msg, agKey));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
   const workKey = hasActions ? agentBeginWork(agKey, msg) : null;
