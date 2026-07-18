@@ -1309,6 +1309,8 @@ body{padding-top:44px;box-sizing:border-box;}
   background-size:200% 100%;animation:wsSweep 1.5s linear infinite}
 @keyframes wsLand{0%{background-color:rgba(202,162,74,.22)}100%{background-color:rgba(202,162,74,0)}}
 .ws-landed{animation:wsLand 1.9s ease-out}
+/* Drag-to-nest: the row you're hovering INTO glows as a drop target. */
+.dump-nest-target{outline:2px solid #C08A2E !important;outline-offset:-2px;background:rgba(192,138,46,.10) !important;border-radius:8px}
 @media (prefers-reduced-motion:reduce){.ws-working::after{animation:none;opacity:.28}.ws-landed{animation:none}}
 
 /* Wholesale quote line item — a real fashion order line: style, colorway,
@@ -1597,7 +1599,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '180';
+  const BUILD = '181';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20548,6 +20550,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.addEventListener('pointerup', dumpStepDragEnd);
     document.addEventListener('pointercancel', dumpStepDragEnd);
   };
+  // Depth of a step in its goal (0 = top). Used to cap nesting at 3 levels.
+  function stepDepth(g, c){
+    var d = 0, p = c;
+    while (p && p.parentId){ p = g.children.find(function(x){ return x.id === p.parentId; }); if (p) d++; if (d > 5) break; }
+    return d;
+  }
+  function stepIsDesc(g, candId, ofId){
+    var p = g.children.find(function(x){ return x.id === candId; });
+    while (p){ if (p.id === ofId) return true; p = g.children.find(function(x){ return x.id === p.parentId; }); }
+    return false;
+  }
+  function dumpStepClearTarget(){
+    document.querySelectorAll('.dump-nest-target').forEach(function(el){ el.classList.remove('dump-nest-target'); });
+  }
   function dumpStepDragMove(e){
     if (!sdnd) return;
     if (e.cancelable) e.preventDefault();
@@ -20555,14 +20571,36 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var fingerY = e.clientY;
     var container = sdnd.el.parentNode;
     var rows = Array.prototype.slice.call(container.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + sdnd.gid + '"]'));
-    var ref = null;
-    for (var k = 0; k < rows.length; k++){
-      var r = rows[k]; if (r === sdnd.el) continue;
-      var rect = r.getBoundingClientRect();
-      if (fingerY < rect.top + rect.height / 2){ ref = r; break; }
+    var g = findGroup(sdnd.gid);
+    // 1) Nest intent: finger resting on the CENTER band of another row.
+    var nestRow = null;
+    for (var m = 0; m < rows.length; m++){
+      var nr = rows[m]; if (nr === sdnd.el) continue;
+      var rr = nr.getBoundingClientRect(), band = rr.height * 0.28;
+      if (fingerY > rr.top + band && fingerY < rr.bottom - band){
+        var tid = nr.getAttribute('data-id');
+        var tRec = g && g.children.find(function(x){ return x.id === tid; });
+        // block cycles and >3 levels deep
+        if (tRec && !stepIsDesc(g, tid, sdnd.cid) && stepDepth(g, tRec) < 2) nestRow = nr;
+        break;
+      }
     }
-    if (ref === null) ref = sdnd.tail;
-    if (ref !== sdnd.el.nextElementSibling) container.insertBefore(sdnd.el, ref);
+    dumpStepClearTarget();
+    sdnd.nestId = null;
+    if (nestRow){
+      nestRow.classList.add('dump-nest-target');
+      sdnd.nestId = nestRow.getAttribute('data-id');
+    } else {
+      // 2) Reorder intent: edge zones = insertion slots (original behavior).
+      var ref = null;
+      for (var k = 0; k < rows.length; k++){
+        var r = rows[k]; if (r === sdnd.el) continue;
+        var rect = r.getBoundingClientRect();
+        if (fingerY < rect.top + rect.height / 2){ ref = r; break; }
+      }
+      if (ref === null) ref = sdnd.tail;
+      if (ref !== sdnd.el.nextElementSibling) container.insertBefore(sdnd.el, ref);
+    }
     sdnd.el.style.transform = '';
     var natTop = sdnd.el.getBoundingClientRect().top;
     sdnd.el.style.transform = 'translateY(' + (fingerY - sdnd.grabY - natTop) + 'px)';
@@ -20573,17 +20611,40 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.removeEventListener('pointercancel', dumpStepDragEnd);
     document.body.classList.remove('dump-dragging');
     if (!sdnd) return;
-    var gid = sdnd.gid, el = sdnd.el, moved = sdnd.moved;
+    var gid = sdnd.gid, el = sdnd.el, moved = sdnd.moved, cidEnd = sdnd.cid;
+    dumpStepDragEnd.__nestId = sdnd.nestId || null;
     el.style.transform = ''; el.style.zIndex = ''; el.style.opacity = ''; el.style.boxShadow = ''; el.style.position = ''; el.style.transition = ''; el.style.willChange = '';
     sdnd = null;
-    if (!moved) return;
-    var g = findGroup(gid); if (!g) return;
-    var ids = Array.prototype.slice.call(document.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + gid + '"]')).map(function(r){ return r.getAttribute('data-id'); });
+    var nestId = dumpStepDragEnd.__nestId;
+    if (!moved){ dumpStepClearTarget(); return; }
+    var g = findGroup(gid); if (!g){ dumpStepClearTarget(); return; }
+    var me = g.children.find(function(c){ return c.id === cidEnd; });
+    if (nestId && me){
+      // Drop-INTO: become the target's last sub-step.
+      me.parentId = nestId;
+      g.children = g.children.filter(function(c){ return c.id !== me.id; }); g.children.push(me);
+      dumpStepClearTarget(); save(); render();
+      showToast('Nested — drag it back out any time', 'success');
+      return;
+    }
+    // Edge drop: honor DOM order AND adopt the nesting of where it landed —
+    // the dropped step joins the sibling group it now sits inside (row below
+    // first, else row above). Dragging a sub-step out to top level un-nests it.
+    var rowEls = Array.prototype.slice.call(document.querySelectorAll('.dump-swipe[data-sw="step"][data-gid="' + gid + '"]'));
+    var ids = rowEls.map(function(r){ return r.getAttribute('data-id'); });
+    if (me){
+      var myIdx = ids.indexOf(me.id);
+      var pidOf = function(id){ var c = g.children.find(function(x){ return x.id === id; }); return (c && c.parentId) || ''; };
+      var newPid = (myIdx >= 0 && myIdx < ids.length - 1) ? pidOf(ids[myIdx + 1])
+                 : (myIdx > 0 ? pidOf(ids[myIdx - 1]) : '');
+      if (newPid && (newPid === me.id || stepIsDesc(g, newPid, me.id))) newPid = '';   // never adopt own subtree
+      if (newPid) me.parentId = newPid; else delete me.parentId;
+    }
     var byId = {}; g.children.forEach(function(c){ byId[c.id] = c; });
     var seen = {};
     var reordered = ids.map(function(id){ seen[id] = true; return byId[id]; }).filter(Boolean);
     g.children = reordered.concat(g.children.filter(function(c){ return !seen[c.id]; }));
-    save(); render();
+    dumpStepClearTarget(); save(); render();
   }
   // Nest a step under a sibling step (sub-task) — mirrors goal nesting.
   window.dumpChildNestPick = function(gid, cid){
