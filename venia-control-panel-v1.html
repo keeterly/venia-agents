@@ -1592,7 +1592,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '168';
+  const BUILD = '169';
   const BUILD_DATE = '2026.07.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3296,6 +3296,9 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <!-- Analytics Row -->
       <div class="dash-grid-3" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border);margin-bottom:24px" id="dash-analytics"></div>
 
+      <!-- Range plan: season targets vs actual -->
+      <div id="dash-rangeplan" style="margin-bottom:24px"></div>
+
       <!-- Two-col: Pipeline + Alerts -->
       <div class="dash-grid-2" style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-bottom:24px">
         <div style="background:var(--bg);padding:20px">
@@ -4628,7 +4631,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -5109,7 +5112,171 @@ function renderDashboard() {
     </tr>`).join('');
 
   setTimeout(() => renderMobileStyleCards(recent, 'dash-table'), 0);
+
+  try { renderRangePlan(); } catch(e){}
 }
+
+// ═══════════════════════════════════════════════
+//  RANGE PLAN — season targets vs actual
+//  STATE.rangePlan = { "FW26": { total, cats:{Outerwear:4,…}, targetMargin, sellIn } }
+// ═══════════════════════════════════════════════
+const RP_CATS = ['Tops','Bottoms','Outerwear','Dresses','Accessories'];
+let RP_SEASON = null;
+
+// "FW26" > "SS26" > "FW25" — parse to (year, half) so the newest season leads.
+function rpSeasonRank(code){
+  const m = String(code||'').trim().match(/^(SS|FW)\s*(\d{2,4})/i);
+  if (!m) return -1;
+  let y = parseInt(m[2],10); if (y < 100) y += 2000;
+  return y*2 + (m[1].toUpperCase()==='FW' ? 1 : 0);
+}
+function rpSeasons(){
+  const set = new Set();
+  (STATE.styles||[]).forEach(s => { if (s.season && s.status!=='archived') set.add(String(s.season).trim()); });
+  Object.keys(STATE.rangePlan||{}).forEach(k => set.add(k));
+  return [...set].filter(Boolean).sort((a,b)=>rpSeasonRank(b)-rpSeasonRank(a));
+}
+function rpActuals(season){
+  const styles = (STATE.styles||[]).filter(s => s.status!=='archived' && String(s.season||'').trim()===season);
+  const cats = {};
+  styles.forEach(s => { const c = s.category||'Other'; cats[c]=(cats[c]||0)+1; });
+  // Margin on landed cost where a cost sheet exists (falls back to COGS inside landedCost).
+  const margins = styles.filter(s => s.retail>0).map(s => {
+    const lc = landedCost(s); return lc>0 ? (s.retail-lc)/s.retail*100 : null;
+  }).filter(m => m!=null);
+  const avgMargin = margins.length ? margins.reduce((a,b)=>a+b,0)/margins.length : null;
+  // Sell-in booked = accepted quotes for this season (orders are created FROM
+  // accepted quotes, so counting the quote once covers both without doubling).
+  const booked = (STATE.slQuotes||[]).filter(q => q.status==='accepted' && String(q.season||'').trim()===season)
+    .reduce((s,q)=>s+(q.total||0),0);
+  return { styles: styles.length, cats, avgMargin, booked };
+}
+function renderRangePlan(){
+  const el = document.getElementById('dash-rangeplan');
+  if (!el) return;
+  if (!STATE.rangePlan) STATE.rangePlan = {};
+  const seasons = rpSeasons();
+  if (!seasons.length){ el.innerHTML=''; return; }
+  if (!RP_SEASON || !seasons.includes(RP_SEASON)) RP_SEASON = seasons[0];
+  const season = RP_SEASON;
+  const plan = STATE.rangePlan[season];
+  const a = rpActuals(season);
+  const selOpts = seasons.map(s=>`<option value="${s}" ${s===season?'selected':''}>${s}</option>`).join('');
+  const head = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:1px;background:var(--bg);padding:14px 20px;border-bottom:1px solid var(--border)">
+      <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Range Plan</div>
+      <select onchange="RP_SEASON=this.value;renderRangePlan()" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${selOpts}</select>
+      <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" onclick="rpOpenModal('${slEsc(season)}')">${plan?'Edit targets':'Set targets'}</button></div>
+    </div>`;
+  if (!plan){
+    el.innerHTML = `<div style="background:var(--border)">${head}
+      <div style="background:var(--bg);padding:22px 20px;font-size:11px;color:var(--muted)">No targets for ${slEsc(season)} yet — set how many styles per category, the margin you're building to, and the season's sell-in goal, and this tracks the line against the plan as you build it.</div></div>`;
+    return;
+  }
+  const bar = (actual, target, met) => {
+    const pct = target>0 ? Math.min(actual/target*100,100) : 0;
+    return `<div style="height:3px;background:var(--border);overflow:hidden;margin-top:4px"><div style="height:100%;width:${pct.toFixed(0)}%;background:${met?'var(--green)':'var(--ink)'};transition:width .5s"></div></div>`;
+  };
+  // Line size + category mix
+  const catKeys = [...new Set([...Object.keys(plan.cats||{}).filter(k=>plan.cats[k]>0), ...Object.keys(a.cats)])];
+  const catRows = catKeys.map(c => {
+    const t = (plan.cats||{})[c]||0, n = a.cats[c]||0;
+    return `<div style="margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between"><span style="font-size:10px;color:var(--ink)">${slEsc(c)}</span>
+      <span style="font-family:'DM Mono',monospace;font-size:10px;color:${t&&n>=t?'var(--green)':'var(--muted)'}">${n}${t?' / '+t:''}</span></div>
+      ${t?bar(n,t,n>=t):''}
+    </div>`;
+  }).join('');
+  const totalMet = plan.total>0 && a.styles>=plan.total;
+  const mAct = a.avgMargin, mTgt = plan.targetMargin||0;
+  const mMet = mAct!=null && mTgt>0 && mAct>=mTgt;
+  const sMet = plan.sellIn>0 && a.booked>=plan.sellIn;
+  el.innerHTML = `<div style="background:var(--border)">${head}
+    <div class="dash-grid-3" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:var(--border)">
+      <div style="background:var(--bg);padding:20px">
+        <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Line Size</div>
+        <div style="font-family:'DM Mono',monospace;font-size:24px;font-weight:300;color:${totalMet?'var(--green)':'var(--ink)'}">${a.styles}<span style="font-size:12px;color:var(--muted)"> / ${plan.total||'—'} styles</span></div>
+        ${plan.total?bar(a.styles,plan.total,totalMet):''}
+        <div style="margin-top:14px">${catRows||'<div style="font-size:10px;color:var(--muted)">No styles in this season yet.</div>'}</div>
+      </div>
+      <div style="background:var(--bg);padding:20px">
+        <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Margin (landed)</div>
+        <div style="font-family:'DM Mono',monospace;font-size:24px;font-weight:300;color:${mAct==null?'var(--muted)':mMet?'var(--green)':mTgt&&mAct<mTgt-5?'var(--red)':'var(--ink)'}">${mAct!=null?mAct.toFixed(0)+'%':'—'}<span style="font-size:12px;color:var(--muted)"> / ${mTgt?mTgt+'% target':'no target'}</span></div>
+        ${mTgt?bar(mAct||0,mTgt,mMet):''}
+        <div style="font-size:9.5px;color:var(--muted);margin-top:12px;line-height:1.5">${mAct==null?'Needs retail prices + costs on this season\'s styles.':(mMet?'On plan.':'Avg landed margin across the season\'s priced styles.')}</div>
+      </div>
+      <div style="background:var(--bg);padding:20px">
+        <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Sell-in</div>
+        <div style="font-family:'DM Mono',monospace;font-size:24px;font-weight:300;color:${sMet?'var(--green)':'var(--ink)'}">$${Math.round(a.booked/1000)}k<span style="font-size:12px;color:var(--muted)"> / ${plan.sellIn?'$'+Math.round(plan.sellIn/1000)+'k goal':'no goal'}</span></div>
+        ${plan.sellIn?bar(a.booked,plan.sellIn,sMet):''}
+        <div style="font-size:9.5px;color:var(--muted);margin-top:12px;line-height:1.5">Accepted quotes · ${slEsc(season)}. <span style="cursor:pointer;text-decoration:underline" onclick="cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)">Open quotes →</span></div>
+      </div>
+    </div></div>`;
+}
+window.rpOpenModal = function(season){
+  if (!STATE.rangePlan) STATE.rangePlan = {};
+  const plan = STATE.rangePlan[season] || {};
+  const a = rpActuals(season);
+  const cats = [...new Set([...RP_CATS, ...Object.keys(a.cats)])];
+  const fld = 'width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px';
+  const lbl = 'font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
+  const catInputs = cats.map(c => `
+    <div><div style="${lbl}">${slEsc(c)}${a.cats[c]?' <span style="color:var(--silver)">· now '+a.cats[c]+'</span>':''}</div>
+    <input class="rp-cat" data-cat="${slEsc(c)}" type="number" min="0" style="${fld}" value="${(plan.cats||{})[c]||''}" placeholder="0"></div>`).join('');
+  const ex = document.getElementById('rp-modal'); if (ex) ex.remove();
+  const ov = document.createElement('div');
+  ov.className='overlay'; ov.id='rp-modal';
+  ov.innerHTML = `<div class="modal" style="width:520px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Range Targets</div><button class="modal-close" onclick="closeModal('rp-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:12px;max-height:78vh;overflow-y:auto">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div><div style="${lbl}">Season</div><input id="rp-season" type="text" style="${fld}" value="${slEsc(season)}" placeholder="FW26"></div>
+        <div><div style="${lbl}">Total styles</div><input id="rp-total" type="number" min="0" style="${fld}" value="${plan.total||''}" placeholder="12"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div><div style="${lbl}">Target margin % (landed)</div><input id="rp-margin" type="number" min="0" max="95" style="${fld}" value="${plan.targetMargin||''}" placeholder="65"></div>
+        <div><div style="${lbl}">Sell-in goal ($ wholesale)</div><input id="rp-sellin" type="number" min="0" style="${fld}" value="${plan.sellIn||''}" placeholder="100000"></div>
+      </div>
+      <div>
+        <div style="${lbl};margin-bottom:8px">Styles per category</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">${catInputs}</div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        ${STATE.rangePlan[season]?`<button class="btn btn-ghost btn-sm" onclick="rpDelete('${slEsc(season)}')">Remove targets</button>`:''}
+        <button class="btn btn-ghost" onclick="closeModal('rp-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="rpSave('${slEsc(season)}')">Save</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  openModal('rp-modal');
+};
+window.rpSave = function(origSeason){
+  const season = (document.getElementById('rp-season')?.value||'').trim();
+  if (!season){ showToast('Give the plan a season'); return; }
+  const cats = {};
+  document.querySelectorAll('#rp-modal .rp-cat').forEach(i => { const n=parseInt(i.value,10)||0; if(n>0) cats[i.dataset.cat]=n; });
+  if (!STATE.rangePlan) STATE.rangePlan = {};
+  if (origSeason && origSeason!==season) delete STATE.rangePlan[origSeason];
+  STATE.rangePlan[season] = {
+    total: parseInt(document.getElementById('rp-total')?.value,10)||0,
+    targetMargin: parseFloat(document.getElementById('rp-margin')?.value)||0,
+    sellIn: parseFloat(document.getElementById('rp-sellin')?.value)||0,
+    cats,
+    updatedAt: new Date().toISOString(),
+  };
+  RP_SEASON = season;
+  save();
+  closeModal('rp-modal');
+  try { logActivity('Range targets set for ' + season); } catch(e){}
+  renderRangePlan();
+  showToast('Targets saved — the dashboard now tracks ' + season + ' against plan');
+};
+window.rpDelete = function(season){
+  if (!confirm('Remove the ' + season + ' targets?')) return;
+  if (STATE.rangePlan) delete STATE.rangePlan[season];
+  save(); closeModal('rp-modal'); renderRangePlan();
+};
 
 // ═══════════════════════════════════════════════
 //  STYLES// ═══════════════════════════════════════════════
@@ -11488,7 +11655,15 @@ function plmContext() {
   const active = (s.styles||[]).filter(st => st.status !== 'archived');
   const styleList = active.map(st => `${st.styleId} — ${st.name} (${st.status}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'})`).join('\n');
   const mats = (s.materials||[]).slice(0,8).map(m => m.name).join(', ');
-  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}`;
+  // Season targets, so the agents can answer "how are we tracking vs plan".
+  let planLine = '';
+  try {
+    planLine = Object.entries(s.rangePlan||{}).map(([season,p]) => {
+      const a = rpActuals(season);
+      return `${season}: ${a.styles}/${p.total||'?'} styles, margin ${a.avgMargin!=null?a.avgMargin.toFixed(0)+'%':'n/a'} vs ${p.targetMargin||'?'}% target, sell-in $${Math.round(a.booked).toLocaleString()} vs $${Math.round(p.sellIn||0).toLocaleString()} goal`;
+    }).join('\n');
+  } catch(e){}
+  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}`;
 }
 
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
