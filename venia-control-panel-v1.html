@@ -1602,7 +1602,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '193';
+  const BUILD = '194';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22018,11 +22018,34 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var fmt = (rec && rec.fmt) || {};
     if (fmt.c) bd = fmt.c;
     if (fmt.b) weight = '700';
+    // A node can carry a sketch photo and/or an Eni-rendered technical flat.
+    var media = '';
+    if (rec && rec.flatSvg) media = fmSvgForNode(rec.flatSvg);
+    else if (rec && rec.img) media = '<img src="' + rec.img + '" alt="" style="pointer-events:none;width:100%;border-radius:8px;margin:-1px 0 6px;display:block;max-height:150px;object-fit:cover">';
+    if (media && w < 176) w = 176;
     return '<div class="fmf-node" data-id="' + n.id + '" onpointerdown="fmNodeDown(event,\'' + n.id + '\')" onclick="fmNodeTap(event,\'' + n.id + '\')" ondblclick="fmNodeDbl(event,\'' + n.id + '\')" '
       + 'style="position:absolute;left:' + rnd(n.x) + 'px;top:' + rnd(n.y) + 'px;transform:translate(-50%,-50%);width:' + w + 'px;box-sizing:border-box;'
       + 'background:' + bg + ';color:' + fg + ';border:2px solid ' + bd + ';border-radius:13px;padding:9px 12px;font-size:13px;line-height:1.35;font-weight:' + weight + ';'
       + 'box-shadow:0 2px 12px rgba(0,0,0,.10);cursor:grab;touch-action:none;' + (n.done ? 'opacity:.55;text-decoration:line-through;' : '') + '">'
+      + media
       + '<span style="pointer-events:none">' + esc((n.done ? '✓ ' : '') + n.label) + '</span></div>';
+  }
+  // Keep only a safe inline <svg> from a model reply (no scripts/handlers), sized
+  // to fill the node on a white card (the flat is black line-work).
+  function fmExtractSvg(text){
+    var m = String(text || '').match(/<svg[\s\S]*?<\/svg>/i);
+    if (!m) return '';
+    return m[0].replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/javascript:/gi, '');
+  }
+  function fmSvgForNode(svg){
+    if (!svg) return '';
+    var s = svg.replace(/<svg([^>]*)>/i, function(mm, attrs){
+      attrs = attrs.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+      return '<svg' + attrs + ' style="width:100%;height:auto;display:block;max-height:160px">';
+    });
+    return '<div style="pointer-events:none;margin:-1px 0 6px;background:#fff;border-radius:8px;padding:5px">' + s + '</div>';
   }
   function fmApplyTransform(){ var c = document.getElementById('fmf-canvas'); if (c) c.style.transform = 'translate(' + fm.panX + 'px,' + fm.panY + 'px) scale(' + fm.zoom + ')'; }
   function fmRenderCanvas(){
@@ -22246,6 +22269,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     else acts += fmAct('fmAddIdea(\'' + id + '\')', '＋ Add idea');
     acts += fmAct('fmExpandNode(\'' + id + '\')', '✦ Expand');
     acts += fmAct('fmStyleMenu(\'' + id + '\')', '🎨 Style');
+    // Sketch → flat: attach a photo, then have Eni render an editable technical flat.
+    var mrec = dumpRecById(id);
+    if (mrec){
+      acts += fmAct('fmAttachPhoto(\'' + id + '\')', (mrec.img ? '📷 Replace photo' : '📷 Photo'));
+      if (mrec.img) acts += fmActGold('fmRenderFlat(\'' + id + '\')', '✦ Render flat');
+      if (mrec.img || mrec.flatSvg){
+        acts += fmAct('fmViewMedia(\'' + id + '\')', '⤢ View');
+        acts += fmActMuted('fmClearMedia(\'' + id + '\')', '🗑 Photo');
+      }
+    }
     if (n.kind === 'branch') acts += fmAct('dumpWebBranch(\'' + g.id + '\',' + n.bi + ');fmRenderCanvas()', '✓ Toggle branch');
     if (n.kind !== 'center') acts += fmActMuted('fmDeleteNode(\'' + id + '\')', '🗑 Delete');
     var bar = document.createElement('div');
@@ -22256,6 +22289,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<div style="display:flex;gap:8px;flex-wrap:wrap">' + acts + '</div>';
     var ov = fmShell(); if (ov) ov.appendChild(bar);
   }
+  window.fmMenu = fmMenu;   // node tap opens this; also reachable for tests
   window.fmMenuClose = function(){ var m = document.getElementById('fmf-menu'); if (m) m.remove(); };
   // Find the live record (goal or step) behind a map node id.
   function dumpRecById(id){
@@ -22497,6 +22531,71 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       logActivity('Mind map expanded — ' + n.label.slice(0, 40));
     } catch(e){
       showToast('Could not expand — ' + String(e.message || e), 'error');
+    } finally {
+      var b = document.getElementById('fmf-busy'); if (b) b.remove();
+    }
+  };
+
+  // ── Sketch on a node → technical flat ────────────────────────────────────
+  // Attach a photo to any node (sketch, reference, fabric); Eni renders an
+  // editable technical flat (inline SVG) from it. Photo persists as a Supabase
+  // URL so it survives reload without bloating localStorage.
+  window.fmAttachPhoto = function(id){
+    var rec = dumpRecById(id); if (!rec){ showToast('This node has no editable record'); return; }
+    fmMenuClose();
+    if (typeof window.veniaUploadImage !== 'function'){ showToast('Connect Supabase in Settings to attach photos','warning'); return; }
+    window.veniaUploadImage('bs-' + id, function(url){
+      rec.img = url; save(); fmRenderCanvas();
+      showToast('Photo attached — tap the node to render a flat', 'success');
+    });
+  };
+  window.fmClearMedia = function(id){
+    var rec = dumpRecById(id); if (!rec) return;
+    delete rec.img; delete rec.flatSvg; save(); fmRenderCanvas(); fmMenuClose();
+    showToast('Photo removed');
+  };
+  window.fmViewMedia = function(id){
+    var rec = dumpRecById(id); if (!rec) return;
+    fmMenuClose();
+    var ov = document.createElement('div');
+    ov.id = 'fmf-media-view';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;padding:24px';
+    ov.addEventListener('click', function(){ ov.remove(); });
+    var inner = rec.flatSvg
+      ? '<div style="background:#fff;border-radius:12px;padding:18px;max-width:92vw;max-height:86vh;overflow:auto">' + fmSvgLarge(rec.flatSvg) + '</div>'
+      : (rec.img ? '<img src="' + rec.img + '" style="max-width:92vw;max-height:86vh;border-radius:12px;display:block">' : '<div style="color:#fff">Nothing to show</div>');
+    ov.innerHTML = inner + '<button aria-label="Close" style="position:absolute;top:calc(16px + var(--sat,0px));right:18px;background:rgba(255,255,255,.14);color:#fff;border:none;width:40px;height:40px;border-radius:50%;font-size:18px;cursor:pointer">✕</button>';
+    document.body.appendChild(ov);
+  };
+  function fmSvgLarge(svg){
+    return svg.replace(/<svg([^>]*)>/i, function(mm, attrs){
+      attrs = attrs.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+      return '<svg' + attrs + ' style="width:min(680px,90vw);height:auto;display:block">';
+    });
+  }
+  window.fmRenderFlat = async function(id){
+    var rec = dumpRecById(id); if (!rec || !rec.img){ showToast('Attach a sketch photo first','warning'); return; }
+    fmMenuClose();
+    var busy = document.createElement('div');
+    busy.id = 'fmf-busy';
+    busy.style.cssText = 'position:absolute;left:50%;bottom:calc(22px + var(--sab,0px));transform:translateX(-50%);background:var(--ink);color:#fff;font-size:12px;font-weight:600;padding:9px 15px;border-radius:0;z-index:9;box-shadow:0 4px 18px rgba(0,0,0,.25)';
+    busy.textContent = '✦ Rendering flat…';
+    var shell = document.getElementById('dump-fullmap'); if (shell) shell.appendChild(busy);
+    try {
+      var sys = 'You are a technical designer for VENIA Collection, a dark, architectural luxury fashion label. '
+        + 'Convert the attached hand sketch into a clean TECHNICAL FLAT (fashion CAD line drawing): a front-view garment flat in spare, precise black line-work on a transparent background — the kind that goes on a tech pack. '
+        + 'Return ONLY a single inline SVG (start with <svg, end with </svg>) — no prose, no code fence, no markdown. Use a viewBox (about 0 0 400 500), stroke="#111", stroke-width 2, fill="none" for the garment outline and construction lines (seams, darts, closures, topstitching as dashed). No colour fills, no text labels, no background rectangle.';
+      var out = await callClaude(sys, null, [{ role:'user', content: [
+        { type:'text', text: 'Sketch to convert into a technical flat. Node label: ' + (rec.t || '') },
+        { type:'image', source: { type:'url', url: rec.img } }
+      ]}]);
+      var svg = fmExtractSvg(out);
+      if (!svg) throw new Error('no usable drawing came back');
+      rec.flatSvg = svg; save(); fmRenderCanvas();
+      showToast('✦ Flat rendered — tap ⤢ View to see it large', 'success');
+      logActivity('Brainstorm: flat rendered from sketch — ' + String(rec.t || '').slice(0, 40));
+    } catch(e){
+      showToast('Could not render — ' + String(e.message || e), 'error');
     } finally {
       var b = document.getElementById('fmf-busy'); if (b) b.remove();
     }
