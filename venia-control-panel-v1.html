@@ -1602,7 +1602,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '194';
+  const BUILD = '195';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22018,10 +22018,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var fmt = (rec && rec.fmt) || {};
     if (fmt.c) bd = fmt.c;
     if (fmt.b) weight = '700';
-    // A node can carry a sketch photo and/or an Eni-rendered technical flat.
-    var media = '';
-    if (rec && rec.flatSvg) media = fmSvgForNode(rec.flatSvg);
-    else if (rec && rec.img) media = '<img src="' + rec.img + '" alt="" style="pointer-events:none;width:100%;border-radius:8px;margin:-1px 0 6px;display:block;max-height:150px;object-fit:cover">';
+    // A node can carry a sketch photo, an Eni-rendered flat, and/or freehand
+    // markup — all composited in one 3:4 box so drawn strokes stay aligned.
+    var media = fmMediaBox(rec);
     if (media && w < 176) w = 176;
     return '<div class="fmf-node" data-id="' + n.id + '" onpointerdown="fmNodeDown(event,\'' + n.id + '\')" onclick="fmNodeTap(event,\'' + n.id + '\')" ondblclick="fmNodeDbl(event,\'' + n.id + '\')" '
       + 'style="position:absolute;left:' + rnd(n.x) + 'px;top:' + rnd(n.y) + 'px;transform:translate(-50%,-50%);width:' + w + 'px;box-sizing:border-box;'
@@ -22039,13 +22038,36 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
       .replace(/javascript:/gi, '');
   }
-  function fmSvgForNode(svg){
-    if (!svg) return '';
-    var s = svg.replace(/<svg([^>]*)>/i, function(mm, attrs){
-      attrs = attrs.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-      return '<svg' + attrs + ' style="width:100%;height:auto;display:block;max-height:160px">';
-    });
-    return '<div style="pointer-events:none;margin:-1px 0 6px;background:#fff;border-radius:8px;padding:5px">' + s + '</div>';
+  // The media layer that fills a 3:4 box (flat SVG preferred, else photo), sized
+  // to contain so freehand strokes drawn over it stay aligned everywhere.
+  function fmMediaFill(rec){
+    if (rec && rec.flatSvg){
+      return rec.flatSvg.replace(/<svg([^>]*)>/i, function(mm, attrs){
+        attrs = attrs.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+        return '<svg' + attrs + ' preserveAspectRatio="xMidYMid meet" style="position:absolute;inset:0;width:100%;height:100%">';
+      });
+    }
+    if (rec && rec.img) return '<img src="' + rec.img + '" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain">';
+    return '';
+  }
+  // Freehand strokes drawn on the node, in the fixed 300×400 draw space.
+  function fmStrokesSVG(rec){
+    if (!rec || !rec.strokes || !rec.strokes.length) return '';
+    var paths = rec.strokes.map(function(s){
+      return '<path d="' + s.d + '" fill="none" stroke="' + (s.c || '#C0392B') + '" stroke-width="' + (s.w || 3) + '" stroke-linecap="round" stroke-linejoin="round"/>';
+    }).join('');
+    return '<svg viewBox="0 0 300 400" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none">' + paths + '</svg>';
+  }
+  function fmMediaBox(rec){
+    if (!rec) return '';
+    var has = rec.flatSvg || rec.img || (rec.strokes && rec.strokes.length);
+    if (!has) return '';
+    return '<div style="position:relative;width:100%;aspect-ratio:3/4;background:#fff;border-radius:8px;overflow:hidden;margin:-1px 0 6px;pointer-events:none">'
+      + fmMediaFill(rec) + fmStrokesSVG(rec) + '</div>';
+  }
+  function fmMediaBoxLarge(rec){
+    return '<div style="position:relative;width:min(600px,88vw);aspect-ratio:3/4;background:#fff;border-radius:12px;overflow:hidden">'
+      + fmMediaFill(rec) + fmStrokesSVG(rec) + '</div>';
   }
   function fmApplyTransform(){ var c = document.getElementById('fmf-canvas'); if (c) c.style.transform = 'translate(' + fm.panX + 'px,' + fm.panY + 'px) scale(' + fm.zoom + ')'; }
   function fmRenderCanvas(){
@@ -22274,9 +22296,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (mrec){
       acts += fmAct('fmAttachPhoto(\'' + id + '\')', (mrec.img ? '📷 Replace photo' : '📷 Photo'));
       if (mrec.img) acts += fmActGold('fmRenderFlat(\'' + id + '\')', '✦ Render flat');
-      if (mrec.img || mrec.flatSvg){
+      acts += fmAct('fmDraw(\'' + id + '\')', '✎ Draw');
+      if (mrec.img || mrec.flatSvg || (mrec.strokes && mrec.strokes.length)){
         acts += fmAct('fmViewMedia(\'' + id + '\')', '⤢ View');
-        acts += fmActMuted('fmClearMedia(\'' + id + '\')', '🗑 Photo');
+        acts += fmActMuted('fmClearMedia(\'' + id + '\')', '🗑 Clear');
       }
     }
     if (n.kind === 'branch') acts += fmAct('dumpWebBranch(\'' + g.id + '\',' + n.bi + ');fmRenderCanvas()', '✓ Toggle branch');
@@ -22551,8 +22574,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
   window.fmClearMedia = function(id){
     var rec = dumpRecById(id); if (!rec) return;
-    delete rec.img; delete rec.flatSvg; save(); fmRenderCanvas(); fmMenuClose();
-    showToast('Photo removed');
+    delete rec.img; delete rec.flatSvg; delete rec.strokes; save(); fmRenderCanvas(); fmMenuClose();
+    showToast('Cleared');
   };
   window.fmViewMedia = function(id){
     var rec = dumpRecById(id); if (!rec) return;
@@ -22561,18 +22584,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.id = 'fmf-media-view';
     ov.style.cssText = 'position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;padding:24px';
     ov.addEventListener('click', function(){ ov.remove(); });
-    var inner = rec.flatSvg
-      ? '<div style="background:#fff;border-radius:12px;padding:18px;max-width:92vw;max-height:86vh;overflow:auto">' + fmSvgLarge(rec.flatSvg) + '</div>'
-      : (rec.img ? '<img src="' + rec.img + '" style="max-width:92vw;max-height:86vh;border-radius:12px;display:block">' : '<div style="color:#fff">Nothing to show</div>');
+    var inner = (rec.flatSvg || rec.img || (rec.strokes && rec.strokes.length))
+      ? fmMediaBoxLarge(rec)
+      : '<div style="color:#fff">Nothing to show</div>';
     ov.innerHTML = inner + '<button aria-label="Close" style="position:absolute;top:calc(16px + var(--sat,0px));right:18px;background:rgba(255,255,255,.14);color:#fff;border:none;width:40px;height:40px;border-radius:50%;font-size:18px;cursor:pointer">✕</button>';
     document.body.appendChild(ov);
   };
-  function fmSvgLarge(svg){
-    return svg.replace(/<svg([^>]*)>/i, function(mm, attrs){
-      attrs = attrs.replace(/\s(width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-      return '<svg' + attrs + ' style="width:min(680px,90vw);height:auto;display:block">';
-    });
-  }
   window.fmRenderFlat = async function(id){
     var rec = dumpRecById(id); if (!rec || !rec.img){ showToast('Attach a sketch photo first','warning'); return; }
     fmMenuClose();
@@ -22599,6 +22616,77 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } finally {
       var b = document.getElementById('fmf-busy'); if (b) b.remove();
     }
+  };
+
+  // ── Draw to refine ───────────────────────────────────────────────────────
+  // Freehand markup over a node's flat/photo (or a blank card). Strokes are SVG
+  // paths in a fixed 300×400 space, stored on the record (rec.strokes) so they
+  // composite into the node, the View overlay and the tech pack alike.
+  var fmDrawState = null, fmDrawR1 = function(n){ return Math.round(n * 10) / 10; };
+  function fmDrawPt(e){
+    var svg = document.getElementById('fmd-svg'); if (!svg) return [0,0];
+    var r = svg.getBoundingClientRect();
+    var x = (e.clientX - r.left) / r.width * 300, y = (e.clientY - r.top) / r.height * 400;
+    return [ Math.max(0, Math.min(300, fmDrawR1(x))), Math.max(0, Math.min(400, fmDrawR1(y))) ];
+  }
+  function fmDrawRedraw(withCur){
+    var svg = document.getElementById('fmd-svg'); if (!svg || !fmDrawState) return;
+    var all = fmDrawState.strokes.slice();
+    if (withCur && fmDrawState.cur) all.push(fmDrawState.cur);
+    svg.innerHTML = all.map(function(s){ return '<path d="' + s.d + '" fill="none" stroke="' + s.c + '" stroke-width="' + s.w + '" stroke-linecap="round" stroke-linejoin="round"/>'; }).join('');
+  }
+  function fmDrawDown(e){ if (!fmDrawState) return; e.preventDefault(); var p = fmDrawPt(e); fmDrawState.cur = { d: 'M' + p[0] + ' ' + p[1], c: fmDrawState.color, w: fmDrawState.width }; try { e.target.setPointerCapture(e.pointerId); } catch(_){ } }
+  function fmDrawMove(e){ if (!fmDrawState || !fmDrawState.cur) return; e.preventDefault(); var p = fmDrawPt(e); fmDrawState.cur.d += ' L' + p[0] + ' ' + p[1]; fmDrawRedraw(true); }
+  function fmDrawUp(){ if (!fmDrawState || !fmDrawState.cur) return; if (fmDrawState.cur.d.indexOf('L') > -1) fmDrawState.strokes.push(fmDrawState.cur); fmDrawState.cur = null; fmDrawRedraw(); }
+  window.fmDrawColor = function(c){
+    if (fmDrawState) fmDrawState.color = c;
+    [].forEach.call(document.querySelectorAll('.fmd-color'), function(b){ b.style.borderColor = (b.getAttribute('data-c') === c) ? '#fff' : 'transparent'; });
+  };
+  window.fmDrawUndo = function(){ if (fmDrawState){ fmDrawState.strokes.pop(); fmDrawRedraw(); } };
+  window.fmDrawClear = function(){ if (fmDrawState){ fmDrawState.strokes = []; fmDrawRedraw(); } };
+  function fmDrawTeardown(){
+    var svg = document.getElementById('fmd-svg');
+    if (svg){ svg.removeEventListener('pointerdown', fmDrawDown); svg.removeEventListener('pointermove', fmDrawMove); }
+    window.removeEventListener('pointerup', fmDrawUp);
+    var ov = document.getElementById('fmf-draw'); if (ov) ov.remove();
+    fmDrawState = null;
+  }
+  window.fmDrawCancel = function(){ fmDrawTeardown(); };
+  window.fmDrawSave = function(id){
+    var rec = dumpRecById(id);
+    if (rec){ if (fmDrawState && fmDrawState.strokes.length) rec.strokes = fmDrawState.strokes.slice(); else delete rec.strokes; save(); fmRenderCanvas(); }
+    fmDrawTeardown();
+    showToast('Markup saved', 'success');
+  };
+  window.fmDraw = function(id){
+    var rec = dumpRecById(id); if (!rec){ showToast('This node has no editable record'); return; }
+    fmMenuClose();
+    var ov = document.createElement('div');
+    ov.id = 'fmf-draw';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9650;background:rgba(10,10,10,.93);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:calc(16px + var(--sat,0px)) 16px calc(16px + var(--sab,0px))';
+    var colors = ['#C0392B', '#111111', '#2E5FA3', '#3F6A50', '#C08A2E'];
+    var swatches = colors.map(function(c, i){ return '<button onclick="fmDrawColor(\'' + c + '\')" data-c="' + c + '" class="fmd-color" aria-label="Pen colour" style="width:32px;height:32px;border-radius:50%;background:' + c + ';border:2px solid ' + (i === 0 ? '#fff' : 'transparent') + ';cursor:pointer"></button>'; }).join('');
+    ov.innerHTML =
+      '<div style="color:#fff;font-size:12px;letter-spacing:1px;opacity:.75">Draw to refine — ' + esc((rec.t || '').slice(0, 40)) + '</div>'
+      + '<div id="fmd-stage" style="position:relative;width:min(600px,90vw);aspect-ratio:3/4;background:#fff;border-radius:12px;overflow:hidden;touch-action:none;box-shadow:0 12px 50px rgba(0,0,0,.55)">'
+      +   fmMediaFill(rec)
+      +   '<svg id="fmd-svg" viewBox="0 0 300 400" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair"></svg>'
+      + '</div>'
+      + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center">' + swatches
+      +   '<button onclick="fmDrawUndo()" class="btn btn-ghost btn-sm" style="color:#fff;border-color:#444;border-radius:9px">↺ Undo</button>'
+      +   '<button onclick="fmDrawClear()" class="btn btn-ghost btn-sm" style="color:#fff;border-color:#444;border-radius:9px">Clear</button>'
+      + '</div>'
+      + '<div style="display:flex;gap:10px">'
+      +   '<button onclick="fmDrawSave(\'' + id + '\')" class="btn" style="background:#fff;color:#111;min-height:44px;border-radius:11px;padding:0 24px;font-weight:700">Done</button>'
+      +   '<button onclick="fmDrawCancel()" class="btn btn-ghost" style="color:#fff;border-color:#444;min-height:44px;border-radius:11px;padding:0 18px">Cancel</button>'
+      + '</div>';
+    document.body.appendChild(ov);
+    fmDrawState = { color: '#C0392B', width: 3, strokes: (rec.strokes || []).map(function(s){ return { d: s.d, c: s.c, w: s.w }; }), cur: null };
+    fmDrawRedraw();
+    var svg = document.getElementById('fmd-svg');
+    svg.addEventListener('pointerdown', fmDrawDown);
+    svg.addEventListener('pointermove', fmDrawMove);
+    window.addEventListener('pointerup', fmDrawUp);
   };
 
   // ── Dump info → reshape the whole map ────────────────────────────────────
