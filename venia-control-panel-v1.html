@@ -1602,7 +1602,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '195';
+  const BUILD = '196';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11483,6 +11483,26 @@ function prOpenDetail(pullId) {
       </div>
 
       ${pull.notes ? `<div style="padding:12px 16px;background:var(--bg-off);border:1px solid var(--border);font-size:10px;color:var(--muted);margin-bottom:16px">${pull.notes}</div>` : ''}
+
+      <!-- PR radar: placements traced back to this pull -->
+      ${(() => {
+        const linked = (STATE.prCoverage || []).filter(c => c.pullId === pull.id);
+        const watchLine = `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:11px 14px;border:1px solid ${pull.watch?'var(--gold)':'var(--border)'};background:${pull.watch?'rgba(192,138,46,.06)':'var(--bg-off)'};margin-bottom:${linked.length?'10px':'4px'}">
+            <div style="font-size:10.5px;color:var(--ink)">${pull.watch?'◉ <strong>Watching for placements</strong> — Eni links matching press & photos here':'Track where these samples land'}</div>
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              <button class="btn btn-ghost btn-sm" style="padding:6px 12px" onclick="prToggleWatch('${pullId}')">${pull.watch?'Stop':'◉ Watch'}</button>
+              <button class="btn btn-gold btn-sm" style="padding:6px 12px" onclick="prFindPlacements('${pullId}')">✦ Find placements</button>
+            </div>
+          </div>`;
+        const list = linked.length ? `<div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 8px">Placements from this pull (${linked.length})</div>`
+          + linked.map(c => `<div style="border:1px solid var(--border);padding:11px 14px;margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;gap:10px"><div style="font-size:12px;font-weight:700">${c.outlet}</div>${c.publishDate?`<div style="font-size:10px;color:var(--muted)">${new Date(c.publishDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>`:''}</div>
+              <div style="font-size:11px;margin-top:2px">${c.headline||''}</div>
+              <div style="font-size:9px;color:var(--muted);margin-top:3px">${[c.celebRef?('★ '+c.celebRef):'', (c.stylesFeature||[]).join(', ')].filter(Boolean).join(' · ')}</div>
+              ${c.url?`<a href="${c.url}" target="_blank" style="font-size:9px;color:var(--muted);text-decoration:underline">View →</a>`:''}
+            </div>`).join('') : '';
+        return watchLine + list;
+      })()}
     </div>`;
 
   // Payment status block for detail view
@@ -11525,6 +11545,31 @@ function prOpenDetail(pullId) {
     </div>`;
 
   openModal('pr-detail-modal');
+}
+
+// PR radar: mark a pull as watched so Eni links matching press & photos to it.
+function prToggleWatch(pullId) {
+  const pull = STATE.prPulls.find(p => p.id === pullId);
+  if (!pull) return;
+  pull.watch = !pull.watch;
+  save();
+  toast(pull.watch ? 'Watching — Eni will link matching press & photos to this pull' : 'Stopped watching');
+  prOpenDetail(pullId);
+}
+// Ask Eni to scout for placements from this pull's artist/publication + styles.
+function prFindPlacements(pullId) {
+  const pull = STATE.prPulls.find(p => p.id === pullId);
+  if (!pull) return;
+  if (!pull.watch) { pull.watch = true; save(); }
+  const styles = (pull.items || []).map(i => i.styleName).filter(Boolean).join(', ');
+  const who = [pull.client, pull.publication].filter(Boolean).join(' / ');
+  closeModal('pr-detail-modal');
+  const prompt = 'Scout for VENIA placements from this pull — ' + (who || 'this client')
+    + '. Styles out: ' + (styles || '—')
+    + '. Look for any recent feature, editorial credit, stage/red-carpet photo, or mention where they wore or featured these pieces. '
+    + 'If you find a real, verifiable one, log it as coverage linked to this pull (pullId ' + pull.id + '). '
+    + 'Or if I send you a photo, confirm the garment against these styles and log it. Report what you find.';
+  if (typeof skSend === 'function') { skToggle(true); skSend(prompt); }
 }
 
 function prReturnItem(pullId, itemIdx) {
@@ -14381,6 +14426,7 @@ function agRenderCoverage(filter, returnHtml) {
 
   const html = coverage.length ? coverage.map(c => {
     const reach = c.reachEstimate >= 1000000 ? (c.reachEstimate/1000000).toFixed(1)+'M' : c.reachEstimate >= 1000 ? (c.reachEstimate/1000).toFixed(0)+'k' : '';
+    const fromPull = c.pullId && STATE.prPulls ? STATE.prPulls.find(p => p.id === c.pullId) : null;
     return `<div class="ag-cov-card" onclick="openCoverageModal('${c.id}')">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
         <div style="flex:1;min-width:0">
@@ -14398,6 +14444,7 @@ function agRenderCoverage(filter, returnHtml) {
         ${c.aveValue ? `<span style="color:var(--gold)">$${(c.aveValue/1000).toFixed(1)}k AVE</span>` : ''}
         ${c.celebRef ? `<span style="color:var(--ink)">★ ${c.celebRef}</span>` : ''}
         ${c.stylesFeature && c.stylesFeature.length ? `<span>${c.stylesFeature.join(' · ')}</span>` : ''}
+        ${fromPull ? `<span style="color:var(--gold)">↳ ${fromPull.invoiceNo||'pull'}${fromPull.client?' · '+fromPull.client:''}</span>` : ''}
         ${c.url ? `<a href="${c.url}" target="_blank" onclick="event.stopPropagation()" style="color:var(--muted);text-decoration:underline">View →</a>` : ''}
       </div>
       <div style="margin-top:8px;display:flex;gap:6px" onclick="event.stopPropagation()">
@@ -14655,9 +14702,40 @@ function agentActionSpec(key) {
 // a pull no matter where the user is standing — the request decides the action,
 // not the active tab.
 function agentAllActionSpec() {
-  return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm).'
+  return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm, Press coverage).'
     + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
-    + agentBrainstormActionSpec() + agentImageActionSpec();
+    + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec();
+}
+
+// Samples currently out on pulls — the watchlist for the PR radar. A detected
+// placement (mention or photo) that matches one of these should be logged as
+// coverage LINKED to that pull, closing the sample→press loop.
+function agentWatchedPullsHint() {
+  var pulls = (window.STATE && STATE.prPulls) || [];
+  var watched = pulls.filter(function(p){ return p && (p.watch || p.status === 'active'); });
+  if (!watched.length) return '';
+  var lines = watched.slice(0, 20).map(function(p){
+    var styles = (p.items || []).map(function(i){ return i.styleName; }).filter(Boolean).slice(0, 8).join(', ');
+    return '• [' + p.id + '] ' + (p.invoiceNo || '') + ' — ' + (p.client || '?')
+      + (p.publication ? ' / ' + p.publication : '')
+      + (styles ? ' — styles out: ' + styles : '')
+      + (p.watch ? ' (WATCHING)' : '');
+  }).join('\n');
+  return '\n\nSAMPLES CURRENTLY OUT — watch these for placements:\n' + lines;
+}
+// PR radar: turn a detected/confirmed placement into logged coverage, linked to
+// the originating pull when it matches. Works with an attached photo (vision
+// confirm against the styles that are out) or a found press hit.
+function agentPRRadarSpec() {
+  return '\n\nPR RADAR — turn placements into logged coverage.\n'
+    + 'When the user shows you (or you find) that VENIA was worn, featured, credited, or mentioned somewhere — a press hit, a photo of an artist in a VENIA piece, an editorial credit — log it. If a PHOTO is attached, first confirm the garment against the styles listed under SAMPLES OUT (and the PLM styles); only log what you can actually see or verify. Do BOTH:\n'
+    + '1) One short sentence naming the placement.\n'
+    + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
+    + '```venia:action\n'
+    + '{"type":"log_coverage","outlet":"Publication or platform","headline":"What ran / the moment","url":"","covType":"editorial","celebRef":"Artist/person, if any","styles":["exact style name(s) featured"],"reach":0,"aveValue":0,"pullId":"the [id] from SAMPLES OUT if it came from one, else empty","notes":""}\n'
+    + '```\n'
+    + 'Rules: "covType" ∈ editorial, celebrity, review, interview, social, mention. Set "pullId" to the matching pull id from SAMPLES OUT when the placement features a style that went out on that pull (same artist / publication / style) — this closes the loop from sample to press. NEVER fabricate a URL, a reach number, or a placement you cannot verify — leave unknowns "" or 0. Emit ONLY when there is a real placement to log.'
+    + agentWatchedPullsHint();
 }
 
 // Capture into Brainstorm from chat. The founder can say "add this to Brainstorm
@@ -14813,7 +14891,58 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
   if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
   if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
+  if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
 }
+
+// Log a detected/confirmed placement into Press coverage, linked to its pull
+// when one matches — the sample→placement→press loop closer.
+function agentRunLogCoverage(action, chatBody) {
+  if (!STATE.prCoverage) STATE.prCoverage = [];
+  var outlet = String(action.outlet || '').trim();
+  var headline = String(action.headline || '').trim();
+  if (!outlet && !headline) { appendAgentNote(chatBody, 'Tell me where VENIA showed up — outlet or the moment — and I\'ll log it.'); return; }
+  var okTypes = ['editorial','celebrity','review','interview','social','mention'];
+  var t = String(action.covType || action.type2 || '').toLowerCase();
+  if (okTypes.indexOf(t) < 0) t = 'editorial';
+  var pullId = String(action.pullId || '').trim();
+  var pull = (pullId && STATE.prPulls) ? STATE.prPulls.find(function(p){ return p.id === pullId; }) : null;
+  var cov = {
+    id: 'COV' + Date.now(), outlet: outlet || '—', journalist: '',
+    headline: headline || outlet, url: String(action.url || '').trim(),
+    publishDate: new Date().toISOString().slice(0, 10), type: t,
+    celebRef: String(action.celebRef || '').trim(),
+    stylesFeature: Array.isArray(action.styles) ? action.styles.map(function(s){ return String(s || '').trim(); }).filter(Boolean) : [],
+    reachEstimate: parseInt(action.reach) || 0, aveValue: parseInt(action.aveValue) || 0,
+    notes: String(action.notes || '').trim(), createdAt: new Date().toISOString(),
+    pullId: pull ? pull.id : '', fromPull: !!pull, addedByAgent: true,
+  };
+  STATE.prCoverage.unshift(cov);
+  save();
+  try { logActivity('PR: coverage logged by agent — ' + (outlet || headline) + (pull ? (' (from pull ' + (pull.invoiceNo || pull.id) + ')') : '')); } catch(e){}
+  try { if (typeof agRenderCoverage === 'function' && document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+  var meta = [t.charAt(0).toUpperCase()+t.slice(1), cov.celebRef ? ('★ ' + cov.celebRef) : '', cov.stylesFeature.join(', ')].filter(Boolean).join(' · ');
+  var card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Coverage logged</div>'
+    + '<div style="font-size:12px;font-weight:700;margin-top:2px">' + escHtml(cov.outlet) + '</div>'
+    + '<div style="font-size:11px;margin-top:1px">' + escHtml(cov.headline) + '</div>'
+    + (meta ? '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + escHtml(meta) + '</div>' : '')
+    + (pull ? '<div style="font-size:10px;color:var(--gold);margin-top:3px">↳ Linked to pull ' + escHtml(pull.invoiceNo || pull.id) + (pull.client ? ' — ' + escHtml(pull.client) : '') + '</div>' : '')
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'pr\')">Open PR</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoCoverage(\'' + cov.id + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoCoverage = function(id, btn){
+  if (STATE.prCoverage) STATE.prCoverage = STATE.prCoverage.filter(function(c){ return c.id !== id; });
+  save();
+  try { if (typeof agRenderCoverage === 'function' && document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+  if (btn){ var b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Coverage entry removed.</div>'; }
+};
 
 // Capture a note/goal/task into Brainstorm from the chat (bridges to dumpCapture).
 function agentRunAddToBrainstorm(action, chatBody) {
