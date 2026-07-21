@@ -1,15 +1,16 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v205';
+const CACHE = 'venia-shell-v206';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
-  // NOTE: no skipWaiting() here. We let the new worker WAIT so the page can
-  // prompt the user ("New version available — Update") before it takes over,
-  // rather than swapping code out from under a live session. The page posts
-  // SKIP_WAITING when the user accepts. First install has no existing worker,
-  // so the browser activates it immediately regardless.
+  // Auto-update: activate the new worker as soon as it's installed instead of
+  // waiting for the user to tap an "Update" ribbon. On iOS the app resumes the
+  // old page for days and that ribbon often never showed, leaving devices stuck
+  // on an old build. The page reloads once on controllerchange (see the HTML
+  // registration), so a fresh deploy lands on the next open with no tapping.
+  self.skipWaiting();
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
 });
 
