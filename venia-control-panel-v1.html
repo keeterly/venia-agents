@@ -1604,7 +1604,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '200';
+  const BUILD = '201';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -12850,17 +12850,59 @@ function cmdRenderHits() {
   const hits = dbGet('hits');
   const kpiEl = document.getElementById('kpi-prhits');
   if (kpiEl) kpiEl.textContent = hits.length;
-  const row = h => `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 20px;border-bottom:1px solid var(--border)">
-    <div style="flex:1">
+  const row = h => {
+    const match = prMatchHitToPull((h.desc||'') + ' ' + (h.person||''));
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 20px;border-bottom:1px solid var(--border)">
+    <div style="flex:1;min-width:0">
       <div style="font-size:11px;font-weight:700">${h.person||'Unknown'}</div>
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${h.desc||''}</div>
       ${h.source?`<a href="${h.source}" target="_blank" style="font-size:9px;color:var(--muted);text-decoration:underline">${h.source.slice(0,60)}…</a>`:''}
+      ${match?`<div style="font-size:9px;color:var(--gold);margin-top:3px;font-weight:700">↳ matches pull ${match.invoiceNo||match.id}${match.client?' · '+match.client:''}</div>`:''}
     </div>
     <div style="font-size:9px;color:var(--muted);flex-shrink:0">${h.date||''}</div>
-    <button style="font-size:9px;padding:2px 6px;border:1px solid var(--border);cursor:pointer;background:none;flex-shrink:0" onclick="dbDelete('hits','${h.id}');cmdRenderHits()">✕</button>
+    <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+      <button class="ag-btn ag-btn-primary ag-btn-sm" style="min-height:auto;padding:4px 8px;white-space:nowrap" onclick="cmdHitToCoverage('${h.id}')" title="Log this mention as press coverage">→ Coverage</button>
+      <button style="font-size:9px;padding:2px 6px;border:1px solid var(--border);cursor:pointer;background:none" onclick="dbDelete('hits','${h.id}');cmdRenderHits()">✕ Dismiss</button>
+    </div>
   </div>`;
+  };
   if (el) el.innerHTML = hits.length ? hits.map(row).join('') : '<div style="padding:16px 20px;font-size:10px;color:var(--muted)">No hits logged yet.</div>';
   if (recentEl) recentEl.innerHTML = hits.slice(0,4).map(h=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${h.person}</span><span style="color:var(--muted)">${h.date}</span></div>`).join('') || '<div style="font-size:10px;color:var(--muted)">No hits yet</div>';
+}
+// Match a press mention to a watched/active pull by artist, publication, or a
+// style that went out on it — the news→radar bridge.
+function prMatchHitToPull(text) {
+  const hay = String(text || '').toLowerCase();
+  const pulls = (STATE.prPulls || []).filter(p => p && (p.watch || p.status === 'active'));
+  for (const p of pulls) {
+    const needles = [p.client, p.publication].filter(Boolean).map(s => String(s).toLowerCase());
+    (p.items || []).forEach(it => { if (it.styleName) needles.push(String(it.styleName).toLowerCase()); });
+    if (needles.some(n => n.length > 2 && hay.includes(n))) return p;
+  }
+  return null;
+}
+// Promote a press-scan hit into logged coverage, linked to its matching pull.
+function cmdHitToCoverage(hitId) {
+  const hit = dbGet('hits').find(h => h.id === hitId);
+  if (!hit) return;
+  if (!STATE.prCoverage) STATE.prCoverage = [];
+  const pull = prMatchHitToPull((hit.desc || '') + ' ' + (hit.person || ''));
+  const cov = {
+    id: 'COV' + Date.now(), outlet: hit.person || 'Press', journalist: '',
+    headline: hit.desc || hit.person || 'Mention', url: hit.source || '',
+    publishDate: hit.date || new Date().toISOString().slice(0, 10), type: 'mention',
+    celebRef: pull ? (pull.client || '') : '',
+    stylesFeature: pull ? (pull.items || []).map(i => i.styleName).filter(Boolean).slice(0, 3) : [],
+    reachEstimate: 0, aveValue: 0, notes: 'From press scan', createdAt: new Date().toISOString(),
+    pullId: pull ? pull.id : '', fromPull: !!pull, fromNews: true,
+  };
+  STATE.prCoverage.unshift(cov);
+  save();
+  dbDelete('hits', hitId);   // moves it out of the mentions inbox into coverage
+  try { logActivity('PR: press mention logged as coverage — ' + cov.outlet + (pull ? (' (pull ' + (pull.invoiceNo || pull.id) + ')') : '')); } catch(e){}
+  cmdRenderHits();
+  try { if (document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+  toast(pull ? ('Logged — linked to ' + (pull.invoiceNo || 'pull')) : 'Logged to coverage', 'success');
 }
 function cmdLogPull() {
   const stylist = document.getElementById('pull-stylist')?.value.trim();
