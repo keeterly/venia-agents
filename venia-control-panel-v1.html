@@ -1602,8 +1602,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '192';
-  const BUILD_DATE = '2026.07.20';
+  const BUILD = '193';
+  const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -14655,8 +14655,41 @@ function agentActionSpec(key) {
 // a pull no matter where the user is standing — the request decides the action,
 // not the active tab.
 function agentAllActionSpec() {
-  return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls).'
-    + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr');
+  return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm).'
+    + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
+    + agentBrainstormActionSpec() + agentImageActionSpec();
+}
+
+// Capture into Brainstorm from chat. The founder can say "add this to Brainstorm
+// as a note / a goal" and Eni parks it — instead of asking "what's the content?".
+function agentBrainstormActionSpec() {
+  return '\n\nCAPTURE TO BRAINSTORM — the user\'s scratchpad for ideas, notes, and goals.\n'
+    + 'When the user asks you to add / capture / save / jot / note / park / remember something "to Brainstorm" (or clearly wants a thought stored rather than acted on), do BOTH:\n'
+    + '1) One short sentence confirming what you captured.\n'
+    + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
+    + '```venia:action\n'
+    + '{"type":"add_to_brainstorm","kind":"note","title":"","text":"the thought, in the USER\'S OWN WORDS","steps":[],"due":""}\n'
+    + '```\n'
+    + 'Rules: PRESERVE the user\'s wording verbatim for a note — do not rewrite, summarize, or add your own polish. "kind" is "note" (a single thought — the default), "goal" (a titled plan: put the heading in "title" and checkable steps in "steps"), or "task" (a single to-do). Set "due" to an ISO date (YYYY-MM-DD) only if the user gave a deadline, else "". Emit the block ONLY when the user wants something stored in Brainstorm.';
+}
+
+// Vision: parse an attached photo. Only present as guidance — the specific write
+// (add_material / apply_style_specs / add_vendors) is chosen by what the photo is.
+function agentImageActionSpec() {
+  return '\n\nWHEN THE USER ATTACHES A PHOTO — read it and act on what it shows:\n'
+    + '• A FABRIC SWATCH / material → estimate what you can SEE (fiber/content, colour, weave, approx. width) and file it with the add_material action below; if you can identify the mill, also propose it as a "Fabric Supplier" via add_vendors. Never invent a supplier, price, or content you cannot determine — leave those "".\n'
+    + '• A PATTERN CARD / SPEC SHEET / tech drawing → read the fields and fill a style with the apply_style_specs action below. Ask which style if it is not obvious.\n'
+    + '• A SKETCH / design → describe it, and offer to capture it to Brainstorm or start a style; do not fabricate measurements.\n'
+    + 'Only report what is legibly in the image.\n'
+    + '\nACTION — add_material: save a fabric/material into the Materials library.\n'
+    + '```venia:action\n'
+    + '{"type":"add_material","materials":[{"name":"Fabric name","content":"e.g. 100% wool","color":"","width":"e.g. 150cm","supplier":"","moq":"","costPerUnit":"","unit":"yd","notes":"what you can see: hand, weave, weight"}]}\n'
+    + '```\n'
+    + '\nACTION — apply_style_specs: fill a style\'s pattern & construction fields from a spec/pattern card.\n'
+    + '```venia:action\n'
+    + '{"type":"apply_style_specs","styleName":"exact style name or code from PLM Context","patternCard":{"baseSize":"","gradeRule":"","patternVer":"","patternLoc":"","patternPieces":0,"liningPieces":0},"construction":{"seamFinish":"","seamAllow":"","closure":"","hemType":"","interlining":"","stitchType":"","spi":"","thread":"","topstitch":"","shrinkage":"","fiberContent":"","coo":"","careInstructions":""},"pieces":[{"name":"","component":"Shell","cut":"","grain":"","notes":""}]}\n'
+    + '```\n'
+    + 'Rules for apply_style_specs: use a style name/code that appears in the PLM Context — if none is given or it is ambiguous, ask which style instead of emitting the block. Include ONLY fields legible on the card; omit or "" the rest. "component" ∈ Shell/Lining/Interlining/Facing/Underlining/Interfacing.';
 }
 
 // Pull the machine-readable block out of a reply. Returns the human text and the
@@ -14777,7 +14810,188 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
   if (action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
+  if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
+  if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
+  if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
 }
+
+// Capture a note/goal/task into Brainstorm from the chat (bridges to dumpCapture).
+function agentRunAddToBrainstorm(action, chatBody) {
+  if (typeof window.dumpCapture !== 'function') { appendAgentNote(chatBody, 'Brainstorm isn\'t loaded yet — open it once and try again.'); return; }
+  const id = window.dumpCapture({
+    kind: String(action.kind||'note'),
+    title: String(action.title||'').trim(),
+    text: String(action.text||'').trim(),
+    steps: Array.isArray(action.steps) ? action.steps : [],
+    due: String(action.due||'').trim(),
+  });
+  if (!id) { appendAgentNote(chatBody, 'Tell me what to capture and I\'ll park it in Brainstorm.'); return; }
+  const isGoal = (String(action.kind||'').toLowerCase()==='goal') || (Array.isArray(action.steps) && action.steps.length && String(action.kind||'').toLowerCase()!=='note');
+  const preview = escHtml((String(action.title||'').trim() || String(action.text||'').trim()).slice(0,120));
+  const stepCount = Array.isArray(action.steps) ? action.steps.filter(s=>String(s||'').trim()).length : 0;
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Captured to Brainstorm</div>'
+    + '<div style="font-size:12px;font-weight:700;margin-top:2px">' + preview + '</div>'
+    + (isGoal && stepCount ? '<div style="font-size:10px;color:var(--muted);margin-top:2px">Goal · ' + stepCount + ' step' + (stepCount>1?'s':'') + '</div>' : '<div style="font-size:10px;color:var(--muted);margin-top:2px">Note</div>')
+    + (action.due ? '<div style="font-size:10px;color:var(--muted);margin-top:1px">Due ' + escHtml(String(action.due)) + '</div>' : '')
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);dumpOpen()">Open Brainstorm</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoBrainstorm(\'' + id + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoBrainstorm = function(id, btn){
+  if (typeof window.dumpRemoveById === 'function') window.dumpRemoveById(id);
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Removed from Brainstorm.</div>'; }
+};
+
+// Execute an add_material action: dedupe against the Materials library, save, confirm.
+function agentRunAddMaterial(action, chatBody) {
+  const list = Array.isArray(action.materials) ? action.materials : [];
+  const now = Date.now();
+  if (!STATE.materials) STATE.materials = [];
+  const key = s => String(s||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  const seen = new Set(STATE.materials.map(m => key(m.name)));
+  const skipped = [], built = [];
+  list.forEach((x, i) => {
+    const name = String(x && x.name || '').trim();
+    if (!name) return;
+    const k = key(name);
+    if (seen.has(k)) { skipped.push(name); return; }
+    seen.add(k);
+    built.push({ id:'MAT'+now+i, name, type:'Fabric',
+      content: String(x.content||'').trim(), color: String(x.color||'').trim(),
+      width: String(x.width||'').trim(), supplier: String(x.supplier||'').trim(),
+      moq: String(x.moq||'').trim(), costPerUnit: String(x.costPerUnit||'').trim(),
+      unit: String(x.unit||'yd').trim() || 'yd', leadDays: '',
+      notes: String(x.notes||'').trim(), lots: [], addedByAgent: true,
+      createdAt: new Date().toISOString() });
+  });
+  if (!built.length) {
+    appendAgentNote(chatBody, skipped.length
+      ? `That fabric is already in your Materials library — nothing new to add.`
+      : 'Show me the swatch (or tell me the details) and I\'ll add it to Materials.');
+    return;
+  }
+  built.forEach(m => STATE.materials.unshift(m));
+  save();
+  try { logActivity('Materials: ' + built.length + ' fabric(s) added by agent'); } catch(e){}
+  try { if (STATE.currentPage === 'materials' && typeof renderMaterials==='function') renderMaterials(); } catch(e){}
+  const ids = built.map(m => m.id).join(',');
+  const rows = built.map(m => {
+    const meta = [m.content, m.color, m.width].filter(Boolean).join(' · ');
+    return `<div style="padding:8px 0;border-top:1px solid var(--border)">
+      <div style="font-size:12px;font-weight:700">${escHtml(m.name)} <span style="font-size:8px;letter-spacing:1px;border:1px solid var(--ink);padding:1px 5px;margin-left:4px">FABRIC</span></div>
+      ${meta?`<div style="font-size:10px;color:var(--muted);margin-top:1px">${escHtml(meta)}</div>`:''}
+      ${m.supplier?`<div style="font-size:10px;margin-top:2px">Supplier: ${escHtml(m.supplier)}</div>`:''}
+      ${m.notes?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${escHtml(m.notes)}</div>`:''}
+    </div>`;
+  }).join('');
+  const dupeNote = skipped.length ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">Already in Materials — skipped: ${escHtml(skipped.slice(0,4).join(', '))}${skipped.length>4?'…':''}</div>` : '';
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + built.length + ' fabric' + (built.length>1?'s':'') + ' added</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-bottom:2px">Saved to Materials — confirm content and pricing before you order.</div>'
+    + rows + dupeNote
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'plm\');setTimeout(function(){goTo(\'materials\',document.querySelector(\'[data-page=materials]\'))},150)">Open Materials</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoMaterial(\'' + ids + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoMaterial = function(idsStr, btn){
+  const ids = String(idsStr||'').split(',').filter(Boolean);
+  if (STATE.materials) STATE.materials = STATE.materials.filter(m => !ids.includes(m.id));
+  save();
+  try { if (STATE.currentPage === 'materials' && typeof renderMaterials==='function') renderMaterials(); } catch(e){}
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Fabric removed from Materials.</div>'; }
+};
+
+// Execute apply_style_specs: write pattern-card + construction fields to a style.
+const STYLE_SPEC_SCALARS = ['seamFinish','seamAllow','closure','closurePlace','hemType','hemAllow','interlining','stitchType','spi','thread','topstitch','shrinkage','fiberContent','coo','careInstructions','baseSize','gradeRule','patternVer','patternLoc'];
+function agentRunApplyStyleSpecs(action, chatBody) {
+  const styles = (window.STATE && STATE.styles) || [];
+  const q = String(action.styleName || action.styleId || '').trim().toLowerCase();
+  let s = null;
+  if (q) s = styles.find(x => String(x.styleId||'').toLowerCase() === q || String(x.name||'').toLowerCase() === q)
+            || styles.find(x => String(x.name||'').toLowerCase().includes(q) || String(x.styleId||'').toLowerCase().includes(q));
+  if (!s) {
+    const names = styles.slice(0,8).map(x => x.name).filter(Boolean).join(', ');
+    appendAgentNote(chatBody, styles.length
+      ? `Which style should I fill in? ${names ? '(e.g. ' + names + ')' : ''}`
+      : 'There are no styles yet — create one first, then I can fill its spec from the card.');
+    return;
+  }
+  // Snapshot for Undo — only the fields we may touch.
+  const before = { patternPieceList: JSON.parse(JSON.stringify(s.patternPieceList || [])) };
+  const pc = action.patternCard || {}, con = action.construction || {};
+  const filled = [];
+  const setField = (key, val) => {
+    const v = (typeof val === 'number') ? val : String(val||'').trim();
+    if (v === '' || v == null) return;
+    before[key] = s[key];
+    if (typeof tpUpdate === 'function' && typeof v === 'string') tpUpdate(s.id, key, v);
+    else s[key] = v;
+    filled.push(key);
+  };
+  STYLE_SPEC_SCALARS.forEach(k => { if (k in pc) setField(k, pc[k]); if (k in con) setField(k, con[k]); });
+  ['patternPieces','liningPieces'].forEach(k => { if (pc[k] != null && pc[k] !== '') { before[k] = s[k]; s[k] = parseInt(pc[k],10) || 0; filled.push(k); } });
+  // Pattern piece list
+  const pieces = Array.isArray(action.pieces) ? action.pieces : [];
+  let addedPieces = 0;
+  if (pieces.length) {
+    if (!Array.isArray(s.patternPieceList)) s.patternPieceList = [];
+    pieces.forEach(p => {
+      const nm = String(p && p.name || '').trim(); if (!nm) return;
+      s.patternPieceList.push({ name: nm, component: String(p.component||'Shell').trim() || 'Shell',
+        matId:'', fabric:'', cut: String(p.cut||'').trim(), grain: String(p.grain||'').trim(),
+        notes: String(p.notes||'').trim(), lotNo:'' });
+      addedPieces++;
+    });
+    if (addedPieces) filled.push(addedPieces + ' pattern piece' + (addedPieces>1?'s':''));
+  }
+  if (!filled.length) { appendAgentNote(chatBody, `I couldn't read any spec fields off that. Try a clearer photo of the card, or tell me the values.`); return; }
+  save();
+  try { if (STATE.currentPage === 'techpack' && typeof renderTechPackPage==='function') renderTechPackPage(); } catch(e){}
+  const snapId = 'ss'+Date.now();
+  window.__agStyleSpecUndo = window.__agStyleSpecUndo || {};
+  window.__agStyleSpecUndo[snapId] = { styleId: s.id, before, addedPieces };
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Filled ' + escHtml(s.name) + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-bottom:2px">From the spec card — review in the tech pack before sending to your factory.</div>'
+    + '<div style="font-size:11px;margin-top:4px">Updated: ' + escHtml(filled.join(', ')) + '</div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'plm\');setTimeout(function(){goTo(\'techpack\',document.querySelector(\'[data-page=techpack]\'));if(typeof renderTechPack===\'function\')renderTechPack(\'' + s.id + '\')},150)">Open Tech Pack</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoStyleSpecs(\'' + snapId + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoStyleSpecs = function(snapId, btn){
+  const snap = window.__agStyleSpecUndo && window.__agStyleSpecUndo[snapId];
+  if (snap && STATE.styles) {
+    const s = STATE.styles.find(x => x.id === snap.styleId);
+    if (s) {
+      Object.keys(snap.before).forEach(k => {
+        if (k === 'patternPieceList') s.patternPieceList = snap.before.patternPieceList;
+        else s[k] = snap.before[k];
+      });
+      save();
+      try { if (STATE.currentPage === 'techpack' && typeof renderTechPackPage==='function') renderTechPackPage(); } catch(e){}
+    }
+  }
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Reverted the spec fields.</div>'; }
+};
 
 // Execute an add_vendors action: dedupe against the library, save, confirm.
 const VENDOR_OK_TYPES = ['Factory','Fabric Supplier','Trim Supplier','Label','Agent','Logistics'];
@@ -20338,6 +20552,41 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (composeOpen){ if (e.key === 'Escape') window.dumpComposeClose(); return; }   // writing space: Enter = newline
     if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); window.dumpAdd(); }
   };
+  // Programmatic capture — the bridge Eni's chat uses to write into Brainstorm.
+  // Builds the SAME item shapes as parseDumpBlock so a captured note/goal/task is
+  // indistinguishable from one typed into the composer. Returns the new item's id
+  // (for Undo), or null on empty input.
+  window.dumpCapture = function(spec){
+    spec = spec || {};
+    var kind = String(spec.kind || '').toLowerCase();
+    var title = String(spec.title || '').trim();
+    var text  = String(spec.text || '').trim();
+    var steps = Array.isArray(spec.steps) ? spec.steps.map(function(s){ return String(s||'').trim(); }).filter(Boolean) : [];
+    var due   = /^\d{4}-\d{2}-\d{2}$/.test(String(spec.due||'')) ? spec.due : null;
+    var it = null;
+    if (kind === 'goal' || (steps.length && kind !== 'note')){
+      var kids = steps.map(function(txt){ return { id: uid(), t: txt, done: false }; });
+      it = { id: uid(), t: (title || text || 'Untitled plan'), d: new Date().toISOString(), done: false, children: kids };
+    } else {
+      // note or task — a single loose thought (task is just a note in this model)
+      var body = title && text ? (title + '\n' + text) : (text || title);
+      if (!body) return null;
+      it = { id: uid(), t: body, d: new Date().toISOString(), done: false };
+    }
+    if (due) it.due = due;
+    items().unshift(it);
+    save();
+    TAB = 'inbox';
+    try { render(); } catch(e){}
+    try { window.dumpBadge && window.dumpBadge(); } catch(e){}
+    return it.id;
+  };
+  // Remove a captured item by id (Undo from the Eni card).
+  window.dumpRemoveById = function(id){
+    if (!id || !STATE.dump) return;
+    var i = STATE.dump.findIndex(function(x){ return x && x.id === id; });
+    if (i >= 0){ STATE.dump.splice(i, 1); save(); try { render(); } catch(e){} try { window.dumpBadge && window.dumpBadge(); } catch(e){} }
+  };
   // ✦ on the composer: instead of adding another item, Eni reads the note
   // against everything you already have and ADJUSTS — updates a goal's steps or
   // date, completes or snoozes things, and only creates when nothing matches.
@@ -24645,6 +24894,14 @@ function gSignIn() {
 #sk-field::placeholder{color:#666}
 .sk-send{background:#fff;color:#0a0a0a;border:none;width:38px;height:38px;border-radius:9px;font-size:16px;cursor:pointer;flex-shrink:0}
 .sk-send:hover{background:#ddd}
+.sk-cam{background:#151515;color:#bbb;border:1px solid #2a2a2a;width:38px;height:38px;border-radius:9px;font-size:17px;cursor:pointer;flex-shrink:0;line-height:1}
+.sk-cam:hover{color:#fff;border-color:#555}
+.sk-photo-chip{display:flex;align-items:center;gap:9px;padding:8px 14px 0}
+.sk-photo-chip img{width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid #2a2a2a}
+.sk-photo-chip .sk-photo-x{background:none;border:none;color:#888;font-size:15px;cursor:pointer;padding:2px 6px}
+.sk-photo-chip .sk-photo-x:hover{color:#fff}
+.sk-photo-chip .sk-photo-label{font-size:11px;color:#999}
+.sk-msg .sk-msg-photo{max-width:150px;max-height:150px;border-radius:9px;border:1px solid rgba(255,255,255,.14);margin-top:6px;display:block}
 .sk-hero{display:flex;align-items:center;gap:var(--sp-3);background:#0a0a0a;border:1px solid #1c1c1c;border-radius:var(--r-lg);
   padding:var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);margin:var(--sp-5) 0 var(--sp-6);cursor:text;
   box-shadow:var(--shadow-md);transition:border-color .18s var(--ease-out),box-shadow .18s var(--ease-out)}
@@ -24931,7 +25188,10 @@ body:has(.overlay.open) #sk-launch, body:has(.overlay.open) #bs-launch{ display:
   <div class="sk-context" id="sk-context">Following: VENIA OS</div>
   <div class="sk-body" id="sk-body"></div>
   <div class="sk-suggest" id="sk-suggest"></div>
+  <div id="sk-photo-chip" class="sk-photo-chip" style="display:none"></div>
   <div class="sk-input">
+    <input type="file" id="sk-photo-input" accept="image/*" style="display:none" onchange="skPhotoPick(this)">
+    <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
     <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" oninput="skAutoGrow(this)"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();skSend();}"></textarea>
     <button class="sk-send" onclick="skSend()" aria-label="Send">↑</button>
@@ -24942,7 +25202,10 @@ body:has(.overlay.open) #sk-launch, body:has(.overlay.open) #bs-launch{ display:
 const SK = { agent:'eni', open:false, history:{eni:[],nigma:[]}, greeted:{eni:false,nigma:false} };
 // Conversations survive reloads (device-local; capped like the live history).
 function skSaveHistory(){
-  try { localStorage.setItem('venia_sk_history', JSON.stringify({ eni: (SK.history.eni||[]).slice(-40), nigma: (SK.history.nigma||[]).slice(-40) })); } catch(e){}
+  // Never persist image blobs — keep localStorage lean and text-only. The chat
+  // shows the thumbnail this session; on reload the text remains, the photo drops.
+  const strip = arr => (arr||[]).slice(-40).map(m => { const { img, __imgBlock, ...rest } = m; return rest; });
+  try { localStorage.setItem('venia_sk_history', JSON.stringify({ eni: strip(SK.history.eni), nigma: strip(SK.history.nigma) })); } catch(e){}
 }
 try {
   const _skh = JSON.parse(localStorage.getItem('venia_sk_history') || 'null');
@@ -25047,15 +25310,54 @@ function skGreet(){
 function skRenderHistory(){
   const body = document.getElementById('sk-body'); if (!body) return;
   body.innerHTML = '';
-  (SK.history[SK.agent]||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.content));
+  (SK.history[SK.agent]||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.content, m.img));
 }
-function skAppend(who, text){
+function skAppend(who, text, img){
   const body = document.getElementById('sk-body'); if (!body) return;
   const div = document.createElement('div');
   div.className = 'sk-msg ' + (who==='user'?'user':'agent');
-  if (who==='user') div.innerHTML = escHtml(text);
-  else div.innerHTML = `<div class="sk-msg-who">${SK.agent==='eni'?'Eni':'Nigma'}</div><div class="sk-msg-body">${skFormat(text)}</div>`;
+  const photo = img ? `<img class="sk-msg-photo" src="${img}" alt="attached photo">` : '';
+  if (who==='user') div.innerHTML = (text ? escHtml(text) : '') + photo;
+  else div.innerHTML = `<div class="sk-msg-who">${SK.agent==='eni'?'Eni':'Nigma'}</div><div class="sk-msg-body">${skFormat(text)}${photo}</div>`;
   body.appendChild(div); body.scrollTop = body.scrollHeight;
+}
+// ── Dock photo attach ────────────────────────────────────────
+// One pending image at a time. We keep a small preview dataURL for the chat and
+// the Anthropic image block for the in-flight call — neither is persisted (the
+// block never enters SK.history; skSaveHistory strips the preview from storage).
+SK.pendingPhoto = null;   // { dataUrl, block }
+async function skPhotoToBlock(file){
+  // Same downscale path as the module's compressImage, self-contained so the
+  // dock doesn't depend on an IIFE-scoped helper. → JPEG dataURL + base64 block.
+  try {
+    const bmp = await createImageBitmap(file);
+    const MAX = 1400, scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width*scale)), h = Math.max(1, Math.round(bmp.height*scale));
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    cv.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const dataUrl = cv.toDataURL('image/jpeg', 0.82);
+    const b64 = dataUrl.split(',')[1] || '';
+    return { dataUrl, block: { type:'image', source:{ type:'base64', media_type:'image/jpeg', data:b64 } } };
+  } catch(e){ return null; }
+}
+async function skPhotoPick(input){
+  const file = input && input.files && input.files[0];
+  input.value = '';   // allow re-picking the same file
+  if (!file) return;
+  const got = await skPhotoToBlock(file);
+  if (!got){ if (typeof showToast==='function') showToast('Could not read that image','error'); return; }
+  SK.pendingPhoto = got;
+  const chip = document.getElementById('sk-photo-chip');
+  if (chip){
+    chip.style.display = 'flex';
+    chip.innerHTML = `<img src="${got.dataUrl}" alt="photo to send"><span class="sk-photo-label">Photo attached</span><button class="sk-photo-x" onclick="skPhotoClear()" aria-label="Remove photo">✕</button>`;
+  }
+  const f = document.getElementById('sk-field'); if (f) f.focus();
+}
+function skPhotoClear(){
+  SK.pendingPhoto = null;
+  const chip = document.getElementById('sk-photo-chip');
+  if (chip){ chip.style.display = 'none'; chip.innerHTML = ''; }
 }
 function skFormat(t){
   return escHtml(t).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\n/g,'<br>');
@@ -25064,6 +25366,7 @@ function skAutoGrow(el){ el.style.height='auto'; el.style.height=Math.min(el.scr
 function skClear(){
   SK.history[SK.agent] = []; SK.greeted[SK.agent] = false;
   skSaveHistory();
+  skPhotoClear();
   const body = document.getElementById('sk-body'); if (body) body.innerHTML='';
   skGreet();
 }
@@ -25122,13 +25425,18 @@ function skMakeWorking(whoLabel, steps){
 async function skSend(preset){
   const field = document.getElementById('sk-field');
   const msg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
-  if (!msg) return;
+  // A photo can be sent on its own — the message OR the image is enough.
+  const photo = (preset==null) ? SK.pendingPhoto : null;
+  if (!msg && !photo) return;
+  if (photo) skPhotoClear();
   if (field){ field.value=''; field.style.height='auto'; }
   if (!SK.open) skToggle(true);
   SK.history[SK.agent] = SK.history[SK.agent] || [];
   SK.greeted[SK.agent] = true;
-  skAppend('user', msg);
-  SK.history[SK.agent].push({role:'user', content:msg});
+  skAppend('user', msg, photo ? photo.dataUrl : undefined);
+  // Stored turn keeps content as a plain string (+ preview img for this session);
+  // the image block rides only in the call history built below.
+  SK.history[SK.agent].push({role:'user', content:msg, img: photo ? photo.dataUrl : undefined});
   if (SK.history[SK.agent].length > 40) SK.history[SK.agent] = SK.history[SK.agent].slice(-40);
   const body = document.getElementById('sk-body');
   // The dock carries EVERY action power on EVERY screen — file prospects,
@@ -25151,7 +25459,16 @@ async function skSend(preset){
       + '\nGive help specific to this section when relevant. You can take any of the actions below right here — never send the user to another screen to get something done.'
       + (hasActions ? agentAllActionSpec() : '')
       + (voice ? '\n\nVENIA voice/tone notes: ' + voice : '');
-    const reply = await callClaude(system, null, SK.history[SK.agent]);
+    // Call history: the same turns, but if a photo rode this send, the last user
+    // turn becomes an Anthropic content-block array (text + image). Stored
+    // SK.history stays string-only, so display/persistence never see the blob.
+    let callHist = SK.history[SK.agent];
+    if (photo) {
+      callHist = SK.history[SK.agent].map(m => ({ role: m.role, content: m.content }));
+      const last = callHist[callHist.length - 1];
+      last.content = [ { type:'text', text: msg || 'Photo attached — read it and act on what it shows.' }, photo.block ];
+    }
+    const reply = await callClaude(system, null, callHist);
     let shown = reply, action = null;
     if (hasActions) {
       const parsed = agentExtractAction(reply);
