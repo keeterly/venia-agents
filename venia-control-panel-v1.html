@@ -1640,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '217';
+  const BUILD = '218';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17126,6 +17126,7 @@ function agBuildSalesOverview() {
 // pipeline stage, tier, and a "follow-ups due" quick toggle. State is module-
 // level so it survives a re-render; the bar reflects the active state.
 let SL_FILTER = { q: '', stage: '', tier: '', due: false, sort: 'pipeline' };
+let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier)
 // Ordering within each pipeline group. 'pipeline' keeps the follow-up-first
 // order; the rest let the founders sort accounts by name, region, etc.
 function slSortComparator() {
@@ -17153,7 +17154,8 @@ function slBuyerMatches(b) {
     if (!od) return false;
   }
   if (f.q) {
-    const hay = [b.name, b.location, b.type, b.contactName, b.contact, b.email, b.notes]
+    const cs = slContactsOf(b).map(c => (c.name||'') + ' ' + (c.email||'') + ' ' + (c.role||'')).join(' ');
+    const hay = [b.name, b.location, b.type, b.contactName, b.contact, b.email, b.notes, cs]
       .map(x => String(x || '').toLowerCase()).join(' ');
     if (!f.q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))) return false;
   }
@@ -17180,7 +17182,7 @@ function slBuyersListHTML() {
     // Type lives in the sub-line under the name (type · location) — no separate
     // TYPE column, which only duplicated it.
     return `<div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
-        <div><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}</div></div>
+        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0"><input type="checkbox" class="sl-row-chk" title="Select for bulk tier" onclick="event.stopPropagation()" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="margin-top:3px;flex-shrink:0;cursor:pointer"><div style="min-width:0"><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}</div></div></div>
         <div><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[b.stage]||'To Reach'}</span></div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:9px;font-family:'DM Mono',monospace">${next}<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button></div>
       </div>`;
@@ -17242,6 +17244,7 @@ function slUpdateFilterCount() {
 
 function agBuildBuyersSection() {
   if (!STATE.slBuyers) STATE.slBuyers = [];
+  SL_SELECTED.clear();   // fresh entry — no stale bulk selection
   const buyers = STATE.slBuyers;
   const today = new Date().toISOString().slice(0,10);
   const inStages = (sts) => buyers.filter(b => sts.includes(b.stage || 'new'));
@@ -17259,6 +17262,7 @@ function agBuildBuyersSection() {
       ${kpi('Follow-ups due', overdue, overdue ? 'chase these first' : 'all current', overdue ? 'var(--red)' : 'var(--green)')}
     </div>
     <div id="sl-filter-bar" class="sl-filter">${total ? slFilterBarHTML() : ''}</div>
+    <div id="sl-bulk-bar" style="display:none"></div>
     <div id="sl-buyers-list">${slBuyersListHTML()}</div>
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Pipeline Actions</h2></div>
@@ -17278,11 +17282,69 @@ function slRefreshBuyers() {
   try { agNav('sl', 'buyers', document.querySelector('#cp-screen-sl .ag-nav-item[onclick*="buyers"]')); } catch (e) {}
 }
 
+// ── Multiple contacts per store ──────────────────────────────────────────────
+// A store can hold several buyers/emails: b.contacts = [{name,email,role}].
+// Legacy single contactName/email records read transparently and migrate on save.
+function slContactsOf(b){
+  if (b && Array.isArray(b.contacts) && b.contacts.length) return b.contacts;
+  if (b && (b.contactName || b.email)) return [{ name:b.contactName||'', email:b.email||'', role:'' }];
+  return [];
+}
+const _SLCIN = 'background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:7px 8px;font-size:11px;width:100%;box-sizing:border-box';
+function slContactRowHTML(c){
+  c = c || {};
+  return `<div class="sl-contact-row" style="display:grid;grid-template-columns:1fr 1.3fr 0.8fr 28px;gap:6px;margin-bottom:6px">
+    <input class="sl-c-name" type="text" value="${slEsc(c.name||'')}" placeholder="Name" style="${_SLCIN}">
+    <input class="sl-c-email" type="email" value="${slEsc(c.email||'')}" placeholder="email@store.com" style="${_SLCIN}">
+    <input class="sl-c-role" type="text" value="${slEsc(c.role||'')}" placeholder="Role" style="${_SLCIN}">
+    <button type="button" class="btn btn-ghost btn-sm" title="Remove contact" style="padding:0;min-width:0" onclick="this.closest('.sl-contact-row').remove()">&#x2715;</button>
+  </div>`;
+}
+function slAddContactRow(c){ const w=document.getElementById('sl-b-contacts'); if(w) w.insertAdjacentHTML('beforeend', slContactRowHTML(c)); }
+function slContactsDisplay(b){
+  const cs = slContactsOf(b);
+  const rows = cs.map(c => {
+    const nm = slEsc(c.name||''); const role = c.role?` <span style="color:var(--muted)">(${slEsc(c.role)})</span>`:'';
+    const em = c.email?`${nm||role?' · ':''}<a href="mailto:${slEsc(c.email)}" style="color:var(--gold)">${slEsc(c.email)}</a>`:'';
+    return (nm||em||role) ? `${nm}${role}${em}` : '';
+  }).filter(Boolean);
+  return rows.length ? '<br>' + rows.join('<br>') : '';
+}
+
+// ── Bulk select + tier ───────────────────────────────────────────────────────
+function slToggleSelect(id, on){ if(on) SL_SELECTED.add(id); else SL_SELECTED.delete(id); slRenderBulkBar(); }
+function slClearSelection(){ SL_SELECTED.clear(); slRenderBulkBar(); document.querySelectorAll('#sl-buyers-list .sl-row-chk').forEach(c=>{ c.checked=false; }); }
+function slRenderBulkBar(){
+  const bar = document.getElementById('sl-bulk-bar'); if(!bar) return;
+  const n = SL_SELECTED.size;
+  if(!n){ bar.innerHTML=''; bar.style.display='none'; return; }
+  bar.style.display='';
+  const bs = 'background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);color:#fff;font-size:10px;padding:4px 11px;cursor:pointer;border-radius:4px;letter-spacing:.5px';
+  const tierBtns = [['dream','Dream'],['strong','Strong'],['reach','Reach'],['','Clear tier']]
+    .map(([k,v]) => `<button style="${bs}" onclick="slBulkTier('${k}')">${v}</button>`).join('');
+  bar.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 13px;background:var(--ink);color:#fff;margin-bottom:12px;border-radius:4px">
+    <span style="font-size:11px;font-weight:700">${n} selected</span>
+    <span style="font-size:9px;letter-spacing:1px;text-transform:uppercase;opacity:.65;margin-left:2px">Set tier</span>
+    ${tierBtns}
+    <button style="${bs};margin-left:auto;background:none;border-color:rgba(255,255,255,.25)" onclick="slClearSelection()">Deselect all</button>
+  </div>`;
+}
+function slBulkTier(tier){
+  const ids = Array.from(SL_SELECTED); if(!ids.length) return;
+  let n = 0;
+  (STATE.slBuyers||[]).forEach(b => { if(ids.indexOf(b.id) >= 0){ b.tier = tier; b.updatedAt = new Date().toISOString(); n++; } });
+  save();
+  SL_SELECTED.clear();
+  slRefreshBuyers();
+  showToast(n + ' account' + (n!==1?'s':'') + ' → ' + (AGENT_TIER_LABEL[tier] || 'no tier'));
+}
+
 function slOpenBuyerModal(id) {
   if (!STATE.slBuyers) STATE.slBuyers = [];
   const b = id ? STATE.slBuyers.find(x => x.id === id) : null;
   const stageOpts = Object.entries(SL_STAGES).map(([k,v]) => `<option value="${k}" ${b&&b.stage===k?'selected':''}>${v}</option>`).join('');
   const typeOpts = SL_TYPES.map(t => `<option value="${t}" ${b&&b.type===t?'selected':''}>${t}</option>`).join('');
+  const tierOpts = `<option value="" ${!(b&&b.tier)?'selected':''}>— none —</option>` + Object.entries(AGENT_TIER_LABEL).map(([k,v]) => `<option value="${k}" ${b&&b.tier===k?'selected':''}>${v}</option>`).join('');
   const html = `<div class="modal" style="width:500px">
     <div class="modal-head"><div class="modal-title">${id?'Edit Buyer':'New Buyer'}</div><button class="modal-close" onclick="closeModal('sl-buyer-modal')">&#x2715;</button></div>
     <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:10px">
@@ -17296,7 +17358,7 @@ function slOpenBuyerModal(id) {
           <input id="sl-b-location" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.location||''}" placeholder="e.g. London, UK">
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
         <div>
           <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Type</div>
           <select id="sl-b-type" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px">${typeOpts}</select>
@@ -17305,16 +17367,17 @@ function slOpenBuyerModal(id) {
           <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Pipeline Stage</div>
           <select id="sl-b-stage" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px">${stageOpts}</select>
         </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Tier</div>
+          <select id="sl-b-tier" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px">${tierOpts}</select>
+        </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-        <div>
-          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Contact Name</div>
-          <input id="sl-b-contact" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.contactName||''}" placeholder="Buyer name">
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+          <div style="font-size:9px;color:var(--muted);letter-spacing:1px;text-transform:uppercase">Contacts</div>
+          <button type="button" class="btn btn-ghost btn-sm" style="padding:2px 9px" onclick="slAddContactRow()">+ Add contact</button>
         </div>
-        <div>
-          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Email</div>
-          <input id="sl-b-email" type="email" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.email||''}" placeholder="buyer@store.com">
-        </div>
+        <div id="sl-b-contacts"></div>
       </div>
       <div>
         <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Website</div>
@@ -17334,18 +17397,34 @@ function slOpenBuyerModal(id) {
   let modal = document.getElementById('sl-buyer-modal');
   if (!modal) { modal = document.createElement('div'); modal.className = 'overlay'; modal.id = 'sl-buyer-modal'; document.body.appendChild(modal); }
   modal.innerHTML = html;
+  // Seed the contact rows (existing contacts, migrating a legacy single contact;
+  // always leave one empty row so there's a place to type).
+  const seed = slContactsOf(b);
+  (seed.length ? seed : [{}]).forEach(c => slAddContactRow(c));
   openModal('sl-buyer-modal');
 }
 
 function slSaveBuyer(existingId) {
   if (!STATE.slBuyers) STATE.slBuyers = [];
+  // Collect every contact row (drop fully-empty ones).
+  const contacts = [];
+  document.querySelectorAll('#sl-b-contacts .sl-contact-row').forEach(row => {
+    const name  = (row.querySelector('.sl-c-name')?.value||'').trim();
+    const email = (row.querySelector('.sl-c-email')?.value||'').trim();
+    const role  = (row.querySelector('.sl-c-role')?.value||'').trim();
+    if (name || email) contacts.push({ name, email, role });
+  });
   const data = {
     name:        (document.getElementById('sl-b-name')?.value||'').trim(),
     location:    (document.getElementById('sl-b-location')?.value||'').trim(),
     type:        document.getElementById('sl-b-type')?.value||'',
     stage:       document.getElementById('sl-b-stage')?.value||'new',
-    contactName: (document.getElementById('sl-b-contact')?.value||'').trim(),
-    email:       (document.getElementById('sl-b-email')?.value||'').trim(),
+    tier:        document.getElementById('sl-b-tier')?.value||'',
+    contacts:    contacts,
+    // Mirror the first contact into the legacy fields so older read paths
+    // (search, agent prompt, exports) keep working.
+    contactName: contacts[0]?.name || '',
+    email:       contacts[0]?.email || '',
     website:     (document.getElementById('sl-b-website')?.value||'').trim(),
     notes:       (document.getElementById('sl-b-notes')?.value||'').trim(),
   };
@@ -17415,7 +17494,7 @@ function slOpenBuyerDetail(id) {
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">
         ${slEsc(b.type)||'—'}${b.location?' · '+slEsc(b.location):''}${site?` · <a href="${slEsc(site)}" target="_blank" rel="noopener" style="color:var(--gold)">site &#x21D7;</a>`:''}
-        ${(b.contactName||b.email)?`<br>${slEsc(b.contactName)||''}${b.contactName&&b.email?' · ':''}${b.email?`<a href="mailto:${slEsc(b.email)}" style="color:var(--gold)">${slEsc(b.email)}</a>`:''}`:''}
+        ${slContactsDisplay(b)}
         ${b.fit?`<br><span style="color:var(--ink)">${AGENT_TIER_LABEL[b.tier]?'['+AGENT_TIER_LABEL[b.tier]+' fit] ':''}${slEsc(b.fit)}</span>`:''}
       </div>
       <div><div style="${lbl}">Stage</div><div style="display:flex;gap:6px;flex-wrap:wrap">${stagePills}</div></div>
