@@ -1640,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '214';
+  const BUILD = '215';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17085,7 +17085,20 @@ function agBuildSalesOverview() {
 // Sales-focused filters: free-text search (name / city / type / contact),
 // pipeline stage, tier, and a "follow-ups due" quick toggle. State is module-
 // level so it survives a re-render; the bar reflects the active state.
-let SL_FILTER = { q: '', stage: '', tier: '', due: false };
+let SL_FILTER = { q: '', stage: '', tier: '', due: false, sort: 'pipeline' };
+// Ordering within each pipeline group. 'pipeline' keeps the follow-up-first
+// order; the rest let the founders sort accounts by name, region, etc.
+function slSortComparator() {
+  const s = SL_FILTER.sort || 'pipeline';
+  const today = new Date().toISOString().slice(0,10);
+  const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+  if (s === 'name') return (a,b) => String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'});
+  if (s === 'region') { const reg = (b) => { const loc=String(b.location||''); const p=loc.split(','); return (p.length>1?p[p.length-1]:loc).trim().toLowerCase()+'|'+loc.toLowerCase(); }; return (a,b) => reg(a).localeCompare(reg(b)) || String(a.name||'').localeCompare(String(b.name||'')); }
+  if (s === 'recent') return (a,b) => String(b.lastContact||'').localeCompare(String(a.lastContact||''));
+  if (s === 'due') return (a,b) => String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'));
+  if (s === 'tier') { const keys=Object.keys(AGENT_TIER_LABEL); const rank=(t)=>{const i=keys.indexOf(t); return i<0?99:i;}; return (a,b) => rank(a.tier)-rank(b.tier) || String(a.name||'').localeCompare(String(b.name||'')); }
+  return (a,b) => (isOverdue(b)-isOverdue(a)) || String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999')) || String(b.lastContact||'').localeCompare(String(a.lastContact||''));
+}
 function slBuyerFilterActive() {
   const f = SL_FILTER;
   return !!(f.q || f.stage || f.tier || f.due);
@@ -17115,10 +17128,7 @@ function slBuyersListHTML() {
   const active = slBuyerFilterActive();
   const today = new Date().toISOString().slice(0,10);
   const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
-  const sortRows = (list) => list.slice().sort((a,b) =>
-    (isOverdue(b)-isOverdue(a))
-    || String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'))
-    || String(b.lastContact||'').localeCompare(String(a.lastContact||'')));
+  const sortRows = (list) => list.slice().sort(slSortComparator());
   const row = (b) => {
     const od = isOverdue(b);
     const tier = AGENT_TIER_LABEL[b.tier] ? `<span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px;margin-left:6px">${AGENT_TIER_LABEL[b.tier]}</span>` : '';
@@ -17162,6 +17172,9 @@ function slFilterBarHTML() {
         <option value="">All tiers</option>
         ${Object.entries(AGENT_TIER_LABEL).map(([k,v]) => `<option value="${k}"${SL_FILTER.tier===k?' selected':''}>${v}</option>`).join('')}
       </select>
+      <select id="sl-filter-sort" class="sl-filter-tier" onchange="slSetSort(this.value)" title="Sort accounts within each stage">
+        ${[['pipeline','Sort: Follow-up'],['name','Sort: Name A–Z'],['region','Sort: Region'],['recent','Sort: Last contact'],['due','Sort: Due date'],['tier','Sort: Tier']].map(([k,v])=>`<option value="${k}"${SL_FILTER.sort===k?' selected':''}>${v}</option>`).join('')}
+      </select>
       <button class="sl-chip sl-chip-due${SL_FILTER.due?' on':''}" onclick="slToggleDueFilter()" title="Only accounts with an overdue follow-up">⚑ Due</button>
     </div>
     <div class="sl-filter-chips">
@@ -17173,10 +17186,11 @@ function slFilterBarHTML() {
 // Search re-renders only the list + count so the input keeps focus mid-type.
 function slSearchBuyers(v) { SL_FILTER.q = v; slRenderBuyerList(); slUpdateFilterCount(); }
 function slSetTierFilter(v) { SL_FILTER.tier = v; slRenderBuyerList(); slUpdateFilterCount(); }
+function slSetSort(v) { SL_FILTER.sort = v; slRenderBuyerList(); }
 // Stage / due toggles rebuild the bar (to flip chip states) then the list.
 function slSetStageFilter(k) { SL_FILTER.stage = (SL_FILTER.stage === k ? '' : k); slRerenderFilterBar(); }
 function slToggleDueFilter() { SL_FILTER.due = !SL_FILTER.due; slRerenderFilterBar(); }
-function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false }; slRerenderFilterBar(); }
+function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false, sort: SL_FILTER.sort || 'pipeline' }; slRerenderFilterBar(); }
 function slRenderBuyerList() { const el = document.getElementById('sl-buyers-list'); if (el) el.innerHTML = slBuyersListHTML(); }
 function slRerenderFilterBar() { const bar = document.getElementById('sl-filter-bar'); if (bar) bar.innerHTML = ((STATE.slBuyers||[]).length ? slFilterBarHTML() : ''); slRenderBuyerList(); }
 function slUpdateFilterCount() {
@@ -17300,10 +17314,14 @@ function slSaveBuyer(existingId) {
     // Editing details is NOT contact — lastContact only moves when a touch is
     // logged, so "gone quiet" stays honest.
     const idx = STATE.slBuyers.findIndex(b => b.id === existingId);
-    if (idx >= 0) STATE.slBuyers[idx] = { ...STATE.slBuyers[idx], ...data };
+    // updatedAt lets the cross-device merge resolve a same-account concurrent
+    // edit (founder + Christine) to the genuinely newest change instead of
+    // whoever pushed last (see _mNewer in mergeSnapshots).
+    if (idx >= 0) STATE.slBuyers[idx] = { ...STATE.slBuyers[idx], ...data, updatedAt: new Date().toISOString() };
   } else {
     data.id = 'BUY' + Date.now();
     data.createdAt = new Date().toISOString();
+    data.updatedAt = data.createdAt;
     data.lastContact = new Date().toISOString().slice(0,10);
     data.log = [];
     STATE.slBuyers.unshift(data);
@@ -17397,6 +17415,7 @@ function slSetBuyerStage(id, stage) {
   b.stage = stage;
   if (!Array.isArray(b.log)) b.log = [];
   b.log.unshift({ d: new Date().toISOString().slice(0,10), t: 'Stage: ' + from + ' → ' + (SL_STAGES[stage]||stage) });
+  b.updatedAt = new Date().toISOString();
   save();
   slOpenBuyerDetail(id);
   slRefreshBuyers();
@@ -17412,6 +17431,7 @@ function slLogTouch(id) {
   const today = new Date().toISOString().slice(0,10);
   b.log.unshift({ d: today, t });
   b.lastContact = today;
+  b.updatedAt = new Date().toISOString();
   save();
   slOpenBuyerDetail(id);
   slRefreshBuyers();
@@ -17422,6 +17442,7 @@ function slSetBuyerNext(id) {
   if (!b) return;
   b.nextDate = (document.getElementById('sl-acct-next')?.value || '').trim();
   b.nextAction = (document.getElementById('sl-acct-nexta')?.value || '').trim();
+  b.updatedAt = new Date().toISOString();
   save();
   slOpenBuyerDetail(id);
   slRefreshBuyers();
