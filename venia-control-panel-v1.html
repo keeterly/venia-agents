@@ -1640,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '215';
+  const BUILD = '216';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4705,7 +4705,42 @@ const EXTRA_LS_KEYS = [
   'venia_budget', 'venia_campaigns', 'venia_fitnotes', 'venia_styleboard',
 ];
 window.EXTRA_LS_KEYS = EXTRA_LS_KEYS;
+// Central concurrent-edit stamp. Every SYNC_KEYS array of {id} records is
+// content-hashed (excluding updatedAt); when a record's content changes locally
+// its updatedAt advances, so the cross-device 3-way merge (_mNewer) always
+// resolves a conflict to the genuinely newest edit — for EVERY record type, not
+// just buyers. First sight of a record (initial load / brand-new record) never
+// stamps, so booting doesn't mark everything as freshly edited. Skipped while
+// applying a remote snapshot so a partner's timestamps are never overwritten.
+window.__recHash = window.__recHash || {};
+function veniaStampUpdated(refreshOnly) {
+  const now = new Date().toISOString();
+  const keys = window.SYNC_KEYS || [];
+  for (let ki = 0; ki < keys.length; ki++) {
+    const k = keys[ki], v = STATE[k];
+    if (!Array.isArray(v)) continue;
+    let cache = window.__recHash[k]; if (!cache) cache = window.__recHash[k] = Object.create(null);
+    const present = Object.create(null);
+    for (let i = 0; i < v.length; i++) {
+      const rec = v[i];
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec) || rec.id == null) continue;
+      const id = rec.id; present[id] = 1;
+      const savedUA = rec.updatedAt;
+      if (savedUA !== undefined) rec.updatedAt = undefined;         // exclude from the hash
+      let h; try { h = JSON.stringify(rec); } catch (e) { h = null; }
+      if (savedUA !== undefined) rec.updatedAt = savedUA;
+      if (h == null) continue;
+      if (refreshOnly) { cache[id] = h; continue; }
+      const prev = cache[id];
+      if (prev === undefined) cache[id] = h;                        // first sight — don't stamp
+      else if (prev !== h) { rec.updatedAt = now; cache[id] = h; }  // genuine local edit
+    }
+    for (const id in cache) if (!present[id]) delete cache[id];     // forget deleted ids
+  }
+}
+window.veniaStampUpdated = veniaStampUpdated;
 function save() {
+  if (!window.__vApplyingRemote) { try { veniaStampUpdated(false); } catch (e) {} }
   const out = {};
   for (const k of SYNC_KEYS) if (STATE[k] !== undefined) out[k] = STATE[k];
   localStorage.setItem('venia-plm-v2', JSON.stringify(out));
@@ -20544,9 +20579,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function applySnapshot(data){
     if (!data) return;
     applyingRemote = true;
+    window.__vApplyingRemote = true;   // tell save()'s stamp not to overwrite the partner's timestamps
     try {
       var keys = window.SYNC_KEYS || [];
       for (var i = 0; i < keys.length; i++) { var k = keys[i]; if (k in data) STATE[k] = data[k]; }
+      // Re-baseline the edit-stamp cache to the applied data, so the next local
+      // save diffs against what's now on screen (not our pre-merge state).
+      try { if (typeof window.veniaStampUpdated === 'function') window.veniaStampUpdated(true); } catch (e) {}
       // Restore standalone-module localStorage keys from the snapshot.
       if (data._ls) {
         var extra = window.EXTRA_LS_KEYS || [];
@@ -20559,7 +20598,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
       if (typeof window.dumpBadge === 'function') window.dumpBadge();
-    } finally { applyingRemote = false; }
+    } finally { applyingRemote = false; window.__vApplyingRemote = false; }
   }
 
   // Every leg records into __syncStat so the Sync Status panel (and the
