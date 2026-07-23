@@ -1640,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '211';
+  const BUILD = '212';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2347,6 +2347,10 @@ body{padding-top:44px;box-sizing:border-box;}
           <div class="ag-nav-item" onclick="setShowSection('set-contacts',this)">Media Contacts</div>
         </div>
         <div class="ag-nav-grp">
+          <div class="ag-nav-lbl">Brand</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-carelabel',this)">Care Label</div>
+        </div>
+        <div class="ag-nav-grp">
           <div class="ag-nav-lbl">System</div>
           <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh()">Security</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
@@ -2703,6 +2707,28 @@ body{padding-top:44px;box-sizing:border-box;}
                 @veniacollection · keeter@veniacollection.com
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARE LABEL TEMPLATE -->
+      <div id="set-carelabel" class="set-section" style="display:none">
+        <div class="ag-content">
+          <div style="max-width:640px">
+            <div class="micro-label" style="margin-bottom:6px">Care Label Template</div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:18px;line-height:1.6">Brand-level defaults applied to every style's care label. A style can still override its own origin, size and symbol standard in the tech pack (⑧ Care Label).</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+              <div><div class="tpl" style="margin-bottom:5px">Brand Name</div><input class="fi" id="cd-brand" placeholder="VENIA" onchange="careDefaultsSet('brand',this.value)"></div>
+              <div><div class="tpl" style="margin-bottom:5px">RN Number</div><input class="fi" id="cd-rn" placeholder="e.g. 123456" onchange="careDefaultsSet('rn',this.value)"></div>
+              <div><div class="tpl" style="margin-bottom:5px">Default Country of Origin</div><input class="fi" id="cd-coo" placeholder="Made in Portugal" onchange="careDefaultsSet('defaultCoo',this.value)"></div>
+              <div><div class="tpl" style="margin-bottom:5px">Symbol Standard</div><select class="fi" id="cd-standard" onchange="careDefaultsSet('standard',this.value)">
+                <option value="both">Both (EU + US)</option><option value="ginetex">EU · GINETEX (symbols only)</option><option value="astm">US · ASTM (symbols + words)</option></select></div>
+              <div><div class="tpl" style="margin-bottom:5px">Label Width (mm)</div><input class="fi" id="cd-w" type="number" placeholder="40" onchange="careDefaultsSet('labelW',this.value)"></div>
+              <div><div class="tpl" style="margin-bottom:5px">Label Height (mm)</div><input class="fi" id="cd-h" type="number" placeholder="60" onchange="careDefaultsSet('labelH',this.value)"></div>
+            </div>
+            <label class="tpl" style="display:flex;align-items:center;gap:8px;margin-top:16px;cursor:pointer"><input type="checkbox" id="cd-size" onchange="careDefaultsSet('includeSize',this.checked)"> Print the size on the label when a style sets one</label>
+            <div style="margin-top:14px"><div class="tpl" style="margin-bottom:5px">Footer line (optional)</div><input class="fi" id="cd-footer" placeholder="e.g. veniacollection.com" onchange="careDefaultsSet('footer',this.value)"></div>
+            <div style="margin-top:22px"><div class="tpl" style="margin-bottom:6px">Preview</div><div id="cd-preview" style="background:#fff;border:1px solid var(--border);padding:10px;display:inline-block"></div></div>
           </div>
         </div>
       </div>
@@ -8591,6 +8617,55 @@ function careDeriveFiber(styleId){
   renderTechPack(s.id); toast('Fiber content pulled from the BOM');
 }
 
+// Ask the assistant to RECOMMEND the care codes from the fibres + construction.
+// The model only returns codes; the glyphs still render deterministically.
+async function careAutoFill(styleId){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return;
+  if(typeof callClaude!=='function'){ toast('Assistant is unavailable right now.'); return; }
+  let fiber=(s.careLabel&&s.careLabel.fiber)||s.fiberContent||''; if(!fiber) fiber=deriveFiberContent(styleId);
+  const con=['seamFinish','closure','interlining','dyeTech','fabricState','hemType'].map(k=>s[k]).filter(Boolean).join(', ');
+  if(!fiber && !con){ toast('Add fibre content or fabrics to the BOM first, then Eni can recommend care.'); return; }
+  const btn=document.getElementById('care-ai-btn'); if(btn){ btn.disabled=true; btn.textContent='✦ Thinking…'; }
+  const codeSet='wash.machine.30|wash.machine.40|wash.machine.60|wash.gentle.30|wash.hand|wash.no ;; bleach.any|bleach.nonchlorine|bleach.no ;; tumble.low|tumble.normal|tumble.no|dry.line|dry.drip|dry.flat|dry.shade ;; iron.1dot|iron.2dot|iron.3dot|iron.no ;; pro.dryclean.P|pro.dryclean.F|pro.wetclean.W|pro.no';
+  const sys='You are a garment care expert. Recommend a safe, standard laundry care label for the fibres given. Reply with ONLY one fenced ```venia:action``` block of {"type":"generate_care_label","codes":[...],"additional":""}. Choose "codes" ONLY from this set — at most one per family, and pick EITHER a tumble OR a natural-dry code, never both: '+codeSet+'. Delicate fibres (wool, silk, cashmere, viscose) → hand wash or dry clean, no tumble, cool iron. When unsure, err gentler.';
+  const msg='Style: '+(s.name||'')+'\nFibre content: '+(fiber||'(unknown)')+'\nConstruction: '+(con||'(not specified)')+'\n\nRecommend the care label codes.';
+  try{
+    const reply=await callClaude(sys,msg);
+    const ex=(typeof agentExtractAction==='function')?agentExtractAction(reply):{action:null};
+    const a=ex&&ex.action;
+    if(!a||a.type!=='generate_care_label'||!Array.isArray(a.codes)){ toast('Eni couldn\'t suggest codes — try again, or pick them manually.'); return; }
+    const seen={}, codes=[];
+    a.codes.forEach(c=>{ c=String(c||'').trim(); if(!CARE_SYMBOLS[c])return; const g=careExcl(c); if(seen[g])return; seen[g]=1; codes.push(c); });
+    if(!s.careLabel)s.careLabel=_careLabelDefault();
+    if(codes.length)s.careLabel.codes=codes;
+    if(!s.careLabel.fiber && fiber){ s.careLabel.fiber=fiber; s.careLabel.fiberAuto=true; if(typeof tpUpdate==='function')tpUpdate(styleId,'fiberContent',fiber); }
+    const add=String(a.additional||'').trim(); if(add)s.careLabel.additional=add;
+    _careSyncText(s); save(); renderTechPack(s.id); toast('Eni recommended a care label — review it.');
+  }catch(e){ toast('Auto-fill failed — '+(e&&e.message||e)); }
+  finally{ const b2=document.getElementById('care-ai-btn'); if(b2){ b2.disabled=false; b2.textContent='✦ Auto-fill from fabric (Eni)'; } }
+}
+
+// ── Brand-level care-label defaults (Settings → Brand → Care Label) ──
+function careDefaultsEnsure(){ if(!STATE.careDefaults) STATE.careDefaults=careCfg(); return STATE.careDefaults; }
+function careDefaultsSet(key, val){
+  const d=careDefaultsEnsure();
+  if(key==='labelW'||key==='labelH') val=parseInt(val,10)||0;
+  else if(key==='includeSize') val=!!val;
+  d[key]=val; save(); careDefaultsPreview();
+}
+function careDefaultsFillForm(){
+  const d=careCfg(); const set=(id,v)=>{ const e=document.getElementById(id); if(e && e.value!==undefined) e.value=(v==null?'':v); };
+  set('cd-brand',d.brand); set('cd-rn',d.rn); set('cd-coo',d.defaultCoo); set('cd-standard',d.standard);
+  set('cd-w',d.labelW); set('cd-h',d.labelH); set('cd-footer',d.footer);
+  const sz=document.getElementById('cd-size'); if(sz) sz.checked=!!d.includeSize;
+  careDefaultsPreview();
+}
+function careDefaultsPreview(){
+  const el=document.getElementById('cd-preview'); if(!el) return;
+  const dummy={name:'Sample',fiberContent:'',careLabel:{fiber:'100% Wool · Lining: 100% Cupro',codes:['wash.hand','bleach.no','dry.flat','iron.1dot','pro.dryclean.P'],coo:'',size:'M',additional:'',standardOverride:''}};
+  el.innerHTML=renderCareLabelSVG(dummy);
+}
+
 // Section ⑧ markup (injected into renderTechPackWork's template).
 function careSectionHTML(s){
   const cl=s.careLabel||_careLabelDefault(); const cfg=careCfg();
@@ -8619,8 +8694,12 @@ function careSectionHTML(s){
             <option value="astm" ${cl.standardOverride==='astm'?'selected':''}>US · ASTM — symbols + words</option>
             <option value="both" ${cl.standardOverride==='both'?'selected':''}>Both</option>
           </select></div>
-          <div class="tp-subhead" style="margin-top:16px">Care Symbols <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#999">— one per row; tap to toggle</span></div>
-          <div id="care-palette">${palette}</div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap">
+            <div class="tp-subhead" style="margin:0">Care Symbols</div>
+            <button type="button" id="care-ai-btn" class="btn btn-ghost btn-sm" style="padding:3px 10px" onclick="careAutoFill('${s.id}')">✦ Auto-fill from fabric (Eni)</button>
+            <span style="font-size:9px;color:#999">one per row; tap to toggle</span>
+          </div>
+          <div id="care-palette" style="margin-top:8px">${palette}</div>
           <div class="tpf tpff" style="margin-top:8px"><div class="tpl">Additional Line (optional)</div><textarea class="tpi tpta" rows="2" placeholder="e.g. Wash with like colours. Reshape while damp." onchange="careField('${s.id}','additional',this.value)">${_cesc(cl.additional||'')}</textarea></div>
         </div>
         <div>
@@ -13600,6 +13679,7 @@ function setShowSection(id, navEl) {
   if (tEl && navEl) tEl.textContent = navEl.textContent.trim();
   if (id==='set-data') setUpdateDataSummary();
   if (id==='set-security') setRenderFaceId();
+  if (id==='set-carelabel' && typeof careDefaultsFillForm==='function') careDefaultsFillForm();
 }
 
 // ── Face ID / passkey management (Settings → Security) ──
@@ -15141,7 +15221,17 @@ function agentImageActionSpec() {
     + '```venia:action\n'
     + '{"type":"apply_style_specs","styleName":"exact style name or code from PLM Context","patternCard":{"baseSize":"","gradeRule":"","patternVer":"","patternLoc":"","patternPieces":0,"liningPieces":0},"construction":{"seamFinish":"","seamAllow":"","closure":"","hemType":"","interlining":"","stitchType":"","spi":"","thread":"","topstitch":"","shrinkage":"","fiberContent":"","coo":"","careInstructions":""},"pieces":[{"name":"","component":"Shell","cut":"","grain":"","notes":""}]}\n'
     + '```\n'
-    + 'Rules for apply_style_specs: use a style name/code that appears in the PLM Context — if none is given or it is ambiguous, ask which style instead of emitting the block. Include ONLY fields legible on the card; omit or "" the rest. "component" ∈ Shell/Lining/Interlining/Facing/Underlining/Interfacing.';
+    + 'Rules for apply_style_specs: use a style name/code that appears in the PLM Context — if none is given or it is ambiguous, ask which style instead of emitting the block. Include ONLY fields legible on the card; omit or "" the rest. "component" ∈ Shell/Lining/Interlining/Facing/Underlining/Interfacing.'
+    + '\n\nACTION — generate_care_label: recommend a garment care label from the fibre content + construction of a style. Choose the care from what the fibres actually need (e.g. wool/silk/cashmere → hand wash cold or dry clean, no tumble; cotton/linen → machine wash warm; delicate trims/linings → gentler). "codes" MUST be drawn ONLY from this fixed set — one per family, no invented codes:\n'
+    + 'wash: wash.machine.30 | wash.machine.40 | wash.machine.60 | wash.gentle.30 | wash.hand | wash.no\n'
+    + 'bleach: bleach.any | bleach.nonchlorine | bleach.no\n'
+    + 'drying (pick ONE of tumble OR natural): tumble.low | tumble.normal | tumble.no | dry.line | dry.drip | dry.flat | dry.shade\n'
+    + 'iron: iron.1dot | iron.2dot | iron.3dot | iron.no\n'
+    + 'professional: pro.dryclean.P | pro.dryclean.F | pro.wetclean.W | pro.no\n'
+    + '```venia:action\n'
+    + '{"type":"generate_care_label","styleName":"exact style name or code from PLM Context","fiber":"e.g. 100% Wool · Lining: 100% Cupro — leave \\"\\" to auto-derive from the BOM","codes":["wash.hand","bleach.no","dry.flat","iron.1dot","pro.dryclean.P"],"coo":"","additional":"optional extra line, e.g. Reshape while damp"}\n'
+    + '```\n'
+    + 'Rules for generate_care_label: name a style from the PLM Context (ask if unclear). Recommend a sensible, safe set for the fibres — when unsure, err gentler. Leave "fiber" "" to let VENIA pull it from the BOM. Never invent a fibre content you cannot read or derive.';
 }
 
 // Pull the machine-readable block out of a reply. Returns the human text and the
@@ -15266,6 +15356,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
   if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
   if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
+  if (action.type === 'generate_care_label') return agentRunGenerateCareLabel(action, chatBody);
 }
 
 // Log a detected/confirmed placement into Press coverage, linked to its pull
@@ -15509,6 +15600,75 @@ window.agentUndoStyleSpecs = function(snapId, btn){
     }
   }
   if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Reverted the spec fields.</div>'; }
+};
+
+// Execute generate_care_label: recommend a care label for a style from its
+// fibres/construction. The assistant only picks CODES; the glyphs render
+// deterministically (see the CARE LABEL ENGINE). Mirrors apply_style_specs.
+function agentRunGenerateCareLabel(action, chatBody) {
+  const styles = (window.STATE && STATE.styles) || [];
+  const q = String(action.styleName || action.styleId || '').trim().toLowerCase();
+  let s = null;
+  if (q) s = styles.find(x => String(x.styleId||'').toLowerCase() === q || String(x.name||'').toLowerCase() === q)
+            || styles.find(x => String(x.name||'').toLowerCase().includes(q) || String(x.styleId||'').toLowerCase().includes(q));
+  if (!s) {
+    const names = styles.slice(0,8).map(x => x.name).filter(Boolean).join(', ');
+    appendAgentNote(chatBody, styles.length
+      ? `Which style is the care label for? ${names ? '(e.g. ' + names + ')' : ''}`
+      : 'There are no styles yet — create one first, then I can build its care label.');
+    return;
+  }
+  // Only accept codes that exist in the canonical set; one per drying family.
+  const raw = Array.isArray(action.codes) ? action.codes : [];
+  const seenGrp = {};
+  const codes = [];
+  raw.forEach(c => { c = String(c||'').trim(); if (!CARE_SYMBOLS[c]) return; const g = careExcl(c); if (seenGrp[g]) return; seenGrp[g] = 1; codes.push(c); });
+  let fiber = String(action.fiber||'').trim();
+  if (!fiber) fiber = deriveFiberContent(s.id);
+  if (!codes.length && !fiber) { appendAgentNote(chatBody, `I couldn't determine care from that — tell me the fibre content (or add fabrics to the BOM) and I'll recommend the symbols.`); return; }
+  // Snapshot for Undo.
+  const before = { careLabel: s.careLabel ? JSON.parse(JSON.stringify(s.careLabel)) : null,
+                   fiberContent: s.fiberContent, coo: s.coo, careInstructions: s.careInstructions };
+  if (!s.careLabel) s.careLabel = _careLabelDefault();
+  if (fiber) { s.careLabel.fiber = fiber; s.careLabel.fiberAuto = !String(action.fiber||'').trim(); if (typeof tpUpdate==='function') tpUpdate(s.id,'fiberContent',fiber); }
+  if (codes.length) s.careLabel.codes = codes;
+  const coo = String(action.coo||'').trim(); if (coo) { s.careLabel.coo = coo; if (typeof tpUpdate==='function') tpUpdate(s.id,'coo',coo); }
+  const add = String(action.additional||'').trim(); if (add) s.careLabel.additional = add;
+  _careSyncText(s);
+  save();
+  try { if (STATE.currentPage === 'techpack' && typeof renderTechPackPage==='function') renderTechPackPage(); } catch(e){}
+  const snapId = 'cl'+Date.now();
+  window.__agCareUndo = window.__agCareUndo || {};
+  window.__agCareUndo[snapId] = { styleId: s.id, before };
+  const summary = codes.map(c => careLabelOf(c)).join(' · ') || 'fibre content only';
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Care label — ' + escHtml(s.name) + '</div>'
+    + (fiber ? '<div style="font-size:11px;margin-top:2px">' + escHtml(fiber) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:3px">' + escHtml(summary) + '</div>'
+    + '<div style="background:#fff;border:1px solid var(--border);padding:8px;margin-top:8px;display:inline-block;max-width:180px">' + renderCareLabelSVG(s) + '</div>'
+    + '<div style="font-size:9px;color:var(--muted);margin-top:6px">Review in the tech pack; confirm against care testing before bulk.</div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'plm\');setTimeout(function(){goTo(\'techpack\',document.querySelector(\'[data-page=techpack]\'));if(typeof renderTechPack===\'function\')renderTechPack(\'' + s.id + '\')},150)">Open Tech Pack</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoCareLabel(\'' + snapId + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoCareLabel = function(snapId, btn){
+  const snap = window.__agCareUndo && window.__agCareUndo[snapId];
+  if (snap && STATE.styles) {
+    const s = STATE.styles.find(x => x.id === snap.styleId);
+    if (s) {
+      s.careLabel = snap.before.careLabel;
+      s.fiberContent = snap.before.fiberContent; s.coo = snap.before.coo; s.careInstructions = snap.before.careInstructions;
+      save();
+      try { if (STATE.currentPage === 'techpack' && typeof renderTechPackPage==='function') renderTechPackPage(); } catch(e){}
+    }
+  }
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Care label reverted.</div>'; }
 };
 
 // Execute an add_vendors action: dedupe against the library, save, confirm.
