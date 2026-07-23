@@ -801,6 +801,12 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .tpsh{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--bg-off);border-bottom:1px solid var(--border);cursor:pointer;user-select:none}
 .tpst{font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink)}
 .tpsb{padding:18px;touch-action:pan-y}
+/* Care-label symbol palette (⑧ Care Label) */
+.care-chip{width:40px;height:40px;padding:5px;background:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:border-color .12s,box-shadow .12s}
+.care-chip:hover{border-color:var(--muted)}
+.care-chip.on{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink);background:var(--bg-off)}
+.care-chip-ico{width:100%;height:100%;display:block}
+.care-chip-ico svg{width:100%;height:100%;display:block}
 .tpg{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
 .tpg2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .tpf{display:flex;flex-direction:column;gap:4px}
@@ -1634,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '210';
+  const BUILD = '211';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4566,6 +4572,10 @@ let STATE = {
   prPulls: [],
   prPitches: [],
   prCoverage: [],
+  // Brand-level care-label template (brand name, RN#, default origin, which
+  // symbol standard, physical label size, logo). Per-style labels fall back to
+  // these when their own field is blank. See CARE_CODES / renderCareLabelSVG.
+  careDefaults: null,
   currentPage: 'dashboard',
   currentStyleId: null,
   styleFilter: 'all',
@@ -4629,7 +4639,7 @@ function init() {
 // NOT synced. `skus` is derived (rebuilt on load), so it is excluded too.
 const SYNC_KEYS = [
   // PLM core
-  'styles', 'materials', 'vendors', 'bom', 'pom',
+  'styles', 'materials', 'vendors', 'bom', 'pom', 'careDefaults',
   // PR
   'prPulls', 'workingPullId', 'prPitches', 'prCoverage', 'prEditors', 'prPrefs',
   // Sales
@@ -8407,6 +8417,222 @@ function renderTechPack(styleId) {
 }
 
 
+// ═══════════════════════════════════════════════
+//  CARE LABEL ENGINE
+//  Standardised laundry-care symbols rendered deterministically as inline SVG.
+//  Base geometry follows ISO 3758 / GINETEX (EU); ASTM D5489 (US) adds the word
+//  phrasing. The assistant only *recommends* which codes apply (Build B) — the
+//  glyphs themselves are never AI-drawn, so a legal symbol can't come out wrong.
+// ═══════════════════════════════════════════════
+function _cesc(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function _cattr(t){ return String(t==null?'':t).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+// Wrap a string into lines of at most `max` characters (SVG text has no auto-wrap).
+function _cwrap(str, max){ const words=String(str||'').split(/\s+/).filter(Boolean); const out=[]; let cur='';
+  words.forEach(w=>{ if(cur && (cur+' '+w).length>max){ out.push(cur); cur=w; } else cur=cur?cur+' '+w:w; }); if(cur)out.push(cur); return out; }
+
+// ── Symbol geometry (24×24 fragments; stroke/fill inherited from the wrapper) ──
+const _TUB='<path d="M3.4 8.6 Q6.2 6.2 9 8.6 T14.6 8.6 T20.6 8.6 L18.6 18 Q18.4 19 17.3 19 L6.7 19 Q5.6 19 5.4 18 Z"/>';
+const _TRI='<path d="M12 4.4 L20.6 19.6 L3.4 19.6 Z"/>';
+const _SQ='<rect x="4" y="6" width="16" height="12.6" rx="0.6"/>';
+const _CIR='<circle cx="12" cy="12" r="8"/>';
+const _IRON='<path d="M2.6 16.2 L20.4 16.2 L19.7 13.5 Q19.2 11.5 16 11.7 L5.2 12.9 Q2.9 13.2 2.6 16.2 Z"/>';
+const _X='<path d="M4 4 L20 20 M20 4 L4 20"/>';
+const _ctxt=(t,sz)=>'<text x="12" y="15.2" font-family="Arial,Helvetica,sans-serif" font-size="'+(sz||7)+'" font-weight="700" fill="#111" stroke="none" text-anchor="middle">'+t+'</text>';
+const _cdot=(cx)=>'<circle cx="'+cx+'" cy="14.3" r="1.15" fill="#111" stroke="none"/>';
+const _cbar=(y)=>'<line x1="7.5" y1="'+y+'" x2="16.5" y2="'+y+'"/>';
+const _TUB_HAND=_TUB+'<path d="M8.7 15.6 L8.7 13.1 Q8.7 12.5 9.3 12.5 L14.4 12.5 Q15.7 12.5 15.7 13.7 L15.7 14.2"/><line x1="10.2" y1="12.5" x2="10.2" y2="10.7"/><line x1="11.8" y1="12.5" x2="11.8" y2="10.4"/><line x1="13.4" y1="12.5" x2="13.4" y2="10.8"/>';
+
+const CARE_SYMBOLS = {
+  // Washing (tub) — number = max temperature, bar = gentle
+  'wash.machine.30': {g:'wash',label:'Machine wash 30°',word:'Machine wash cold',inner:_TUB+_ctxt('30')},
+  'wash.machine.40': {g:'wash',label:'Machine wash 40°',word:'Machine wash warm',inner:_TUB+_ctxt('40')},
+  'wash.machine.60': {g:'wash',label:'Machine wash 60°',word:'Machine wash hot',inner:_TUB+_ctxt('60')},
+  'wash.gentle.30':  {g:'wash',label:'Gentle wash 30°',word:'Machine wash cold, gentle cycle',inner:_TUB+_ctxt('30')+_cbar(20.7)},
+  'wash.hand':       {g:'wash',label:'Hand wash',word:'Hand wash',inner:_TUB_HAND},
+  'wash.no':         {g:'wash',label:'Do not wash',word:'Do not wash',inner:_TUB+_X},
+  // Bleaching (triangle)
+  'bleach.any':         {g:'bleach',label:'Bleach allowed',word:'Bleach when needed',inner:_TRI},
+  'bleach.nonchlorine': {g:'bleach',label:'Non-chlorine bleach only',word:'Non-chlorine bleach only when needed',inner:_TRI+'<line x1="9.2" y1="10.5" x2="12.6" y2="17"/><line x1="12.6" y1="10.5" x2="16" y2="17"/>'},
+  'bleach.no':          {g:'bleach',label:'Do not bleach',word:'Do not bleach',inner:_TRI+_X},
+  // Tumble dry (circle in square) — dots = heat
+  'tumble.low':    {g:'tumble',label:'Tumble dry low',word:'Tumble dry low',inner:_SQ+'<circle cx="12" cy="12.3" r="4.4"/><circle cx="12" cy="12.3" r="1.2" fill="#111" stroke="none"/>'},
+  'tumble.normal': {g:'tumble',label:'Tumble dry normal',word:'Tumble dry medium',inner:_SQ+'<circle cx="12" cy="12.3" r="4.4"/><circle cx="10.5" cy="12.3" r="1.15" fill="#111" stroke="none"/><circle cx="13.5" cy="12.3" r="1.15" fill="#111" stroke="none"/>'},
+  'tumble.no':     {g:'tumble',label:'Do not tumble dry',word:'Do not tumble dry',inner:_SQ+'<circle cx="12" cy="12.3" r="4.4"/>'+_X},
+  // Natural dry (square + lines)
+  'dry.line':  {g:'dry',label:'Line dry',word:'Line dry',inner:_SQ+'<line x1="12" y1="8.6" x2="12" y2="16"/>'},
+  'dry.drip':  {g:'dry',label:'Drip dry',word:'Drip dry',inner:_SQ+'<line x1="10" y1="8.6" x2="10" y2="16"/><line x1="14" y1="8.6" x2="14" y2="16"/>'},
+  'dry.flat':  {g:'dry',label:'Dry flat',word:'Dry flat',inner:_SQ+'<line x1="8" y1="12.3" x2="16" y2="12.3"/>'},
+  'dry.shade': {g:'dry',label:'Line dry in shade',word:'Line dry in the shade',inner:_SQ+'<line x1="12" y1="8.6" x2="12" y2="16"/><line x1="4.3" y1="6.3" x2="8.2" y2="10.2"/>'},
+  // Ironing (iron) — dots = heat
+  'iron.1dot': {g:'iron',label:'Iron low · 110°',word:'Iron low',inner:_IRON+_cdot(11.5)},
+  'iron.2dot': {g:'iron',label:'Iron medium · 150°',word:'Iron medium',inner:_IRON+_cdot(10)+_cdot(13)},
+  'iron.3dot': {g:'iron',label:'Iron high · 200°',word:'Iron high',inner:_IRON+_cdot(8.7)+_cdot(11.5)+_cdot(14.3)},
+  'iron.no':   {g:'iron',label:'Do not iron',word:'Do not iron',inner:_IRON+_X},
+  // Professional care (circle) — letter = solvent
+  'pro.dryclean.P': {g:'pro',label:'Dry clean (P)',word:'Dry clean, any solvent except trichloroethylene',inner:_CIR+_ctxt('P',8)},
+  'pro.dryclean.F': {g:'pro',label:'Dry clean (F)',word:'Dry clean, petroleum solvent only',inner:_CIR+_ctxt('F',8)},
+  'pro.wetclean.W': {g:'pro',label:'Professional wet clean',word:'Professional wet clean',inner:_CIR+_ctxt('W',8)},
+  'pro.no':         {g:'pro',label:'Do not dry clean',word:'Do not dry clean',inner:_CIR+_X},
+};
+const CARE_GROUPS = [
+  {key:'wash',   title:'Washing',      codes:['wash.machine.30','wash.machine.40','wash.machine.60','wash.gentle.30','wash.hand','wash.no']},
+  {key:'bleach', title:'Bleaching',    codes:['bleach.any','bleach.nonchlorine','bleach.no']},
+  {key:'tumble', title:'Tumble Dry',   codes:['tumble.low','tumble.normal','tumble.no']},
+  {key:'dry',    title:'Natural Dry',  codes:['dry.line','dry.drip','dry.flat','dry.shade']},
+  {key:'iron',   title:'Ironing',      codes:['iron.1dot','iron.2dot','iron.3dot','iron.no']},
+  {key:'pro',    title:'Professional Care', codes:['pro.dryclean.P','pro.dryclean.F','pro.wetclean.W','pro.no']},
+];
+const CARE_CODES = Object.keys(CARE_SYMBOLS);
+function careSymbolInner(code){ const c=CARE_SYMBOLS[code]; return c?c.inner:''; }
+// Standalone glyph (for the palette): wraps the fragment with stroke styling.
+function careSymbol(code){ const inner=careSymbolInner(code); if(!inner) return '';
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">'+inner+'</svg>'; }
+function careWord(code){ const c=CARE_SYMBOLS[code]; return c?c.word:''; }
+function careLabelOf(code){ const c=CARE_SYMBOLS[code]; return c?c.label:code; }
+// Drying is one decision: choosing a tumble mode clears any natural-dry mode and vice versa.
+function careExcl(code){ const f=String(code).split('.')[0]; return (f==='tumble'||f==='dry')?'dry':f; }
+function _careLabelDefault(){ return {fiber:'',fiberAuto:false,codes:[],coo:'',size:'',additional:'',standardOverride:''}; }
+function careCfg(){ return Object.assign({brand:'VENIA',rn:'',defaultCoo:'',standard:'both',labelW:40,labelH:60,logoUrl:'',includeSize:true,footer:''}, STATE.careDefaults||{}); }
+
+// Derive fiber composition from the style's linked fabric BOM lines → material.content.
+// Groups Shell (Fabric) vs Lining, dedupes, and joins. Returns '' if nothing usable.
+function deriveFiberContent(styleId){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return '';
+  const bom=(STATE.bom&&STATE.bom[styleId])||[]; const mats=STATE.materials||[];
+  const shell=[], lining=[], seen=new Set();
+  bom.forEach(b=>{
+    const mat=b.matId?mats.find(m=>m.id===b.matId):null;
+    const isFab = b.lineType==='Fabric' || (mat && ['Fabric','Lining'].includes(mat.type));
+    if(!isFab) return;
+    const content=(mat&&mat.content?mat.content:'').trim(); if(!content) return;
+    const role=(mat&&mat.type==='Lining')?'lining':'shell';
+    const k=role+'|'+content.toLowerCase(); if(seen.has(k)) return; seen.add(k);
+    (role==='lining'?lining:shell).push(content);
+  });
+  let out=shell.join(' · ');
+  if(lining.length) out += (out?' · ':'')+'Lining: '+lining.join(' · ');
+  return out;
+}
+
+// Compose the whole care label as one self-contained SVG (used for preview,
+// print, and — Build C — file export). Falls back to brand defaults per field.
+function renderCareLabelSVG(s, opts){
+  opts=opts||{}; const cfg=careCfg(); const cl=s.careLabel||_careLabelDefault();
+  const standard=opts.standard||cl.standardOverride||cfg.standard||'both';
+  const wantWords = standard!=='ginetex';
+  const codes=(cl.codes||[]).filter(c=>CARE_SYMBOLS[c]);
+  const fiber=(cl.fiber||s.fiberContent||'').trim();
+  const coo=(cl.coo||s.coo||cfg.defaultCoo||'').trim();
+  const size=(cl.size||'').trim();
+  const add=(cl.additional||'').trim();
+  const rn=(cfg.rn||'').trim();
+  const brand=(cfg.brand||'VENIA').trim();
+  const W=260, PAD=16; let y=PAD; const parts=[];
+  const line=(txt,sz,weight,color,gap)=>{ y+=sz; parts.push('<text x="'+(W/2)+'" y="'+y+'" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-size="'+sz+'" font-weight="'+(weight||400)+'" fill="'+(color||'#111')+'">'+_cesc(txt)+'</text>'); y+=(gap==null?6:gap); };
+  line(brand.toUpperCase(),15,700,'#111',4);
+  parts.push('<line x1="'+PAD+'" y1="'+y+'" x2="'+(W-PAD)+'" y2="'+y+'" stroke="#111" stroke-width="0.8"/>'); y+=12;
+  if(fiber) _cwrap(fiber,44).forEach(l=>line(l,10,600,'#111',3));
+  if(coo) line(coo,9,400,'#333',2);
+  if(rn) line('RN '+rn,8,400,'#666',2);
+  if(size && cfg.includeSize) line('Size '+size,9,600,'#111',2);
+  if(codes.length){
+    y+=8; const sz=30, gap=6; const per=Math.max(1,Math.floor((W-2*PAD+gap)/(sz+gap))); const nRows=Math.ceil(codes.length/per);
+    for(let r=0;r<nRows;r++){ const slice=codes.slice(r*per,(r+1)*per); const rowW=slice.length*sz+(slice.length-1)*gap; let x=(W-rowW)/2;
+      slice.forEach(c=>{ parts.push('<g transform="translate('+x.toFixed(1)+','+y+') scale('+(sz/24).toFixed(4)+')" fill="none" stroke="#111" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">'+CARE_SYMBOLS[c].inner+'</g>'); x+=sz+gap; });
+      y+=sz+(r<nRows-1?gap:0); }
+    y+=8;
+  }
+  if(wantWords && codes.length){ const txt=codes.map(c=>CARE_SYMBOLS[c].word).filter(Boolean).join('. ')+'.'; _cwrap(txt,48).forEach(l=>line(l,7.5,400,'#444',2.4)); y+=1; }
+  if(add){ y+=2; _cwrap(add,50).forEach(l=>line(l,7.5,400,'#444',2.4)); }
+  if(cfg.footer){ y+=2; _cwrap(cfg.footer,54).forEach(l=>line(l,6.5,400,'#888',1.8)); }
+  y+=PAD-6; const H=Math.round(y);
+  return '<svg viewBox="0 0 '+W+' '+H+'" width="'+W+'" height="'+H+'" xmlns="http://www.w3.org/2000/svg"><rect x="0.5" y="0.5" width="'+(W-1)+'" height="'+(H-1)+'" fill="#fff" stroke="#e0e0e0"/>'+parts.join('')+'</svg>';
+}
+
+// Keep the legal careInstructions text in sync with the chosen symbols + extra
+// line, so the existing tech-pack legal block / factory print stay meaningful.
+function _careSyncText(s){
+  const codes=(s.careLabel&&s.careLabel.codes)||[];
+  let t=codes.map(c=>CARE_SYMBOLS[c]&&CARE_SYMBOLS[c].word).filter(Boolean).join('. ');
+  const add=(s.careLabel&&s.careLabel.additional||'').trim();
+  if(add) t+=(t?'. ':'')+add;
+  if(t && !/[.!?]$/.test(t)) t+='.';
+  if(typeof tpUpdate==='function') tpUpdate(s.id,'careInstructions',t); else { s.careInstructions=t; save(); }
+}
+function careRefresh(styleId){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return;
+  const prev=document.getElementById('care-preview'); if(prev) prev.innerHTML=renderCareLabelSVG(s);
+  const codes=(s.careLabel&&s.careLabel.codes)||[];
+  document.querySelectorAll('#care-palette .care-chip').forEach(ch=>{ ch.classList.toggle('on', codes.includes(ch.dataset.code)); });
+}
+function careToggle(styleId, code){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return;
+  if(!s.careLabel) s.careLabel=_careLabelDefault();
+  let codes=s.careLabel.codes||[]; const grp=careExcl(code); const had=codes.includes(code);
+  codes=codes.filter(c=>careExcl(c)!==grp); if(!had) codes.push(code);
+  s.careLabel.codes=codes; _careSyncText(s); save(); careRefresh(styleId);
+}
+function careField(styleId, key, val){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return;
+  if(!s.careLabel) s.careLabel=_careLabelDefault();
+  s.careLabel[key]=val;
+  if(key==='fiber'){ s.careLabel.fiberAuto=false; if(typeof tpUpdate==='function') tpUpdate(styleId,'fiberContent',val); }
+  else if(key==='coo'){ if(typeof tpUpdate==='function') tpUpdate(styleId,'coo',val); }
+  else if(key==='additional'){ _careSyncText(s); }
+  save(); careRefresh(styleId);
+}
+function careDeriveFiber(styleId){
+  const s=STATE.styles.find(x=>x.id===styleId); if(!s) return;
+  const f=deriveFiberContent(styleId);
+  if(!f){ toast('No fabric fiber content in the BOM yet — add fabrics with fiber content first.'); return; }
+  if(!s.careLabel) s.careLabel=_careLabelDefault();
+  s.careLabel.fiber=f; s.careLabel.fiberAuto=true;
+  if(typeof tpUpdate==='function') tpUpdate(styleId,'fiberContent',f); else save();
+  renderTechPack(s.id); toast('Fiber content pulled from the BOM');
+}
+
+// Section ⑧ markup (injected into renderTechPackWork's template).
+function careSectionHTML(s){
+  const cl=s.careLabel||_careLabelDefault(); const cfg=careCfg();
+  const palette=CARE_GROUPS.map(g=>`
+    <div style="margin-bottom:12px">
+      <div class="tpl" style="margin-bottom:6px">${g.title}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${g.codes.map(code=>`<button type="button" class="care-chip${(cl.codes||[]).includes(code)?' on':''}" data-code="${code}" title="${_cattr(careLabelOf(code))}" onclick="careToggle('${s.id}','${code}')"><span class="care-chip-ico">${careSymbol(code)}</span></button>`).join('')}
+      </div>
+    </div>`).join('');
+  return `
+  <div class="tps">
+    <div class="tpsh" onclick="tpToggle(this)"><div class="tpst">⑧ Care Label</div><span style="font-size:12px;color:#999">▾</span></div>
+    <div class="tpsb">
+      <div class="care-layout" style="display:grid;grid-template-columns:1fr 282px;gap:22px;align-items:start">
+        <div>
+          <div class="tpf tpff"><div class="tpl">Fiber Composition <button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;padding:2px 8px;vertical-align:middle" onclick="careDeriveFiber('${s.id}')">↻ Pull from BOM</button></div>
+            <input class="tpi" value="${_cattr(cl.fiber||s.fiberContent||'')}" placeholder="e.g. 100% Wool · Lining: 100% Cupro" onchange="careField('${s.id}','fiber',this.value)"></div>
+          <div class="tpg2" style="margin:12px 0">
+            <div class="tpf"><div class="tpl">Country of Origin</div><input class="tpi" value="${_cattr(cl.coo||s.coo||cfg.defaultCoo||'')}" placeholder="Made in Portugal" onchange="careField('${s.id}','coo',this.value)"></div>
+            <div class="tpf"><div class="tpl">Size (optional)</div><input class="tpi" value="${_cattr(cl.size||'')}" placeholder="e.g. M — blank = size-agnostic" onchange="careField('${s.id}','size',this.value)"></div>
+          </div>
+          <div class="tpf"><div class="tpl">Symbol Standard</div><select class="tpi" onchange="careField('${s.id}','standardOverride',this.value)">
+            <option value="" ${!cl.standardOverride?'selected':''}>Brand default (${cfg.standard})</option>
+            <option value="ginetex" ${cl.standardOverride==='ginetex'?'selected':''}>EU · GINETEX — symbols only</option>
+            <option value="astm" ${cl.standardOverride==='astm'?'selected':''}>US · ASTM — symbols + words</option>
+            <option value="both" ${cl.standardOverride==='both'?'selected':''}>Both</option>
+          </select></div>
+          <div class="tp-subhead" style="margin-top:16px">Care Symbols <span style="font-weight:400;text-transform:none;letter-spacing:0;color:#999">— one per row; tap to toggle</span></div>
+          <div id="care-palette">${palette}</div>
+          <div class="tpf tpff" style="margin-top:8px"><div class="tpl">Additional Line (optional)</div><textarea class="tpi tpta" rows="2" placeholder="e.g. Wash with like colours. Reshape while damp." onchange="careField('${s.id}','additional',this.value)">${_cesc(cl.additional||'')}</textarea></div>
+        </div>
+        <div>
+          <div class="tpl" style="margin-bottom:8px">Live Preview</div>
+          <div id="care-preview" style="background:#fff;border:1px solid #e0e0e0;padding:10px;display:flex;justify-content:center">${renderCareLabelSVG(s)}</div>
+          <div style="font-size:9px;color:#999;margin-top:8px;line-height:1.5">Symbols follow ISO 3758 / GINETEX. This label prints on the tech pack &amp; factory share. Confirm final symbols against your care testing before bulk production.</div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderTechPackWork(s) {
   if (!s) return;
   const bom = STATE.bom[s.id] || [];
@@ -8941,6 +9167,8 @@ function renderTechPackWork(s) {
       </div>
     </div>
   </div>
+
+  ${careSectionHTML(s)}
 
   <div style="padding:16px 0;display:flex;justify-content:space-between;align-items:center">
     <div style="font-size:9px;color:#999;letter-spacing:.5px">Changes save automatically · Last edited ${new Date().toLocaleDateString()}</div>
@@ -10384,6 +10612,10 @@ function renderTechPackPrint(s) {
           ${field('Size Label', s.sizeLabel)}
           ${field('Hang Tag', s.hangLoc)}
         </div>
+        ${((s.careLabel&&(s.careLabel.codes||[]).length)||s.fiberContent) ? `<div style="margin-top:12px;padding-top:10px;border-top:1px solid #e0e0e0">
+          <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px;font-weight:700">Care Label</div>
+          <div style="max-width:220px">${renderCareLabelSVG(s,{forPrint:true})}</div>
+        </div>` : ''}
 
         <!-- Target cost box (manufacturer copy: NO retail price / margin) -->
         ${(s.cogs||s.landed) ? `<div style="margin-top:12px;padding:10px;background:#f7f7f7;border:1px solid #e0e0e0">
