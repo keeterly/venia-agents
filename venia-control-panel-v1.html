@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '220';
+  const BUILD = '221';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15289,7 +15289,12 @@ function agentActionSpec(key) {
       + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, State","country":"USA","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","phone":"","address":"","approach":"Optional first-move suggestion"}]}\n'
       + '```\n'
       + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.\n'
-      + 'LONG LISTS: keep the prose to one sentence and add AT MOST 20 stores per action block. If the list (or an attached file) has more, add the first 20 and end with "Say continue and I\'ll add the next batch." — the remaining rows are still in the conversation, so continue from where you stopped.'
+      + 'LONG LISTS: keep the prose to one sentence and add AT MOST 20 stores per action block. If the list (or an attached file) has more, add the first 20 and end with "Say continue and I\'ll add the next batch." — the remaining rows are still in the conversation, so continue from where you stopped.\n'
+      + '\nACTION — update_buyers: correct or update accounts ALREADY in the CRM (fix a country or location, change stage/tier/type, set phone/address/website, add a contact). Match each account by its name as it appears in the CRM.\n'
+      + '```venia:action\n'
+      + '{"type":"update_buyers","updates":[{"name":"Exact store name","set":{"location":"Chicago, IL","country":"USA"},"addContacts":[{"name":"","email":"","role":""}]}]}\n'
+      + '```\n'
+      + 'Rules for update_buyers: put ONLY the fields you are changing inside "set" — allowed keys: location, country, type, stage, tier, phone, address, website, notes, fit, nextDate, nextAction. Blank values are ignored (this action never clears a field). "stage" takes To Reach / Talking / Quoted / Stockist / Ordered / Dormant; "tier" is dream / strong / reach. "addContacts" appends people, never replaces. AT MOST 20 updates per block — same continue pattern as add_buyers. Use this instead of asking the user to fix records by hand.'
       + slCrmKnownAccountsHint();
   }
   if (key === 'plm') {
@@ -15517,6 +15522,7 @@ function agentRunAction(key, action, chatBody) {
   // store" works from Today just as well as from Sales.
   if (action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
   if (action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
+  if (action.type === 'update_buyers') return agentRunUpdateBuyers(action, chatBody);
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
   if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
@@ -16103,6 +16109,81 @@ function agentBuildBuyers(action) {
   });
   return built;
 }
+
+// Execute update_buyers: edit existing CRM accounts in place. Matches by name
+// (exact first, then contains), applies only whitelisted non-blank fields,
+// stamps updatedAt for the cross-device merge, and offers a full Undo.
+function agentRunUpdateBuyers(action, chatBody) {
+  const list = Array.isArray(action.updates) ? action.updates : [];
+  const buyers = STATE.slBuyers || [];
+  const OK = ['location','country','type','stage','tier','phone','address','website','notes','fit','nextDate','nextAction'];
+  const STAGE_BY = {};
+  Object.entries(SL_STAGES).forEach(([k,v]) => { STAGE_BY[k] = k; STAGE_BY[v.toLowerCase()] = k; });
+  const snap = {}, done = [], missed = [];
+  list.forEach(u => {
+    const q = String(u && u.name || '').trim().toLowerCase();
+    if (!q) return;
+    const b = buyers.find(x => String(x.name||'').toLowerCase() === q)
+           || buyers.find(x => String(x.name||'').toLowerCase().includes(q));
+    if (!b) { missed.push(u.name); return; }
+    if (!snap[b.id]) snap[b.id] = JSON.parse(JSON.stringify(b));
+    const set = (u && u.set) || {};
+    const applied = [];
+    OK.forEach(k => {
+      let v = set[k]; if (v == null) return;
+      v = String(v).trim(); if (v === '') return;              // blanks never clear a field
+      if (k === 'stage'){ const kk = STAGE_BY[v.toLowerCase()]; if (!kk) return; v = kk; }
+      if (k === 'tier'){ v = v.toLowerCase(); if (!AGENT_TIER_LABEL[v]) return; }
+      if (k === 'type'){ const t = SL_TYPES.find(t => t.toLowerCase() === v.toLowerCase()); if (!t) return; v = t; }
+      if (String(b[k]||'') === v) return;
+      b[k] = v; applied.push(k);
+    });
+    const adds = Array.isArray(u && u.addContacts) ? u.addContacts : [];
+    if (adds.length){
+      const cs = slContactsOf(b).slice();
+      let added = 0;
+      adds.forEach(c => {
+        const nm = String(c && c.name || '').trim(), em = String(c && c.email || '').trim(), rl = String(c && c.role || '').trim();
+        if (!nm && !em) return;
+        if (em && cs.some(x => String(x.email||'').toLowerCase() === em.toLowerCase())) return;   // dedupe by email
+        cs.push({ name: nm, email: em, role: rl }); added++;
+      });
+      if (added){ b.contacts = cs; b.contactName = cs[0].name || ''; b.email = cs[0].email || ''; applied.push('+' + added + ' contact' + (added > 1 ? 's' : '')); }
+    }
+    if (applied.length){ b.updatedAt = new Date().toISOString(); done.push({ name: b.name, fields: applied }); }
+    else delete snap[b.id];
+  });
+  if (!done.length && !missed.length){ appendAgentNote(chatBody, 'Tell me which accounts to update and what to change on each.'); return; }
+  if (done.length){ save(); try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch (e) {} }
+  const snapId = 'bu' + Date.now();
+  window.__agBuyerUpdUndo = window.__agBuyerUpdUndo || {};
+  window.__agBuyerUpdUndo[snapId] = snap;
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Updated ' + done.length + ' account' + (done.length !== 1 ? 's' : '') + '</div>'
+    + (done.length ? '<div style="font-size:10.5px;line-height:1.6;margin-top:4px">' + done.slice(0,12).map(d => escHtml(d.name) + ' <span style="color:var(--muted)">— ' + escHtml(d.fields.join(', ')) + '</span>').join('<br>') + (done.length > 12 ? '<br><span style="color:var(--muted)">…and ' + (done.length - 12) + ' more</span>' : '') + '</div>' : '')
+    + (missed.length ? '<div style="font-size:10px;color:var(--red,#c0392b);margin-top:6px">Not found: ' + escHtml(missed.join(', ')) + '</div>' : '')
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);slOpenBuyers()">Open CRM</button>'
+    + (done.length ? '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoBuyerUpdates(\'' + snapId + '\', this)">Undo</button>' : '')
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoBuyerUpdates = function(snapId, btn){
+  const snap = window.__agBuyerUpdUndo && window.__agBuyerUpdUndo[snapId];
+  if (snap && STATE.slBuyers){
+    Object.keys(snap).forEach(id => {
+      const i = STATE.slBuyers.findIndex(x => x.id === id);
+      if (i >= 0) STATE.slBuyers[i] = snap[id];
+    });
+    save();
+    try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch (e) {}
+  }
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Account updates reverted.</div>'; }
+};
 
 function isSalesBuyersVisible() {
   const el = document.getElementById('sl-buyers-list');
@@ -17723,8 +17804,57 @@ function slMigrateLeads() {
     try { cmdRenderPipeline(); } catch (e) {}
   }
 }
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} }, 3000);
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} }, 20000);   // again after initial sync settles
+// ── Country normalizer ───────────────────────────────────────────────────────
+// Early agent-scouted rows saved "City, Country" into location and left the
+// (newer) country field blank. This deterministically splits a recognized
+// country name off the end of location into country — no AI involved, so it
+// can't mangle data. Idempotent, runs at boot like slMigrateLeads, and catches
+// legacy rows that arrive later via cross-device sync.
+const SL_COUNTRY_CANON = (function(){
+  const groups = {
+    'USA':['usa','us','u.s.','u.s.a.','united states','united states of america'],
+    'UK':['uk','u.k.','united kingdom','england','great britain'],
+    'South Korea':['south korea','korea','republic of korea'],
+    'Hong Kong':['hong kong','hong kong sar'],
+    'UAE':['uae','united arab emirates'],
+    'Netherlands':['netherlands','the netherlands','holland'],
+  };
+  const simple = ['Italy','France','Japan','Canada','Taiwan','Belgium','Luxembourg','Germany','Spain','Portugal','Denmark','Sweden','Norway','Finland','Australia','New Zealand','China','Singapore','Switzerland','Austria','Greece','Ireland','Mexico','Brazil','Poland','Czech Republic','Turkey','Thailand','India','Israel','Iceland'];
+  const m = Object.create(null);
+  Object.keys(groups).forEach(c => groups[c].forEach(a => { m[a] = c; }));
+  simple.forEach(c => { m[c.toLowerCase()] = c; });
+  return m;
+})();
+const SL_US_STATES = new Set(['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC']);
+function slNormalizeCountries(){
+  let n = 0;
+  (STATE.slBuyers||[]).forEach(function(b){
+    if (b.country) return;
+    const loc = String(b.location||'').trim(); if (!loc) return;
+    const parts = loc.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+    const last = parts[parts.length-1] || '';
+    const canon = SL_COUNTRY_CANON[last.toLowerCase()];
+    if (canon && parts.length > 1){
+      b.country = canon; b.location = parts.slice(0,-1).join(', ');
+      b.updatedAt = new Date().toISOString(); n++;
+    } else if (canon && parts.length === 1){
+      b.country = canon; b.location = '';
+      b.updatedAt = new Date().toISOString(); n++;
+    } else if (SL_US_STATES.has(last.toUpperCase()) && parts.length > 1){
+      b.country = 'USA';                       // "Nashville, TN" — state stays in location
+      b.updatedAt = new Date().toISOString(); n++;
+    }
+  });
+  if (n){
+    save();
+    try { logActivity('CRM: split country out of location on ' + n + ' account(s)'); } catch (e) {}
+    try { slRefreshBuyers(); } catch (e) {}
+  }
+  return n;
+}
+window.slNormalizeCountries = slNormalizeCountries;
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} }, 3000);
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} }, 20000);   // again after initial sync settles
 
 // One-time cleanup for duplicates already piled up before the add-buyers dedup
 // guard shipped. CONSERVATIVE: only collapses UNTOUCHED copies of a same-named
