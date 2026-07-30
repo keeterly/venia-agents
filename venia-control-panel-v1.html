@@ -1640,7 +1640,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '218';
+  const BUILD = '219';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -12566,11 +12566,13 @@ async function callClaude(system, userMsg, history=[], model) {
   // window, so long generations (day plans, reshapes, adjustments) stop
   // 504ing. Any streaming failure falls through to the buffered path below,
   // which also covers the browser-key direct fallback.
-  try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 4096 }); }
+  // 16384, not 4096: adaptive thinking counts against max_tokens, and long
+  // tasks (bulk buyer lists) were hitting the cap mid-thought with zero text.
+  try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384 }); }
   catch (e) { /* fall back to buffered */ }
   const key = getKey('anthropic');
   const msgs = userMsg ? [...history, {role:'user', content: userMsg}] : history;
-  const body = JSON.stringify({ model: model || 'claude-sonnet-5', max_tokens: 4096, system, messages: msgs });
+  const body = JSON.stringify({ model: model || 'claude-sonnet-5', max_tokens: 16384, system, messages: msgs });
 
   // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
   // path that can't be shadowed by the site's "/" rewrite. We try the relative
@@ -12640,7 +12642,7 @@ async function callClaudeStream(system, userMsg, opts) {
   const msgs = userMsg ? [...(opts.history || []), { role: 'user', content: userMsg }] : (opts.history || []);
   const body = JSON.stringify({
     model: opts.model || 'claude-sonnet-5',
-    max_tokens: opts.maxTokens || 8192,
+    max_tokens: opts.maxTokens || 16384,
     stream: true,
     system,
     messages: msgs,
@@ -15275,9 +15277,10 @@ function agentActionSpec(key) {
       + '1) One short sentence naming what you are adding.\n'
       + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
       + '```venia:action\n'
-      + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, Country","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","approach":"Optional first-move suggestion"}]}\n'
+      + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, State","country":"USA","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","approach":"Optional first-move suggestion"}]}\n'
       + '```\n'
-      + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.'
+      + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.\n'
+      + 'LONG LISTS: keep the prose to one sentence and add AT MOST 20 stores per action block. If the list (or an attached file) has more, add the first 20 and end with "Say continue and I\'ll add the next batch." — the remaining rows are still in the conversation, so continue from where you stopped.'
       + slCrmKnownAccountsHint();
   }
   if (key === 'plm') {
@@ -16073,6 +16076,7 @@ function agentBuildBuyers(action) {
       id: 'BUY' + now + i,
       name,
       location: String(x.location || x.city || x.region || '').trim(),
+      country: String(x.country || '').trim(),
       type,
       stage: 'new',
       contactName: String(x.contactName || x.contact || '').trim(),
@@ -17134,7 +17138,7 @@ function slSortComparator() {
   const today = new Date().toISOString().slice(0,10);
   const isOverdue = (b) => b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
   if (s === 'name') return (a,b) => String(a.name||'').localeCompare(String(b.name||''), undefined, {sensitivity:'base'});
-  if (s === 'region') { const reg = (b) => { const loc=String(b.location||''); const p=loc.split(','); return (p.length>1?p[p.length-1]:loc).trim().toLowerCase()+'|'+loc.toLowerCase(); }; return (a,b) => reg(a).localeCompare(reg(b)) || String(a.name||'').localeCompare(String(b.name||'')); }
+  if (s === 'region') { const reg = (b) => { const c=String(b.country||'').trim(); if(c) return c.toLowerCase()+'|'+String(b.location||'').toLowerCase(); const loc=String(b.location||''); const p=loc.split(','); return (p.length>1?p[p.length-1]:loc).trim().toLowerCase()+'|'+loc.toLowerCase(); }; return (a,b) => reg(a).localeCompare(reg(b)) || String(a.name||'').localeCompare(String(b.name||'')); }
   if (s === 'recent') return (a,b) => String(b.lastContact||'').localeCompare(String(a.lastContact||''));
   if (s === 'due') return (a,b) => String(a.nextDate||'9999').localeCompare(String(b.nextDate||'9999'));
   if (s === 'tier') { const keys=Object.keys(AGENT_TIER_LABEL); const rank=(t)=>{const i=keys.indexOf(t); return i<0?99:i;}; return (a,b) => rank(a.tier)-rank(b.tier) || String(a.name||'').localeCompare(String(b.name||'')); }
@@ -17155,7 +17159,7 @@ function slBuyerMatches(b) {
   }
   if (f.q) {
     const cs = slContactsOf(b).map(c => (c.name||'') + ' ' + (c.email||'') + ' ' + (c.role||'')).join(' ');
-    const hay = [b.name, b.location, b.type, b.contactName, b.contact, b.email, b.notes, cs]
+    const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, cs]
       .map(x => String(x || '').toLowerCase()).join(' ');
     if (!f.q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))) return false;
   }
@@ -17182,7 +17186,7 @@ function slBuyersListHTML() {
     // Type lives in the sub-line under the name (type · location) — no separate
     // TYPE column, which only duplicated it.
     return `<div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
-        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0"><input type="checkbox" class="sl-row-chk" title="Select for bulk tier" onclick="event.stopPropagation()" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="margin-top:3px;flex-shrink:0;cursor:pointer"><div style="min-width:0"><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}</div></div></div>
+        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0"><input type="checkbox" class="sl-row-chk" title="Select for bulk tier" onclick="event.stopPropagation()" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="margin-top:3px;flex-shrink:0;cursor:pointer"><div style="min-width:0"><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}${b.country?' · '+slEsc(b.country):''}</div></div></div>
         <div><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[b.stage]||'To Reach'}</span></div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:9px;font-family:'DM Mono',monospace">${next}<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button></div>
       </div>`;
@@ -17348,14 +17352,18 @@ function slOpenBuyerModal(id) {
   const html = `<div class="modal" style="width:500px">
     <div class="modal-head"><div class="modal-title">${id?'Edit Buyer':'New Buyer'}</div><button class="modal-close" onclick="closeModal('sl-buyer-modal')">&#x2715;</button></div>
     <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:10px">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div style="display:grid;grid-template-columns:1.2fr 1fr 0.7fr;gap:8px">
         <div>
           <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Account Name *</div>
           <input id="sl-b-name" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.name||''}" placeholder="e.g. Darkroom London">
         </div>
         <div>
           <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Location</div>
-          <input id="sl-b-location" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.location||''}" placeholder="e.g. London, UK">
+          <input id="sl-b-location" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${b?.location||''}" placeholder="e.g. Nashville, TN">
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Country</div>
+          <input id="sl-b-country" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.country||'')}" placeholder="USA">
         </div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
@@ -17417,6 +17425,7 @@ function slSaveBuyer(existingId) {
   const data = {
     name:        (document.getElementById('sl-b-name')?.value||'').trim(),
     location:    (document.getElementById('sl-b-location')?.value||'').trim(),
+    country:     (document.getElementById('sl-b-country')?.value||'').trim(),
     type:        document.getElementById('sl-b-type')?.value||'',
     stage:       document.getElementById('sl-b-stage')?.value||'new',
     tier:        document.getElementById('sl-b-tier')?.value||'',
@@ -17493,7 +17502,7 @@ function slOpenBuyerDetail(id) {
     <div class="modal-head"><div class="modal-title">${slEsc(b.name)||'Account'}</div><button class="modal-close" onclick="closeModal('sl-acct-modal')">&#x2715;</button></div>
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">
-        ${slEsc(b.type)||'—'}${b.location?' · '+slEsc(b.location):''}${site?` · <a href="${slEsc(site)}" target="_blank" rel="noopener" style="color:var(--gold)">site &#x21D7;</a>`:''}
+        ${slEsc(b.type)||'—'}${b.location?' · '+slEsc(b.location):''}${b.country?' · '+slEsc(b.country):''}${site?` · <a href="${slEsc(site)}" target="_blank" rel="noopener" style="color:var(--gold)">site &#x21D7;</a>`:''}
         ${slContactsDisplay(b)}
         ${b.fit?`<br><span style="color:var(--ink)">${AGENT_TIER_LABEL[b.tier]?'['+AGENT_TIER_LABEL[b.tier]+' fit] ':''}${slEsc(b.fit)}</span>`:''}
       </div>
@@ -26374,9 +26383,12 @@ body:has(.overlay.open) #sk-launch, body:has(.overlay.open) #bs-launch{ display:
   <div class="sk-body" id="sk-body"></div>
   <div class="sk-suggest" id="sk-suggest"></div>
   <div id="sk-photo-chip" class="sk-photo-chip" style="display:none"></div>
+  <div id="sk-file-chip" class="sk-photo-chip" style="display:none"></div>
   <div class="sk-input">
     <input type="file" id="sk-photo-input" accept="image/*" style="display:none" onchange="skPhotoPick(this)">
+    <input type="file" id="sk-file-input" accept=".csv,.tsv,.txt,.xlsx,.xls" style="display:none" onchange="skFilePick(this)">
     <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
+    <button class="sk-cam" onclick="document.getElementById('sk-file-input').click()" aria-label="Attach a spreadsheet or CSV" title="Attach a spreadsheet (Excel / CSV) — Eni reads it">▤</button>
     <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" oninput="skAutoGrow(this)"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();skSend();}"></textarea>
     <button class="sk-send" onclick="skSend()" aria-label="Send">↑</button>
@@ -26495,7 +26507,7 @@ function skGreet(){
 function skRenderHistory(){
   const body = document.getElementById('sk-body'); if (!body) return;
   body.innerHTML = '';
-  (SK.history[SK.agent]||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.content, m.img));
+  (SK.history[SK.agent]||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.disp || m.content, m.img));
 }
 function skAppend(who, text, img){
   const body = document.getElementById('sk-body'); if (!body) return;
@@ -26544,6 +26556,65 @@ function skPhotoClear(){
   const chip = document.getElementById('sk-photo-chip');
   if (chip){ chip.style.display = 'none'; chip.innerHTML = ''; }
 }
+// ── Dock spreadsheet / CSV attach ────────────────────────────
+// One pending file at a time. Excel parses client-side via SheetJS (lazy-loaded
+// from CDN only when an .xlsx/.xls is actually picked — same CDN pattern as the
+// Supabase client). The rows ride into the conversation as CSV text, so the
+// agent can read them AND later "continue" batching from the same turn.
+SK.pendingFile = null;   // { name, text, rows, truncated, keptRows }
+function skLoadXLSX(){
+  return new Promise(function(res, rej){
+    if (window.XLSX) return res(window.XLSX);
+    var s = document.createElement('script');
+    s.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+    s.onload = function(){ window.XLSX ? res(window.XLSX) : rej(new Error('Spreadsheet reader failed to load')); };
+    s.onerror = function(){ rej(new Error('Could not load the spreadsheet reader — check your connection')); };
+    document.head.appendChild(s);
+  });
+}
+async function skFilePick(input){
+  const file = input && input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  const ext = (file.name.split('.').pop()||'').toLowerCase();
+  let text = '';
+  try {
+    if (ext === 'xlsx' || ext === 'xls'){
+      if (typeof showToast==='function') showToast('Reading spreadsheet…','info');
+      const X = await skLoadXLSX();
+      const wb = X.read(await file.arrayBuffer(), { type:'array' });
+      const first = wb.SheetNames[0];
+      text = X.utils.sheet_to_csv(wb.Sheets[first]);
+      if (wb.SheetNames.length > 1) text = '(sheet "' + first + '" of ' + wb.SheetNames.length + ')\n' + text;
+    } else {
+      text = await file.text();
+    }
+  } catch(e){
+    if (typeof showToast==='function') showToast('Could not read that file — ' + (e && e.message || 'try CSV'), 'error');
+    return;
+  }
+  // Cap what rides into the conversation: 400 data rows / ~25KB keeps the call
+  // and localStorage sane. The agent is told when rows were cut.
+  const lines = String(text||'').replace(/\r\n?/g,'\n').split('\n').filter(function(l){ return l.trim() !== ''; });
+  const totalRows = Math.max(0, lines.length - 1);   // minus the header row
+  let out = lines.slice(0, 401).join('\n');
+  if (out.length > 25000) out = out.slice(0, 25000).split('\n').slice(0, -1).join('\n');   // drop the cut-off partial line
+  const keptRows = Math.max(0, out.split('\n').length - 1);
+  const truncated = keptRows < totalRows;
+  if (!out.trim()){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
+  SK.pendingFile = { name: file.name, text: out, rows: totalRows, truncated, keptRows };
+  const chip = document.getElementById('sk-file-chip');
+  if (chip){
+    chip.style.display = 'flex';
+    chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">▤</span><span class="sk-photo-label">' + escHtml(file.name) + ' — ' + totalRows + ' rows' + (truncated ? ' (first ' + keptRows + ' attach)' : '') + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
+  }
+  const f = document.getElementById('sk-field'); if (f) f.focus();
+}
+function skFileClear(){
+  SK.pendingFile = null;
+  const chip = document.getElementById('sk-file-chip');
+  if (chip){ chip.style.display = 'none'; chip.innerHTML = ''; }
+}
 function skFormat(t){
   return escHtml(t).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\n/g,'<br>');
 }
@@ -26552,6 +26623,7 @@ function skClear(){
   SK.history[SK.agent] = []; SK.greeted[SK.agent] = false;
   skSaveHistory();
   skPhotoClear();
+  if (typeof skFileClear === 'function') skFileClear();
   const body = document.getElementById('sk-body'); if (body) body.innerHTML='';
   skGreet();
 }
@@ -26602,19 +26674,29 @@ function skMakeWorking(whoLabel, steps){
 
 async function skSend(preset){
   const field = document.getElementById('sk-field');
-  const msg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
-  // A photo can be sent on its own — the message OR the image is enough.
+  const rawMsg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
+  // A photo or a file can be sent on its own — any one of the three is enough.
   const photo = (preset==null) ? SK.pendingPhoto : null;
-  if (!msg && !photo) return;
+  const fileAtt = (preset==null) ? SK.pendingFile : null;
+  if (!rawMsg && !photo && !fileAtt) return;
+  const msg = rawMsg || (fileAtt ? 'Read this file and act on what it contains — if it is a list of stores or buyers, add them to the Buyers CRM.' : rawMsg);
   if (photo) skPhotoClear();
+  if (fileAtt) skFileClear();
   if (field){ field.value=''; field.style.height='auto'; }
   if (!SK.open) skToggle(true);
   SK.history[SK.agent] = SK.history[SK.agent] || [];
   SK.greeted[SK.agent] = true;
-  skAppend('user', msg, photo ? photo.dataUrl : undefined);
+  // Display shows a compact file marker; the STORED turn carries the full CSV
+  // text so this call — and later "continue" turns — can read the rows.
+  const dispText = msg + (fileAtt ? '\n▤ ' + fileAtt.name + ' (' + fileAtt.rows + ' rows)' : '');
+  const fullText = fileAtt
+    ? msg + '\n\n[Attached file "' + fileAtt.name + '" — ' + fileAtt.rows + ' data rows as CSV'
+      + (fileAtt.truncated ? '; only the first ' + fileAtt.keptRows + ' are included below' : '') + ']\n' + fileAtt.text
+    : msg;
+  skAppend('user', dispText, photo ? photo.dataUrl : undefined);
   // Stored turn keeps content as a plain string (+ preview img for this session);
   // the image block rides only in the call history built below.
-  SK.history[SK.agent].push({role:'user', content:msg, img: photo ? photo.dataUrl : undefined});
+  SK.history[SK.agent].push({role:'user', content:fullText, disp: fileAtt ? dispText : undefined, img: photo ? photo.dataUrl : undefined});
   if (SK.history[SK.agent].length > 40) SK.history[SK.agent] = SK.history[SK.agent].slice(-40);
   const body = document.getElementById('sk-body');
   // The dock carries EVERY action power on EVERY screen — file prospects,

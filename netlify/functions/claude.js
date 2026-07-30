@@ -65,7 +65,11 @@ export default async (req) => {
     return new Response(JSON.stringify({ error: { message: 'Bad JSON' } }),
       { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-  if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 8192) payload.max_tokens = 8192;
+  // 16384 ceiling: claude-sonnet-5's adaptive thinking counts against
+  // max_tokens, and a long task (e.g. filing a big buyer list) was burning the
+  // whole old 8192 budget on thinking and stopping before any text. max_tokens
+  // is a ceiling, not a spend — you only pay for tokens actually generated.
+  if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 16384) payload.max_tokens = 16384;
   if (!ALLOWED_MODELS.has(payload.model)) payload.model = DEFAULT_MODEL;   // pin model server-side
 
   const r = await fetch('https://api.anthropic.com/v1/messages', {
