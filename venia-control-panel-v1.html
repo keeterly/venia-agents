@@ -1319,6 +1319,15 @@ body{padding-top:44px;box-sizing:border-box;}
 
 /* Buyers CRM filter bar */
 .sl-filter{margin:0 0 16px}
+/* Buyers CRM spreadsheet view — dense, Excel-like, header click-sorts. */
+.sl-tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;background:var(--bg);border:1px solid var(--border)}
+.sl-tbl{width:100%;min-width:1080px;border-collapse:collapse}
+.sl-tbl th{position:sticky;top:0;background:var(--bg-off);color:var(--muted);font-size:8px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;text-align:left;padding:9px 10px;border-bottom:2px solid var(--ink);cursor:pointer;user-select:none;white-space:nowrap}
+.sl-tbl th:hover{color:var(--ink)}
+.sl-tbl td{padding:9px 10px;font-size:11px;color:var(--soft,#444);border-bottom:1px solid var(--border);vertical-align:middle}
+.sl-tbl tbody tr{cursor:pointer;transition:background .1s}
+.sl-tbl tbody tr:hover{background:var(--bg-hover,var(--bg-off))}
+.sl-tbl tbody tr:last-child td{border-bottom:none}
 .sl-filter-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:9px}
 .sl-filter-q{flex:1 1 200px;min-width:0;height:38px;padding:0 12px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:12px;font-family:inherit;letter-spacing:.2px}
 .sl-filter-q::placeholder{color:var(--muted)}
@@ -1640,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '219';
+  const BUILD = '220';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15277,7 +15286,7 @@ function agentActionSpec(key) {
       + '1) One short sentence naming what you are adding.\n'
       + '2) Then, on its own line, exactly ONE fenced block and nothing after it:\n'
       + '```venia:action\n'
-      + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, State","country":"USA","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","approach":"Optional first-move suggestion"}]}\n'
+      + '{"type":"add_buyers","buyers":[{"name":"Store name","location":"City, State","country":"USA","type":"Concept store","tier":"dream","fit":"One line on why it fits VENIA","website":"","contactName":"","email":"","phone":"","address":"","approach":"Optional first-move suggestion"}]}\n'
       + '```\n'
       + 'Rules: real stores only. NEVER invent a contact email or name you do not actually know — leave them "" and the user will source them. "type" must be one of: Concept store, Department store, Online retail, Boutique, Specialty retail, Showroom. Stores are saved at stage "New" for the user to review and reach out to. Emit the block ONLY when the user wants stores saved — if they only asked to see ideas, list them and offer to add the best fits.\n'
       + 'LONG LISTS: keep the prose to one sentence and add AT MOST 20 stores per action block. If the list (or an attached file) has more, add the first 20 and end with "Say continue and I\'ll add the next batch." — the remaining rows are still in the conversation, so continue from where you stopped.'
@@ -16082,6 +16091,8 @@ function agentBuildBuyers(action) {
       contactName: String(x.contactName || x.contact || '').trim(),
       email: String(x.email || '').trim(),
       website: String(x.website || x.url || '').trim(),
+      address: String(x.address || '').trim(),
+      phone: String(x.phone || '').trim(),
       tier, fit,
       notes: noteParts.join(' '),
       source: String(x.source || 'Agent — lead acquisition').trim(),
@@ -17131,6 +17142,12 @@ function agBuildSalesOverview() {
 // level so it survives a re-render; the bar reflects the active state.
 let SL_FILTER = { q: '', stage: '', tier: '', due: false, sort: 'pipeline' };
 let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier)
+// Buyers CRM view: the phase-grouped pipeline, or a flat spreadsheet-style
+// table with click-to-sort column headers. Device preference, not synced.
+let SL_VIEW = localStorage.getItem('venia-sl-view') || 'pipeline';
+let SL_TBL = { key: 'name', dir: 1 };   // table-view header sort
+function slSetView(v){ SL_VIEW = (v === 'table') ? 'table' : 'pipeline'; try{ localStorage.setItem('venia-sl-view', SL_VIEW); }catch(e){} slRerenderFilterBar(); }
+function slTableSort(key){ if (SL_TBL.key === key) SL_TBL.dir = -SL_TBL.dir; else SL_TBL = { key, dir: 1 }; slRenderBuyerList(); }
 // Ordering within each pipeline group. 'pipeline' keeps the follow-up-first
 // order; the rest let the founders sort accounts by name, region, etc.
 function slSortComparator() {
@@ -17159,16 +17176,74 @@ function slBuyerMatches(b) {
   }
   if (f.q) {
     const cs = slContactsOf(b).map(c => (c.name||'') + ' ' + (c.email||'') + ' ' + (c.role||'')).join(' ');
-    const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, cs]
+    const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, b.address, b.phone, cs]
       .map(x => String(x || '').toLowerCase()).join(' ');
     if (!f.q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))) return false;
   }
   return true;
 }
 
+// ── Spreadsheet-style table view ─────────────────────────────────────────────
+// Flat, dense, Excel-like: every account is one row, and every column header
+// click-sorts (second click flips direction). Same filters/search/bulk-select
+// as the pipeline view.
+function slTblVal(b, key){
+  switch(key){
+    case 'name':     return String(b.name||'').toLowerCase();
+    case 'type':     return String(b.type||'').toLowerCase();
+    case 'location': return String(b.location||'').toLowerCase();
+    case 'country':  return String(b.country||'').toLowerCase();
+    case 'stage':    { const ks=Object.keys(SL_STAGES); const i=ks.indexOf(b.stage||'new'); return i<0?99:i; }
+    case 'tier':     { const r={dream:0,strong:1,reach:2}; return (b.tier in r)?r[b.tier]:9; }
+    case 'contact':  { const c=slContactsOf(b)[0]||{}; return String(c.name||'').toLowerCase(); }
+    case 'email':    { const c=slContactsOf(b)[0]||{}; return String(c.email||b.email||'').toLowerCase(); }
+    case 'phone':    return String(b.phone||'').toLowerCase();
+    case 'next':     return String(b.nextDate||'');
+    case 'last':     return String(b.lastContact||'');
+    default:         return '';
+  }
+}
+function slBuyersTableHTML(){
+  const rows = (STATE.slBuyers||[]).filter(slBuyerMatches).slice().sort((a,b)=>{
+    const va=slTblVal(a,SL_TBL.key), vb=slTblVal(b,SL_TBL.key);
+    // Blank cells always sink to the bottom, whichever direction is active.
+    if (va==='' || vb===''){ if (va!==vb) return va==='' ? 1 : -1; }
+    const c = (typeof va==='number'&&typeof vb==='number') ? va-vb : String(va).localeCompare(String(vb));
+    return (c || String(a.name||'').localeCompare(String(b.name||''))) * SL_TBL.dir;
+  });
+  if (!rows.length) return `<div style="padding:30px 18px;text-align:center;color:var(--muted);font-size:11px">No accounts match this filter.<br><a onclick="slClearBuyerFilter()" style="color:var(--ink);cursor:pointer;text-decoration:underline;display:inline-block;margin-top:8px">Clear filters</a></div>`;
+  const today = new Date().toISOString().slice(0,10);
+  const th = (key,label) => `<th onclick="slTableSort('${key}')" title="Sort by ${label}">${label}${SL_TBL.key===key?(SL_TBL.dir>0?' ▲':' ▼'):''}</th>`;
+  const body = rows.map(b=>{
+    const c = slContactsOf(b); const c0 = c[0]||{};
+    const od = b.stage !== 'inactive' && b.nextDate && b.nextDate < today;
+    const email = c0.email || b.email || '';
+    return `<tr onclick="slOpenBuyerDetail('${b.id}')">
+      <td onclick="event.stopPropagation()"><input type="checkbox" class="sl-row-chk" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="cursor:pointer"></td>
+      <td style="font-weight:600;color:var(--ink);white-space:nowrap">${slEsc(b.name)||'—'}</td>
+      <td>${slEsc(b.type)||''}</td>
+      <td>${slEsc(b.location)||''}</td>
+      <td>${slEsc(b.country)||''}</td>
+      <td><span style="font-size:9px;font-weight:600;color:${SL_STAGE_COLORS[b.stage]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px;white-space:nowrap">${SL_STAGES[b.stage]||'To Reach'}</span></td>
+      <td>${AGENT_TIER_LABEL[b.tier]?`<span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px">${AGENT_TIER_LABEL[b.tier]}</span>`:''}</td>
+      <td style="white-space:nowrap">${slEsc(c0.name)||''}${c.length>1?` <span style="color:var(--muted)">+${c.length-1}</span>`:''}</td>
+      <td onclick="event.stopPropagation()" style="white-space:nowrap">${email?`<a href="mailto:${slEsc(email)}" style="color:var(--gold)">${slEsc(email)}</a>`:''}</td>
+      <td style="white-space:nowrap">${slEsc(b.phone)||''}</td>
+      <td style="white-space:nowrap;color:${od?'var(--red)':'var(--muted)'};font-weight:${od?'700':'400'}">${od?'⚑ ':''}${slEsc(b.nextDate)||''}</td>
+      <td style="white-space:nowrap;color:var(--muted)">${slEsc(b.lastContact)||''}</td>
+      <td onclick="event.stopPropagation()"><button class="ag-btn ag-btn-ghost ag-btn-sm" style="min-height:0;padding:4px 9px" onclick="slOpenBuyerModal('${b.id}')">✎</button></td>
+    </tr>`;
+  }).join('');
+  return `<div class="sl-tbl-wrap"><table class="sl-tbl">
+    <thead><tr><th></th>${th('name','Name')}${th('type','Type')}${th('location','Location')}${th('country','Country')}${th('stage','Stage')}${th('tier','Tier')}${th('contact','Contact')}${th('email','Email')}${th('phone','Phone')}${th('next','Next')}${th('last','Last')}<th></th></tr></thead>
+    <tbody>${body}</tbody>
+  </table></div>`;
+}
+
 // Builds the phase-grouped list from the CURRENT filter. Used for the first
 // render and every live filter update, so behaviour stays identical.
 function slBuyersListHTML() {
+  if (SL_VIEW === 'table') return slBuyersTableHTML();
   const all = (STATE.slBuyers || []);
   const buyers = all.filter(slBuyerMatches);
   const active = slBuyerFilterActive();
@@ -17218,9 +17293,11 @@ function slFilterBarHTML() {
         <option value="">All tiers</option>
         ${Object.entries(AGENT_TIER_LABEL).map(([k,v]) => `<option value="${k}"${SL_FILTER.tier===k?' selected':''}>${v}</option>`).join('')}
       </select>
-      <select id="sl-filter-sort" class="sl-filter-tier" onchange="slSetSort(this.value)" title="Sort accounts within each stage">
+      ${SL_VIEW==='pipeline' ? `<select id="sl-filter-sort" class="sl-filter-tier" onchange="slSetSort(this.value)" title="Sort accounts within each stage">
         ${[['pipeline','Sort: Follow-up'],['name','Sort: Name A–Z'],['region','Sort: Region'],['recent','Sort: Last contact'],['due','Sort: Due date'],['tier','Sort: Tier']].map(([k,v])=>`<option value="${k}"${SL_FILTER.sort===k?' selected':''}>${v}</option>`).join('')}
-      </select>
+      </select>` : ''}
+      <button class="sl-chip${SL_VIEW==='pipeline'?' on':''}" onclick="slSetView('pipeline')" title="Phase-grouped pipeline view">☰ Pipeline</button>
+      <button class="sl-chip${SL_VIEW==='table'?' on':''}" onclick="slSetView('table')" title="Flat spreadsheet view — click column headers to sort">▦ Table</button>
       <button class="sl-chip sl-chip-due${SL_FILTER.due?' on':''}" onclick="slToggleDueFilter()" title="Only accounts with an overdue follow-up">⚑ Due</button>
     </div>
     <div class="sl-filter-chips">
@@ -17388,8 +17465,18 @@ function slOpenBuyerModal(id) {
         <div id="sl-b-contacts"></div>
       </div>
       <div>
-        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Website</div>
-        <input id="sl-b-website" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.website||'')}" placeholder="store.com">
+        <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Address</div>
+        <input id="sl-b-address" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.address||'')}" placeholder="Street address — e.g. 425 Broadway, Nashville, TN 37203">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Phone</div>
+          <input id="sl-b-phone" type="tel" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.phone||'')}" placeholder="+1 615 555 0100">
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Website</div>
+          <input id="sl-b-website" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.website||'')}" placeholder="store.com">
+        </div>
       </div>
       <div>
         <div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Notes / Last conversation</div>
@@ -17435,6 +17522,8 @@ function slSaveBuyer(existingId) {
     contactName: contacts[0]?.name || '',
     email:       contacts[0]?.email || '',
     website:     (document.getElementById('sl-b-website')?.value||'').trim(),
+    address:     (document.getElementById('sl-b-address')?.value||'').trim(),
+    phone:       (document.getElementById('sl-b-phone')?.value||'').trim(),
     notes:       (document.getElementById('sl-b-notes')?.value||'').trim(),
   };
   if (!data.name) { showToast('Account name is required'); return; }
@@ -17503,6 +17592,7 @@ function slOpenBuyerDetail(id) {
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">
         ${slEsc(b.type)||'—'}${b.location?' · '+slEsc(b.location):''}${b.country?' · '+slEsc(b.country):''}${site?` · <a href="${slEsc(site)}" target="_blank" rel="noopener" style="color:var(--gold)">site &#x21D7;</a>`:''}
+        ${(b.address||b.phone)?`<br>${slEsc(b.address)||''}${b.address&&b.phone?' · ':''}${b.phone?`<a href="tel:${slEsc(String(b.phone).replace(/[^+\d]/g,''))}" style="color:var(--gold)">${slEsc(b.phone)}</a>`:''}`:''}
         ${slContactsDisplay(b)}
         ${b.fit?`<br><span style="color:var(--ink)">${AGENT_TIER_LABEL[b.tier]?'['+AGENT_TIER_LABEL[b.tier]+' fit] ':''}${slEsc(b.fit)}</span>`:''}
       </div>
