@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '223';
+  const BUILD = '224';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -12570,7 +12570,22 @@ const INTERNAL = new Set(['keeter','christine','keeter johnson','christine johns
 function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim()); }
 
 // ── CALL CLAUDE ──────────────────────────────────────────────────────
-async function callClaude(system, userMsg, history=[], model) {
+// Retry wrapper: Anthropic's servers intermittently answer 529 "Overloaded"
+// (and the odd 500/503/429) — transient by nature, so absorb up to two
+// automatic retries with backoff before surfacing anything to the user.
+async function callClaude(system, userMsg, history, model) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, attempt === 1 ? 2500 : 7000));
+    try { return await _callClaudeOnce(system, userMsg, history || [], model); }
+    catch (e) {
+      lastErr = e;
+      if (!/overloaded|529|50[023]|429|rate.?limit/i.test(String(e && e.message))) throw e;
+    }
+  }
+  throw new Error('Claude\'s servers are busy right now — not your fault. Your message is saved in this chat; send "try again" in a moment. (' + String(lastErr && lastErr.message || 'overloaded') + ')');
+}
+async function _callClaudeOnce(system, userMsg, history=[], model) {
   // Stream-first: the SSE relay isn't subject to the buffered-function time
   // window, so long generations (day plans, reshapes, adjustments) stop
   // 504ing. Any streaming failure falls through to the buffered path below,
@@ -26992,7 +27007,17 @@ async function skSend(preset){
     think.__done && think.__done();
     agentEndWork(workKey, false);
     const t = think.querySelector('.sk-work');
-    if (t) t.outerHTML = `<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">⚠ ${escHtml(err.message||'Something went wrong')}</span><div style="font-size:10px;color:#888;margin-top:6px">Add your Claude API key in Settings → API Keys. <a style="color:#bbb;cursor:pointer;text-decoration:underline" onclick="skToggle();cpGoto('set')">Open Settings →</a></div></div>`;
+    // Tell the truth about WHY it failed: a busy Anthropic server is not a
+    // missing API key. Key hint only for auth-shaped errors.
+    const _em = String(err && err.message || '');
+    const _busy = /overloaded|529|50[023]|429|rate.?limit|busy/i.test(_em);
+    const _keyish = /401|403|\bkey\b|auth|not connected/i.test(_em);
+    const _footer = _busy
+      ? 'Your message (and any attached file) is saved in this chat — just send “try again” in a moment.'
+      : _keyish
+        ? 'Add your Claude API key in Settings → API Keys. <a style="color:#bbb;cursor:pointer;text-decoration:underline" onclick="skToggle();cpGoto(\'set\')">Open Settings →</a>'
+        : 'If this keeps happening, check ⇅ Sync Status and Settings → API Keys.';
+    if (t) t.outerHTML = `<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">⚠ ${escHtml(err.message||'Something went wrong')}</span><div style="font-size:10px;color:#888;margin-top:6px">${_footer}</div></div>`;
   }
   if (body) body.scrollTop = body.scrollHeight;
 }
