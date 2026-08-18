@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '238';
+  const BUILD = '239';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16142,7 +16142,77 @@ function agentPRRadarSpec() {
 // (the cacheable block); these travel in the volatile system block instead.
 function agentContextHints() {
   return (typeof slCrmKnownAccountsHint === 'function' ? slCrmKnownAccountsHint() : '')
-    + (typeof agentWatchedPullsHint === 'function' ? agentWatchedPullsHint() : '');
+    + (typeof agentWatchedPullsHint === 'function' ? agentWatchedPullsHint() : '')
+    + (typeof veniaOpsContext === 'function' ? veniaOpsContext() : '');
+}
+// ── TOTAL RECALL (Backbone E2) — the ops snapshot Eni reads every turn ──────
+// Everything the founders can see, Eni can see: vendors, materials, open POs,
+// wholesale orders with AR truth, recent coverage, open pitches, press
+// contacts, the Brand Library index, upcoming content, frozen line sheets.
+// Every list is capped with an honest "+N more" so the digest stays cheap
+// (it rides in the VOLATILE system block; the specs stay cached).
+function veniaOpsContext(){
+  const S = window.STATE; if (!S) return '';
+  const parts = [];
+  const more = (arr, n) => arr.length > n ? '\n…+' + (arr.length - n) + ' more' : '';
+  const money = (cur, n) => (typeof slMoneyC === 'function') ? slMoneyC(cur, n) : '$' + Math.round(n||0).toLocaleString();
+  try {
+    const vs = S.vendors || [];
+    if (vs.length) parts.push('Vendors (' + vs.length + '):\n' + vs.slice(0,20).map(v =>
+      '• ' + [v.name, v.type, [v.city, v.country].filter(Boolean).join(', '),
+        v.moq ? 'MOQ ' + v.moq : '', v.lead ? 'lead ' + v.lead + 'd' : ''].filter(Boolean).join(' | ')
+    ).join('\n') + more(vs, 20));
+    const ms = S.materials || [];
+    if (ms.length) parts.push('Materials (' + ms.length + '):\n' + ms.slice(0,15).map(m =>
+      '• ' + [m.name, m.content, m.supplier, m.cost ? '$' + m.cost + '/' + (m.unit||'yd') : '',
+        m.moq ? 'MOQ ' + m.moq : ''].filter(Boolean).join(' | ')
+    ).join('\n') + more(ms, 15));
+    const pos = (S.pos || []).filter(po => !['received','cancelled'].includes(po.status));
+    if (pos.length) parts.push('Open production POs:\n' + pos.slice(0,12).map(po =>
+      '• ' + po.id + ' — ' + (po.vendor||'?') + ' | ' + (po.units||0) + 'u | ' + money(po.currency, po.total||0)
+      + ' | ' + (po.status||'draft') + (po.exFactory ? ' | ex-factory ' + po.exFactory : '')
+      + (!po.depositPaidAt && (po.total||0) > 0 ? ' | deposit unpaid' : '')
+    ).join('\n') + more(pos, 12));
+    const ords = (S.slOrders || []).filter(o => o.status !== 'cancelled'
+      && (o.status !== 'delivered' || (o.payment && o.payment.invoiceId && ['paid','void','uncollectible'].indexOf(o.payment.status) < 0)));
+    if (ords.length) parts.push('Wholesale orders (open / unpaid):\n' + ords.slice(0,12).map(o => {
+      const p = o.payment || {};
+      const pay = p.invoiceId
+        ? (['paid','void','uncollectible'].indexOf(p.status) >= 0 ? p.status
+           : 'invoiced' + (p.dueDate ? ', due ' + p.dueDate : '') + (p.amountRemaining != null ? ', $' + Math.round(p.amountRemaining).toLocaleString() + ' outstanding' : ''))
+        : 'not invoiced';
+      return '• #' + o.id + ' ' + (o.account||'?') + ' | $' + Math.round(o.total||0).toLocaleString()
+        + ' | ' + (o.status||'') + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
+    }).join('\n') + more(ords, 12));
+    const covs = (S.prCoverage || []).slice()
+      .sort((a,b) => String(b.publishDate||b.createdAt||'').localeCompare(String(a.publishDate||a.createdAt||'')));
+    if (covs.length) parts.push('Recent press coverage (' + covs.length + ' logged):\n' + covs.slice(0,8).map(c =>
+      '• ' + [String(c.publishDate||c.createdAt||'').slice(0,10), c.outlet, c.headline, c.celebRef ? 'feat. ' + c.celebRef : '', c.type].filter(Boolean).join(' | ')
+    ).join('\n') + more(covs, 8));
+    const pits = (S.prPitches || []).filter(p => ['draft','sent','opened'].includes(p.status));
+    if (pits.length) parts.push('Open pitches:\n' + pits.slice(0,8).map(p =>
+      '• ' + [p.publication, p.subject, p.status, p.celebRef ? 'feat. ' + p.celebRef : '', p.followUpDate ? 'follow up ' + p.followUpDate : ''].filter(Boolean).join(' | ')
+    ).join('\n') + more(pits, 8));
+    const eds = S.prEditors || [];
+    if (eds.length) parts.push('Press contacts (' + eds.length + '):\n' + eds.slice(0,25).map(e =>
+      '• ' + [e.name, e.publication, e.type, e.relationship, e.beat].filter(Boolean).join(' | ')
+    ).join('\n') + more(eds, 25));
+    const docs = S.brandDocs || [];
+    if (docs.length) parts.push('Brand Library (' + docs.length + ' docs — titles only; the user opens them in Brand → Library):\n' + docs.slice(0,12).map(d =>
+      '• ' + d.title + ' (' + (d.kind||'note') + ', ' + String(d.createdAt||'').slice(0,10) + ')'
+    ).join('\n') + more(docs, 12));
+    const today = new Date().toISOString().slice(0,10);
+    const horizon = new Date(Date.now() + 14*86400000).toISOString().slice(0,10);
+    const mk = (S.mkCalendar || []).filter(e => e.date && e.date >= today && e.date <= horizon && e.status !== 'posted');
+    if (mk.length) parts.push('Content going out (next 14d):\n' + mk.slice(0,8).map(e =>
+      '• ' + [e.date, e.title || 'planned post', e.platform].filter(Boolean).join(' | ')
+    ).join('\n') + more(mk, 8));
+    const lss = S.slLinesheets || [];
+    if (lss.length) parts.push('Frozen line sheets:\n' + lss.slice(0,5).map(l =>
+      '• ' + (l.name||l.id) + ' — ' + (l.styles||[]).length + ' styles, frozen ' + String(l.frozenAt||'').slice(0,10)
+    ).join('\n') + more(lss, 5));
+  } catch(e){}
+  return parts.length ? '\n\nVENIA OPS SNAPSHOT (live):\n' + parts.join('\n') : '';
 }
 
 // Capture into Brainstorm from chat. The founder can say "add this to Brainstorm
