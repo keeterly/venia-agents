@@ -18,7 +18,7 @@ function corsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, x-venia-code',
     'Vary': 'Origin',
   };
 }
@@ -49,6 +49,19 @@ export default async (req) => {
   if (!originAllowed(req)) {
     return new Response(JSON.stringify({ error: { message: 'Forbidden' } }),
       { status: 403, headers: { ...cors, 'Content-Type': 'application/json' } });
+  }
+  // Real wall (Origin headers are forgeable by non-browser callers): when a
+  // gate hash is configured, require the VENIA access code on every call so a
+  // stranger can't spend the ANTHROPIC_API_KEY budget. Enforce-if-configured
+  // keeps the function working on sites that haven't set the hash yet.
+  const gateHash = (process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH || '').toLowerCase();
+  if (gateHash) {
+    const sent = req.headers.get('x-venia-code') || '';
+    const okCode = sent && (await sha256Hex(sent)) === gateHash;
+    if (!okCode) {
+      return new Response(JSON.stringify({ error: { message: 'Not authorized — VENIA access code required.' } }),
+        { status: 401, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
   }
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) {
@@ -104,3 +117,8 @@ export default async (req) => {
 // the site's "/" rewrite or the root static publish, which is what was causing
 // POSTs to be rejected with a bare 405 before they reached this code.
 export const config = { path: ['/api/claude', '/.netlify/functions/claude'] };
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}

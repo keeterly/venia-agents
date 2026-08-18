@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '226';
+  const BUILD = '227';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1742,7 +1742,12 @@ body{padding-top:44px;box-sizing:border-box;}
   window.vagSubmit = async function() {
     const val = $('vag-pw-input').value;
     if ((await sha256(val)) === HASH) {
-      window.__ac = val;   // keep the code in memory so money actions can authorize the Stripe fn (never persisted)
+      // Keep the code in memory AND on this device: the serverless functions
+      // now verify it on every call (the real wall behind the forgeable Origin
+      // check), so it must survive Face-ID unlocks and reloads without
+      // re-prompting. Founder devices only; the code was already typed here.
+      window.__ac = val;
+      try { localStorage.setItem('venia_ac', val); } catch (e) {}
       const canFace = await platformAuth();
       if (canFace && !localStorage.getItem(CRED) && !localStorage.getItem(SKIP)) {
         // Offer Face ID enrollment before entering
@@ -4752,7 +4757,19 @@ function save() {
   if (!window.__vApplyingRemote) { try { veniaStampUpdated(false); } catch (e) {} }
   const out = {};
   for (const k of SYNC_KEYS) if (STATE[k] !== undefined) out[k] = STATE[k];
-  localStorage.setItem('venia-plm-v2', JSON.stringify(out));
+  try {
+    localStorage.setItem('venia-plm-v2', JSON.stringify(out));
+    window.__vQuotaHit = false;
+  } catch (e) {
+    // Device storage full (usually a base64 photo awaiting its hosted-URL
+    // swap). Cloud sync still carries the data; tell the founder instead of
+    // failing silently, once per incident, and record it for the sync panel.
+    if (window.__syncStat) window.__syncStat.quota = { t: new Date().toISOString(), err: String(e && e.message || e).slice(0, 120) };
+    if (!window.__vQuotaHit && typeof showToast === 'function') {
+      window.__vQuotaHit = true;
+      showToast('⚠ Device storage is full — local save failed (cloud sync still runs). Free space or remove large photos.', 'error');
+    }
+  }
 }
 
 // ── 3-way merge for cross-device sync ────────────────────────────────────────
@@ -4835,6 +4852,8 @@ function _mScalar(base, local, cloud) {
 function mergeSnapshots(base, local, cloud) {
   base = base || {}; local = local || {}; cloud = cloud || {};
   const out = { _who: local._who || cloud._who };
+  const sv = Math.max(local._schemaVersion || 0, cloud._schemaVersion || 0);
+  if (sv) out._schemaVersion = sv;   // carry the highest shape version through merges
   (window.SYNC_KEYS || []).forEach(function (k) {
     const b = base[k], l = local[k], c = cloud[k];
     if (l === undefined && c === undefined) return;
@@ -11625,13 +11644,45 @@ window.prDepositChip = function(pullId, pct){
   if (el) el.value = Math.max(1, Math.round(outValue * pct / 100));
 };
 
+// One place to get the VENIA access code for serverless-function auth.
+// Memory first, then this device's stored copy (saved at gate entry), then —
+// only when the caller says so — a one-time prompt (stored for next time).
+window.veniaAC = function(promptIfMissing, reason){
+  let c = window.__ac || '';
+  if (!c) { try { c = localStorage.getItem('venia_ac') || ''; } catch (e) {} if (c) window.__ac = c; }
+  if (!c && promptIfMissing) {
+    c = prompt(reason || 'Enter your VENIA access code:') || '';
+    if (c) { window.__ac = c; try { localStorage.setItem('venia_ac', c); } catch (e) {} }
+  }
+  return c;
+};
+// Attach the code to every call to our own serverless functions — they verify
+// it server-side now (Origin headers are forgeable; the code is the real wall).
+// One wrapper covers every current and future call site.
+;(function(){
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try {
+      const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+      if (/^(\/api\/|\/\.netlify\/functions\/)/.test(url) || /veniacollection\.com\/(api|\.netlify)\//.test(url) || /venia-creator\.netlify\.app\/(api|\.netlify)\//.test(url)) {
+        const ac = window.veniaAC(false);
+        if (ac) {
+          init = init || {};
+          const h = init.headers || {};
+          if (typeof Headers !== 'undefined' && h instanceof Headers) { if (!h.has('x-venia-code')) h.set('x-venia-code', ac); }
+          else if (!h['x-venia-code']) { h['x-venia-code'] = ac; init.headers = h; }
+        }
+      }
+    } catch (e) {}
+    return _fetch(input, init);
+  };
+})();
 async function prStripe(action, payload){
   const headers = {'Content-Type':'application/json'};
-  // capture/cancel move money on a card — authorize with the access code.
-  // Prompt once if it isn't already in memory (e.g. after a Face ID unlock).
-  if (action === 'capture' || action === 'cancel') {
-    let code = window.__ac;
-    if (!code) { code = prompt('Enter your VENIA access code to authorize this card action:') || ''; if (code) window.__ac = code; }
+  // capture/cancel/invoice move money — make sure the code is present, with a
+  // one-time prompt if this device has never stored it.
+  if (action === 'capture' || action === 'cancel' || action === 'invoice') {
+    const code = window.veniaAC(true, 'Enter your VENIA access code to authorize this money action:');
     if (!code) return { error: 'Cancelled — access code required.' };
     headers['x-venia-code'] = code;
   }
@@ -12606,13 +12657,20 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 // (and the odd 500/503/429) — transient by nature, so absorb up to two
 // automatic retries with backoff before surfacing anything to the user.
 async function callClaude(system, userMsg, history, model) {
-  let lastErr = null;
+  let lastErr = null, askedCode = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise(r => setTimeout(r, attempt === 1 ? 2500 : 7000));
     try { return await _callClaudeOnce(system, userMsg, history || [], model); }
     catch (e) {
       lastErr = e;
-      if (!/overloaded|529|50[023]|429|rate.?limit/i.test(String(e && e.message))) throw e;
+      const em = String(e && e.message);
+      // Function gate 401: this device doesn't hold the access code yet
+      // (Face-ID-only unlocks never typed it). One prompt, stored, retried.
+      if (!askedCode && /access code required|not authorized.*401|401.*access code/i.test(em)) {
+        askedCode = true;
+        if (window.veniaAC && window.veniaAC(true, 'Enter your VENIA access code to reconnect Eni:')) { attempt--; continue; }
+      }
+      if (!/overloaded|529|50[023]|429|rate.?limit/i.test(em)) throw e;
     }
   }
   throw new Error('Claude\'s servers are busy right now — not your fault. Your message is saved in this chat; send "try again" in a moment. (' + String(lastErr && lastErr.message || 'overloaded') + ')');
@@ -18963,6 +19021,9 @@ window.slSendOrderInvoice = async function(orderId) {
   if (!email) email = prompt('Buyer email for the invoice:') || '';
   email = email.trim();
   if (!email) { showToast('An email is needed to invoice', 'info'); return; }
+  // Sending a real invoice is a gated money action now — make sure the access
+  // code is on this device (one-time prompt if not; the fetch wrapper attaches it).
+  if (!window.veniaAC(true, 'Enter your VENIA access code to send this invoice:')) { showToast('Cancelled — access code required to invoice', 'info'); return; }
   const btn = document.getElementById('sl-ord-inv-btn');
   const st = document.getElementById('sl-ord-inv-status');
   if (btn) { btn.disabled = true; btn.textContent = 'Creating invoice…'; }
@@ -20969,7 +21030,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function snapshot(){
     // Built from the same SYNC_KEYS list save() uses, so cloud parity is
     // automatic — add a collection to SYNC_KEYS and it persists AND syncs.
-    var d = { _who: who() };
+    var d = { _who: who(), _schemaVersion: 2 };   // bump when a synced record's SHAPE changes, so an old client can detect newer data
     var keys = window.SYNC_KEYS || [];
     for (var i = 0; i < keys.length; i++) { var k = keys[i]; if (STATE[k] !== undefined) d[k] = STATE[k]; }
     // Standalone modules that keep their own localStorage key ride along as raw
@@ -21367,20 +21428,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         }
       } catch(_){ /* function unavailable — fall back to a direct read below */ }
 
-      // Fallback: direct read (works while the database is open).
+      // No direct-read fallback: the old path pulled the ENTIRE workspace blob
+      // (every style, cost, vendor) into an unauthenticated factory browser and
+      // filtered client-side — a data leak, not a degrade. The edge function is
+      // the only server for shares; if it's down, fail with a clear message.
       if (!s){
-        var sr = await c.from('venia_shares').select('*').eq('token', token).maybeSingle();
-        if (sr.error || !sr.data || sr.data.revoked){
-          shareFail('Link no longer active', 'This tech pack link has been revoked or does not exist. Ask VENIA for a fresh link.');
-          return;
-        }
-        var ws = await c.from('venia_workspace').select('data, updated_at').eq('id','main').maybeSingle();
-        var d = ws.data && ws.data.data;
-        if (!d || !Array.isArray(d.styles)){ shareFail('Tech pack unavailable', 'The workspace has no published data yet.'); return; }
-        STATE.styles = d.styles; STATE.materials = d.materials||[]; STATE.vendors = d.vendors||[];
-        STATE.bom = d.bom||{}; STATE.pom = d.pom||{};
-        s = STATE.styles.find(function(x){ return x.id === sr.data.style_id; });
-        upd = ws.data.updated_at ? new Date(ws.data.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+        shareFail('Tech pack temporarily unavailable', 'The share service could not be reached. Ask VENIA to check the factory-share function, or try again shortly.');
+        return;
       }
 
       if (!s){ shareFail('Style not found', 'This style may have been removed.'); return; }

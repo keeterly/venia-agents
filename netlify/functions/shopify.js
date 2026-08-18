@@ -30,7 +30,7 @@ function corsHeaders(req) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, x-venia-code',
     'Vary': 'Origin',
   };
 }
@@ -49,6 +49,13 @@ export default async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
   if (req.method !== 'POST') return json({ error: 'Method Not Allowed — expected POST' }, 405, cors);
   if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403, cors);
+  // Enforce the VENIA access code when a gate hash is configured (Origin is
+  // forgeable) — this proxy can read the store's orders and customers.
+  const gateHash = (process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH || '').toLowerCase();
+  if (gateHash) {
+    const sent = req.headers.get('x-venia-code') || '';
+    if (!sent || (await sha256Hex(sent)) !== gateHash) return json({ error: 'Not authorized — VENIA access code required.' }, 401, cors);
+  }
 
   const domain = process.env.SHOPIFY_STORE_DOMAIN;
   const token  = process.env.SHOPIFY_ADMIN_TOKEN;
@@ -172,3 +179,8 @@ const json = (o, status, cors) =>
 // Serve at a clean path that can't be shadowed by the site's "/" rewrite,
 // matching the pattern used by the Anthropic relay.
 export const config = { path: ['/api/shopify', '/.netlify/functions/shopify'] };
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}

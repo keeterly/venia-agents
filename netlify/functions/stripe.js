@@ -57,7 +57,10 @@ export default async (req) => {
   // the client sends it, we compare its SHA-256 to STRIPE_GATE_HASH (the same
   // hash the login gate uses). The raw code never appears in the page source,
   // only its hash does, so knowing the hash doesn't let you forge the header.
-  const GATED = ['capture', 'cancel'];
+  // 'invoice' creates and SENDS a real invoice to a buyer's inbox — it was the
+  // one money action left ungated, exploitable by any caller forging an Origin
+  // header. Gated fail-closed like the card actions.
+  const GATED = ['capture', 'cancel', 'invoice'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
     // Fail CLOSED: if the gate hash isn't configured, refuse the money action
