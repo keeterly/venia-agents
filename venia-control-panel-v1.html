@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '234';
+  const BUILD = '235';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4702,7 +4702,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal', 'growthSeen',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -13359,6 +13359,12 @@ function buildTodayFocus() {
       text:`${season}: ${gapUnits} forecast units across ${gapStyles} style${gapStyles>1?'s':''} not on a PO — factory commit ${days===0?'today':'in '+days+'d'}`,
       act:"cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)" });
   });
+  // 4d. Growth loop: coverage-backed intros waiting. Rolled up to ONE line —
+  //     the queue itself lives on the Sales overview; Today never spams pairs.
+  try {
+    const gN = (typeof slGrowthSuggestions === 'function') ? slGrowthSuggestions().length : 0;
+    if (gN) items.push({pri:'low', text:`Press → sales: ${gN} coverage-backed intro${gN>1?'s':''} suggested`, act:"cpGoto('sl')"});
+  } catch(e){}
   // 5. Quotes that went quiet (sent, no movement in 7+ days).
   (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
     const at = new Date(q.createdAt || 0);
@@ -15554,6 +15560,7 @@ function agBuildCoverageSection() {
       <button class="ag-pill${PR_COV_FILTER==='social'?' ag-pill-active':''}"    onclick="agCovFilter('social',this)">Social</button>
     </div>
     <div class="ag-sec-actions">
+      <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prCoverageOnePager()" title="Print-ready press one-pager for market meetings">⇓ One-pager</button>
       <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="openCoverageModal()">+ Log Coverage</button>
     </div>
   </div>`;
@@ -15561,6 +15568,50 @@ function agBuildCoverageSection() {
   const listHtml = agRenderCoverage(PR_COV_FILTER, true);
   return statsHtml + filters + `<div id="ag-coverage-list" style="margin-top:4px">${listHtml}</div>`;
 }
+
+// Pre-market press one-pager: the proof sheet a buyer sees before the line —
+// reach, AVE, celebrity placements and the strongest coverage, print-ready.
+window.prCoverageOnePager = function(){
+  const all = (STATE.prCoverage||[]).slice()
+    .sort((a,b) => String(b.publishDate||b.createdAt||'').localeCompare(String(a.publishDate||a.createdAt||'')));
+  if (!all.length){ showToast('No coverage logged yet — the one-pager builds itself from the coverage log'); return; }
+  const esc = (v) => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const totalReach = all.reduce((s,c) => s + (c.reachEstimate||0), 0);
+  const totalAVE = all.reduce((s,c) => s + (c.aveValue||0), 0);
+  const yr = String(new Date().getFullYear());
+  const thisYear = all.filter(c => String(c.publishDate||'').startsWith(yr)).length;
+  const celebs = [...new Set(all.map(c => String(c.celebRef||'').trim()).filter(Boolean))];
+  const reachTxt = totalReach >= 1000000 ? (totalReach/1000000).toFixed(1)+'M' : totalReach >= 1000 ? (totalReach/1000).toFixed(0)+'k' : (totalReach||'—');
+  const rows = all.slice(0, 18).map(c => `<tr>
+    <td>${esc(String(c.publishDate||c.createdAt||'').slice(0,10))}</td>
+    <td><b>${esc(c.outlet||'—')}</b></td>
+    <td>${esc(c.headline||'')}${c.celebRef ? ' <span style="color:#8a6d1a">· ' + esc(c.celebRef) + '</span>' : ''}</td>
+    <td style="text-transform:uppercase;font-size:8px;letter-spacing:1px">${esc(c.type||'')}</td>
+  </tr>`).join('');
+  const html = '<!DOCTYPE html><html><head><title>VENIA — Press</title><style>'
+    + 'body{font-family:monospace;font-size:11px;padding:40px;color:#111;max-width:760px;margin:0 auto}'
+    + 'h1{font-size:15px;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}'
+    + '.sub{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#666}'
+    + '.stats{display:flex;gap:24px;margin:22px 0;border-top:2px solid #111;border-bottom:1px solid #ddd;padding:14px 0}'
+    + '.stat b{display:block;font-size:18px;margin-bottom:2px}.stat span{font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:#666}'
+    + '.celebs{margin:14px 0;font-size:10px;line-height:1.7}'
+    + 'table{width:100%;border-collapse:collapse;margin-top:14px}th{font-size:8px;letter-spacing:2px;text-transform:uppercase;border-bottom:2px solid #111;padding:7px 4px;text-align:left}td{padding:7px 4px;border-bottom:1px solid #ddd;font-size:10px;vertical-align:top}'
+    + '.foot{margin-top:26px;border-top:1px solid #111;padding-top:10px;font-size:8px;letter-spacing:1px;color:#555}'
+    + '@media print{button{display:none}}</style></head><body>'
+    + '<h1>VENIA Collection</h1><p class="sub">Press &amp; Placements — ' + esc(yr) + '</p>'
+    + '<div class="stats">'
+    + '<div class="stat"><b>' + all.length + '</b><span>Placements logged</span></div>'
+    + '<div class="stat"><b>' + thisYear + '</b><span>This year</span></div>'
+    + '<div class="stat"><b>' + reachTxt + '</b><span>Est. reach</span></div>'
+    + (totalAVE ? '<div class="stat"><b>$' + (totalAVE/1000).toFixed(1) + 'k</b><span>Ad value equiv.</span></div>' : '')
+    + '</div>'
+    + (celebs.length ? '<div class="celebs"><b style="font-size:8px;letter-spacing:2px;text-transform:uppercase">Worn by</b><br>' + celebs.slice(0,12).map(esc).join(' · ') + '</div>' : '')
+    + '<table><thead><tr><th>Date</th><th>Outlet</th><th>Coverage</th><th>Type</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    + '<div class="foot">VENIA Collection | veniacollection.com — press kit available on request.</div>'
+    + '<' + '/body></html>';
+  const w = window.open('','_blank','width=900,height=700');
+  if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), 400); }
+};
 
 function agCovFilter(filter, el) {
   PR_COV_FILTER = filter;
@@ -17668,6 +17719,72 @@ const SL_PHASES = [
 const SL_TYPES = ['Concept store','Department store','Online retail','Boutique','Specialty retail','Showroom','Stylist','Direct client'];
 const slEsc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+// ── GROWTH LOOP — coverage → sales suggestions (Backbone D1) ────────────────
+// Fresh press is sales ammunition with a shelf life. Each suggestion pairs ONE
+// recent coverage hit with ONE buyer who should hear about it. Gates keep it
+// quiet: only priority tiers (dream/strong), only accounts still in play, never
+// anyone touched inside the cooldown or with a planned move already on the
+// books. Dismissals/sends live in synced STATE.growthSeen so the queue is the
+// same on both founders' phones and a pairing never comes back.
+const GROWTH_COV_DAYS = 45;        // coverage counts as "fresh proof" this long
+const GROWTH_TOUCH_COOLDOWN = 14;  // don't suggest buyers touched this recently
+function growthKey(covId, buyerId){ return covId + '|' + buyerId; }
+function slGrowthSuggestions(){
+  const seen = STATE.growthSeen || {};
+  const now = Date.now();
+  const covCut   = new Date(now - GROWTH_COV_DAYS * 86400000).toISOString().slice(0,10);
+  const touchCut = new Date(now - GROWTH_TOUCH_COOLDOWN * 86400000).toISOString().slice(0,10);
+  const today = new Date().toISOString().slice(0,10);
+  const fresh = (STATE.prCoverage||[]).filter(c => String(c.publishDate || c.createdAt || '').slice(0,10) >= covCut)
+    .sort((a,b) => String(b.publishDate||b.createdAt||'').localeCompare(String(a.publishDate||a.createdAt||'')));
+  if (!fresh.length) return [];
+  const tierRank = { dream:0, strong:1 };
+  const out = [];
+  (STATE.slBuyers||[]).forEach(b => {
+    if (!['new','warm','quoted'].includes(b.stage||'new')) return;   // stockists & dormant excluded
+    if (!(b.tier in tierRank)) return;                               // tier gate: proof goes to priority targets
+    if (String(b.lastContact||'') >= touchCut) return;               // touched recently — cooling down
+    if (b.nextDate && b.nextDate >= today) return;                   // already has a planned move
+    const cov = fresh.find(c => !seen[growthKey(c.id, b.id)]);       // newest proof not yet paired with them
+    if (cov) out.push({ cov, buyer: b });
+  });
+  out.sort((a,b) => (tierRank[a.buyer.tier] - tierRank[b.buyer.tier])
+    || String(b.cov.publishDate||'').localeCompare(String(a.cov.publishDate||'')));
+  return out.slice(0, 6);
+}
+function growthMark(covId, buyerId, action){
+  if (!STATE.growthSeen) STATE.growthSeen = {};
+  STATE.growthSeen[growthKey(covId, buyerId)] = { action, at: new Date().toISOString() };
+}
+window.growthDismiss = function(covId, buyerId){
+  growthMark(covId, buyerId, 'dismissed');
+  save();
+  try { agNavSl('overview'); } catch(e){}
+};
+window.growthLogTouch = function(covId, buyerId){
+  const b = (STATE.slBuyers||[]).find(x => x.id === buyerId);
+  const c = (STATE.prCoverage||[]).find(x => x.id === covId);
+  if (!b || !c) return;
+  slTouchAccount(b.name, 'Sent press proof — ' + (c.outlet||'coverage') + (c.headline ? ' · “' + c.headline + '”' : ''));
+  growthMark(covId, buyerId, 'done');
+  save();
+  showToast('Touch logged on ' + b.name);
+  try { agNavSl('overview'); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+};
+window.growthDraft = function(covId, buyerId){
+  const b = (STATE.slBuyers||[]).find(x => x.id === buyerId);
+  const c = (STATE.prCoverage||[]).find(x => x.id === covId);
+  if (!b || !c) return;
+  // The pair stays pending until the send is actually logged — drafting isn't sending.
+  agentSend('sl', 'Draft a short wholesale outreach email to ' + b.name
+    + (b.type ? ' (' + b.type + (b.location ? ', ' + b.location : '') + ')' : '')
+    + '. The hook is our new press: ' + (c.outlet || 'recent coverage')
+    + (c.headline ? ' just ran "' + c.headline + '"' : '')
+    + (c.celebRef ? ' featuring ' + c.celebRef : '')
+    + (c.url ? ' (' + c.url + ')' : '')
+    + '. Goal: get our line sheet in front of their buyer. VENIA voice — direct, confident, no fluff, under 120 words. After I send it I will log the touch.');
+};
 // Honest Sales overview — every number computed live from the CRM and quotes.
 // (Replaces the hard-coded demo stats/quotes/automations that used to sit in
 // the static markup.)
@@ -17833,6 +17950,23 @@ function agBuildSalesOverview() {
       ${stat('Quotes', money(pendingVal), pending.length + ' pending · ' + money(bookedVal) + ' won')}
     </div>
     ${overdue.length ? `<div class="ag-sec-head"><h2 class="ag-sec-title">Needs attention</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavSl('buyers')">Open CRM</button></div></div><div class="ag-list">${attention}</div>` : ''}
+    ${(function(){
+      const g = (typeof slGrowthSuggestions === 'function') ? slGrowthSuggestions() : [];
+      if (!g.length) return '';
+      return `<div class="ag-sec-head"><h2 class="ag-sec-title">Press → Sales</h2><div class="ag-sec-actions"><span style="font-size:9px;color:var(--muted)">fresh coverage · priority targets</span></div></div>
+      <div class="ag-list">${g.map(x => `
+        <div class="ag-list-row" style="grid-template-columns:1fr auto">
+          <div style="cursor:pointer" onclick="slOpenBuyerDetail('${x.buyer.id}')">
+            <div class="ag-lr-name">${slEsc(x.buyer.name)} <span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold)">${slEsc(AGENT_TIER_LABEL[x.buyer.tier]||'')}</span></div>
+            <div class="ag-lr-sub">${slEsc(SL_STAGES[x.buyer.stage]||'To Reach')} — send the ${slEsc(x.cov.outlet||'coverage')} proof${x.cov.celebRef ? ' (' + slEsc(x.cov.celebRef) + ')' : ''}${x.cov.headline ? ' · “' + slEsc(x.cov.headline) + '”' : ''}</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+            <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="growthDraft('${x.cov.id}','${x.buyer.id}')">Draft intro</button>
+            <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="growthLogTouch('${x.cov.id}','${x.buyer.id}')" title="I sent it — log the touch">✓ Sent</button>
+            <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="growthDismiss('${x.cov.id}','${x.buyer.id}')" title="Skip this pairing for good">✕</button>
+          </div>
+        </div>`).join('')}</div>`;
+    })()}
     <div class="ag-sec-head"><h2 class="ag-sec-title">Quick Actions</h2></div>
     <div class="ag-workflows" style="grid-template-columns:repeat(2,1fr)">
       <div class="ag-wf" onclick="agNavSl('buyers')"><div class="ag-wf-tag">CRM</div><div class="ag-wf-title">Buyers Pipeline</div><div class="ag-wf-desc">Every store — to reach, in conversation, doing business.</div></div>
