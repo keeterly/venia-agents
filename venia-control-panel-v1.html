@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '224';
+  const BUILD = '225';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14065,11 +14065,27 @@ function setUpdateDataSummary() {
   ];
   el.innerHTML = summary.map(([k,v])=>`<span style="margin-right:24px;white-space:nowrap"><strong>${v}</strong> ${k}</span>`).join('');
 }
+// Backup format 2: the WHOLE workspace. Format 1 bundled only ccDb + drafts +
+// boilerplate + the SYNC_KEYS blob — a restore silently lost Cost Sheets,
+// Budget, Campaigns, Fit Notes, Styleboard, Launch Checklist, Revenue Goals,
+// Press Kit, Brand Watch and the chat history. Now every EXTRA_LS_KEYS store
+// plus the chat rides along, and import accepts BOTH formats.
 function dbExport() {
-  const data = { ccDb: dbRead(), oeData: localStorage.getItem('VENIA_OE_DRAFTS'), bpData: localStorage.getItem('VENIA_BOILERPLATE'), plmData: localStorage.getItem('venia-plm-v2'), exportedAt: new Date().toISOString() };
+  const ls = {};
+  const extraKeys = (window.EXTRA_LS_KEYS || []).concat(['venia_sk_history']);
+  extraKeys.forEach(k => { try { const v = localStorage.getItem(k); if (v != null) ls[k] = v; } catch(e){} });
+  const data = {
+    format: 2,
+    exportedAt: new Date().toISOString(),
+    plmData: localStorage.getItem('venia-plm-v2'),
+    ls,
+    // Legacy fields so an old app version can still read a new file's core.
+    ccDb: dbRead(), oeData: localStorage.getItem('VENIA_OE_DRAFTS'), bpData: localStorage.getItem('VENIA_BOILERPLATE'),
+  };
   const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
   const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`venia-backup-${new Date().toISOString().slice(0,10)}.json`; a.click();
-  toast('Export downloaded');
+  const n = Object.keys(ls).length;
+  toast('Export downloaded — full workspace (' + n + ' module stores + PLM data)');
 }
 function dbImport() {
   const inp = document.createElement('input'); inp.type='file'; inp.accept='.json';
@@ -14080,11 +14096,22 @@ function dbImport() {
     reader.onload = ev => {
       try {
         const data = JSON.parse(ev.target.result);
-        if (data.ccDb) dbWrite(data.ccDb);
-        if (data.oeData) localStorage.setItem('VENIA_OE_DRAFTS', data.oeData);
-        if (data.bpData) localStorage.setItem('VENIA_BOILERPLATE', data.bpData);
-        if (data.plmData) localStorage.setItem('venia-plm-v2', data.plmData);
-        toast('Data imported — reload page');
+        let restored = 0;
+        if (data.plmData) { localStorage.setItem('venia-plm-v2', data.plmData); restored++; }
+        if (data.ls && typeof data.ls === 'object') {
+          // Format 2: restore every bundled store verbatim.
+          const okKeys = (window.EXTRA_LS_KEYS || []).concat(['venia_sk_history']);
+          Object.keys(data.ls).forEach(k => {
+            if (okKeys.indexOf(k) < 0) return;                 // never restore unknown keys
+            try { localStorage.setItem(k, data.ls[k]); restored++; } catch(e){}
+          });
+        } else {
+          // Format 1 (legacy file): restore what it carried.
+          if (data.ccDb) { dbWrite(data.ccDb); restored++; }
+          if (data.oeData) { localStorage.setItem('VENIA_OE_DRAFTS', data.oeData); restored++; }
+          if (data.bpData) { localStorage.setItem('VENIA_BOILERPLATE', data.bpData); restored++; }
+        }
+        toast('Imported ' + restored + ' store' + (restored!==1?'s':'') + ' — reload the page');
       } catch(e) { toast('Import failed: '+e.message,'error'); }
     };
     reader.readAsText(file);
