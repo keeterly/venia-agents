@@ -60,7 +60,7 @@ export default async (req) => {
   // 'invoice' creates and SENDS a real invoice to a buyer's inbox — it was the
   // one money action left ungated, exploitable by any caller forging an Origin
   // header. Gated fail-closed like the card actions.
-  const GATED = ['capture', 'cancel', 'invoice'];
+  const GATED = ['capture', 'cancel', 'invoice', 'invoice_status'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
     // Fail CLOSED: if the gate hash isn't configured, refuse the money action
@@ -138,6 +138,21 @@ export default async (req) => {
       const s = await call('checkout/sessions/' + encodeURIComponent(body.id), {}, 'GET');
       if (s.error) return json({ error: s.error.message }, 400);
       return json({ payment_status: s.payment_status, status: s.status, payment_intent: s.payment_intent });
+    }
+    // Invoice status (AR truth): the wholesale flow sends real Stripe INVOICES,
+    // whose lifecycle (open → paid / void / uncollectible) was never read back
+    // — the app counted every invoice as booked revenue forever. Amounts are
+    // returned in dollars.
+    if (body.action === 'invoice_status') {
+      const inv = await call('invoices/' + encodeURIComponent(body.id), {}, 'GET');
+      if (inv.error) return json({ error: inv.error.message }, 400, cors);
+      return json({
+        id: inv.id, status: inv.status,
+        amount_paid: (inv.amount_paid || 0) / 100,
+        amount_remaining: (inv.amount_remaining || 0) / 100,
+        due_date: inv.due_date ? new Date(inv.due_date * 1000).toISOString().slice(0, 10) : '',
+        hosted_invoice_url: inv.hosted_invoice_url || '',
+      }, 200, cors);
     }
     if (body.action === 'capture') {
       const pi = await call('payment_intents/' + encodeURIComponent(body.payment_intent) + '/capture', {});
