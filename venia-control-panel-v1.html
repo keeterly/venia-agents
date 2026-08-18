@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '233';
+  const BUILD = '234';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8110,7 +8110,7 @@ function renderLineSheet() {
           <span>VENIA Collection — Trade Only</span>
           <span>${styles.length} styles · ${seasonLabel}</span>
         </div>
-        <div style="line-height:1.6">Terms — Minimum opening order: 3 units per style. Lead times in days from PO. Wholesale USD, FOB. Prices confidential.</div>
+        <div style="line-height:1.6">Terms — Minimum opening order: ${(STATE.slPrefs&&STATE.slPrefs.moq)?String(STATE.slPrefs.moq).replace(/</g,'&lt;'):'per line sheet'}. Lead times in days from PO. Wholesale USD, FOB. Prices confidential.</div>
       </div>
     </div>`;
 }
@@ -18523,12 +18523,35 @@ function slExportBuyers() {
 // ══════════════════════════════════════════════════════════
 //  SALES — LINE SHEETS (PLM-connected preview)
 // ══════════════════════════════════════════════════════════
+// Line sheets v2 (the spine's C4). The MOQ on a line sheet is VENIA's own
+// wholesale minimum toward the buyer: per-style override (s.wsMoq) → the
+// Sales-settings default (slPrefs.moq) → dash. No more invented "6pcs".
+let SL_LS_SEASON = null;
+function slMoqFor(s){
+  return (s && String(s.wsMoq||'').trim()) || (STATE.slPrefs && String(STATE.slPrefs.moq||'').trim()) || '';
+}
+window.slSetWsMoq = function(id, v){
+  const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
+  const t = String(v||'').trim();
+  if (t) s.wsMoq = t; else delete s.wsMoq;
+  save();
+};
+function slLsStyles(){
+  return (STATE.styles||[]).filter(s => s.status !== 'archived'
+    && (!SL_LS_SEASON || SL_LS_SEASON === 'all' || String(s.season||'').trim() === SL_LS_SEASON));
+}
 function agBuildLineSheetsSection() {
   if (!STATE.slLinesheets) STATE.slLinesheets = [];
-  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived');
+  const seasons = (typeof rpSeasons === 'function') ? rpSeasons() : [];
+  if (!SL_LS_SEASON || (SL_LS_SEASON !== 'all' && !seasons.includes(SL_LS_SEASON))) SL_LS_SEASON = seasons[0] || 'all';
+  const seasonLabel = SL_LS_SEASON === 'all' ? 'All Seasons' : SL_LS_SEASON;
+  const styles = slLsStyles();
+  const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
+  const seasonOpts = [`<option value="all" ${SL_LS_SEASON==='all'?'selected':''}>All seasons</option>`]
+    .concat(seasons.map(x => `<option value="${slEsc(x)}" ${SL_LS_SEASON===x?'selected':''}>${slEsc(x)}</option>`)).join('');
 
   const styleTable = styles.length === 0
-    ? `<div style="padding:32px;text-align:center;color:var(--muted);font-size:11px">No styles in PLM — add styles to build a line sheet</div>`
+    ? `<div style="padding:32px;text-align:center;color:var(--muted);font-size:11px">No styles${SL_LS_SEASON!=='all'?' in '+slEsc(SL_LS_SEASON):''} — add styles to build a line sheet</div>`
     : `<div class="ag-list">
         <div class="ag-list-row ag-list-row-h"><div>Style</div><div>Category</div><div>Wholesale</div><div>MOQ</div><div>Status</div></div>
         ${styles.map(s => `
@@ -18536,20 +18559,44 @@ function agBuildLineSheetsSection() {
             <div><div class="ag-lr-name">${s.styleId||''} — ${s.name||''}</div><div class="ag-lr-sub">${s.season||''} · ${s.fabric||''}</div></div>
             <div class="ag-lr-mono" style="font-size:9px">${(s.category||'').toUpperCase()}</div>
             <div class="ag-lr-mono">$${s.wholesale||'—'}</div>
-            <div class="ag-lr-mono">6pcs</div>
+            <div><input type="text" class="ag-lr-mono" style="width:64px;background:transparent;border:none;border-bottom:1px dashed var(--border-mid);color:var(--ink);font-size:10px;padding:2px 0;outline:none" value="${slEsc(s.wsMoq||'')}" placeholder="${slEsc(moqDefault||'—')}" title="Wholesale minimum for this style (blank = Sales-settings default)" onchange="slSetWsMoq('${s.id}',this.value)"></div>
             <div><span class="ag-badge ag-b-${s.status==='active'?'active':'draft'}">${s.status||'draft'}</span></div>
           </div>`).join('')}
       </div>`;
 
+  const snaps = (STATE.slLinesheets||[]).slice().sort((a,b)=>String(b.frozenAt||'').localeCompare(String(a.frozenAt||'')));
+  const snapList = snaps.length ? `
+    <div style="margin-top:24px">
+      <div class="ag-sec-head"><h2 class="ag-sec-title">Frozen Line Sheets</h2></div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:10px">A frozen sheet never changes — what the buyer saw stays what the buyer saw. Orders taken against it keep its prices.</div>
+      <div class="ag-list">
+        <div class="ag-list-row ag-list-row-h"><div>Sheet</div><div>Styles</div><div>Frozen</div><div>Actions</div></div>
+        ${snaps.map(l => `
+          <div class="ag-list-row">
+            <div><div class="ag-lr-name">${slEsc(l.name||l.id)}</div><div class="ag-lr-sub">${slEsc(l.currency||'USD')}${l.delivery?' · delivery '+slEsc(l.delivery):''}</div></div>
+            <div class="ag-lr-mono">${(l.styles||[]).length}</div>
+            <div class="ag-lr-mono" style="font-size:9px">${String(l.frozenAt||'').slice(0,10)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLinesheetSnap('${l.id}')">Print</button>
+              <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slLinesheetOrderForm('${l.id}')">Order form</button>
+              <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slDeleteLinesheet('${l.id}')" title="Delete snapshot">✕</button>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>` : '';
+
   return `
-    <div class="ag-sec-head"><h2 class="ag-sec-title">FW26 Line Sheet Preview</h2>
-      <div class="ag-sec-actions">
+    <div class="ag-sec-head"><h2 class="ag-sec-title">${slEsc(seasonLabel)} Line Sheet Preview</h2>
+      <div class="ag-sec-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <select onchange="SL_LS_SEASON=this.value;agNavSl('linesheets')" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${seasonOpts}</select>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLineSheet()">&#x21D3; Export PDF</button>
-        <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentSend('sl','Generate a full wholesale line sheet for FW26. For each style include: style number, name, description, wholesale price, retail price, available colors, sizes, and estimated delivery date. Format it clearly for a wholesale buyer. VENIA voice.')">&#x25C8; Generate with Agent</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slFreezeLinesheet()" title="Snapshot this sheet — versioned, immutable, order forms come from it">❄ Freeze</button>
+        <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentSend('sl','Generate a full wholesale line sheet for ${slEsc(seasonLabel)}. For each style include: style number, name, description, wholesale price, retail price, available colors, sizes, and estimated delivery date. Format it clearly for a wholesale buyer. VENIA voice.')">&#x25C8; Generate with Agent</button>
       </div>
     </div>
-    <div style="font-size:10px;color:var(--muted);margin-bottom:12px">${styles.length} active styles from PLM</div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:12px">${styles.length} style${styles.length===1?'':'s'} from PLM · wholesale USD${moqDefault?' · default MOQ '+slEsc(moqDefault):' · set a default MOQ in Sales → Settings'}</div>
     ${styleTable}
+    ${snapList}
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Agent Actions</h2></div>
       <div class="ag-workflows" style="grid-template-columns:repeat(2,1fr)">
@@ -18561,13 +18608,90 @@ function agBuildLineSheetsSection() {
     </div>`;
 }
 
-function slPrintLineSheet() {
-  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived');
-  const rows = styles.map(s => `<tr><td>${s.styleId||''}</td><td>${s.name||''}</td><td>${s.category||''}</td><td>$${s.wholesale||'—'}</td><td>$${s.retail||'—'}</td><td>${s.colors||'—'}</td><td>${s.sizes||'—'}</td><td>${s.season||''}</td></tr>`).join('');
-  const html = '<!DOCTYPE html><html><head><title>VENIA Line Sheet</title><style>body{font-family:monospace;font-size:11px;padding:40px;color:#111}h1{font-size:14px;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:24px}th{font-size:8px;letter-spacing:2px;text-transform:uppercase;border-bottom:2px solid #111;padding:8px 4px;text-align:left}td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:10px}@media print{button{display:none}}</style></head><body><h1>VENIA Collection</h1><p style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#666">FW26 Line Sheet &mdash; Wholesale</p><table><thead><tr><th>Style#</th><th>Name</th><th>Category</th><th>Wholesale</th><th>Retail</th><th>Colors</th><th>Sizes</th><th>Season</th></tr></thead><tbody>' + rows + '</tbody></table><' + '/body></html>';
+// One print engine for live previews and frozen snapshots alike.
+function slLinesheetPrintDoc(subtitle, footNote, rows){
+  const esc = (v) => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const tr = rows.map(r => `<tr><td>${esc(r.code)}</td><td>${esc(r.name)}</td><td>${esc(r.category)}</td><td>$${esc(r.wholesale||'—')}</td><td>$${esc(r.retail||'—')}</td><td>${esc(r.colors||'—')}</td><td>${esc(r.sizes||'—')}</td><td>${esc(r.moq||'—')}</td><td>${esc(r.season)}</td></tr>`).join('');
+  const html = '<!DOCTYPE html><html><head><title>VENIA Line Sheet</title><style>body{font-family:monospace;font-size:11px;padding:40px;color:#111}h1{font-size:14px;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:24px}th{font-size:8px;letter-spacing:2px;text-transform:uppercase;border-bottom:2px solid #111;padding:8px 4px;text-align:left}td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:10px}.foot{margin-top:28px;border-top:1px solid #111;padding-top:10px;font-size:8px;letter-spacing:1px;color:#555;line-height:1.7}@media print{button{display:none}}</style></head><body><h1>VENIA Collection</h1><p style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#666">' + esc(subtitle) + '</p><table><thead><tr><th>Style#</th><th>Name</th><th>Category</th><th>Wholesale</th><th>Retail</th><th>Colors</th><th>Sizes</th><th>MOQ</th><th>Season</th></tr></thead><tbody>' + tr + '</tbody></table><div class="foot">' + footNote + '</div><' + '/body></html>';
   const w = window.open('','_blank','width=900,height=700');
   if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), 400); }
 }
+function slLinesheetFoot(currency, delivery, frozenLine){
+  const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
+  return 'VENIA Collection — Trade Only. Wholesale prices in ' + (currency||'USD') + ', FOB. Prices confidential.'
+    + (moqDefault ? ' Minimum order ' + String(moqDefault).replace(/</g,'&lt;') + ' unless noted per style.' : '')
+    + (delivery ? '<br>Delivery window: ' + String(delivery).replace(/</g,'&lt;') + '.' : '')
+    + (frozenLine ? '<br>' + frozenLine : '');
+}
+function slLsRowFrom(s){
+  return { code:s.styleId||'', name:s.name||'', category:s.category||'', season:s.season||'',
+    fabric:s.fabric||'', colors:s.colors||'', sizes:s.sizes||'', wholesale:s.wholesale||0,
+    retail:s.retail||0, moq: slMoqFor(s) };
+}
+function slPrintLineSheet() {
+  const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
+  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
+  const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
+  slLinesheetPrintDoc(seasonLabel + ' Line Sheet — Wholesale', slLinesheetFoot('USD', delivery, ''), slLsStyles().map(slLsRowFrom));
+}
+// Freeze the current preview into an immutable, versioned snapshot. Orders and
+// reprints come from the snapshot, so a later price edit in PLM can never
+// silently rewrite what a buyer was sent.
+window.slFreezeLinesheet = function(){
+  if (!STATE.slLinesheets) STATE.slLinesheets = [];
+  const styles = slLsStyles();
+  if (!styles.length){ showToast('Nothing to freeze — no styles in this view'); return; }
+  const season = (SL_LS_SEASON && SL_LS_SEASON !== 'all') ? SL_LS_SEASON : '';
+  const ver = 1 + (STATE.slLinesheets||[]).filter(l => String(l.season||'') === season)
+    .reduce((m,l) => Math.max(m, l.version||0), 0);
+  const cal = season ? ((STATE.seasonCal||{})[season] || {}) : {};
+  const now = new Date().toISOString();
+  STATE.slLinesheets.unshift({
+    // Season+version in the id keeps it unique even for freezes in the same
+    // millisecond — the cross-device merge matches records by id.
+    id: 'LS' + Date.now().toString(36) + '-' + String(season||'all').replace(/[^A-Za-z0-9]/g,'') + '-v' + ver,
+    season, version: ver,
+    name: (season || 'Line sheet') + ' · v' + ver,
+    currency: 'USD', frozenAt: now, updatedAt: now,
+    delivery: cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '',
+    styles: styles.map(s => ({ styleId: s.id, ...slLsRowFrom(s) })),
+  });
+  save();
+  try { logActivity('Line sheet frozen: ' + (season||'all seasons') + ' v' + ver); } catch(e){}
+  agNavSl('linesheets');
+  showToast((season||'Line sheet') + ' v' + ver + ' frozen — ' + styles.length + ' styles locked');
+};
+window.slDeleteLinesheet = function(id){
+  const l = (STATE.slLinesheets||[]).find(x => x.id === id); if (!l) return;
+  if (!confirm('Delete frozen sheet ' + (l.name||id) + '? Orders already created from it are untouched.')) return;
+  STATE.slLinesheets = STATE.slLinesheets.filter(x => x.id !== id);
+  save(); agNavSl('linesheets');
+};
+window.slPrintLinesheetSnap = function(id){
+  const l = (STATE.slLinesheets||[]).find(x => x.id === id); if (!l) return;
+  slLinesheetPrintDoc((l.name||'Line Sheet') + ' — Wholesale',
+    slLinesheetFoot(l.currency, l.delivery, 'Frozen ' + String(l.frozenAt||'').slice(0,10) + ' — prices as sent.'),
+    l.styles||[]);
+};
+// The size/color order grid IS the quote modal: prefill one line per frozen
+// style at the FROZEN wholesale price, buyer types the size runs, and saving
+// creates a normal quote (which already flows to order → invoice → PO demand).
+window.slLinesheetOrderForm = function(id){
+  const snap = (STATE.slLinesheets||[]).find(x => x.id === id); if (!snap) return;
+  slOpenQuoteModal(null);
+  const se = document.getElementById('sl-q-season'); if (se && snap.season) se.value = snap.season;
+  const wrap = document.getElementById('sl-q-items'); if (wrap) wrap.innerHTML = '';
+  const empty = document.getElementById('sl-q-empty'); if (empty) empty.remove();
+  let missing = 0;
+  (snap.styles||[]).forEach(r => {
+    const live = (STATE.styles||[]).find(s => s.id === r.styleId);
+    if (!live || live.status === 'archived'){ missing++; return; }
+    slQuoteAddItem({ styleId: r.styleId, ws: r.wholesale, color: '' });
+  });
+  try { slQuoteRecalc(); } catch(e){}
+  showToast('Order form from ' + (snap.name||'sheet') + ' — type size runs, pick the buyer'
+    + (missing ? ' (' + missing + ' frozen style' + (missing>1?'s':'') + ' no longer in the line, skipped)' : ''));
+};
 
 // ══════════════════════════════════════════════════════════
 //  SALES — QUOTES
