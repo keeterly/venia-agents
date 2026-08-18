@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '235';
+  const BUILD = '236';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13892,10 +13892,10 @@ async function cmdPRFollowUp() {
   if(outEl) outEl.style.display=''; if(label) label.textContent='Cold Pitch Queue…';
   if(body) body.textContent='Analyzing contacts for stale pitches…';
   try {
-    const contacts = dbGet('mediaContacts');
+    const contacts = (STATE.prEditors||[]);
     const r = await callClaude(
       `You are VENIA's PR assistant. Identify which media contacts should be followed up with and draft concise check-in notes.`,
-      `Contacts (${contacts.length}):\n${contacts.slice(0,20).map(c=>`${c.name||''} at ${c.outlet||''} — ${c.tier||'?'} tier`).join('\n')||'No contacts in database yet.'}\n\nIdentify top 3 follow-up priorities and draft a 2-sentence check-in for each.`
+      `Contacts (${contacts.length}):\n${contacts.slice(0,20).map(c=>`${c.name||''} at ${c.publication||''} — ${c.relationship||'new'}${c.beat?' · '+c.beat:''}${c.lastContact?' · last touch '+c.lastContact:''}`).join('\n')||'No contacts in database yet.'}\n\nIdentify top 3 follow-up priorities and draft a 2-sentence check-in for each.`
     );
     if(body) body.textContent=r; if(label) label.textContent='Follow-up Queue';
   } catch(e) { if(body) body.textContent='Error: '+e.message; }
@@ -14506,43 +14506,53 @@ function setOpenAddContact() {
   const f = document.getElementById('set-add-contact-form');
   if (f) f.style.display = f.style.display==='none'?'':'none';
 }
+// Media contacts now have ONE home: STATE.prEditors (PR → Editors & Stylists).
+// This Settings table reads that store; the old dbGet('mediaContacts') list was
+// folded in by prMergeMediaContacts() on boot.
 function setRenderContacts() {
   const el = document.getElementById('set-contacts-table');
   if (!el) return;
-  let contacts = dbGet('mediaContacts');
-  const tier = document.getElementById('set-mc-tier')?.value||'all';
+  let contacts = (STATE.prEditors||[]);
   const q = (document.getElementById('set-mc-search')?.value||'').toLowerCase();
-  if (tier!=='all') contacts = contacts.filter(c=>c.tier===tier);
-  if (q) contacts = contacts.filter(c=>(c.name+c.outlet+c.email).toLowerCase().includes(q));
-  if (!contacts.length) { el.innerHTML='<div style="font-size:10px;color:var(--muted);padding:12px 0">No contacts yet — add your press list above.</div>'; return; }
-  el.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:11px">
-    <thead><tr style="border-bottom:2px solid var(--ink)">${['Outlet','Contact','Email','Role','Tier','Cat'].map(h=>`<th style="text-align:left;padding:8px;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">${h}</th>`).join('')}<th></th></tr></thead>
+  if (q) contacts = contacts.filter(c=>((c.name||'')+(c.publication||'')+(c.email||'')).toLowerCase().includes(q));
+  if (!contacts.length) { el.innerHTML='<div style="font-size:10px;color:var(--muted);padding:12px 0">No contacts yet — add your press list above. Contacts live in PR → Editors &amp; Stylists.</div>'; return; }
+  el.innerHTML=`<div style="font-size:9px;color:var(--muted);padding:4px 0 8px">One list, one truth — these are PR → Editors &amp; Stylists. Edits there show here and vice versa.</div>
+  <table style="width:100%;border-collapse:collapse;font-size:11px">
+    <thead><tr style="border-bottom:2px solid var(--ink)">${['Outlet','Contact','Email','Role','Beat','Rel.'].map(h=>`<th style="text-align:left;padding:8px;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">${h}</th>`).join('')}<th></th></tr></thead>
     <tbody>${contacts.map(c=>`<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:8px;font-weight:700">${c.outlet||'—'}</td>
-      <td style="padding:8px">${c.name||'—'}</td>
-      <td style="padding:8px;color:var(--muted)">${c.email||'—'}</td>
-      <td style="padding:8px;color:var(--muted)">${c.role||'—'}</td>
-      <td style="padding:8px"><span style="font-size:9px;font-weight:700;color:var(--ink)">${c.tier||'—'}</span></td>
-      <td style="padding:8px;color:var(--muted)">${c.cat||'—'}</td>
-      <td style="padding:8px"><button style="font-size:9px;padding:2px 6px;border:1px solid var(--border);cursor:pointer;background:none" onclick="dbDelete('mediaContacts','${c.id}');setRenderContacts()">✕</button></td>
+      <td style="padding:8px;font-weight:700">${slEsc(c.publication||'—')}</td>
+      <td style="padding:8px">${slEsc(c.name||'—')}</td>
+      <td style="padding:8px;color:var(--muted)">${slEsc(c.email||'—')}</td>
+      <td style="padding:8px;color:var(--muted)">${slEsc(c.role||'—')}</td>
+      <td style="padding:8px;color:var(--muted)">${slEsc(c.beat||'—')}</td>
+      <td style="padding:8px"><span style="font-size:9px;font-weight:700;color:var(--ink);text-transform:capitalize">${slEsc(c.relationship||'new')}</span></td>
+      <td style="padding:8px"><button style="font-size:9px;padding:2px 6px;border:1px solid var(--border);cursor:pointer;background:none;color:var(--ink)" onclick="prOpenEditorModal('${c.id}')">Edit</button></td>
     </tr>`).join('')}</tbody></table>`;
 }
 function setSaveContact() {
   const outlet = document.getElementById('mc-outlet')?.value.trim();
   if (!outlet) { toast('Outlet name required'); return; }
-  dbInsert('mediaContacts',{
-    outlet, name:document.getElementById('mc-name')?.value.trim()||'',
-    email:document.getElementById('mc-email')?.value.trim()||'',
-    role:document.getElementById('mc-role')?.value.trim()||'',
-    tier:document.getElementById('mc-tier-sel')?.value||'B',
-    cat:document.getElementById('mc-cat')?.value||'fashion',
-    tone:document.getElementById('mc-tone')?.value.trim()||'',
-    response:document.getElementById('mc-response')?.value.trim()||'',
-    notes:document.getElementById('mc-notes')?.value.trim()||'',
+  if (!STATE.prEditors) STATE.prEditors = [];
+  const tier = document.getElementById('mc-tier-sel')?.value||'B';
+  const tone = document.getElementById('mc-tone')?.value.trim()||'';
+  const response = document.getElementById('mc-response')?.value.trim()||'';
+  const extraNotes = document.getElementById('mc-notes')?.value.trim()||'';
+  STATE.prEditors.push({
+    id: 'ED' + Date.now(),
+    name: document.getElementById('mc-name')?.value.trim() || outlet,
+    role: document.getElementById('mc-role')?.value.trim()||'',
+    publication: outlet,
+    email: document.getElementById('mc-email')?.value.trim()||'',
+    instagram: '', type: 'editor',
+    relationship: tier === 'A' ? 'warm' : 'new',
+    beat: document.getElementById('mc-cat')?.value||'fashion',
+    notes: ['Tier ' + tier, tone && 'Tone: ' + tone, response && 'Response: ' + response, extraNotes].filter(Boolean).join(' · '),
+    lastContact: '', createdAt: new Date().toISOString(),
   });
+  save();
   ['mc-outlet','mc-name','mc-email','mc-role','mc-tone','mc-response','mc-notes'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   document.getElementById('set-add-contact-form').style.display='none';
-  setRenderContacts(); toast('Contact saved');
+  setRenderContacts(); toast('Contact saved to PR → Editors & Stylists');
 }
 function setUpdateDataSummary() {
   const el = document.getElementById('set-data-summary');
@@ -14551,7 +14561,7 @@ function setUpdateDataSummary() {
   const summary = [
     ['Leads', (db.leads||[]).length],
     ['PR Hits', (db.hits||[]).length],
-    ['Media Contacts', (db.mediaContacts||[]).length],
+    ['Media Contacts', (window.STATE?.prEditors||[]).length],
     ['Watchlist', (db.watchlist||[]).length],
     ['Stylist Pulls', (db.stylistPulls||[]).length],
     ['OE Drafts', JSON.parse(localStorage.getItem('VENIA_OE_DRAFTS')||'[]').length],
@@ -14768,37 +14778,98 @@ Package (all sections, copy-paste ready):
 4. AUDIENCE EMAIL — under 150 words. Subject line in caps. Lead with ${c.n}. Include one specific product detail. Close with link to veniacollection.com.`;
 }
 
+// ── CELEBRITY QUEUE (Backbone D2) — status derived from the coverage log ────
+// The static VENIA_CELEBS list seeds tiers and context, but documentation
+// status is DERIVED from real records: logged coverage documents a placement,
+// a pitch with that name means the press push is in motion. Names that appear
+// in the coverage log but aren't on the target list join the queue on their own.
+function prCelebNorm(n){ return String(n||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+function prCelebLive(name){
+  const k = prCelebNorm(name);
+  if (!k) return { covN:0, lastCov:'', pitched:false };
+  const covs = (STATE.prCoverage||[]).filter(c => prCelebNorm(c.celebRef) === k)
+    .sort((a,b) => String(b.publishDate||b.createdAt||'').localeCompare(String(a.publishDate||a.createdAt||'')));
+  const pitched = (STATE.prPitches||[]).some(p => prCelebNorm(p.celebRef) === k);
+  return { covN: covs.length, lastCov: covs[0] ? String(covs[0].publishDate||covs[0].createdAt||'').slice(0,10) : '', pitched };
+}
+function prCelebStatusOf(c, live){
+  if (live && live.covN) return 'documented';
+  if (live && live.pitched) return 'partial';
+  return (c && c.s) || 'partial';
+}
+// Pitch-ready moments: a documented placement with no pitch riding on it yet —
+// the press push the coverage has already earned.
+function prCelebQueue(){
+  const out = [];
+  const listed = new Set(VENIA_CELEBS.map(c => prCelebNorm(c.n)));
+  VENIA_CELEBS.forEach(c => {
+    const live = prCelebLive(c.n);
+    if (live.covN && !live.pitched) out.push({ name:c.n, outlets:c.outlets||'', live, listed:true });
+  });
+  const seen = new Set();
+  (STATE.prCoverage||[]).forEach(cov => {
+    const k = prCelebNorm(cov.celebRef);
+    if (!k || listed.has(k) || seen.has(k)) return;
+    seen.add(k);
+    const live = prCelebLive(cov.celebRef);
+    if (!live.pitched) out.push({ name: String(cov.celebRef).trim(), outlets: cov.outlet||'', live, listed:false });
+  });
+  out.sort((a,b) => String(b.live.lastCov||'').localeCompare(String(a.live.lastCov||'')));
+  return out;
+}
+window.prPitchCeleb = function(name, outlets){
+  const firstOutlet = String(outlets||'').split(',')[0].trim();
+  openPitchFromCeleb(name, firstOutlet, '');
+};
 function agBuildCelebsSection() {
   const tiers = [1,2,3];
   const tierLabels = {1:'Tier 1 — Global Scale', 2:'Tier 2 — Major Reach', 3:'Tier 3 — Targeted Impact'};
-  const tierDesc   = {1:'Start here. Largest reach, highest leverage, none documented.',
+  const tierDesc   = {1:'Start here. Largest reach, highest leverage.',
                       2:'Strong press upside. Most in-progress.',
                       3:'Niche but high-alignment. Good for credibility-building press.'};
 
-  const counts = VENIA_CELEBS.reduce((a,c)=>{a[c.tier]=(a[c.tier]||0)+1;return a},{});
-  const undoc  = VENIA_CELEBS.filter(c=>c.s==='undocumented').length;
-  const partial= VENIA_CELEBS.filter(c=>c.s==='partial').length;
-  const done   = VENIA_CELEBS.filter(c=>c.s==='documented').length;
+  const liveMap = new Map(VENIA_CELEBS.map(c => [c.n, prCelebLive(c.n)]));
+  const statusOf = (c) => prCelebStatusOf(c, liveMap.get(c.n));
+  const undoc  = VENIA_CELEBS.filter(c => statusOf(c)==='undocumented').length;
+  const partial= VENIA_CELEBS.filter(c => statusOf(c)==='partial').length;
+  const done   = VENIA_CELEBS.filter(c => statusOf(c)==='documented').length;
+  const queue  = prCelebQueue();
 
   let html = `<div class="ag-stats">
-    <div class="ag-stat"><div class="ag-stat-l">Total placements</div><div class="ag-stat-v">${VENIA_CELEBS.length}</div><div class="ag-stat-s">confirmed clients</div></div>
-    <div class="ag-stat"><div class="ag-stat-l">Undocumented</div><div class="ag-stat-v" style="color:var(--red)">${undoc}</div><div class="ag-stat-s">no press release</div></div>
-    <div class="ag-stat"><div class="ag-stat-l">In progress</div><div class="ag-stat-v" style="color:var(--amber)">${partial}</div><div class="ag-stat-s">partial coverage</div></div>
-    <div class="ag-stat"><div class="ag-stat-l">Documented</div><div class="ag-stat-v" style="color:var(--green)">${done}</div><div class="ag-stat-s">full press package</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Target artists</div><div class="ag-stat-v">${VENIA_CELEBS.length}</div><div class="ag-stat-s">placement targets</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Undocumented</div><div class="ag-stat-v" style="color:var(--red)">${undoc}</div><div class="ag-stat-s">no coverage, no pitch</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">In progress</div><div class="ag-stat-v" style="color:var(--amber)">${partial}</div><div class="ag-stat-s">pitched or partial</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Documented</div><div class="ag-stat-v" style="color:var(--green)">${done}</div><div class="ag-stat-s">coverage logged</div></div>
   </div>`;
+
+  if (queue.length) {
+    html += `<div class="ag-sec-head"><h2 class="ag-sec-title">Pitch-ready moments</h2><div class="ag-sec-actions"><span style="font-size:9px;color:var(--muted)">placements with no pitch riding on them yet</span></div></div>
+    <div class="ag-list">${queue.slice(0,8).map(q => `
+      <div class="ag-list-row" style="grid-template-columns:1fr auto">
+        <div><div class="ag-lr-name">${slEsc(q.name)}${q.listed ? '' : ' <span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold)">from coverage log</span>'}</div>
+          <div class="ag-lr-sub">${q.live.covN} placement${q.live.covN>1?'s':''} logged${q.live.lastCov ? ' · latest ' + slEsc(q.live.lastCov) : ''}</div></div>
+        <div style="display:flex;align-items:center;justify-content:flex-end">
+          <button class="ag-btn ag-btn-primary ag-btn-sm" data-n="${slEsc(q.name)}" data-o="${slEsc(q.outlets)}" onclick="prPitchCeleb(this.dataset.n,this.dataset.o)">Pitch this</button>
+        </div>
+      </div>`).join('')}</div>`;
+  }
 
   for (const tier of tiers) {
     const celebs = VENIA_CELEBS.filter(c=>c.tier===tier);
     html += `<div class="ag-celeb-section-hd">${tierLabels[tier]} <span class="ag-celeb-section-ct">${tierDesc[tier]}</span></div>`;
     html += '<div class="ag-celeb-grid">';
     for (const c of celebs) {
-      const sCls = c.s==='undocumented'?'ag-celeb-s-undoc':c.s==='partial'?'ag-celeb-s-partial':'ag-celeb-s-done';
-      const sLbl = c.s==='undocumented'?'Undocumented':c.s==='partial'?'Partial':'Documented';
+      const st = statusOf(c);
+      const lv = liveMap.get(c.n) || { covN:0, lastCov:'', pitched:false };
+      const sCls = st==='undocumented'?'ag-celeb-s-undoc':st==='partial'?'ag-celeb-s-partial':'ag-celeb-s-done';
+      const sLbl = st==='undocumented'?'Undocumented':st==='partial'?'Partial':'Documented';
       html += `<div class="ag-celeb-card" ${agAttr('pr', prCelebPrompt(c))}>
         <div class="ag-celeb-tier-lbl">TIER ${c.tier}</div>
         <div class="ag-celeb-name">${c.n}</div>
         <div class="ag-celeb-genre">${c.g}</div>
         <span class="ag-celeb-s ${sCls}">${sLbl}</span>
+        ${lv.covN ? `<div style="font-size:9px;color:var(--green);margin-top:4px">${lv.covN} placement${lv.covN>1?'s':''} logged${lv.lastCov?' · '+lv.lastCov:''}</div>` : ''}
+        <div style="margin-top:6px"><button class="ag-btn ag-btn-ghost ag-btn-sm" data-n="${slEsc(c.n)}" data-o="${slEsc(c.outlets||'')}" onclick="event.stopPropagation();prPitchCeleb(this.dataset.n,this.dataset.o)">${lv.pitched?'Pitch again':'Pitch'}</button></div>
       </div>`;
     }
     html += '</div>';
@@ -16976,7 +17047,9 @@ function prRefreshOverview() {
   // Celebrity counts — derive from the data so they can't drift (was hard-coded 38/27)
   if (typeof VENIA_CELEBS !== 'undefined') {
     set('pr-celeb-total', VENIA_CELEBS.length);
-    set('pr-celeb-undoc', VENIA_CELEBS.filter(c => c.s === 'undocumented').length);
+    // Live status: logged coverage/pitches upgrade a target automatically.
+    set('pr-celeb-undoc', VENIA_CELEBS.filter(c => (typeof prCelebStatusOf === 'function'
+      ? prCelebStatusOf(c, prCelebLive(c.n)) : c.s) === 'undocumented').length);
   }
 }
 
@@ -18645,6 +18718,70 @@ function slDedupeBuyers() {
 }
 setTimeout(function(){ try { slDedupeBuyers(); } catch (e) {} }, 3500);
 setTimeout(function(){ try { slDedupeBuyers(); } catch (e) {} }, 21000);
+
+// ── One press-contact truth (Backbone D2) ───────────────────────────────────
+// The Settings "media contacts" list and PR's Editors & Stylists CRM were two
+// disconnected address books. Fold the Settings list into prEditors (synced,
+// agent-visible) — match by email first, else by name+outlet; a matched record
+// only gains blank fields, never loses anything. Strictly additive: runs until
+// the old store is empty, then never again.
+function prMergeMediaContacts(){
+  const old = dbGet('mediaContacts');
+  if (!old || !old.length) return 0;
+  if (!STATE.prEditors) STATE.prEditors = [];
+  const norm = (s) => String(s||'').trim().toLowerCase();
+  let added = 0, enriched = 0;
+  old.forEach((c, i) => {
+    const em = norm(c.email);
+    const match = STATE.prEditors.find(e => (em && norm(e.email) === em)
+      || (norm(e.name) === norm(c.name || c.outlet) && norm(e.publication) === norm(c.outlet)));
+    const noteBits = [c.tier ? 'Tier ' + c.tier : '', c.tone ? 'Tone: ' + c.tone : '',
+      c.response ? 'Response: ' + c.response : '', c.notes || ''].filter(Boolean).join(' · ');
+    if (match) {
+      if (!match.email && c.email) match.email = c.email;
+      if (!match.role && c.role) match.role = c.role;
+      if (!match.beat && c.cat) match.beat = c.cat;
+      if (noteBits && (match.notes||'').indexOf(noteBits) < 0) match.notes = match.notes ? match.notes + '\n' + noteBits : noteBits;
+      match.updatedAt = new Date().toISOString();
+      enriched++;
+    } else {
+      STATE.prEditors.push({
+        id: 'ED' + Date.now() + '-mc' + i,
+        name: c.name || c.outlet || 'Contact', role: c.role || '',
+        publication: c.outlet || '', email: c.email || '', instagram: '',
+        type: 'editor', relationship: c.tier === 'A' ? 'warm' : 'new',
+        beat: c.cat || '', notes: noteBits, lastContact: '',
+        createdAt: c.createdAt || new Date().toISOString(), mergedFrom: 'mediaContacts',
+      });
+      added++;
+    }
+  });
+  dbSet('mediaContacts', []);
+  save();
+  try { logActivity('Media contacts merged into PR contacts: ' + added + ' added, ' + enriched + ' enriched'); } catch(e){}
+  return added + enriched;
+}
+// If BOTH phones migrated their own copy before syncing, the cross-device
+// record-union can briefly hold twins — drop the later-created of any two
+// merge-tagged records with the same name+outlet+email.
+function prDedupeMergedEditors(){
+  const norm = (s) => String(s||'').trim().toLowerCase();
+  const eds = STATE.prEditors || [];
+  const seen = {}; const rm = new Set();
+  eds.forEach(e => {
+    const k = norm(e.name) + '|' + norm(e.publication) + '|' + norm(e.email);
+    const prev = seen[k];
+    if (prev && prev.mergedFrom && e.mergedFrom) {
+      const drop = String(prev.createdAt||'') <= String(e.createdAt||'') ? e : prev;
+      rm.add(drop.id);
+      if (drop === prev) seen[k] = e;
+    } else if (!prev) seen[k] = e;
+  });
+  if (rm.size) { STATE.prEditors = eds.filter(e => !rm.has(e.id)); save(); }
+  return rm.size;
+}
+setTimeout(function(){ try { prMergeMediaContacts(); prDedupeMergedEditors(); } catch (e) {} }, 4000);
+setTimeout(function(){ try { prMergeMediaContacts(); prDedupeMergedEditors(); } catch (e) {} }, 22000);
 
 function slExportBuyers() {
   if (!STATE.slBuyers || !STATE.slBuyers.length) { showToast('No buyers to export'); return; }
