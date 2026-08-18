@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '232';
+  const BUILD = '233';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8189,6 +8189,122 @@ function poOwed(po){
   return (po.depositPaidAt ? 0 : dep) + (po.balancePaidAt ? 0 : bal);
 }
 
+// ── DEMAND PLAN — forecast-committed demand (the spine's C2) ────────────────
+// Fashion production is forecast-driven, not order-driven: factory quantities
+// are committed BEFORE the order book closes, because the factory lead time
+// forces it. The forecast lives per style (s.forecastUnits — merges safely as
+// part of the style record); the plan reconciles it against reality as orders
+// land: sold (accepted quotes), units already on POs, and units in stock.
+// Gap to commit = forecast − on-PO − stock: what you still owe the factory.
+let PO_DEMAND_SEASON = null;
+function poUnitsForStyle(styleId){
+  let n = 0;
+  (STATE.pos||[]).forEach(po => {
+    if (po.status === 'cancelled') return;
+    (po.items||[]).forEach(it => { if (it.styleId === styleId) n += (it.qty||0); });
+  });
+  return n;
+}
+function poSoldUnitsForStyle(styleId, season){
+  let n = 0;
+  (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && (!season || String(q.season||'').trim() === season))
+    .forEach(q => (q.items||[]).forEach(it => {
+      if (it.styleId !== styleId) return;
+      const szSum = Object.values(it.sizes||{}).reduce((a,b) => a + (parseInt(b,10)||0), 0);
+      n += szSum || (it.qty||0);
+    }));
+  return n;
+}
+function poDemandRows(season){
+  return (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season)
+    .map(s => {
+      const f = parseInt(s.forecastUnits,10)||0;
+      const onPo = poUnitsForStyle(s.id), stock = s.stock||0;
+      return { s, f, sold: poSoldUnitsForStyle(s.id, season), onPo, stock, gap: Math.max(0, f - onPo - stock) };
+    });
+}
+window.poSetForecast = function(id, v){
+  const s = STATE.styles.find(x => x.id === id); if (!s) return;
+  const n = parseInt(v,10)||0;
+  if (n) s.forecastUnits = n; else delete s.forecastUnits;
+  save(); renderProduction();
+  try { buildTodayFocus(); } catch(e){}
+};
+// Even spread across the style's size run, remainder to the middle sizes —
+// an honest starting curve the founder adjusts, not fake precision.
+function poSpreadSizes(sizes, total){
+  const out = {};
+  if (!sizes || !sizes.length){ out['M'] = total; return out; }
+  const base = Math.floor(total / sizes.length);
+  let rem = total - base * sizes.length;
+  sizes.forEach(sz => { if (base > 0) out[sz] = base; });
+  sizes.map((sz,i) => ({ sz, d: Math.abs(i - (sizes.length-1)/2) }))
+    .sort((a,b) => a.d - b.d)
+    .forEach(o => { if (rem > 0){ out[o.sz] = (out[o.sz]||0) + 1; rem--; } });
+  return out;
+}
+window.poFromGaps = function(season){
+  const gaps = poDemandRows(season).filter(r => r.f > 0 && r.gap > 0);
+  if (!gaps.length){ showToast('No forecast gaps — every ' + season + ' forecast unit is on a PO or in stock'); return; }
+  poOpenModal(null);
+  const se = document.getElementById('po-season'); if (se) se.value = season;
+  const wrap = document.getElementById('po-items'); if (wrap) wrap.innerHTML = '';
+  gaps.forEach(r => poAddItem({
+    styleId: r.s.id, name: (r.s.styleId ? r.s.styleId + ' ' : '') + (r.s.name||''),
+    sizes: poSpreadSizes(slQuoteSizesFor(r.s), r.gap), cost: landedCost(r.s)||0,
+  }));
+  showToast(gaps.length + ' gap line' + (gaps.length>1?'s':'') + ' pulled from the forecast — sizes spread evenly, adjust the curve');
+};
+function poDemandHTML(season, seasons){
+  const rows = poDemandRows(season);
+  const selOpts = (seasons && seasons.length ? seasons : [season])
+    .map(x => `<option value="${slEsc(x)}" ${x===season?'selected':''}>${slEsc(x)}</option>`).join('');
+  const cal = (STATE.seasonCal||{})[season];
+  let commitLine;
+  if (cal && cal.factoryCommit){
+    const t0 = new Date(); const mid = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate());
+    const days = Math.round((new Date(cal.factoryCommit + 'T00:00:00') - mid) / 86400000);
+    commitLine = days >= 0
+      ? `Factory commit ${cal.factoryCommit} (${days===0?'today':'in '+days+'d'})`
+      : `Factory commit passed ${cal.factoryCommit}`;
+  } else {
+    commitLine = 'No factory-commit date yet — set the season calendar on the Timeline so the gap deadline is real';
+  }
+  let totF=0, totSold=0, totPo=0, totStock=0, totGap=0, anyGap=false;
+  const trs = rows.map(r => {
+    totF+=r.f; totSold+=r.sold; totPo+=r.onPo; totStock+=r.stock; totGap+=r.gap;
+    if (r.f>0 && r.gap>0) anyGap = true;
+    const cover = r.f>0 ? Math.round(r.sold/r.f*100) : null;
+    const over = r.f>0 && r.sold>r.f;
+    return `<tr>
+      <td><div class="t-name">${r.s.name}</div><div class="t-id">${r.s.styleId}</div></td>
+      <td><input type="number" min="0" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" value="${r.f||''}" placeholder="0" onchange="poSetForecast('${r.s.id}',this.value)" title="Units you're committing to make"></td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px;color:${over?'var(--amber)':'var(--ink)'}">${r.sold}${cover!=null?` <span style="color:${over?'var(--amber)':'var(--muted)'};font-size:9px">(${cover}%)</span>`:''}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px">${r.onPo}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${r.stock}</td>
+      <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${r.f>0 ? (r.gap>0?'var(--red)':'var(--green)') : 'var(--muted)'}">${r.f>0 ? (r.gap>0?r.gap:'✓') : '—'}</td>
+    </tr>`;
+  }).join('');
+  return `<div style="margin-bottom:22px">
+    <div class="sec-head"><div class="sec-title">Demand Plan — ${slEsc(season)}</div>
+      <div class="sec-actions" style="display:flex;gap:6px;align-items:center">
+        <select onchange="PO_DEMAND_SEASON=this.value;renderProduction()" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${selOpts}</select>
+        ${anyGap ? `<button class="btn btn-gold btn-sm" onclick="poFromGaps('${slEsc(season)}')">Build PO from gaps</button>` : ''}
+      </div></div>
+    <div style="font-size:9.5px;color:var(--muted);margin:2px 0 10px;line-height:1.5">${commitLine} · Forecast = what you commit to make pre-season; Sold reconciles against it as orders land. Gap = forecast − on PO − stock.</div>
+    ${rows.length ? `<div class="tbl-wrap"><table><thead><tr>
+      <th>Style</th><th>Forecast</th><th>Sold</th><th>On PO</th><th>Stock</th><th>Gap to commit</th>
+    </tr></thead><tbody>${trs}
+      ${rows.length>1 ? `<tr style="border-top:2px solid var(--border-mid)"><td style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase">Total</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totF}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totSold}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totPo}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:var(--muted)">${totStock}</td>
+        <td style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${totGap>0?'var(--red)':'var(--green)'}">${totGap>0?totGap:'✓'}</td></tr>` : ''}
+    </tbody></table></div>` : `<div style="padding:16px;border:1px solid var(--border);font-size:11px;color:var(--muted)">No styles in ${slEsc(season)} yet.</div>`}
+  </div>`;
+}
+
 function renderProduction(){
   const el = document.getElementById('production-content');
   if (!el) return;
@@ -8220,6 +8336,12 @@ function renderProduction(){
       <div class="stat-card"><div class="stat-label">Owed to factories</div><div class="stat-val" style="color:${owed>0?'var(--amber)':'var(--ink)'}">$${Math.round(owed).toLocaleString()}</div><div class="stat-sub">unpaid deposits + balances</div></div>
       <div class="stat-card"><div class="stat-label">Paid YTD</div><div class="stat-val">$${Math.round(paidYtd).toLocaleString()}</div><div class="stat-sub">production cash out</div></div>
     </div>
+    ${(function(){
+      const seasons = (typeof rpSeasons === 'function') ? rpSeasons() : [];
+      if (!seasons.length) return '';
+      if (!PO_DEMAND_SEASON || !seasons.includes(PO_DEMAND_SEASON)) PO_DEMAND_SEASON = seasons[0];
+      try { return poDemandHTML(PO_DEMAND_SEASON, seasons); } catch(e){ return ''; }
+    })()}
     <div class="sec-head"><div class="sec-title">Purchase Orders</div>
       <div class="sec-actions"><button class="btn btn-gold btn-sm" onclick="poOpenModal(null)">+ New PO</button></div></div>
     ${pos.length ? `<div class="tbl-wrap"><table><thead><tr>
@@ -13051,7 +13173,20 @@ function plmContext() {
       ].filter(p => p[1]).map(p => p[0] + ' ' + p[1]).join(', ')
     ).join('\n');
   } catch(e){}
-  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}`;
+  // Demand plan: forecast vs coverage, so "are we covered for FW26?" is answerable.
+  let fcLine = '';
+  try {
+    if (typeof poDemandRows === 'function') {
+      const fcSeasons = [...new Set((s.styles||[]).filter(st => st.status !== 'archived' && (parseInt(st.forecastUnits,10)||0) > 0)
+        .map(st => String(st.season||'').trim()).filter(Boolean))];
+      fcLine = fcSeasons.map(sn => {
+        const rows = poDemandRows(sn).filter(r => r.f > 0);
+        const f = rows.reduce((a,r)=>a+r.f,0), sold = rows.reduce((a,r)=>a+r.sold,0), gap = rows.reduce((a,r)=>a+r.gap,0);
+        return `${sn}: forecast ${f}u, sold ${sold}u, gap to factory commit ${gap}u`;
+      }).join('\n');
+    }
+  } catch(e){}
+  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}${fcLine?'\nDemand plan (forecast-committed):\n'+fcLine:''}`;
 }
 
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
@@ -13204,6 +13339,25 @@ function buildTodayFocus() {
         text: `${season}: ${label} ${days === 0 ? 'today' : 'in ' + days + 'd'} (${cal[k]})`,
         act: "cpGoto('plm');goTo('timeline')" });
     });
+  });
+  // 4c. Forecast gaps inside the factory-commit window: units promised to the
+  //     season that aren't on a PO yet. Quiet until 21 days out (no log-time
+  //     interrupts), high inside 7 — after the commit date it stops nagging
+  //     (the decision window is over; the retro owns what happened).
+  Object.entries(STATE.seasonCal||{}).forEach(([season, cal]) => {
+    if (!cal || !cal.factoryCommit || typeof poUnitsForStyle !== 'function') return;
+    const days = Math.round((new Date(cal.factoryCommit + 'T00:00:00') - _scMid) / 86400000);
+    if (days < 0 || days > 21) return;
+    let gapUnits = 0, gapStyles = 0;
+    (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season).forEach(s => {
+      const f = parseInt(s.forecastUnits,10)||0; if (!f) return;
+      const gap = Math.max(0, f - poUnitsForStyle(s.id) - (s.stock||0));
+      if (gap > 0){ gapUnits += gap; gapStyles++; }
+    });
+    if (!gapUnits) return;
+    items.push({ pri: days <= 7 ? 'high' : 'med',
+      text:`${season}: ${gapUnits} forecast units across ${gapStyles} style${gapStyles>1?'s':''} not on a PO — factory commit ${days===0?'today':'in '+days+'d'}`,
+      act:"cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)" });
   });
   // 5. Quotes that went quiet (sent, no movement in 7+ days).
   (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
