@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '225';
+  const BUILD = '226';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4776,26 +4776,34 @@ function _mNewer(a, b) {
 }
 // Merge arrays of {id} records.
 function _mArray(base, local, cloud) {
-  const B = _mById(base).m, L = _mById(local), C = _mById(cloud).m;
+  const B = _mById(base).m, L = _mById(local), C = _mById(cloud);
   const out = [], seen = Object.create(null);
   Object.keys(L.m).forEach(function (id) { seen[id] = 1; });
-  Object.keys(C).forEach(function (id) { seen[id] = 1; });
+  Object.keys(C.m).forEach(function (id) { seen[id] = 1; });
   Object.keys(seen).forEach(function (id) {
-    const inL = id in L.m, inC = id in C, inB = id in B;
+    const inL = id in L.m, inC = id in C.m, inB = id in B;
     if (inL && inC) {
-      if (_mEq(L.m[id], C[id])) out.push(L.m[id]);
-      else if (inB && _mEq(C[id], B[id])) out.push(L.m[id]);      // only local changed
-      else if (inB && _mEq(L.m[id], B[id])) out.push(C[id]);      // only cloud changed
-      else out.push(_mNewer(L.m[id], C[id]));                     // both changed → newest
+      if (_mEq(L.m[id], C.m[id])) out.push(L.m[id]);
+      else if (inB && _mEq(C.m[id], B[id])) out.push(L.m[id]);    // only local changed
+      else if (inB && _mEq(L.m[id], B[id])) out.push(C.m[id]);    // only cloud changed
+      else out.push(_mNewer(L.m[id], C.m[id]));                   // both changed → newest
     } else if (inL && !inC) {
       if (!inB) out.push(L.m[id]);                                // local added (cloud never had it)
       // else: cloud deleted it → drop
     } else if (!inL && inC) {
-      if (!inB) out.push(C[id]);                                  // cloud added
+      if (!inB) out.push(C.m[id]);                                // cloud added
       // else: local deleted it → drop
     }
   });
-  L.noid.forEach(function (r) { out.push(r); });                  // keep pusher's id-less rows
+  // Keep BOTH sides' id-less rows (activity-log entries carry no id). The old
+  // code kept only the pusher's — the other device's entries were silently
+  // dropped on every merge. Union both, deduped by content; these are
+  // append-only log rows, so keeping is always the safe direction.
+  const noidSeen = Object.create(null);
+  L.noid.concat(C.noid).forEach(function (r) {
+    let k; try { k = JSON.stringify(r); } catch (e) { k = String(r); }
+    if (noidSeen[k]) return; noidSeen[k] = 1; out.push(r);
+  });
   return out;
 }
 // Merge plain objects (bom/pom maps keyed by style, prefs) per top-level key.
@@ -4832,15 +4840,39 @@ function mergeSnapshots(base, local, cloud) {
     if (l === undefined && c === undefined) return;
     if (l === undefined) { out[k] = c; return; }
     if (c === undefined) { out[k] = l; return; }
+    // The board canvas is {cards:[{id,...}], panX, panY, zoom}. As a plain
+    // object it merged whole-key: two founders pinning cards concurrently lost
+    // one side's cards entirely. Merge cards record-by-record; view state
+    // (pan/zoom) stays changed-side-wins.
+    if (k === 'board' && l && c && typeof l === 'object' && typeof c === 'object' && !Array.isArray(l) && !Array.isArray(c)) {
+      const merged = _mObject(b || {}, l, c);
+      merged.cards = _mArray((b && Array.isArray(b.cards)) ? b.cards : [], Array.isArray(l.cards) ? l.cards : [], Array.isArray(c.cards) ? c.cards : []);
+      out[k] = merged;
+      return;
+    }
     if (_mRecArray(l) || _mRecArray(c)) out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
     else if ((l && typeof l === 'object' && !Array.isArray(l)) || (c && typeof c === 'object' && !Array.isArray(c))) out[k] = _mObject(b, l, c);
     else out[k] = _mScalar(b, l, c);
   });
-  // Standalone-module localStorage bag: per-key changed-side-wins.
+  // Standalone-module localStorage bag: per-key changed-side-wins — EXCEPT
+  // cost sheets, which are one JSON blob holding EVERY style's sheet. Whole-
+  // blob wins meant two founders editing sheets for DIFFERENT styles lost one
+  // side completely — unacceptable once cost sheets are the money authority.
+  // Parse both sides and merge per style-id via _mObject.
   const bls = base._ls || {}, lls = local._ls || {}, cls = cloud._ls || {}, outls = {};
   (window.EXTRA_LS_KEYS || []).forEach(function (k) {
     const inL = k in lls, inC = k in cls, inB = k in bls;
-    if (inL && inC) outls[k] = _mScalar(bls[k], lls[k], cls[k]);
+    if (inL && inC) {
+      if (k === 'venia-cost-sheets') {
+        try {
+          const bo = inB ? (JSON.parse(bls[k]) || {}) : {};
+          const lo = JSON.parse(lls[k]) || {}, co = JSON.parse(cls[k]) || {};
+          outls[k] = JSON.stringify(_mObject(bo, lo, co));
+          return;
+        } catch (e) { /* unparseable side — fall through to scalar */ }
+      }
+      outls[k] = _mScalar(bls[k], lls[k], cls[k]);
+    }
     else if (inL && !inC) { if (!inB) outls[k] = lls[k]; }
     else if (!inL && inC) { if (!inB) outls[k] = cls[k]; }
   });
