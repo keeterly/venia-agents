@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '228';
+  const BUILD = '229';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7476,8 +7476,23 @@ function saveVendor() {
   data.dutyRate = dutyV==='' ? null : (parseFloat(dutyV)||0);
   if (id) {
     const idx = STATE.vendors.findIndex(x=>x.id===id);
+    const oldName = idx!==-1 ? String(STATE.vendors[idx].name||'').trim() : '';
     if(idx!==-1) STATE.vendors[idx]={...STATE.vendors[idx],...data};
-    toast(name+' updated');
+    // Rename-safe linkage: styles, POs, materials and BOM lines reference the
+    // vendor by NAME — a rename used to silently orphan all of them. Propagate
+    // the new name everywhere the old one (or this vendor's id) points, and
+    // stamp the id so the NEXT rename doesn't even need the name match.
+    if (idx!==-1 && oldName && name && oldName !== name) {
+      let relinked = 0;
+      const touch = (o, field) => { o[field] = name; o.vendorId = id; relinked++; };
+      (STATE.styles||[]).forEach(s => { if (s.vendorId === id || String(s.vendor||'').trim() === oldName) touch(s, 'vendor'); });
+      (typeof poList==='function' ? poList() : []).forEach(p => { if (p.vendorId === id || String(p.vendor||'').trim() === oldName) touch(p, 'vendor'); });
+      (STATE.materials||[]).forEach(m => { if (m.vendorId === id || String(m.supplier||'').trim() === oldName) touch(m, 'supplier'); });
+      Object.keys(STATE.bom||{}).forEach(k => (STATE.bom[k]||[]).forEach(b => { if (b.vendorId === id || String(b.supplier||'').trim() === oldName) touch(b, 'supplier'); }));
+      toast(name+' updated' + (relinked ? ' — ' + relinked + ' linked record' + (relinked>1?'s':'') + ' followed the rename' : ''));
+    } else {
+      toast(name+' updated');
+    }
   } else {
     data.id='VEN'+Date.now();
     STATE.vendors.push(data);
@@ -7487,6 +7502,30 @@ function saveVendor() {
   closeModal('vendor-modal');
   renderVendors();
 }
+
+// One-time (idempotent) vendor linker: stamp vendorId on every style / PO /
+// material / BOM line whose vendor name matches EXACTLY ONE vendor. Ambiguous
+// or unmatched names are left alone (no fuzzy matching — a wrong link would
+// silently reassign POs to the wrong factory). Runs at boot like the other
+// self-healing migrations, so synced legacy rows get caught later too.
+function vendorLinkMigrate(){
+  const byName = Object.create(null);
+  (STATE.vendors||[]).forEach(v => { const k = String(v.name||'').trim().toLowerCase(); if (k) (byName[k] = byName[k] || []).push(v); });
+  let n = 0;
+  const link = (o, field) => {
+    if (!o || o.vendorId) return;
+    const k = String(o[field]||'').trim().toLowerCase(); if (!k) return;
+    const vs = byName[k];
+    if (vs && vs.length === 1) { o.vendorId = vs[0].id; n++; }
+  };
+  (STATE.styles||[]).forEach(s => link(s, 'vendor'));
+  (typeof poList==='function' ? poList() : []).forEach(p => link(p, 'vendor'));
+  (STATE.materials||[]).forEach(m => link(m, 'supplier'));
+  Object.keys(STATE.bom||{}).forEach(k => (STATE.bom[k]||[]).forEach(b => link(b, 'supplier')));
+  if (n) { save(); try { logActivity('Vendors: linked ' + n + ' record(s) by id (rename-safe)'); } catch (e) {} }
+  return n;
+}
+window.vendorLinkMigrate = vendorLinkMigrate;
 
 // ═══════════════════════════════════════════════
 //  UTILS
@@ -9908,7 +9947,6 @@ function generatePO(vendorId) {
   const qty = parseInt(qtyStr) || defQty;
 
   const now = new Date();
-  const poNumber = `PO-${now.getFullYear()}-${String(STATE.styles.filter(s=>s.vendor===vendor.name).length).padStart(3,'0')}`;
   const issueDate = now.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
 
   // Sourcing economics
@@ -9929,6 +9967,31 @@ function generatePO(vendorId) {
   const totalFreight = lineRows.reduce((a,r)=>a+r.freight,0);
   const totalLanded = lineRows.reduce((a,r)=>a+r.landed,0);
   const moqWarn = moqNum && totalUnits < moqNum;
+
+  // ONE PO system: this used to be print-only — the document existed for the
+  // length of the print dialog and never appeared in Production, so it had no
+  // payment tracking, no receiving, and had to be re-typed by hand. Now it
+  // creates a real Production PO draft first (opt-out preserved for a
+  // no-strings preview) and the PRINTED number IS the tracked record's id.
+  let poRec = null;
+  if (confirm('Create this as a tracked PO in Production (payments, receiving, Today reminders), then print?\n\nCancel = print a preview only, nothing saved.')) {
+    poRec = {
+      id: 'PO-' + Date.now().toString(36).toUpperCase(),
+      vendor: vendor.name, vendorId: vendor.id,
+      season: (styles[0] && styles[0].season) || '',
+      currency: cur, depositPct: 30, exFactory: '', status: 'draft',
+      notes: 'Issued from Vendors · ' + issueDate,
+      items: styles.map(s => ({ styleId: s.id, name: s.name, color: '', sizes: {}, qty, cost: s.cogs || 0 })),
+      units: totalUnits, total: Math.round(totalCogs * 100) / 100,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    poList().unshift(poRec);
+    save();
+    try { logActivity('Production PO ' + poRec.id + ' issued from Vendors — ' + vendor.name + ' · ' + totalUnits + ' units'); } catch (e) {}
+    try { renderProduction(); } catch (e) {}
+    showToast('PO ' + poRec.id + ' created in Production — draft', 'success');
+  }
+  const poNumber = poRec ? poRec.id : `PO-${now.getFullYear()}-PREVIEW`;
 
   // Build PO HTML for print
   const poHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -18088,8 +18151,8 @@ function slNormalizeCountries(){
   return n;
 }
 window.slNormalizeCountries = slNormalizeCountries;
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} }, 3000);
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} }, 20000);   // again after initial sync settles
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} }, 3000);
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} }, 20000);   // again after initial sync settles
 
 // One-time cleanup for duplicates already piled up before the add-buyers dedup
 // guard shipped. CONSERVATIVE: only collapses UNTOUCHED copies of a same-named
