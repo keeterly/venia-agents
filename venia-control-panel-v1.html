@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '227';
+  const BUILD = '228';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4698,7 +4698,7 @@ const SYNC_KEYS = [
   // Marketing
   'mkCaptions', 'mkCalendar', 'mkPrefs',
   // Brand
-  'brTone', 'brPrefs',
+  'brTone', 'brPrefs', 'brandDocs',
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
@@ -5097,7 +5097,10 @@ function renderDashboard() {
   const inDev = active.filter(s => ['concept','design','sms','development'].includes(s.status));
   const prods = active.filter(s => s.status === 'production');
   const samp = active.filter(s => s.status === 'sms');
-  const margins = live.filter(s => s.retail && s.cogs).map(s => ((s.retail-s.cogs)/s.retail)*100);
+  // ONE margin formula on this screen: use landedCost() (cost-sheet authority,
+  // falls back to cogs+extras) — the raw retail/cogs version disagreed with the
+  // Range Plan block right below it for any style with a cost sheet.
+  const margins = live.filter(s => s.retail && (typeof landedCost === 'function' ? landedCost(s) : s.cogs)).map(s => { const lc = (typeof landedCost === 'function') ? landedCost(s) : s.cogs; return ((s.retail - lc) / s.retail) * 100; });
   const avgM = margins.length ? (margins.reduce((a,b)=>a+b,0)/margins.length).toFixed(0) : null;
   const totalRetail = live.filter(s=>s.retail).reduce((sum,s)=>sum+s.retail,0);
   const seasons = [...new Set(active.map(s=>s.season))];
@@ -12856,11 +12859,8 @@ function cmdInit() {
   revRender();
   // Update home tiles — "Active leads" = pipeline stores still in play.
   const leadsN = (STATE.slBuyers||[]).filter(b => ['new','warm','quoted'].includes(b.stage||'new')).length;
-  const hits  = dbGet('hits');
   const el_l = document.getElementById('cpl-stat-leads');
-  const el_h = document.getElementById('cpl-stat-hits');
   if (el_l) el_l.textContent = leadsN || '0';
-  if (el_h) el_h.textContent = hits.length  || '0';
 }
 window.cplRefreshToday = buildTodayFocus;
 
@@ -12879,11 +12879,8 @@ function cpRenderToday(){
   } catch(e){}
   try {
     const leadsN = (STATE.slBuyers||[]).filter(b => ['new','warm','quoted'].includes(b.stage||'new')).length;
-    const hits = dbGet('hits');
     const el_l = document.getElementById('cpl-stat-leads');
-    const el_h = document.getElementById('cpl-stat-hits');
     if (el_l) el_l.textContent = leadsN || '0';
-    if (el_h) el_h.textContent = hits.length  || '0';
     cmdLoadShopify();  // decides live-vs-demo itself, based on the server proxy
   } catch(e){}
 }
@@ -13392,7 +13389,19 @@ async function cmdEventLeads() {
 
 // ── DAILY BRIEFING ───────────────────────────────────────────────────
 async function cmdRunBriefing() {
-  const el = document.getElementById('cmd-briefing-out');
+  // The AI summary gets its OWN element — it used to overwrite #cmd-briefing-out
+  // and clobber the rule-based digest that buildTodayFocus had just written
+  // there (two functions fighting over one div = the "three Todays" bug).
+  let el = document.getElementById('cmd-briefing-ai');
+  if (!el) {
+    const out = document.getElementById('cmd-briefing-out');
+    if (out && out.parentNode) {
+      el = document.createElement('div');
+      el.id = 'cmd-briefing-ai';
+      el.style.cssText = 'font-size:12px;line-height:1.7;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--border)';
+      out.parentNode.insertBefore(el, out);
+    }
+  }
   if (el) el.innerHTML = '<span style="color:var(--muted)">Generating briefing…</span>';
   try {
     const buyers = STATE.slBuyers || [];
@@ -13503,8 +13512,6 @@ function cmdLogHit() {
   cmdRenderHits();
   const kpiEl = document.getElementById('kpi-prhits');
   if (kpiEl) kpiEl.textContent = dbGet('hits').length;
-  const tileEl = document.getElementById('cpl-stat-hits');
-  if (tileEl) tileEl.textContent = dbGet('hits').length;
   toast('PR hit logged');
 }
 async function cmdLogHitAndPitch() {
@@ -15392,7 +15399,7 @@ async function agentSend(key, message) {
     think.__done && think.__done();
     const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
-    if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); } }
+    if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); try { appendAgentNote(body, '⚠ That change did NOT save — ' + (e && e.message || 'something went wrong') + '. Please try again.'); } catch(_){} } }
     agentEndWork(workKey, !!action);
   } catch (err) {
     think.__done && think.__done();
@@ -15466,7 +15473,19 @@ function agentActionSpec(key) {
 function agentAllActionSpec() {
   return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm, Press coverage).'
     + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
-    + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec();
+    + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec()
+    + agentBrandDocSpec();
+}
+
+// Brand/creative output used to evaporate into chat history — guidelines, shot
+// lists, briefs the Brand agent wrote had nowhere to live. save_brand_doc
+// persists them into the synced Brand Library (STATE.brandDocs).
+function agentBrandDocSpec() {
+  return '\n\nACTION — save_brand_doc: persist brand/creative output into the Brand Library so it outlives this chat. Use whenever you produce brand content worth keeping — guidelines, a manifesto draft, a shot list, a mood-board or campaign brief, a template — or the user says save/keep it.\n'
+    + '```venia:action\n'
+    + '{"type":"save_brand_doc","title":"Short document name","kind":"guideline","body":"The full document text — markdown formatting is fine."}\n'
+    + '```\n'
+    + '"kind" ∈ guideline | manifesto | shotlist | brief | template | note. Put the COMPLETE document in "body" (not a summary). One doc per block.';
 }
 
 // Samples currently out on pulls — the watchlist for the PR radar. A detected
@@ -15666,7 +15685,62 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
   if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
   if (action.type === 'generate_care_label') return agentRunGenerateCareLabel(action, chatBody);
+  if (action.type === 'save_brand_doc') return agentRunSaveBrandDoc(action, chatBody);
 }
+
+// Execute save_brand_doc: persist a brand/creative document into the synced
+// Brand Library, with the standard confirmation card + Undo.
+const BRAND_DOC_KINDS = ['guideline','manifesto','shotlist','brief','template','note'];
+function agentRunSaveBrandDoc(action, chatBody) {
+  const title = String(action.title || '').trim();
+  const docBody = String(action.body || '').trim();
+  if (!title || !docBody) { appendAgentNote(chatBody, 'Give me a title and the document text and I\'ll file it in the Brand Library.'); return; }
+  let kind = String(action.kind || '').toLowerCase().trim();
+  if (BRAND_DOC_KINDS.indexOf(kind) < 0) kind = 'note';
+  if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
+  const doc = { id: 'BD' + Date.now(), title: title.slice(0, 120), kind, body: docBody.slice(0, 40000),
+                createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  STATE.brandDocs.unshift(doc);
+  save();
+  try { logActivity('Brand Library: saved "' + doc.title + '" (' + kind + ')'); } catch (e) {}
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Saved to Brand Library</div>'
+    + '<div style="font-size:11px;margin-top:2px">' + escHtml(doc.title) + ' <span style="color:var(--muted)">· ' + kind + '</span></div>'
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'br\')">Open Brand</button>'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoBrandDoc(\'' + doc.id + '\', this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentUndoBrandDoc = function(id, btn){
+  if (Array.isArray(STATE.brandDocs)) { STATE.brandDocs = STATE.brandDocs.filter(d => d.id !== id); save(); }
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Removed from the Brand Library.</div>'; }
+};
+// View / delete a saved brand doc (Brand overview → Brand Library list).
+window.brOpenDoc = function(id){
+  const d = (STATE.brandDocs||[]).find(x => x.id === id); if (!d) return;
+  const html = '<div class="modal" style="width:640px;max-width:94vw">'
+    + '<div class="modal-head"><div class="modal-title">' + escHtml(d.title) + '</div><button class="modal-close" onclick="closeModal(\'br-doc-modal\')">✕</button></div>'
+    + '<div class="modal-body" style="padding:20px;max-height:70vh;overflow-y:auto">'
+    + '<div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px">' + escHtml(d.kind) + ' · saved ' + new Date(d.createdAt).toLocaleDateString() + '</div>'
+    + '<div style="font-size:12px;line-height:1.7;white-space:pre-wrap">' + escHtml(d.body) + '</div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;border-top:1px solid var(--border);padding-top:12px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="if(confirm(\'Delete this document?\')){agentUndoBrandDoc(\'' + d.id + '\');closeModal(\'br-doc-modal\');try{agNavGo(\'br\',\'overview\')}catch(e){}}">Delete</button>'
+    + '<button class="btn btn-gold btn-sm" onclick="brCopyDoc(\'' + d.id + '\')">Copy text</button>'
+    + '</div></div></div>';
+  let modal = document.getElementById('br-doc-modal');
+  if (!modal) { modal = document.createElement('div'); modal.className = 'overlay'; modal.id = 'br-doc-modal'; document.body.appendChild(modal); }
+  modal.innerHTML = html;
+  openModal('br-doc-modal');
+};
+window.brCopyDoc = function(id){
+  const d = (STATE.brandDocs||[]).find(x => x.id === id); if (!d) return;
+  navigator.clipboard.writeText(d.body).then(function(){ showToast('Copied'); }).catch(function(){ showToast('Copy failed', 'error'); });
+};
 
 // Log a detected/confirmed placement into Press coverage, linked to its pull
 // when one matches — the sample→placement→press loop closer.
@@ -17159,7 +17233,7 @@ function agSectionData(key, section) {
       stats:[{l:'Stockists',v:buyers.filter(b=>['active','closed'].includes(b.stage)).length+'',s:'doing business'},{l:'Gone quiet',v:buyers.filter(b=>['warm','quoted','active','closed'].includes(b.stage)&&(_daysAgo(b.lastContact)==null||_daysAgo(b.lastContact)>=30)).length+'',s:'no touch in 30d+'},{l:'Follow-ups due',v:buyers.filter(b=>b.stage!=='inactive'&&b.nextDate&&b.nextDate<_today).length+'',s:'overdue'},{l:'Dormant',v:buyers.filter(b=>b.stage==='inactive').length+'',s:'parked accounts'}],
       prompts:[{t:'Which accounts are at risk of churning?',tag:'ANALYZE',d:'No orders, no engagement, or declining spend.'},{t:'How do I re-engage an account that went quiet?',tag:'DRAFT',d:'Outreach strategy + 2-touch sequence.'}] },
     sellthrough: {
-      stats:(function(){ const ss = (STATE.styleSales&&STATE.styleSales.map)||{}; const rows = Object.keys(ss).map(k=>ss[k]).filter(x=>x&&x.units); if(!rows.length) return [{l:'Sales data',v:'—',s:'connect Shopify for per-style numbers'}]; const top = rows.slice().sort((a,b)=>(b.revenue||0)-(a.revenue||0))[0]; return [{l:'Styles selling',v:rows.length+'',s:'with recorded sales'},{l:'Top style',v:String(top.title||'—').slice(0,14).toUpperCase(),s:'$'+Math.round(top.revenue||0).toLocaleString()+' · '+(top.units||0)+' units'}]; })(),
+      stats:(function(){ const ss = (STATE.styleSales&&STATE.styleSales.map)||{}; const rows = Object.entries(ss).map(([t,x])=>({t, u:(x&&x.u)||0, r:(x&&x.r)||0})).filter(x=>x.u>0); if(!rows.length) return [{l:'Sales data',v:'—',s:'connect Shopify for per-style numbers'}]; const top = rows.slice().sort((a,b)=>b.r-a.r)[0]; return [{l:'Styles selling',v:rows.length+'',s:'with recorded sales'},{l:'Top style',v:String(top.t||'—').slice(0,14).toUpperCase(),s:'$'+Math.round(top.r).toLocaleString()+' · '+top.u+' units'}]; })(),
       prompts:[{t:'Which styles are underperforming and why?',tag:'ANALYZE',d:'Sell-through by style using our real Shopify sales.'},{t:'Which style deserves a reorder?',tag:'ANALYZE',d:'Current sales pace, lead time, buyer demand signals.'}] },
     automations: { prompts:[{t:'Suggest sales automations for VENIA',tag:'FIND',d:'Follow-ups, alerts, quote reminders.'}] },
     templates:   { prompts:[{t:'Write a wholesale outreach template for new accounts',tag:'DRAFT',d:'Short, VENIA voice, not desperate.'},{t:'Build a 3-touch buyer follow-up sequence',tag:'BUILD',d:'Days 3, 7, 14. Different hooks each time.'}] },
@@ -17317,7 +17391,17 @@ function agBuildBrOverview() {
     </div>
     <div class="ag-sec-head"><h2 class="ag-sec-title">Quick Actions</h2></div>
     <div class="ag-workflows"><div class="ag-wf"><div class="ag-wf-tag">REVIEW</div><div class="ag-wf-title">Tone Review</div><div class="ag-wf-desc">Drop in any copy. Agent flags off-brand language and suggests rewrites.</div></div><div class="ag-wf"><div class="ag-wf-tag">BOARD</div><div class="ag-wf-title">Mood Board</div><div class="ag-wf-desc">Build a board from references, palette, materials, and mood notes.</div></div><div class="ag-wf"><div class="ag-wf-tag">SHOOT</div><div class="ag-wf-title">Shoot Planning</div><div class="ag-wf-desc">Generate shot list, location brief, talent direction from a board.</div></div><div class="ag-wf"><div class="ag-wf-tag">GUIDELINES</div><div class="ag-wf-title">Guidelines Update</div><div class="ag-wf-desc">Edit the brand guideline doc. Agent enforces consistency across team.</div></div><div class="ag-wf"><div class="ag-wf-tag">REFERENCE</div><div class="ag-wf-title">Find Reference</div><div class="ag-wf-desc">Search the reference archive for visuals matching a mood, palette, or composition.</div></div><div class="ag-wf"><div class="ag-wf-tag">AUDIT</div><div class="ag-wf-title">Brand Audit</div><div class="ag-wf-desc">Sweep last 30 days of PR, marketing, sales output for brand drift.</div></div></div>
-    ${toneGlance}`;
+    ${toneGlance}
+    ${(function(){
+      const docs = STATE.brandDocs || [];
+      const head = `<div class="ag-sec-head"><h2 class="ag-sec-title">Brand Library</h2><div class="ag-sec-actions"><span style="font-size:9px;color:var(--muted)">${docs.length} saved</span></div></div>`;
+      if (!docs.length) return head + `<div style="padding:20px;text-align:center;color:var(--muted);font-size:11px">Nothing saved yet — when the agent writes guidelines, shot lists or briefs, they land here instead of vanishing in chat. Try: “Draft our photography guidelines and save them.”</div>`;
+      return head + `<div class="ag-list">${docs.slice(0,12).map(d => `<div class="ag-list-row" style="grid-template-columns:1fr 110px 90px;cursor:pointer" onclick="brOpenDoc('${d.id}')">
+        <div><div class="ag-lr-name">${slEsc(d.title)}</div><div class="ag-lr-sub">${slEsc((d.body||'').slice(0,80))}…</div></div>
+        <div><span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px">${slEsc(d.kind)}</span></div>
+        <div style="text-align:right;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)">${String(d.createdAt||'').slice(0,10)}</div>
+      </div>`).join('')}</div>`;
+    })()}`;
 }
 function agBuildSalesOverview() {
   const buyers = STATE.slBuyers || [];
@@ -27112,7 +27196,17 @@ async function skSend(preset){
     if (action) {
       // Hand the photo (if any) to the action so a "save as a note" can keep it.
       window.__agTurnPhoto = photo ? photo.dataUrl : '';
-      try { agentRunAction(agKey, action, body); } catch(e){ console.warn('agent action failed', e); }
+      try { agentRunAction(agKey, action, body); }
+      catch(e){
+        // Never show success on a failed write — the founder must know nothing saved.
+        console.warn('agent action failed', e);
+        try {
+          const d = document.createElement('div');
+          d.className = 'sk-msg agent';
+          d.innerHTML = '<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">⚠ That change did NOT save — ' + escHtml(String(e && e.message || 'something went wrong')) + '. Please try again.</span></div>';
+          body.appendChild(d); body.scrollTop = body.scrollHeight;
+        } catch(_){}
+      }
       window.__agTurnPhoto = '';
     }
     agentEndWork(workKey, !!action);
@@ -27234,10 +27328,15 @@ document.addEventListener('keydown', function(e){
     // a device can no longer get stuck on an old build: the next open that sees
     // a new deploy activates it and reloads automatically.
     var refreshing = false;
+    function swReload() { if (refreshing) return; refreshing = true; window.location.reload(); }
     navigator.serviceWorker.addEventListener('controllerchange', function () {
-      if (refreshing) return;
-      refreshing = true;
-      window.location.reload();
+      // Backgrounded (iOS resume, closed tab coming back): swap immediately —
+      // this is the case skipWaiting() exists for. Foreground mid-task: never
+      // yank the page out from under a founder typing a PO; swap on the next
+      // background/leave instead.
+      if (document.hidden) { swReload(); return; }
+      document.addEventListener('visibilitychange', function () { if (document.hidden) swReload(); });
+      window.addEventListener('pagehide', swReload);
     });
   });
 })();
