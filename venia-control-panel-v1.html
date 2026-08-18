@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '236';
+  const BUILD = '237';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4702,7 +4702,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal', 'growthSeen',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -13287,21 +13287,21 @@ function buildTodayFocus() {
   (STATE.prPulls||[]).filter(p => p.status==='active').forEach(p => {
     const due = new Date(p.returnDate||p.dueDate||p.createdAt);
     const days = Math.floor((now-due)/86400000);
-    if (days > 0) items.push({pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${(p.items||[]).map(i=>i.styleName).join(', ')})`});
-    else if (days > -3) items.push({pri:'med', text:`PR Pull due soon — ${p.client}`});
+    if (days > 0) items.push({key:'pull|'+p.id, pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${(p.items||[]).map(i=>i.styleName).join(', ')})`});
+    else if (days > -3) items.push({key:'pull|'+p.id, pri:'med', text:`PR Pull due soon — ${p.client}`});
   });
   // 2. Pipeline follow-ups (Buyers CRM): overdue planned moves surface here.
   const _today = now.toISOString().slice(0,10);
   (STATE.slBuyers||[]).forEach(b => {
     if (b.stage === 'inactive' || !b.nextDate || b.nextDate >= _today) return;
     const days = Math.floor((now - new Date(b.nextDate + 'T00:00:00')) / 86400000);
-    items.push({pri: days >= 7 ? 'high' : 'med', text:`Follow up ${b.name}${b.nextAction ? ' — ' + b.nextAction : ''} (${days}d overdue)`});
+    items.push({key:'buyer|'+b.id, pri: days >= 7 ? 'high' : 'med', text:`Follow up ${b.name}${b.nextAction ? ' — ' + b.nextAction : ''} (${days}d overdue)`});
   });
   // 3. Sample rounds past their ETA with no result logged.
   (STATE.styles||[]).forEach(s => {
     try {
       if (typeof sampleOverdue === 'function' && sampleOverdue(s)) {
-        items.push({pri:'high', text:`Sample overdue — ${s.name||s.styleId} (chase the factory)`,
+        items.push({key:'sample|'+s.id, pri:'high', text:`Sample overdue — ${s.name||s.styleId} (chase the factory)`,
                     act:"cpGoto('plm');goTo('samples')"});
       }
     } catch(e){}
@@ -13315,7 +13315,7 @@ function buildTodayFocus() {
       for (const k of KEYS) {
         if (sched[k] < now && !(typeof tlDone === 'function' && tlDone(s, k))) {
           const days = Math.floor((now - sched[k]) / 86400000);
-          items.push({pri: days > 14 ? 'high' : 'med', text:`Timeline: ${s.name||s.styleId} is ${days}d behind on ${k.toUpperCase()} for the ${s.drop} drop`,
+          items.push({key:'tl|'+s.id, pri: days > 14 ? 'high' : 'med', text:`Timeline: ${s.name||s.styleId} is ${days}d behind on ${k.toUpperCase()} for the ${s.drop} drop`,
                       act:"cpGoto('plm');goTo('timeline')"});
           break;   // one line per style — the worst milestone
         }
@@ -13335,7 +13335,7 @@ function buildTodayFocus() {
       const days = Math.round((new Date(cal[k] + 'T00:00:00') - _scMid) / 86400000);
       if (days < 0 || days > 14) return;
       const hard = ['linesheetFreeze','orderClose','factoryCommit'].includes(k);
-      items.push({ pri: (hard && days <= 3) ? 'high' : 'med',
+      items.push({ key:'cal|'+season+'|'+k, pri: (hard && days <= 3) ? 'high' : 'med',
         text: `${season}: ${label} ${days === 0 ? 'today' : 'in ' + days + 'd'} (${cal[k]})`,
         act: "cpGoto('plm');goTo('timeline')" });
     });
@@ -13355,7 +13355,7 @@ function buildTodayFocus() {
       if (gap > 0){ gapUnits += gap; gapStyles++; }
     });
     if (!gapUnits) return;
-    items.push({ pri: days <= 7 ? 'high' : 'med',
+    items.push({ key:'gap|'+season, pri: days <= 7 ? 'high' : 'med',
       text:`${season}: ${gapUnits} forecast units across ${gapStyles} style${gapStyles>1?'s':''} not on a PO — factory commit ${days===0?'today':'in '+days+'d'}`,
       act:"cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)" });
   });
@@ -13363,13 +13363,13 @@ function buildTodayFocus() {
   //     the queue itself lives on the Sales overview; Today never spams pairs.
   try {
     const gN = (typeof slGrowthSuggestions === 'function') ? slGrowthSuggestions().length : 0;
-    if (gN) items.push({pri:'low', text:`Press → sales: ${gN} coverage-backed intro${gN>1?'s':''} suggested`, act:"cpGoto('sl')"});
+    if (gN) items.push({key:'growth', pri:'low', text:`Press → sales: ${gN} coverage-backed intro${gN>1?'s':''} suggested`, act:"cpGoto('sl')"});
   } catch(e){}
   // 5. Quotes that went quiet (sent, no movement in 7+ days).
   (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
     const at = new Date(q.createdAt || 0);
     const days = Math.floor((now - at) / 86400000);
-    if (days >= 7) items.push({pri:'med', text:`Quote to ${q.buyerName} is quiet — $${Math.round(q.total||0).toLocaleString()}, sent ${days}d ago`,
+    if (days >= 7) items.push({key:'quote|'+q.id, pri:'med', text:`Quote to ${q.buyerName} is quiet — $${Math.round(q.total||0).toLocaleString()}, sent ${days}d ago`,
                                act:"cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)"});
   });
   // 6. Wholesale deliveries due or past due. Calendar-day distance (vs midnight),
@@ -13378,9 +13378,9 @@ function buildTodayFocus() {
   (STATE.slOrders || dbGet('slOrders') || []).forEach(o => {
     if (!o.deliveryDate || ['delivered','cancelled'].includes(o.status)) return;
     const days = Math.round((new Date(o.deliveryDate + 'T00:00:00') - midnight) / 86400000);
-    if (days < 0) items.push({pri:'high', text:`Wholesale order #${o.id} (${o.account}) delivery is ${-days}d past due`,
+    if (days < 0) items.push({key:'del|'+o.id, pri:'high', text:`Wholesale order #${o.id} (${o.account}) delivery is ${-days}d past due`,
                               act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
-    else if (days <= 7) items.push({pri:'med', text:`Wholesale delivery in ${days}d — #${o.id} (${o.account})`,
+    else if (days <= 7) items.push({key:'del|'+o.id, pri:'med', text:`Wholesale delivery in ${days}d — #${o.id} (${o.account})`,
                                     act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
   });
   // 6c. Invoices genuinely past due (real AR, not "invoice was sent"): only
@@ -13391,7 +13391,7 @@ function buildTodayFocus() {
     const dueIso = p.dueDate || (p.at ? new Date(new Date(p.at).getTime() + 14*86400000).toISOString().slice(0,10) : '');
     if (!dueIso) return;
     const over = Math.round((midnight - new Date(dueIso + 'T00:00:00')) / 86400000);
-    if (over > 0) items.push({pri:'high', text:`Invoice #${o.id} (${o.account}) is ${over}d past due — $${Math.round((p.amountRemaining!=null?p.amountRemaining:o.total)||0).toLocaleString()} outstanding`,
+    if (over > 0) items.push({key:'inv|'+o.id, pri:'high', text:`Invoice #${o.id} (${o.account}) is ${over}d past due — $${Math.round((p.amountRemaining!=null?p.amountRemaining:o.total)||0).toLocaleString()} outstanding`,
                               act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
   });
   // 6b. Production POs: factory payments coming due, and ex-factory dates near.
@@ -13402,17 +13402,17 @@ function buildTodayFocus() {
     const act = "cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)";
     if (po.depositDue && !po.depositPaidAt) {
       const dd = payDays(po.depositDue);
-      if (dd < 0) items.push({pri:'high', text:`Factory deposit ${-dd}d overdue — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
-      else if (dd <= 7) items.push({pri:'med', text:`Factory deposit due in ${dd}d — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
+      if (dd < 0) items.push({key:'po|'+po.id+'|dep', pri:'high', text:`Factory deposit ${-dd}d overdue — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
+      else if (dd <= 7) items.push({key:'po|'+po.id+'|dep', pri:'med', text:`Factory deposit due in ${dd}d — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
     }
     if (po.balanceDue && !po.balancePaidAt) {
       const bd = payDays(po.balanceDue);
-      if (bd < 0) items.push({pri:'high', text:`Factory balance ${-bd}d overdue — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
-      else if (bd <= 7) items.push({pri:'med', text:`Factory balance due in ${bd}d — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
+      if (bd < 0) items.push({key:'po|'+po.id+'|bal', pri:'high', text:`Factory balance ${-bd}d overdue — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
+      else if (bd <= 7) items.push({key:'po|'+po.id+'|bal', pri:'med', text:`Factory balance due in ${bd}d — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
     }
     if (po.exFactory && ['placed','production'].includes(po.status)) {
       const xd = payDays(po.exFactory);
-      if (xd >= 0 && xd <= 7) items.push({pri:'med', text:`PO ${po.id} ships ex-factory in ${xd}d — ${po.units||0} units (${po.vendor})`, act});
+      if (xd >= 0 && xd <= 7) items.push({key:'po|'+po.id+'|exf', pri:'med', text:`PO ${po.id} ships ex-factory in ${xd}d — ${po.units||0} units (${po.vendor})`, act});
     }
   });
   // 7. Content going out in the next 48h.
@@ -13420,7 +13420,7 @@ function buildTodayFocus() {
     const d = new Date(e.date + 'T00:00:00');
     const days = Math.round((d - midnight) / 86400000);
     if (days >= 0 && days <= 1 && e.status !== 'posted') {
-      items.push({pri:'low', text:`Content ${days === 0 ? 'today' : 'tomorrow'} — ${e.title||'planned post'} (${e.platform||''})`,
+      items.push({key:'mk|'+(e.id||e.date), pri:'low', text:`Content ${days === 0 ? 'today' : 'tomorrow'} — ${e.title||'planned post'} (${e.platform||''})`,
                   act:"cpGoto('mk');setTimeout(function(){agNavGo('mk','calendar')},150)"});
     }
   });
@@ -13435,16 +13435,42 @@ function buildTodayFocus() {
   const order = { high: 0, med: 1, low: 2 };
   items.sort((a,b) => (order[a.pri] ?? 2) - (order[b.pri] ?? 2));
   const colMap = {high:'var(--red)', med:'var(--amber)', low:'var(--muted)'};
-  const html = !items.length
-    ? '<span style="color:var(--muted)">All clear — nothing urgent today.</span>'
-    : items.map(i =>
+  // One Today, two founders (Backbone D3): every keyed item can be assigned —
+  // tap the chip to cycle unassigned → K → C → unassigned. Assignments live in
+  // synced STATE.todayAssign so both phones show the same split; "Mine" filters
+  // to the signed-in founder. Items clear themselves when the underlying work
+  // is done — assignment is who's on it, not a separate checklist to groom.
+  const who = (typeof veniaWho === 'function') ? veniaWho() : '';
+  const asg = STATE.todayAssign || {};
+  const view = (who && localStorage.getItem('venia-today-view') === 'mine') ? 'mine' : 'all';
+  const mineN = who ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who).length : 0;
+  const shown = view === 'mine' ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who) : items;
+  const pillS = (on) => `background:${on?'var(--ink)':'transparent'};color:${on?'var(--bg)':'var(--muted)'};border:1px solid ${on?'var(--ink)':'var(--border-mid)'};padding:2px 10px;font-size:9px;letter-spacing:1px;cursor:pointer`;
+  const header = who ? `<div style="display:flex;gap:6px;align-items:center;padding:0 0 8px">
+      <button onclick="todayView('all')" style="${pillS(view==='all')}">ALL ${items.length}</button>
+      <button onclick="todayView('mine')" style="${pillS(view==='mine')}">MINE ${mineN}</button>
+    </div>` : '';
+  const chipCol = { keeter:'var(--gold)', christine:'var(--blue)' };
+  const chip = (i) => {
+    if (!i.key) return '';
+    const a = asg[i.key];
+    const lbl = a ? (a.to === 'keeter' ? 'K' : 'C') : '＋';
+    const col = a ? (chipCol[a.to] || 'var(--ink)') : 'var(--muted)';
+    return `<button onclick="event.stopPropagation();todayAssign('${slEsc(i.key)}')" title="${a ? 'Assigned to ' + a.to + ' — tap to reassign' : 'Unassigned — tap to assign'}" style="background:none;border:1px solid ${col};color:${col};cursor:pointer;font-size:9px;font-weight:700;line-height:1;padding:3px 6px;flex-shrink:0;border-radius:9px;min-width:20px">${lbl}</button>`;
+  };
+  const digestOff = localStorage.getItem('venia-digest-optin') === 'off';
+  const footer = `<div style="padding-top:8px;font-size:9px;color:var(--muted)">Morning digest ${digestOff ? 'off' : 'on'} · <span onclick="todayDigestToggle()" style="cursor:pointer;text-decoration:underline">${digestOff ? 'turn on' : 'turn off'}</span></div>`;
+  const html = header + (!shown.length
+    ? `<span style="color:var(--muted)">${view === 'mine' ? 'Nothing assigned to you — tap ＋ on an item under All.' : 'All clear — nothing urgent today.'}</span>`
+    : shown.map(i =>
         `<div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)${i.act?';cursor:pointer':''}"${i.act?` onclick="${i.act.replace(/"/g,'&quot;')}"`:''}>
           <div style="width:3px;min-height:16px;background:${colMap[i.pri]};flex-shrink:0;border-radius:2px"></div>
           <div style="font-size:11px;color:var(--ink);line-height:1.5;flex:1">${i.text}</div>
+          ${who ? chip(i) : ''}
           ${i.act?`<div style="font-size:10px;color:var(--muted);flex-shrink:0">→</div>`:''}
           ${i.nag?`<button onclick="event.stopPropagation();dismissNag('${i.nag}')" title="Dismiss — reconnect any time in Settings" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;flex-shrink:0">✕</button>`:''}
         </div>`
-      ).join('');
+      ).join('')) + footer;
   if (container) container.innerHTML = html;
   if (homeEl) homeEl.innerHTML = html;
   // Once a day per device: surface the urgent count as a notification so
@@ -13452,17 +13478,56 @@ function buildTodayFocus() {
   try { todayDigestNotify(items); } catch(e){}
 }
 
+// Which founder is signed in — the Supabase session is the only identity that
+// is both per-person and persistent. Empty string = not signed in (or a
+// non-founder session): assignment chips and "Mine" stay hidden.
+function veniaWho(){
+  try {
+    const em = String((window.veniaAuthUser && window.veniaAuthUser.email) || '').toLowerCase();
+    if (em === 'keeter@veniacollection.com') return 'keeter';
+    if (em === 'christine@veniacollection.com') return 'christine';
+  } catch(e){}
+  return '';
+}
+window.todayAssign = function(key){
+  if (!key) return;
+  if (!STATE.todayAssign) STATE.todayAssign = {};
+  const cur = (STATE.todayAssign[key] && STATE.todayAssign[key].to) || '';
+  const next = cur === '' ? 'keeter' : cur === 'keeter' ? 'christine' : '';
+  if (next) STATE.todayAssign[key] = { to: next, at: new Date().toISOString() };
+  else delete STATE.todayAssign[key];
+  save();
+  buildTodayFocus();
+};
+window.todayView = function(v){
+  localStorage.setItem('venia-today-view', v === 'mine' ? 'mine' : 'all');
+  buildTodayFocus();
+};
+window.todayDigestToggle = function(){
+  const off = localStorage.getItem('venia-digest-optin') === 'off';
+  localStorage.setItem('venia-digest-optin', off ? 'on' : 'off');
+  try { if (off && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(e){}
+  buildTodayFocus();
+};
+
 // One local digest notification per day per device (no server involved):
 // fires on the first app open of the day when anything urgent is waiting.
 function todayDigestNotify(items) {
+  if (localStorage.getItem('venia-digest-optin') === 'off') return;   // opt-out honored
   const urgent = (items||[]).filter(i => i.pri === 'high' || i.pri === 'med');
   if (!urgent.length) return;
   if (!window.Notification || Notification.permission !== 'granted') return;
   const today = new Date().toISOString().slice(0,10);
   if (localStorage.getItem('venia-digest-day') === today) return;
   localStorage.setItem('venia-digest-day', today);
-  const title = urgent.length + ' thing' + (urgent.length > 1 ? 's' : '') + ' need' + (urgent.length > 1 ? '' : 's') + ' you today';
-  const body = urgent.slice(0,3).map(i => '• ' + i.text).join('\n');
+  // Personalize: lead with what's assigned to the signed-in founder.
+  const who = (typeof veniaWho === 'function') ? veniaWho() : '';
+  const asg = (window.STATE && STATE.todayAssign) || {};
+  const mine = who ? urgent.filter(i => i.key && asg[i.key] && asg[i.key].to === who) : [];
+  const title = urgent.length + ' thing' + (urgent.length > 1 ? 's' : '') + ' need' + (urgent.length > 1 ? '' : 's') + ' you today'
+    + (mine.length ? ' · ' + mine.length + ' yours' : '');
+  const lead = mine.length ? mine : urgent;
+  const body = lead.slice(0,3).map(i => '• ' + i.text).join('\n');
   try {
     if (navigator.serviceWorker && navigator.serviceWorker.ready) {
       navigator.serviceWorker.ready.then(reg => reg.showNotification(title, { body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'venia-digest' }));
