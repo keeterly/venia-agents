@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '240';
+  const BUILD = '241';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6328,6 +6328,24 @@ function styleDuty(style, vendor){
 }
 function vendorIncoterm(v){ return v.incoterm || (vendorRegion(v)==='Domestic' ? 'EXW (local)' : 'FOB'); }
 
+// Vendor cadence (Backbone F2): when did we last actually WORK with this
+// vendor — latest PO touch or sample-round date across their linked styles.
+// Green ≤90d, amber ≤180d, red beyond: a quiet factory is a risk you can see.
+function vendorLastActivity(v){
+  const vName = String(v.name||'').trim().toLowerCase();
+  const isMine = (id, name) => (id && id === v.id) || (vName && String(name||'').trim().toLowerCase() === vName);
+  let last = '';
+  (STATE.pos||[]).forEach(po => {
+    if (!isMine(po.vendorId, po.vendor)) return;
+    const d = String(po.updatedAt || po.createdAt || '').slice(0,10);
+    if (d > last) last = d;
+  });
+  (STATE.styles||[]).forEach(s => {
+    if (!isMine(s.vendorId, s.vendor)) return;
+    (s.sampleLog||[]).forEach(e => { const d = String(e.date||'').slice(0,10); if (d > last) last = d; });
+  });
+  return last;
+}
 function renderVendors(filter) {
   if (filter !== undefined) vendorFilter = filter;
   let list = [...STATE.vendors];
@@ -6359,6 +6377,13 @@ function renderVendors(filter) {
       <div class="vendor-detail">📧 <span>${v.email||'—'}</span></div>
       <div class="vendor-detail">⏱ Lead: <span>${v.lead||'—'} days</span></div>
       <div class="vendor-detail">MOQ: <span>${v.moq||'—'}</span></div>
+      ${(function(){
+        const la = (typeof vendorLastActivity === 'function') ? vendorLastActivity(v) : '';
+        if (!la) return '<div class="vendor-detail">⚡ Last activity: <span style="color:var(--muted)">none logged</span></div>';
+        const days = Math.max(0, Math.round((Date.now() - new Date(la + 'T00:00:00')) / 86400000));
+        const col = days > 180 ? 'var(--red)' : days > 90 ? 'var(--amber)' : 'var(--green)';
+        return '<div class="vendor-detail">⚡ Last activity: <span style="color:' + col + '">' + la + ' (' + days + 'd ago)</span></div>';
+      })()}
       ${assignedStyles.length ? `
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
           <div style="font-size:9px;color:var(--muted)">${assignedStyles.length} style${assignedStyles.length>1?'s':''} · ${activeStyles.length} in-work</div>
@@ -8013,23 +8038,42 @@ function advanceSample(styleId, stage) {
 // ── Sample round history (detail panel) ──
 function dpSampleRoundsHtml(s) {
   const log = s.sampleLog || [];
-  const resultColor = { Pass:'var(--green)', Revise:'var(--amber)', Fail:'var(--red)' };
+  // One result vocabulary everywhere: canonical lowercase (approved/revise/
+  // rejected) with the legacy Pass/Fail spellings still colored for old rows
+  // that predate the boot migration.
+  const resultColor = { approved:'var(--green)', revise:'var(--amber)', rejected:'var(--red)', Pass:'var(--green)', Revise:'var(--amber)', Fail:'var(--red)' };
+  const resultLbl = (r) => (typeof SAMPLE_RESULTS !== 'undefined' && SAMPLE_RESULTS[r]) ? SAMPLE_RESULTS[r][0] : r;
   const rows = log.length ? log.map((e,i)=>`
     <div style="display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid var(--border)">
       <span style="font-size:8px;letter-spacing:1px;text-transform:uppercase;padding:2px 7px;border:1px solid var(--border-mid);color:var(--ink);flex-shrink:0">${e.round}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:9px;color:var(--muted);font-family:'DM Mono',monospace">${e.date||''}${e.result?` · <span style="color:${resultColor[e.result]||'var(--muted)'};font-weight:700">${e.result}</span>`:''}</div>
+        <div style="font-size:9px;color:var(--muted);font-family:'DM Mono',monospace">${e.date||''}${e.result?` · <span style="color:${resultColor[e.result]||'var(--muted)'};font-weight:700">${resultLbl(e.result)}</span>`:''}</div>
         ${e.note?`<div style="font-size:11px;color:var(--soft);line-height:1.5;margin-top:2px">${e.note}</div>`:''}
       </div>
     </div>`).join('') : '<div style="font-size:11px;color:var(--muted);font-style:italic">No sample rounds logged yet.</div>';
+  // One fit truth: rows filed on the Fit Notes page under this style code show
+  // up here too, so the fit story reads in one place.
+  let fitRows = '';
+  try {
+    const clean = (v) => String(v==null?'':v).replace(/</g,'&lt;');
+    const mine = (JSON.parse(localStorage.getItem('venia_fitnotes')||'[]') || []).filter(r =>
+      Array.isArray(r) && String(r[0]||'').trim().toLowerCase() === String(s.styleId||'').trim().toLowerCase() && (r[2]||r[3]));
+    if (mine.length) fitRows = '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)">'
+      + '<div style="font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">Fit notes · <span style="cursor:pointer;text-decoration:underline" onclick="goTo(\'fitnotes\')">open page →</span></div>'
+      + mine.map(r => `<div style="display:flex;gap:8px;font-size:11px;padding:4px 0;align-items:baseline">
+          <span style="color:${r[4]==='Resolved'?'var(--green)':'var(--amber)'};font-size:8px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0">${clean(r[4]||'Open')}</span>
+          ${r[1]?`<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);flex-shrink:0">${clean(r[1])}</span>`:''}
+          <span style="color:var(--soft)">${clean(r[2]||'')}${r[3]?' — '+clean(r[3]):''}</span>
+        </div>`).join('') + '</div>';
+  } catch(e){}
   return `
-    ${rows}
+    ${rows}${fitRows}
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px">
       <select class="fs" id="dp-sr-round" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
         ${(typeof SAMPLE_STAGES!=='undefined'?SAMPLE_STAGES:['Proto','SMS1','SMS2','TOP','Approved']).map(st=>`<option value="${st}"${s.sample===st?' selected':''}>${st}</option>`).join('')}
       </select>
       <select class="fs" id="dp-sr-result" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
-        <option value="">Result…</option><option>Pass</option><option>Revise</option><option>Fail</option>
+        <option value="">Result…</option><option value="approved">Approved</option><option value="revise">Revise</option><option value="rejected">Rejected</option>
       </select>
       <input class="fi" id="dp-sr-note" placeholder="Fit note (e.g. shoulder 1cm wide)" style="flex:1;min-width:140px;font-size:11px;min-height:auto;padding:5px 7px">
       <button class="btn btn-gold btn-sm" onclick="dpAddSampleRound('${s.id}')">+ Log Round</button>
@@ -8040,12 +8084,16 @@ function dpAddSampleRound(styleId) {
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s) return;
   const round = document.getElementById('dp-sr-round')?.value;
-  const result = document.getElementById('dp-sr-result')?.value || '';
+  // Normalize to the canonical vocabulary even if an old cached page still has
+  // the legacy Pass/Fail options — every reader checks lowercase values.
+  let result = (document.getElementById('dp-sr-result')?.value || '').toLowerCase();
+  result = ({ pass:'approved', fail:'rejected' })[result] || result;
+  if (['','approved','revise','rejected'].indexOf(result) < 0) result = '';
   const note = document.getElementById('dp-sr-note')?.value.trim() || '';
   if (!round) return;
   if (!s.sampleLog) s.sampleLog = [];
   s.sampleLog.push({ round, date:new Date().toISOString().slice(0,10), result, note });
-  s.sample = round; // keep current round in sync
+  s.sample = (result === 'approved' && round === 'TOP') ? 'Approved' : round; // keep current round in sync
   save();
   logActivity(`Sample round logged: ${s.name} — ${round}${result?' ('+result+')':''}`);
   openDp(styleId);
@@ -19056,8 +19104,24 @@ function slNormalizeCountries(){
   return n;
 }
 window.slNormalizeCountries = slNormalizeCountries;
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} }, 3000);
-setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} try { slRefreshInvoiceStatuses(); } catch (e) {} }, 20000);   // again after initial sync settles
+// One sample-result vocabulary (Backbone F1): the detail panel used to write
+// Pass/Revise/Fail while everything else reads approved/revise/rejected — so a
+// "Pass" logged there never flipped a TOP to Approved and rendered as Pending
+// in the tracker. Normalize old rows in place; idempotent.
+function sampleResultNormalize(){
+  const map = { pass:'approved', fail:'rejected', revise:'revise', approved:'approved', rejected:'rejected' };
+  let n = 0;
+  (STATE.styles||[]).forEach(s => (s.sampleLog||[]).forEach(e => {
+    const raw = String(e.result||'');
+    if (!raw) return;
+    const canon = map[raw.toLowerCase()];
+    if (canon && canon !== raw) { e.result = canon; n++; }
+  }));
+  if (n) { save(); try { logActivity('Sample results normalized: ' + n + ' round(s)'); } catch(e){} }
+  return n;
+}
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} try { sampleResultNormalize(); } catch (e) {} }, 3000);
+setTimeout(function(){ try { slMigrateLeads(); } catch (e) {} try { slNormalizeCountries(); } catch (e) {} try { vendorLinkMigrate(); } catch (e) {} try { sampleResultNormalize(); } catch (e) {} try { slRefreshInvoiceStatuses(); } catch (e) {} }, 20000);   // again after initial sync settles
 
 // One-time cleanup for duplicates already piled up before the add-buyers dedup
 // guard shipped. CONSERVATIVE: only collapses UNTOUCHED copies of a same-named
@@ -21277,7 +21341,7 @@ function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,
 function fitNoteRowHTML(v) {
   v = v || ['','','','','Open'];
   var resolved = (v[4] === 'Resolved');
-  return '<td><input class="pom-input" style="width:80px" placeholder="VEN-00X" value="'+esc(v[0])+'" onchange="saveFitNotes()"></td>'
+  return '<td><input class="pom-input" list="fitnotes-styles" style="width:80px" placeholder="VEN-00X" value="'+esc(v[0])+'" onchange="saveFitNotes()"></td>'
     + '<td><input class="pom-input" style="width:40px" placeholder="S/M/L" value="'+esc(v[1])+'" onchange="saveFitNotes()"></td>'
     + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Describe fit issue…" value="'+esc(v[2])+'" onchange="saveFitNotes()"></td>'
     + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Grader note…" value="'+esc(v[3])+'" onchange="saveFitNotes()"></td>'
@@ -21300,6 +21364,12 @@ function renderFitNotes() {
   try { rows = JSON.parse(localStorage.getItem('venia_fitnotes') || 'null'); } catch(e) { rows = null; }
   if (!rows || !rows.length) rows = FITNOTES_SEED;
   tbody.innerHTML = rows.map(function(r){ return '<tr>' + fitNoteRowHTML(r) + '</tr>'; }).join('');
+  // Style# suggests real PLM codes, so notes filed here also surface on the
+  // style's detail panel (dpSampleRoundsHtml matches on the code).
+  var dl = document.getElementById('fitnotes-styles');
+  if (!dl) { dl = document.createElement('datalist'); dl.id = 'fitnotes-styles'; document.body.appendChild(dl); }
+  dl.innerHTML = ((window.STATE && STATE.styles) || []).filter(function(s){ return s.styleId && s.status !== 'archived'; })
+    .map(function(s){ return '<option value="' + esc(s.styleId) + '">' + esc(s.name||'') + '</option>'; }).join('');
 }
 function saveFitNotes() {
   try {
