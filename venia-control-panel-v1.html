@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '239';
+  const BUILD = '240';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16094,7 +16094,33 @@ function agentAllActionSpec() {
   return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm, Press coverage).'
     + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
     + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec()
-    + agentBrandDocSpec();
+    + agentBrandDocSpec() + agentOpsActionSpec();
+}
+
+// Ops writes (Backbone E3): the production/press verbs the founders kept
+// having to do by hand after telling Eni about them. Every one is undoable
+// and confirms with a card; none of them invents data.
+function agentOpsActionSpec() {
+  return '\n\nACTION — log_sample_round: record a sample round on a style (a proto/SMS/TOP arrived, was sent, approved, needs revision…).\n'
+    + '```venia:action\n'
+    + '{"type":"log_sample_round","style":"Exact style name or code from the PLM list","round":"Proto","eta":"YYYY-MM-DD","result":"","note":"What changed / was requested"}\n'
+    + '```\n'
+    + '"round" ∈ Proto | SMS1 | SMS2 | TOP. "result" ∈ "" (still out) | approved | revise | rejected — set it only when the user states an outcome. "eta" = when the sample is expected back; omit if unknown. One style per block.\n'
+    + '\nACTION — set_forecast: commit forecast units per style into the demand plan (Production → Demand Plan).\n'
+    + '```venia:action\n'
+    + '{"type":"set_forecast","forecasts":[{"style":"Exact style name or code","units":120}]}\n'
+    + '```\n'
+    + 'Only when the user states quantities or clearly asks you to set them — NEVER invent numbers. "units":0 clears a forecast. Up to 20 styles per block.\n'
+    + '\nACTION — save_season_calendar: set a season\'s key commercial dates (the spine every deadline reads — market, order close, line-sheet freeze, factory commit, delivery window).\n'
+    + '```venia:action\n'
+    + '{"type":"save_season_calendar","season":"FW26","dates":{"marketStart":"","marketEnd":"","orderClose":"","linesheetFreeze":"","factoryCommit":"","deliveryStart":"","deliveryEnd":""},"notes":""}\n'
+    + '```\n'
+    + 'Include ONLY the dates the user gave, ISO (YYYY-MM-DD); blanks leave existing dates untouched (this never clears a date).\n'
+    + '\nACTION — add_pitch: file a press pitch into the PR pitch tracker.\n'
+    + '```venia:action\n'
+    + '{"type":"add_pitch","publication":"Outlet","subject":"The angle / subject line","contact":"","email":"","celebRef":"","pitchType":"celebrity","status":"draft","followUpDate":"","body":"The pitch text if you drafted one","notes":""}\n'
+    + '```\n'
+    + '"status" ∈ draft | sent (draft unless the user says it already went out). NEVER invent a contact email. One pitch per block.';
 }
 
 // Brand/creative output used to evaporate into chat history — guidelines, shot
@@ -16382,7 +16408,168 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
   if (action.type === 'generate_care_label') return agentRunGenerateCareLabel(action, chatBody);
   if (action.type === 'save_brand_doc') return agentRunSaveBrandDoc(action, chatBody);
+  if (action.type === 'log_sample_round') return agentRunLogSampleRound(action, chatBody);
+  if (action.type === 'set_forecast') return agentRunSetForecast(action, chatBody);
+  if (action.type === 'save_season_calendar') return agentRunSaveSeasonCal(action, chatBody);
+  if (action.type === 'add_pitch') return agentRunAddPitch(action, chatBody);
 }
+// Resolve a style by code or name, exact before fuzzy, live styles only.
+function agentFindStyle(ref){
+  const q = String(ref||'').trim().toLowerCase();
+  if (!q) return null;
+  const ss = (STATE.styles||[]).filter(s => s.status !== 'archived');
+  return ss.find(s => String(s.styleId||'').toLowerCase() === q)
+      || ss.find(s => String(s.name||'').toLowerCase() === q)
+      || ss.find(s => { const n = String(s.name||'').toLowerCase(); return n && (n.includes(q) || q.includes(n)); })
+      || null;
+}
+function agentActionCard(chatBody, headline, lines, undoCall){
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + headline + '</div>'
+    + lines
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="' + undoCall + '">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+function agentRunLogSampleRound(action, chatBody){
+  const s = agentFindStyle(action.style);
+  if (!s) { appendAgentNote(chatBody, 'I couldn\'t find a style called "' + String(action.style||'') + '" in the line — nothing was logged.'); return; }
+  const rounds = ['Proto','SMS1','SMS2','TOP'];
+  const round = rounds.find(r => r.toLowerCase() === String(action.round||'').trim().toLowerCase()) || 'Proto';
+  let result = String(action.result||'').toLowerCase().trim();
+  if (['','approved','revise','rejected'].indexOf(result) < 0) result = '';
+  const eta = /^\d{4}-\d{2}-\d{2}$/.test(String(action.eta||'')) ? String(action.eta) : '';
+  const prevSample = s.sample || '';
+  if (!s.sampleLog) s.sampleLog = [];
+  s.sampleLog.push({ round, date: new Date().toISOString().slice(0,10), eta, result, note: String(action.note||'').trim() });
+  s.sample = (result === 'approved' && round === 'TOP') ? 'Approved' : round;
+  save();
+  try { logActivity('Sample round logged by agent: ' + (s.name||s.styleId) + ' → ' + round + (result ? ' (' + result + ')' : '')); } catch(e){}
+  try { if (document.getElementById('samples-content')) renderSamples(); } catch(e){}
+  agentActionCard(chatBody, 'Sample round logged',
+    '<div style="font-size:12px;font-weight:700;margin-top:2px">' + escHtml(s.name||s.styleId) + ' — ' + round + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + [result || 'pending', eta ? 'ETA ' + eta : ''].filter(Boolean).join(' · ') + '</div>',
+    'agentUndoSampleRound(\'' + s.id + '\',\'' + prevSample + '\', this)');
+}
+window.agentUndoSampleRound = function(styleId, prevSample, btn){
+  const s = (STATE.styles||[]).find(x => x.id === styleId);
+  if (s && s.sampleLog && s.sampleLog.length){ s.sampleLog.pop(); s.sample = prevSample || ''; save(); }
+  try { if (document.getElementById('samples-content')) renderSamples(); } catch(e){}
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Round removed — the style is back where it was.</div>'; }
+};
+function agentRunSetForecast(action, chatBody){
+  const list = Array.isArray(action.forecasts) ? action.forecasts.slice(0, 20) : [];
+  const applied = [], missed = [], prev = {};
+  list.forEach(f => {
+    const s = agentFindStyle(f && f.style);
+    const n = parseInt(f && f.units, 10);
+    if (!s || isNaN(n) || n < 0) { missed.push(String((f && f.style) || '?')); return; }
+    prev[s.id] = s.forecastUnits || 0;
+    if (n) s.forecastUnits = n; else delete s.forecastUnits;
+    applied.push({ s, n });
+  });
+  if (!applied.length) { appendAgentNote(chatBody, 'None of those styles matched the line — no forecast was set.'); return; }
+  save();
+  try { if (document.getElementById('production-content')) renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  const undoId = 'fc' + Date.now();
+  window.__agForecastUndo = window.__agForecastUndo || {};
+  window.__agForecastUndo[undoId] = prev;
+  try { logActivity('Forecast set by agent: ' + applied.map(a => (a.s.styleId||a.s.name) + ' ' + a.n + 'u').join(', ')); } catch(e){}
+  agentActionCard(chatBody, 'Forecast committed',
+    '<div style="font-size:11px;margin-top:2px">' + applied.map(a => escHtml(a.s.name||a.s.styleId) + ' → <b>' + a.n + 'u</b>').join('<br>') + '</div>'
+    + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:4px">Not found (skipped): ' + escHtml(missed.join(', ')) + '</div>' : ''),
+    'agentUndoForecast(\'' + undoId + '\', this)');
+}
+window.agentUndoForecast = function(undoId, btn){
+  const prev = (window.__agForecastUndo||{})[undoId]; if (!prev) return;
+  Object.keys(prev).forEach(id => {
+    const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
+    if (prev[id]) s.forecastUnits = prev[id]; else delete s.forecastUnits;
+  });
+  delete window.__agForecastUndo[undoId];
+  save();
+  try { if (document.getElementById('production-content')) renderProduction(); } catch(e){}
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Forecast restored to the previous numbers.</div>'; }
+};
+function agentRunSaveSeasonCal(action, chatBody){
+  const season = String(action.season||'').trim();
+  if (!season) { appendAgentNote(chatBody, 'Which season is this calendar for (e.g. FW26)? Nothing was saved.'); return; }
+  const KEYS = ['marketStart','marketEnd','orderClose','linesheetFreeze','factoryCommit','deliveryStart','deliveryEnd'];
+  if (!STATE.seasonCal) STATE.seasonCal = {};
+  const prevRec = STATE.seasonCal[season] ? JSON.parse(JSON.stringify(STATE.seasonCal[season])) : null;
+  const rec = Object.assign({}, STATE.seasonCal[season] || {});
+  const dates = action.dates || {};
+  const setLines = [];
+  KEYS.forEach(k => {
+    const v = String(dates[k]||'').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) { rec[k] = v; setLines.push(k + ' ' + v); }
+  });
+  const notes = String(action.notes||'').trim();
+  if (notes) rec.notes = notes;
+  if (!setLines.length && !notes) { appendAgentNote(chatBody, 'No valid ISO dates (YYYY-MM-DD) in that — nothing was saved.'); return; }
+  rec.updatedAt = new Date().toISOString();
+  STATE.seasonCal[season] = rec;
+  save();
+  try { logActivity('Season calendar updated by agent: ' + season); } catch(e){}
+  try { if (document.getElementById('gantt-container')) renderGantt(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  const undoId = 'sc' + Date.now();
+  window.__agSeasonCalUndo = window.__agSeasonCalUndo || {};
+  window.__agSeasonCalUndo[undoId] = { season, prev: prevRec };
+  agentActionCard(chatBody, season + ' calendar updated',
+    '<div style="font-size:11px;margin-top:2px">' + (setLines.length ? escHtml(setLines.join(' · ')) : 'notes updated') + '</div>',
+    'agentUndoSeasonCal(\'' + undoId + '\', this)');
+}
+window.agentUndoSeasonCal = function(undoId, btn){
+  const u = (window.__agSeasonCalUndo||{})[undoId]; if (!u) return;
+  if (!STATE.seasonCal) STATE.seasonCal = {};
+  if (u.prev) STATE.seasonCal[u.season] = u.prev; else delete STATE.seasonCal[u.season];
+  delete window.__agSeasonCalUndo[undoId];
+  save();
+  try { if (document.getElementById('gantt-container')) renderGantt(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Season calendar restored.</div>'; }
+};
+function agentRunAddPitch(action, chatBody){
+  if (!STATE.prPitches) STATE.prPitches = [];
+  const pub = String(action.publication||'').trim();
+  const subj = String(action.subject||'').trim();
+  if (!pub || !subj) { appendAgentNote(chatBody, 'A pitch needs a publication and an angle — nothing was filed.'); return; }
+  const status = String(action.status||'draft').toLowerCase() === 'sent' ? 'sent' : 'draft';
+  const p = {
+    // Random suffix: two agent-filed pitches can land in the same millisecond,
+    // and a shared id would make one Undo remove both.
+    id: 'PITCH' + Date.now() + '-' + Math.floor(Math.random() * 1e4), publication: pub,
+    contact: String(action.contact||'').trim(), email: String(action.email||'').trim(),
+    status, subject: subj,
+    type: String(action.pitchType||'').trim() || 'celebrity',
+    celebRef: String(action.celebRef||'').trim(),
+    sentAt: status === 'sent' ? new Date().toISOString() : null,
+    followUpDate: /^\d{4}-\d{2}-\d{2}$/.test(String(action.followUpDate||'')) ? String(action.followUpDate) : '',
+    publishUrl: '', reachEstimate: 0,
+    body: String(action.body||'').trim(), notes: String(action.notes||'').trim(),
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), addedByAgent: true,
+  };
+  STATE.prPitches.unshift(p);
+  save();
+  try { logActivity('PR: pitch filed by agent — ' + pub + (p.celebRef ? ' (' + p.celebRef + ')' : '')); } catch(e){}
+  agentActionCard(chatBody, 'Pitch filed (' + status + ')',
+    '<div style="font-size:12px;font-weight:700;margin-top:2px">' + escHtml(pub) + '</div>'
+    + '<div style="font-size:11px;margin-top:1px">' + escHtml(subj) + '</div>'
+    + (p.celebRef ? '<div style="font-size:10px;color:var(--muted);margin-top:2px">★ ' + escHtml(p.celebRef) + '</div>' : ''),
+    'agentUndoPitch(\'' + p.id + '\', this)');
+}
+window.agentUndoPitch = function(id, btn){
+  STATE.prPitches = (STATE.prPitches||[]).filter(p => p.id !== id);
+  save();
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Pitch removed.</div>'; }
+};
 
 // Execute save_brand_doc: persist a brand/creative document into the synced
 // Brand Library, with the standard confirmation card + Undo.
