@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '231';
+  const BUILD = '232';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4702,7 +4702,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -6384,6 +6384,93 @@ function filterVendor(type, el) {
 //  TIMELINE / GANTT
 // ═══════════════════════════════════════════════
 let ganttFilter = 'all';
+// ── SEASON CALENDAR — the spine's hard dates, one record per season ────────
+// STATE.seasonCal = { "FW26": { marketStart, marketEnd, orderClose,
+//   linesheetFreeze, factoryCommit, deliveryStart, deliveryEnd, notes, updatedAt } }
+// Everything downstream reads these instead of inventing its own deadlines:
+// Today nags the freeze/close/commit dates, the timeline shows the strip, and
+// the demand plan (C2) locks against factoryCommit.
+const SC_MILESTONES = [
+  { key:'linesheetFreeze', label:'Line sheet freeze' },
+  { key:'marketStart',     label:'Market opens' },
+  { key:'marketEnd',       label:'Market closes' },
+  { key:'orderClose',      label:'Order close' },
+  { key:'factoryCommit',   label:'Factory commit' },
+  { key:'deliveryStart',   label:'Delivery opens' },
+  { key:'deliveryEnd',     label:'Delivery closes' },
+];
+function scStripHTML(season){
+  const cal = (STATE.seasonCal||{})[season];
+  const btn = `<button class="btn btn-ghost btn-sm" onclick="scOpenModal('${slEsc(season)}')">${cal?'Edit':'Set season calendar'}</button>`;
+  if (!cal) return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--bg);border:1px solid var(--border);padding:10px 14px;margin-bottom:14px">
+    <span style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Season calendar</span>
+    <span style="font-size:10px;color:var(--muted);flex:1;min-width:200px">No key dates for ${slEsc(season)} — set market week, order close and factory commit so the deadlines surface on Today.</span>
+    ${btn}</div>`;
+  const t0 = new Date(); const mid = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate());
+  const fmtSc = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  const chips = SC_MILESTONES.filter(m => cal[m.key]).map(m => {
+    const days = Math.round((new Date(cal[m.key] + 'T00:00:00') - mid) / 86400000);
+    const col = days < 0 ? 'var(--muted)' : days <= 3 ? 'var(--red)' : days <= 14 ? 'var(--amber)' : 'var(--ink)';
+    const sub = days < 0 ? 'passed' : days === 0 ? 'today' : 'in ' + days + 'd';
+    return `<div style="min-width:84px;flex-shrink:0">
+      <div style="font-size:7px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap">${m.label}</div>
+      <div style="font-family:'DM Mono',monospace;font-size:10.5px;color:${col};margin-top:3px">${fmtSc(cal[m.key])}</div>
+      <div style="font-size:8px;color:${col}">${sub}</div>
+    </div>`;
+  }).join('');
+  return `<div style="background:var(--bg);border:1px solid var(--border);padding:12px 14px;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <span style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700">${slEsc(season)} season calendar</span>
+      <span style="margin-left:auto">${btn}</span></div>
+    <div style="display:flex;gap:14px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:2px">${chips || '<span style="font-size:10px;color:var(--muted)">No dates set yet.</span>'}</div>
+    ${cal.notes ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">${slEsc(cal.notes)}</div>` : ''}
+  </div>`;
+}
+window.scOpenModal = function(season){
+  if (!STATE.seasonCal) STATE.seasonCal = {};
+  const cal = STATE.seasonCal[season] || {};
+  const fld='width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px';
+  const lbl='font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
+  const dateInputs = SC_MILESTONES.map(m => `
+    <div><div style="${lbl}">${m.label}</div><input class="sc-date" data-key="${m.key}" type="date" style="${fld}" value="${slEsc(cal[m.key]||'')}"></div>`).join('');
+  const ex = document.getElementById('sc-modal'); if (ex) ex.remove();
+  const ov = document.createElement('div'); ov.className='overlay'; ov.id='sc-modal';
+  ov.innerHTML = `<div class="modal" style="width:520px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Season Calendar</div><button class="modal-close" onclick="closeModal('sc-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:20px;display:flex;flex-direction:column;gap:12px;max-height:78vh;overflow-y:auto">
+      <div><div style="${lbl}">Season</div><input id="sc-season" type="text" style="${fld}" value="${slEsc(season)}" placeholder="FW26"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${dateInputs}</div>
+      <div><div style="${lbl}">Notes</div><textarea id="sc-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Which market, whose order deadline is hard…">${slEsc(cal.notes||'')}</textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:4px">
+        ${STATE.seasonCal[season]?`<button class="btn btn-ghost btn-sm" onclick="scDelete('${slEsc(season)}')">Remove</button>`:''}
+        <button class="btn btn-ghost" onclick="closeModal('sc-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="scSave('${slEsc(season)}')">Save</button>
+      </div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  openModal('sc-modal');
+};
+window.scSave = function(origSeason){
+  const season = (document.getElementById('sc-season')?.value||'').trim();
+  if (!season){ showToast('Give the calendar a season'); return; }
+  if (!STATE.seasonCal) STATE.seasonCal = {};
+  if (origSeason && origSeason !== season) delete STATE.seasonCal[origSeason];
+  const rec = { updatedAt: new Date().toISOString() };
+  document.querySelectorAll('#sc-modal .sc-date').forEach(i => { if (i.value) rec[i.dataset.key] = i.value; });
+  rec.notes = (document.getElementById('sc-notes')?.value||'').trim();
+  STATE.seasonCal[season] = rec;
+  save(); closeModal('sc-modal');
+  try { logActivity('Season calendar set for ' + season); } catch(e){}
+  try { renderGantt(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  showToast(season + ' key dates saved — deadlines now surface on Today');
+};
+window.scDelete = function(season){
+  if (!confirm('Remove the ' + season + ' calendar?')) return;
+  if (STATE.seasonCal) delete STATE.seasonCal[season];
+  save(); closeModal('sc-modal');
+  try { renderGantt(); } catch(e){}
+};
 // ── TIMELINE — critical-path workback from each drop date ──────────────────
 // Milestones are computed BACKWARD from the drop using the style's production
 // lead (days) and standard offsets: drop ← ex-factory 21d ← production (lead)
@@ -6399,6 +6486,18 @@ const TL_MILESTONES = [
   { key:'exf',    label:'Ex-factory' },
   { key:'drop',   label:'Drop' },
 ];
+// Real ex-factory: the latest non-cancelled PO that carries this style. A
+// placed/production/shipped PO beats a draft; among equals the latest date wins.
+function tlPoExfFor(s){
+  const cands = (STATE.pos||[]).filter(po => po.status !== 'cancelled' && po.exFactory
+    && (po.items||[]).some(it => it.styleId === s.id));
+  if (!cands.length) return null;
+  const firm = cands.filter(po => po.status !== 'draft');
+  const pool = (firm.length ? firm : cands).slice()
+    .sort((a,b) => String(b.exFactory).localeCompare(String(a.exFactory)));
+  return { date: pool[0].exFactory, poId: pool[0].id, draft: pool[0].status === 'draft' };
+}
+const TL_ROUNDS = { proto:['Proto'], sms:['SMS1','SMS2','SMS'], top:['TOP'] };
 function tlSchedule(s){
   if (!s.drop) return null;
   const drop = new Date(s.drop + 'T12:00:00');
@@ -6406,16 +6505,46 @@ function tlSchedule(s){
   const lead = parseInt(s.lead) || 45;
   const back = (days) => { const x = new Date(drop); x.setDate(x.getDate() - days); return x; };
   const exf = 21, prod = exf + lead, top = prod + 10, sms = top + 21, proto = sms + 21, fabric = proto + 14;
-  return { fabric: back(fabric), proto: back(proto), sms: back(sms), top: back(top), prod: back(prod), exf: back(exf), drop };
+  const out = { fabric: back(fabric), proto: back(proto), sms: back(sms), top: back(top), prod: back(prod), exf: back(exf), drop, _src:{} };
+  // Real dates beat the formula: a PO's ex-factory anchors exf (and production
+  // start = ex-factory minus the lead), and logged sample rounds anchor the
+  // sample milestones — ETA while a round is out, the round's own date after.
+  try {
+    const po = tlPoExfFor(s);
+    if (po) {
+      const x = new Date(po.date + 'T12:00:00');
+      if (!isNaN(x)) {
+        out.exf = x; out._src.exf = po.poId + ' ex-factory' + (po.draft ? ' (draft)' : '');
+        const p = new Date(x); p.setDate(p.getDate() - lead);
+        out.prod = p; out._src.prod = po.poId + ' ex-factory − ' + lead + 'd lead';
+      }
+    }
+    const log = s.sampleLog || [];
+    Object.entries(TL_ROUNDS).forEach(([k, rounds]) => {
+      const entries = log.filter(e => rounds.includes(e.round));
+      if (!entries.length) return;
+      const last = entries[entries.length - 1];
+      const iso = last.eta || last.date;
+      if (!iso) return;
+      const d = new Date(iso + 'T12:00:00');
+      if (!isNaN(d)) { out[k] = d; out._src[k] = last.round + (last.result ? ' round logged' : ' sample ETA'); }
+    });
+  } catch(e){}
+  return out;
 }
 function tlDone(s, key){
   const st = s.status, smIdx = ['Proto','SMS1','SMS2','TOP','Approved'].indexOf(s.sample || '');
   const shipped = ['active','sale'].includes(st);
+  // The sample log is ground truth: an approved round — or any later round
+  // already logged — marks the milestone done even if s.sample never advanced.
+  const log = s.sampleLog || [];
+  const approved = (rounds) => log.some(e => rounds.includes(e.round) && ['approved','pass'].includes(String(e.result||'').toLowerCase()));
+  const anyOf = (rounds) => log.some(e => rounds.includes(e.round));
   switch (key) {
-    case 'fabric': return smIdx >= 0 || ['sms','development','production'].includes(st) || shipped;
-    case 'proto':  return smIdx >= 1 || ['production'].includes(st) || shipped;
-    case 'sms':    return smIdx >= 3 || ['production'].includes(st) || shipped;
-    case 'top':    return s.sample === 'Approved' || ['production'].includes(st) || shipped;
+    case 'fabric': return smIdx >= 0 || anyOf(['Proto','SMS1','SMS2','SMS','TOP']) || ['sms','development','production'].includes(st) || shipped;
+    case 'proto':  return smIdx >= 1 || approved(TL_ROUNDS.proto) || anyOf(['SMS1','SMS2','SMS','TOP']) || ['production'].includes(st) || shipped;
+    case 'sms':    return smIdx >= 3 || approved(TL_ROUNDS.sms) || anyOf(['TOP']) || ['production'].includes(st) || shipped;
+    case 'top':    return s.sample === 'Approved' || approved(TL_ROUNDS.top) || ['production'].includes(st) || shipped;
     default:       return shipped;
   }
 }
@@ -6451,10 +6580,12 @@ function renderGantt(filter) {
       if (!done && past) status = 'late';
       else if (!done && soon && status !== 'late') status = 'risk';
       if (!done && !nextMs) nextMs = m.label + ' · ' + fmt(due);
+      // A gold underline marks a REAL date (PO ex-factory / sample log), not the workback formula.
+      const real = sched._src && sched._src[m.key];
       return `<div style="flex:1;min-width:56px;text-align:center">
         <div style="width:10px;height:10px;border-radius:50%;margin:0 auto;background:${done?'var(--green)':'transparent'};border:2px solid ${color}"></div>
         <div style="font-size:7px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:5px;white-space:nowrap">${m.label}</div>
-        <div style="font-size:8.5px;font-family:'DM Mono',monospace;color:${done ? 'var(--muted)' : color === 'var(--border-mid)' ? 'var(--muted)' : color}">${fmt(due)}</div>
+        <div ${real?`title="${slEsc(real)}"`:''} style="font-size:8.5px;font-family:'DM Mono',monospace;display:inline-block;color:${done ? 'var(--muted)' : color === 'var(--border-mid)' ? 'var(--muted)' : color}${real?';border-bottom:1px solid var(--gold)':''}">${fmt(due)}</div>
       </div>`;
     }).join('');
     if (status === 'late') late++; else if (status === 'risk') risk++; else ontrack++;
@@ -6474,7 +6605,11 @@ function renderGantt(filter) {
       ${nextMs && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${nextMs} · production lead ${parseInt(s.lead)||45} days</div>` : ''}
     </div>`;
   });
+  // The season calendar strip leads the page: the filtered season's key dates,
+  // or the newest season's when viewing all.
+  const calSeason = ganttFilter !== 'all' ? ganttFilter : (rpSeasons()[0] || '');
   document.getElementById('gantt-container').innerHTML = `
+    ${calSeason ? scStripHTML(calSeason) : ''}
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);margin-bottom:16px">
       <div style="background:var(--bg);padding:14px;text-align:center"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--green);margin-bottom:6px">On track</div><div style="font-family:'DM Mono',monospace;font-size:24px;color:var(--green)">${ontrack}</div></div>
       <div style="background:var(--bg);padding:14px;text-align:center"><div style="font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--amber);margin-bottom:6px">At risk</div><div style="font-family:'DM Mono',monospace;font-size:24px;color:var(--amber)">${risk}</div></div>
@@ -12904,7 +13039,19 @@ function plmContext() {
       return `${season}: ${a.styles}/${p.total||'?'} styles, margin ${a.avgMargin!=null?a.avgMargin.toFixed(0)+'%':'n/a'} vs ${p.targetMargin||'?'}% target, sell-in $${Math.round(a.booked).toLocaleString()} vs $${Math.round(p.sellIn||0).toLocaleString()} goal`;
     }).join('\n');
   } catch(e){}
-  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}`;
+  // Season calendar, so the agents answer against the real deadlines.
+  let calLine = '';
+  try {
+    calLine = Object.entries(s.seasonCal||{}).map(([season, c]) =>
+      season + ': ' + [
+        ['market', c.marketStart ? c.marketStart + (c.marketEnd ? '→' + c.marketEnd : '') : ''],
+        ['line sheet freeze', c.linesheetFreeze], ['order close', c.orderClose],
+        ['factory commit', c.factoryCommit],
+        ['delivery', c.deliveryStart ? c.deliveryStart + (c.deliveryEnd ? '→' + c.deliveryEnd : '') : ''],
+      ].filter(p => p[1]).map(p => p[0] + ' ' + p[1]).join(', ')
+    ).join('\n');
+  } catch(e){}
+  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}`;
 }
 
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
@@ -13039,6 +13186,24 @@ function buildTodayFocus() {
         }
       }
     } catch(e){}
+  });
+  // 4b. Season calendar: the spine's hard dates. Upcoming-only — a market week
+  //     that already passed isn't actionable. The commercial deadlines (freeze,
+  //     order close, factory commit) escalate to high inside 3 days; everything
+  //     surfaces as a heads-up inside 14.
+  const _scMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const SC_NAG = { linesheetFreeze:'Line sheet freeze', orderClose:'Order close', factoryCommit:'Factory commit', marketStart:'Market opens', deliveryStart:'Delivery window opens' };
+  Object.entries(STATE.seasonCal||{}).forEach(([season, cal]) => {
+    if (!cal) return;
+    Object.entries(SC_NAG).forEach(([k, label]) => {
+      if (!cal[k]) return;
+      const days = Math.round((new Date(cal[k] + 'T00:00:00') - _scMid) / 86400000);
+      if (days < 0 || days > 14) return;
+      const hard = ['linesheetFreeze','orderClose','factoryCommit'].includes(k);
+      items.push({ pri: (hard && days <= 3) ? 'high' : 'med',
+        text: `${season}: ${label} ${days === 0 ? 'today' : 'in ' + days + 'd'} (${cal[k]})`,
+        act: "cpGoto('plm');goTo('timeline')" });
+    });
   });
   // 5. Quotes that went quiet (sent, no movement in 7+ days).
   (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
