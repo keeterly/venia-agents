@@ -1662,7 +1662,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '252';
+  const BUILD = '253';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2694,10 +2694,10 @@ body{padding-top:44px;box-sizing:border-box;}
               <button class="ag-btn ag-btn-ghost ag-btn-sm" style="margin-top:10px" onclick="cmdLogPull()">Log Pull + Add to Watchlist →</button>
             </div>
           </div>
-          <!-- PR Hits table -->
-          <div style="margin-top:1px;background:var(--bg)">
-            <div style="padding:16px 20px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Detected & Logged PR Hits</div>
-            <div id="cmd-hits-table" style="padding:0 0 8px"></div>
+          <!-- Unconfirmed mentions moved to the Coverage page (one record per event) -->
+          <div style="margin-top:1px;background:var(--bg);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap">
+            <div style="font-size:10px;color:var(--muted)">Press-sweep mentions now live on the Coverage page — promote or dismiss them there.</div>
+            <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('pr','hits')">Open Coverage →</button>
           </div>
           <!-- Press Kit -->
           <div style="margin-top:20px;padding-top:24px;border-top:1px solid var(--border);background:var(--bg);padding:24px">
@@ -13459,6 +13459,7 @@ function plmContext() {
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
 function cmdInit() {
   buildTodayFocus();
+  try { prMigrateStylistPulls(); } catch(e){}
   populateLMStyles();
   populateOEStyles();
   cmdLoadShopify();
@@ -14286,30 +14287,36 @@ async function cmdPRFollowUp() {
   } catch(e) { if(body) body.textContent='Error: '+e.message; }
 }
 function cmdLogHit() {
+  // One record per press event: the quick form prefills the Coverage modal
+  // (type "mention") instead of writing to the orphan dbGet('hits') inbox.
+  // dbGet('hits') stays as the press sweep's inbox only (cmdPRSweep).
   const person = document.getElementById('hit-person')?.value.trim();
   const source = document.getElementById('hit-source')?.value.trim();
   const desc   = document.getElementById('hit-desc')?.value.trim();
   if (!person) { toast('Who / what publication?'); return; }
-  dbInsert('hits', {person, source, desc, date: new Date().toISOString().slice(0,10)});
+  openCoverageModal();
+  const set = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+  set('cov-outlet', person); set('cov-url', source); set('cov-headline', desc || person);
+  const t = document.getElementById('cov-type'); if (t) t.value = 'mention';
   ['hit-person','hit-source','hit-desc'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  cmdRenderHits();
-  const kpiEl = document.getElementById('kpi-prhits');
-  if (kpiEl) kpiEl.textContent = dbGet('hits').length;
-  toast('PR hit logged');
 }
 async function cmdLogHitAndPitch() {
-  cmdLogHit();
+  // Draft pitches from the form's own fields (the mention itself), then hand
+  // the record to the Coverage modal — never from whatever dbGet('hits')[0] was.
+  const person = document.getElementById('hit-person')?.value.trim();
+  const source = document.getElementById('hit-source')?.value.trim();
+  const desc   = document.getElementById('hit-desc')?.value.trim();
+  if (!person) { toast('Who / what publication?'); return; }
   const body = document.getElementById('cmd-pr-out-body');
   const outEl = document.getElementById('cmd-pr-out');
   const label = document.getElementById('cmd-pr-out-label');
-  if(outEl) outEl.style.display=''; if(label) label.textContent='Drafting pitches from hit…';
+  cmdLogHit();
+  if(outEl) outEl.style.display=''; if(label) label.textContent='Drafting pitches from mention…';
   if(body) body.textContent='Writing related pitches…';
-  const hits = dbGet('hits');
-  const latest = hits[0];
   try {
     const r = await callClaude(
-      `You are VENIA Collection's PR strategist. Given a press hit, generate related pitches to capitalize on the coverage.`,
-      `New PR hit:\n${latest?.person} — ${latest?.desc}\nSource: ${latest?.source}\n\nGenerate 3 related editor pitches (different publications/angles) that build on this coverage.`
+      `You are VENIA Collection's PR strategist. Given a press mention, generate related pitches to capitalize on the coverage.`,
+      `New press mention:\n${person} — ${desc || ''}\nSource: ${source || ''}\n\nGenerate 3 related editor pitches (different publications/angles) that build on this coverage.`
     );
     if(body) body.textContent=r; if(label) label.textContent='Follow-up Pitches';
   } catch(e) { if(body) body.textContent='Error: '+e.message; }
@@ -14372,8 +14379,11 @@ function cmdHitToCoverage(hitId) {
   try { logActivity('PR: press mention logged as coverage — ' + cov.outlet + (pull ? (' (pull ' + (pull.invoiceNo || pull.id) + ')') : '')); } catch(e){}
   cmdRenderHits();
   try { if (document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+  try { if (document.getElementById('ag-mentions-strip')) agRenderMentions(); } catch(e){}
   toast(pull ? ('Logged — linked to ' + (pull.invoiceNo || 'pull')) : 'Logged to coverage', 'success');
 }
+// Quick-log a stylist pull as a DRAFT record in the ONE prPulls store —
+// no more parallel dbGet('stylistPulls') table (one record per event).
 function cmdLogPull() {
   const stylist = document.getElementById('pull-stylist')?.value.trim();
   if (!stylist) { toast('Stylist name required'); return; }
@@ -14383,10 +14393,30 @@ function cmdLogPull() {
     clients: document.getElementById('pull-clients')?.value.trim()||'',
     clientIGs: document.getElementById('pull-client-igs')?.value.trim()||'',
     context: document.getElementById('pull-context')?.value.trim()||'',
-    date: new Date().toISOString().slice(0,10),
   };
-  dbInsert('stylistPulls', entry);
-  // Auto-add to watchlist
+  if (!STATE.prPulls) STATE.prPulls = [];
+  STATE.prPulls.unshift({
+    id: 'PR' + Date.now(),
+    status: 'draft',
+    client: stylist, contact: stylist, email: '', phone: '',
+    pullType: 'editorial',
+    publication: entry.context || '',
+    pullDate: new Date().toISOString().slice(0,10),
+    returnDate: '', shootDate: '', photographer: '', address: '',
+    notes: ['Quick-logged from Press Tools.',
+            entry.pieces    ? 'Pieces: ' + entry.pieces       : '',
+            entry.clients   ? 'Clients: ' + entry.clients     : '',
+            entry.clientIGs ? 'Client IGs: ' + entry.clientIGs : '',
+            entry.ig        ? 'IG: ' + entry.ig               : ''].filter(Boolean).join('\n'),
+    invoiceNo: `PR-${new Date().getFullYear()}-${String((STATE.prPulls||[]).length+1).padStart(3,'0')}`,
+    termsNotes: '', feeType: 'none', feeAmount: 0, totalRetail: 0,
+    items: [],   // explicit: several readers walk pull.items unguarded
+    createdAt: new Date().toISOString(),
+    terms: { damage:false, credit:false, alteration:false, tearsheet:false },
+    quickLog: true,
+  });
+  save();
+  // Auto-add to watchlist (unchanged behaviour, new record home)
   const existing = dbGet('watchlist').find(w => w.ig === entry.ig);
   if (!existing && entry.ig) {
     dbInsert('watchlist', {name:stylist, ig:entry.ig, cat:'stylist', reason:'Auto-added from pull'});
@@ -14401,16 +14431,53 @@ function cmdLogPull() {
   }
   ['pull-stylist','pull-ig','pull-pieces','pull-clients','pull-client-igs','pull-context'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   cmdRenderPulls(); cmdRenderWatchlist();
-  toast('Pull logged + watchlist updated');
+  try { logActivity('PR: draft pull created from quick log — ' + stylist); } catch(e){}
+  toast('Draft pull created — finish it in PR Pulls');
+}
+// One-time additive migration: legacy stylistPulls rows become draft pulls in
+// the one store. Runs once per workspace (STATE.spMigrated syncs), never loses
+// a record — the legacy store only empties after the drafts exist.
+function prMigrateStylistPulls() {
+  try {
+    if (STATE.spMigrated) return;
+    const legacy = dbGet('stylistPulls');
+    if (!legacy.length) { STATE.spMigrated = true; return; }
+    if (!STATE.prPulls) STATE.prPulls = [];
+    legacy.forEach((e, i) => {
+      STATE.prPulls.push({
+        id: 'PRSP' + Date.now() + '-' + i,
+        status: 'draft',
+        client: e.stylist || 'Stylist', contact: e.stylist || '', email: '', phone: '',
+        pullType: 'editorial',
+        publication: e.context || '',
+        pullDate: e.date || '', returnDate: '', shootDate: '', photographer: '', address: '',
+        notes: ['Migrated from the legacy stylist-pull log.',
+                e.pieces    ? 'Pieces: ' + e.pieces        : '',
+                e.clients   ? 'Clients: ' + e.clients      : '',
+                e.clientIGs ? 'Client IGs: ' + e.clientIGs : '',
+                e.ig        ? 'IG: ' + e.ig                : ''].filter(Boolean).join('\n'),
+        invoiceNo: 'PR-LEG-' + String(i+1).padStart(3,'0'),
+        termsNotes: '', feeType: 'none', feeAmount: 0, totalRetail: 0,
+        items: [],
+        createdAt: new Date().toISOString(),
+        terms: { damage:false, credit:false, alteration:false, tearsheet:false },
+        quickLog: true, migrated: true,
+      });
+    });
+    STATE.spMigrated = true;
+    save();
+    legacy.slice().forEach(e => { if (e && e.id) dbDelete('stylistPulls', e.id); });
+    try { logActivity('PR: migrated ' + legacy.length + ' quick-logged stylist pull' + (legacy.length>1?'s':'') + ' into draft pulls'); } catch(e){}
+  } catch(e){}
 }
 function cmdRenderPulls() {
   const el = document.getElementById('cmd-pulls-list');
-  const pulls = dbGet('stylistPulls');
-  if (el) el.innerHTML = pulls.length ? pulls.slice(0,6).map(p=>
-    `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">
-      <span style="font-weight:700">${p.stylist}</span>
-      <span style="color:var(--muted);margin-left:6px">${p.ig||''}</span>
-      <div style="color:var(--muted);font-size:10px;margin-top:2px">${p.pieces||''}</div>
+  const pulls = (STATE.prPulls||[]).slice(0,6);
+  if (el) el.innerHTML = pulls.length ? pulls.map(p=>
+    `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:11px;cursor:pointer" onclick="cpGoto('pr')">
+      <span style="font-weight:700">${p.client||''}</span>
+      <span style="color:var(--muted);margin-left:6px;text-transform:uppercase;font-size:9px;letter-spacing:1px">${p.status||''}</span>
+      <div style="color:var(--muted);font-size:10px;margin-top:2px">${p.publication || (p.items||[]).map(i=>i.styleName).filter(Boolean).slice(0,3).join(', ') || ''}</div>
     </div>`
   ).join('') : '<div style="font-size:10px;color:var(--muted)">No pulls logged yet.</div>';
 }
@@ -16007,7 +16074,36 @@ function agBuildCoverageSection() {
   </div>`;
 
   const listHtml = agRenderCoverage(PR_COV_FILTER, true);
-  return statsHtml + filters + `<div id="ag-coverage-list" style="margin-top:4px">${listHtml}</div>`;
+  return statsHtml + filters
+    + `<div id="ag-mentions-strip">${agRenderMentions(true)}</div>`
+    + `<div id="ag-coverage-list" style="margin-top:4px">${listHtml}</div>`;
+}
+
+// Unconfirmed mentions — the press sweep's inbox, rendered where confirmations
+// happen (one record per event: promote → coverage, or dismiss).
+function agRenderMentions(returnHtml) {
+  const hits = dbGet('hits');
+  const row = h => `<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 14px;border-bottom:1px solid var(--border)">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:11px;font-weight:700">${h.person||'Unknown'}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${h.desc||''}</div>
+      ${h.source?`<a href="${h.source}" target="_blank" style="font-size:9px;color:var(--muted);text-decoration:underline">${String(h.source).slice(0,60)}…</a>`:''}
+    </div>
+    <div style="font-size:9px;color:var(--muted);flex-shrink:0">${h.date||''}</div>
+    <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+      <button class="ag-btn ag-btn-primary ag-btn-sm" style="min-height:auto;padding:4px 8px;white-space:nowrap" onclick="cmdHitToCoverage('${h.id}')">Promote →</button>
+      <button style="font-size:9px;padding:2px 6px;border:1px solid var(--border);cursor:pointer;background:none" onclick="dbDelete('hits','${h.id}');agRenderMentions()">✕ Dismiss</button>
+    </div>
+  </div>`;
+  const html = hits.length ? `<div style="background:var(--bg-off);border:1px solid var(--border);margin-top:4px">
+    <div style="padding:10px 14px;border-bottom:1px solid var(--border);font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Unconfirmed mentions — ${hits.length}</div>
+    ${hits.map(row).join('')}
+  </div>` : '';
+  if (returnHtml) return html;
+  const el = document.getElementById('ag-mentions-strip');
+  if (el) el.innerHTML = html;
+  try { cmdRenderHits(); } catch(e){}   // keep the Money overview card in step
+  return html;
 }
 
 // Pre-market press one-pager: the proof sheet a buyer sees before the line —
@@ -21668,6 +21764,8 @@ function loadRevenueGoals() {
     loadBudgetData();
     loadRevenueGoals();
     updateBudgetTotal();
+    // One-record-per-event migration runs at boot, not on first Money visit.
+    try { prMigrateStylistPulls(); } catch(e){}
     try { var fb = document.getElementById('foot-build'); if (fb) fb.textContent = window.VENIA_BUILD || '—'; } catch(e){}
     try { pkLoadPressKit(); } catch(e){}
   }
@@ -26204,7 +26302,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }
       if (bsVeniaOn() && STATE.bizSnap && STATE.bizSnap.txt) lines.push(STATE.bizSnap.txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');
       var pulse = [];
-      if (bsVeniaOn() && (STATE.prPulls || []).length) pulse.push((STATE.prPulls || []).length + ' PR pulls');
+      var actPulls = bsVeniaOn() ? (STATE.prPulls || []).filter(function(p){ return p && p.status === 'active'; }).length : 0;
+      if (actPulls) pulse.push(actPulls + ' active PR pulls');
       if (bsVeniaOn() && (STATE.slBuyers || []).length) pulse.push((STATE.slBuyers || []).length + ' wholesale buyer contacts');
       if (bsVeniaOn() && (STATE.materials || []).length) pulse.push((STATE.materials || []).length + ' materials on file');
       if (pulse.length) lines.push('OS pulse: ' + pulse.join(', ') + '.');
