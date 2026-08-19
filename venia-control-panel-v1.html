@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '242';
+  const BUILD = '243';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13697,6 +13697,8 @@ function buildTodayFocus() {
   // Once a day per device: surface the urgent count as a notification so
   // deadlines reach you even if you weren't planning to look.
   try { todayDigestNotify(items); } catch(e){}
+  // Keep the server-side morning digest fed (throttled; founder sessions only).
+  try { veniaDigestPublish(items); } catch(e){}
 }
 
 // Which founder is signed in — the Supabase session is the only identity that
@@ -13725,11 +13727,52 @@ window.todayView = function(v){
   buildTodayFocus();
 };
 window.todayDigestToggle = function(){
-  const off = localStorage.getItem('venia-digest-optin') === 'off';
-  localStorage.setItem('venia-digest-optin', off ? 'on' : 'off');
-  try { if (off && window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch(e){}
+  const wasOff = localStorage.getItem('venia-digest-optin') === 'off';
+  localStorage.setItem('venia-digest-optin', wasOff ? 'on' : 'off');
+  try {
+    if (wasOff && window.Notification && Notification.permission === 'default') {
+      Notification.requestPermission().then(function(res){ if (res === 'granted') veniaDigestPushSet(true); });
+    } else {
+      veniaDigestPushSet(wasOff);   // flag this device's push sub on the server
+    }
+  } catch(e){}
   buildTodayFocus();
 };
+// ── SERVER MORNING DIGEST (D3, server side) ─────────────────────────────────
+// A scheduled Netlify function (7am PT) pushes the day's urgent items to
+// phones with the digest turned on — even when the app is closed. The client's
+// only jobs: keep the shared digest content fresh, and keep this device's
+// push-subscription flag matching the toggle.
+async function veniaDigestPushSet(on){
+  try {
+    const c = window.__sbClient; if (!c) return;
+    if (on && typeof window.veniaPushEnsure === 'function') await window.veniaPushEnsure();
+    if (!('serviceWorker' in navigator)) return;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (reg && reg.pushManager) ? await reg.pushManager.getSubscription() : null;
+    if (!sub || !sub.endpoint) return;
+    await c.from('venia_push_subs').update({ digest: !!on }).eq('id', sub.endpoint);
+  } catch(e){}
+}
+let __digestPubAt = 0, __digestFlagSynced = false;
+function veniaDigestPublish(items){
+  try {
+    const c = window.__sbClient; if (!c) return;
+    if (typeof veniaWho === 'function' && !veniaWho()) return;   // founder session publishes; RLS enforces it anyway
+    // Once per session, mirror the local toggle onto this device's sub row.
+    if (!__digestFlagSynced && window.Notification && Notification.permission === 'granted') {
+      __digestFlagSynced = true;
+      veniaDigestPushSet(localStorage.getItem('venia-digest-optin') !== 'off');
+    }
+    if (Date.now() - __digestPubAt < 30 * 60 * 1000) return;    // fresh enough
+    const slim = (items||[]).filter(i => i.pri === 'high' || i.pri === 'med').slice(0, 10)
+      .map(i => ({ pri: i.pri, text: String(i.text||'').slice(0, 140), key: i.key || '' }));
+    __digestPubAt = Date.now();
+    c.from('venia_daily_digest').upsert({ id: 'latest',
+      items: { at: new Date().toISOString(), list: slim },
+      updated_at: new Date().toISOString() }).then(function(){}, function(){});
+  } catch(e){}
+}
 
 // One local digest notification per day per device (no server involved):
 // fires on the first app open of the day when anything urgent is waiting.
@@ -26412,6 +26455,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       await c.from('venia_push_subs').upsert({ id: j.endpoint, sub: j, label: (navigator.userAgent || '').slice(0, 80) });
     } catch(e){}
   }
+  // The morning-digest module (outside this IIFE) reuses the same subscription
+  // plumbing instead of duplicating the VAPID handshake.
+  window.veniaPushEnsure = delegPushEnsure;
   async function delegQueueServer(kind, id, gid, q, sys, userMsg){
     var c = delegSb(); if (!c) return false;
     try {
