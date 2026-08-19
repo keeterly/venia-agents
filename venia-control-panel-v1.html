@@ -1649,7 +1649,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '241';
+  const BUILD = '242';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5357,7 +5357,10 @@ function renderRangePlan(){
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:1px;background:var(--bg);padding:14px 20px;border-bottom:1px solid var(--border)">
       <div style="font-size:8px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Range Plan</div>
       <select onchange="RP_SEASON=this.value;renderRangePlan()" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${selOpts}</select>
-      <div style="margin-left:auto"><button class="btn btn-ghost btn-sm" onclick="rpOpenModal('${slEsc(season)}')">${plan?'Edit targets':'Set targets'}</button></div>
+      <div style="margin-left:auto;display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" onclick="seasonRetroOpen('${slEsc(season)}')" title="Close the loop: what actually happened vs the plan">⟲ Retro</button>
+        <button class="btn btn-ghost btn-sm" onclick="rpOpenModal('${slEsc(season)}')">${plan?'Edit targets':'Set targets'}</button>
+      </div>
     </div>`;
   if (!plan){
     el.innerHTML = `<div style="background:var(--border)">${head}
@@ -5462,6 +5465,132 @@ window.rpSave = function(origSeason){
   try { logActivity('Range targets set for ' + season); } catch(e){}
   renderRangePlan();
   showToast('Targets saved — the dashboard now tracks ' + season + ' against plan');
+};
+// ── SEASON RETRO (Backbone F3) — close the loop before the season goes dark ─
+// Once styles are archived, live actuals go quiet (every reader filters
+// archived out). The retro captures what actually happened — forecast vs sold,
+// money booked vs goal, margins, sampling effort, press won, winners and
+// no-sells — as a saved Brand Library doc, and seeds the NEXT season's range
+// plan from those actuals instead of a blank form.
+function rpNextSeason(code){
+  const m = String(code||'').trim().match(/^(SS|FW)\s*(\d{2,4})$/i);
+  if (!m) return '';
+  let y = parseInt(m[2],10); if (y >= 2000) y -= 2000;
+  return m[1].toUpperCase() === 'SS' ? 'FW' + y : 'SS' + (y + 1);
+}
+function seasonRetroData(season){
+  // Includes archived styles on purpose: the retro is how a closed season keeps its numbers.
+  const styles = (STATE.styles||[]).filter(s => String(s.season||'').trim() === season);
+  const plan = (STATE.rangePlan||{})[season] || null;
+  const rows = styles.map(s => {
+    const f = parseInt(s.forecastUnits,10)||0;
+    const sold = (typeof poSoldUnitsForStyle === 'function') ? poSoldUnitsForStyle(s.id, season) : 0;
+    const moved = (typeof unitsSoldFor === 'function') ? unitsSoldFor(s) : 0;
+    const lc = (typeof landedCost === 'function') ? (landedCost(s)||0) : 0;
+    const margin = (s.retail > 0 && lc > 0) ? (s.retail - lc) / s.retail * 100 : null;
+    const roundsN = (s.sampleLog||[]).length;
+    return { s, f, sold, moved, margin, roundsN, cat: s.category || 'Other' };
+  });
+  const booked = (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
+    .reduce((a,q) => a + (q.total||0), 0);
+  const names = styles.map(s => String(s.name||'').toLowerCase()).filter(Boolean);
+  const covN = (STATE.prCoverage||[]).filter(c =>
+    (c.stylesFeature||[]).some(n => names.includes(String(n||'').toLowerCase()))).length;
+  const margins = rows.map(r => r.margin).filter(m => m != null);
+  const withRounds = rows.filter(r => r.roundsN > 0);
+  return {
+    season, plan, rows, booked, covN,
+    avgMargin: margins.length ? margins.reduce((a,b)=>a+b,0)/margins.length : null,
+    avgRounds: withRounds.length ? withRounds.reduce((a,r)=>a+r.roundsN,0)/withRounds.length : null,
+    totF: rows.reduce((a,r)=>a+r.f,0),
+    totSold: rows.reduce((a,r)=>a+r.sold,0),
+    winners: rows.filter(r => r.sold > 0).sort((a,b)=>b.sold-a.sold).slice(0,5),
+    unsold: rows.filter(r => r.f > 0 && r.sold === 0),
+  };
+}
+function seasonRetroText(d){
+  const pct = (a,b) => b > 0 ? Math.round(a/b*100) + '%' : '—';
+  const money = (n) => '$' + Math.round(n||0).toLocaleString();
+  const L = [];
+  L.push(d.season + ' — SEASON RETRO (generated ' + new Date().toISOString().slice(0,10) + ')');
+  L.push('');
+  L.push('Line: ' + d.rows.length + ' styles' + (d.plan && d.plan.total ? ' (plan ' + d.plan.total + ')' : ''));
+  L.push('Sell-in booked: ' + money(d.booked) + (d.plan && d.plan.sellIn ? ' vs ' + money(d.plan.sellIn) + ' goal (' + pct(d.booked, d.plan.sellIn) + ')' : ''));
+  L.push('Avg landed margin: ' + (d.avgMargin != null ? d.avgMargin.toFixed(0) + '%' : 'n/a')
+    + (d.plan && d.plan.targetMargin ? ' vs ' + d.plan.targetMargin + '% target' : ''));
+  L.push('Forecast: ' + d.totF + 'u committed · ' + d.totSold + 'u sold to order (' + pct(d.totSold, d.totF) + ' of forecast)');
+  L.push('Press: ' + d.covN + ' placement' + (d.covN===1?'':'s') + ' featured this season\'s styles');
+  if (d.avgRounds != null) L.push('Sampling: avg ' + d.avgRounds.toFixed(1) + ' rounds per sampled style');
+  if (d.winners.length) { L.push(''); L.push('WINNERS (by units sold to order):');
+    d.winners.forEach(r => L.push('• ' + (r.s.styleId||'') + ' ' + (r.s.name||'') + ' — ' + r.sold + 'u sold / ' + r.f + 'u forecast')); }
+  if (d.unsold.length) { L.push(''); L.push('FORECAST BUT DIDN\'T SELL (rethink or cut):');
+    d.unsold.forEach(r => L.push('• ' + (r.s.styleId||'') + ' ' + (r.s.name||'') + ' — ' + r.f + 'u forecast, 0 sold')); }
+  L.push(''); L.push('PER STYLE — forecast / sold to order / units moved / margin:');
+  d.rows.forEach(r => L.push('• ' + (r.s.styleId||'') + ' ' + (r.s.name||'') + ': ' + r.f + ' / ' + r.sold + ' / ' + r.moved
+    + ' / ' + (r.margin != null ? r.margin.toFixed(0) + '%' : '—')));
+  return L.join('\n');
+}
+window.seasonRetroOpen = function(season){
+  season = season || RP_SEASON || (typeof rpSeasons === 'function' && rpSeasons()[0]) || '';
+  if (!season) { showToast('No season to review yet'); return; }
+  const d = seasonRetroData(season);
+  if (!d.rows.length) { showToast('No ' + season + ' styles found (archived ones count — check the season code)'); return; }
+  const next = rpNextSeason(season);
+  const ex = document.getElementById('retro-modal'); if (ex) ex.remove();
+  const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'retro-modal';
+  ov.innerHTML = `<div class="modal" style="width:640px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">${slEsc(season)} Retro</div><button class="modal-close" onclick="closeModal('retro-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:20px;max-height:80vh;overflow-y:auto">
+      <pre style="font-family:'DM Mono',monospace;font-size:10.5px;line-height:1.7;white-space:pre-wrap;color:var(--ink);margin:0">${slEsc(seasonRetroText(d))}</pre>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-ghost" onclick="closeModal('retro-modal')">Close</button>
+        ${next ? `<button class="btn btn-ghost btn-sm" onclick="seasonRetroSeed('${slEsc(season)}')" title="Prefill ${slEsc(next)} targets from what actually happened">Seed ${slEsc(next)} plan</button>` : ''}
+        <button class="btn btn-gold" onclick="seasonRetroSave('${slEsc(season)}')">Save to Brand Library</button>
+      </div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  openModal('retro-modal');
+};
+window.seasonRetroSave = function(season){
+  const d = seasonRetroData(season);
+  const body = seasonRetroText(d);
+  if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
+  const title = season + ' Retro';
+  const existing = STATE.brandDocs.find(x => x.title === title);
+  if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
+  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title, kind: 'retro', body,
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  save();
+  try { logActivity('Season retro saved: ' + season); } catch(e){}
+  showToast(title + (existing ? ' updated' : ' saved') + ' — it lives in Brand → Library');
+};
+window.seasonRetroSeed = function(season){
+  const next = rpNextSeason(season);
+  if (!next) { showToast('Couldn\'t derive the next season from "' + season + '"'); return; }
+  if (!STATE.rangePlan) STATE.rangePlan = {};
+  if (STATE.rangePlan[next]) {
+    showToast(next + ' already has targets — opening them (retro numbers are in the report)');
+    closeModal('retro-modal'); rpOpenModal(next); return;
+  }
+  const d = seasonRetroData(season);
+  const soldRows = d.rows.filter(r => r.sold > 0);
+  const base = soldRows.length ? soldRows : d.rows;
+  const cats = {};
+  base.forEach(r => { cats[r.cat] = (cats[r.cat]||0) + 1; });
+  STATE.rangePlan[next] = {
+    total: base.length,
+    cats,
+    targetMargin: Math.round(Math.max((d.plan && d.plan.targetMargin) || 0, d.avgMargin || 0)) || 0,
+    sellIn: d.booked > 0 ? Math.round(d.booked * 1.15 / 1000) * 1000 : ((d.plan && d.plan.sellIn) || 0),
+    updatedAt: new Date().toISOString(),
+  };
+  save();
+  try { logActivity('Range plan seeded for ' + next + ' from the ' + season + ' retro'); } catch(e){}
+  closeModal('retro-modal');
+  RP_SEASON = next;
+  try { renderRangePlan(); } catch(e){}
+  rpOpenModal(next);
+  showToast(next + ' targets seeded from what ' + season + ' actually did — adjust and save');
 };
 window.rpDelete = function(season){
   if (!confirm('Remove the ' + season + ' targets?')) return;
@@ -5674,6 +5803,14 @@ function archiveSeason() {
   if (!season) { toast('Pick a season first'); return; }
   const targets = STATE.styles.filter(s => s.season === season && s.status !== 'archived');
   if (!targets.length) { toast(`Nothing to archive in ${season}`); return; }
+  // Archiving mutes the season's live actuals everywhere — capture the retro
+  // first so the numbers survive as a saved doc. Skipped if one already exists.
+  const hasRetro = (STATE.brandDocs||[]).some(d => d.title === season + ' Retro');
+  if (!hasRetro && typeof seasonRetroOpen === 'function'
+      && confirm(`Run the ${season} retro first? (Recommended — the season's numbers go quiet once its styles are archived. Cancel to archive without it.)`)) {
+    seasonRetroOpen(season);
+    return;   // archive again after saving the retro
+  }
   if (!confirm(`Archive ${season} — ${targets.length} style${targets.length>1?'s':''}?\n\nThey leave the lists, timeline, selectors and SKUs, but stay in the Archived view and can be restored any time.`)) return;
   targets.forEach(archiveStyle);
   buildSkus(); save(); populateStyleSelects();
@@ -16621,7 +16758,7 @@ window.agentUndoPitch = function(id, btn){
 
 // Execute save_brand_doc: persist a brand/creative document into the synced
 // Brand Library, with the standard confirmation card + Undo.
-const BRAND_DOC_KINDS = ['guideline','manifesto','shotlist','brief','template','note'];
+const BRAND_DOC_KINDS = ['guideline','manifesto','shotlist','brief','template','note','retro'];
 function agentRunSaveBrandDoc(action, chatBody) {
   const title = String(action.title || '').trim();
   const docBody = String(action.body || '').trim();
