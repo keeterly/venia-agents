@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '268';
+  const BUILD = '269';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6467,6 +6467,41 @@ function renderPomPage() {
   document.getElementById('pom-content').innerHTML = `<div class="empty"><div class="empty-icon">◑</div><div class="empty-text">Select a style to view its Point of Measure sheet</div></div>`;
 }
 
+// ── POM TEMPLATES — the standing point lists (with house default tolerances)
+// lifted from VENIA's production tech pack, so a new style starts from the
+// standard sheet instead of a blank grid. Seeding only ADDS points whose
+// names aren't already present.
+const POM_TEMPLATES = {
+  'Tops / Jackets / Dresses': [
+    ['Chest at underarm', 0.06], ['Waist @ seam', 0.13], ['Waist — 7" down from armhole', 0.25],
+    ['Sweep straight across', 0.5], ['Sweep along curve', 0.5],
+    ['HPS to CF hem', 0.25], ['HPS to CB hem', 0.25], ['HPS to waist', 0.25],
+    ['Front neck drop', 0.13], ['Back neck drop', 0.13], ['Across shoulder', 0.25],
+    ['Neck opening', 0.13], ['Collar height', 0.06], ['Shoulder length', 0.13],
+    ['Armhole straight', 0.25], ['Armhole along curve', 0.25], ['Bicep at underarm', 0.25],
+    ['Sleeve length', 0.25], ['Sleeve opening', 0.13], ['Cuff height', 0.06],
+  ],
+  'Bottoms': [
+    ['Waist opening', 0.25], ['Hip — 7" below waist', 0.25], ['Thigh — 1" below crotch', 0.25],
+    ['Front rise — along curve', 0.25], ['Back rise — along curve', 0.25],
+    ['Front crotch depth', 0.25], ['Back crotch depth', 0.25],
+    ['Inseam', 0.25], ['Outseam', 0.5], ['Waistband height', 0.06], ['Hem opening', 0.25],
+  ],
+};
+window.pomSeedTemplate = function(styleId, kind){
+  const tpl = POM_TEMPLATES[kind]; if (!tpl) return;
+  if (!STATE.pom[styleId]) STATE.pom[styleId] = [];
+  const have = new Set(STATE.pom[styleId].map(p => String(p.point||'').trim().toLowerCase()));
+  let n = 0;
+  tpl.forEach(([point, tol]) => {
+    if (have.has(point.toLowerCase())) return;
+    STATE.pom[styleId].push({ id: 'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point, tol, comment: '' });
+    n++;
+  });
+  save(); pomSelectStyle(styleId);
+  toast(n ? ('Seeded ' + n + ' standard points — fill the base size, then grade') : 'All template points already present', n ? 'success' : 'info');
+};
+
 function pomSelectStyle(styleId) {
   currentPomStyleId = styleId;
   if (!styleId) { renderPomPage(); return; }
@@ -6538,9 +6573,11 @@ function pomSelectStyle(styleId) {
       </table>
     </div>
     <div style="margin-top:8px;font-size:10px;color:var(--muted)">Dev = measured (${baseSz} sample) − spec; <span style="color:var(--red)">red ⚠</span> = beyond tolerance, <span style="color:var(--green)">green ✓</span> = in spec.</div>
-    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="showPomAdd()">+ Add Measurement Point</button>
       <button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')" title="Fill the size run from the base-size column using a grade increment">⊞ Grade from base size</button>
+      <span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-left:6px">Seed standard sheet:</span>
+      ${Object.keys(POM_TEMPLATES).map(k=>`<button class="btn btn-ghost btn-sm" onclick="pomSeedTemplate('${styleId}','${k}')" title="Adds the house-standard points (with default tolerances) that aren't already on this sheet">${k} (${POM_TEMPLATES[k].length})</button>`).join('')}
     </div>
   `;
   document.getElementById('pom-content').innerHTML = html;
@@ -7573,6 +7610,8 @@ function dpAdvanceStage() {
     if (!((STATE.bom||{})[id]||[]).length) missing.push('BOM (no materials listed)');
     if (!((STATE.pom||{})[id]||[]).length) missing.push('POM (no measurement spec)');
     if (!(s.sampleLog||[]).some(e => e.round === 'TOP' && e.result === 'approved')) missing.push('an approved TOP sample');
+    const openGates = (s.gates||[]).filter(g => !g.done);
+    if (openGates.length) missing.push(openGates.length + ' open condition' + (openGates.length>1?'s':'') + ' before bulk ("' + openGates[0].text.slice(0,60) + '"' + (openGates.length>1?' …':'') + ')');
     if (missing.length && !confirm('Heads up — ' + s.name + ' is moving into PRODUCTION without:\n\n• ' + missing.join('\n• ') + '\n\nAdvance anyway?')) return;
   }
   const prev = s.status;
@@ -8492,7 +8531,7 @@ const SAMPLE_COLORS = {Proto:'var(--purple)',SMS1:'var(--blue)',SMS2:'var(--teal
 function sampleToday(){ return new Date().toISOString().slice(0, 10); }
 function sampleLast(s){ const l = s.sampleLog || []; return l.length ? l[l.length - 1] : null; }
 function sampleOverdue(s){ const e = sampleLast(s); return !!(e && e.eta && !e.result && e.eta < sampleToday()); }
-const SAMPLE_RESULTS = { '': ['Pending', 'var(--amber)'], approved: ['Approved', 'var(--green)'], revise: ['Revise', 'var(--amber)'], rejected: ['Rejected', 'var(--red)'] };
+const SAMPLE_RESULTS = { '': ['Pending', 'var(--amber)'], approved: ['Approved', 'var(--green)'], 'approved-corrections': ['Appr. w/ corrections', 'var(--amber)'], revise: ['Revise', 'var(--amber)'], rejected: ['Rejected', 'var(--red)'] };
 function sampleResultChip(r){ const [t, c] = SAMPLE_RESULTS[r || ''] || SAMPLE_RESULTS['']; return `<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;color:${c}">${t}</span>`; }
 
 function renderSamples(filter='all') {
@@ -8561,7 +8600,26 @@ window.openSampleCard = function(styleId){
         <button class="btn btn-ghost btn-sm" style="min-height:38px" onclick="fitSessionStart('${s.id}')" title="Walk the tape through the POM points — spec vs measured, stamped to this round">Fit session</button>
         <button class="btn btn-gold btn-sm" style="min-height:38px" onclick="sampleLogRound('${s.id}')">＋ Log</button>
       </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <input id="smp-received" type="date" class="fi" style="min-height:38px;font-size:12px;flex:1;min-width:130px" title="Sample received on">
+        <input id="smp-color" class="fi" placeholder="Sample color / lot" style="min-height:38px;font-size:12px;flex:1.4;min-width:120px">
+      </div>
       <input id="smp-note" class="fi" placeholder="Note — what was requested / changed" style="width:100%;box-sizing:border-box;min-height:38px;font-size:13px;margin-top:8px">
+    </div>
+    <!-- Conditions gating bulk — the teeth of an "approved with corrections":
+         each stays on Today until checked off. -->
+    <div style="border:1px solid var(--border);padding:12px;margin:0 0 12px;background:var(--bg)">
+      <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Conditions before bulk ${(s.gates||[]).filter(g=>!g.done).length?`<span style="color:var(--red)">· ${(s.gates||[]).filter(g=>!g.done).length} open</span>`:''}</div>
+      ${(s.gates||[]).length ? (s.gates||[]).map(g=>`
+        <div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px dashed var(--border)">
+          <input type="checkbox" ${g.done?'checked':''} onchange="gateToggle('${s.id}','${g.id}',this.checked)" style="margin-top:2px">
+          <span style="flex:1;font-size:12px;color:${g.done?'var(--muted)':'var(--ink)'};${g.done?'text-decoration:line-through':''}">${(g.text||'').replace(/</g,'&lt;')}${g.round?` <span style="font-size:10px;color:var(--muted)">· ${g.round}</span>`:''}</span>
+          <button onclick="gateDel('${s.id}','${g.id}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1">✕</button>
+        </div>`).join('') : '<div style="font-size:11px;color:var(--muted);font-style:italic">None — add anything the factory must submit before cutting bulk.</div>'}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <input id="smp-gate" class="fi" placeholder="e.g. Submit photo of waistband construction before bulk" style="flex:1;min-height:36px;font-size:12px" onkeydown="if(event.key==='Enter')gateAdd('${s.id}')">
+        <button class="btn btn-ghost btn-sm" style="min-height:36px" onclick="gateAdd('${s.id}')">＋</button>
+      </div>
     </div>
     ${log.length ? log.map((e, ri) => {
       const idx = (s.sampleLog || []).length - 1 - ri;
@@ -8571,6 +8629,8 @@ window.openSampleCard = function(styleId){
           <span style="display:inline-block;padding:2px 9px;border:1px solid ${SAMPLE_COLORS[e.round]||'var(--border)'};font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${SAMPLE_COLORS[e.round]||'var(--muted)'}">${e.round}</span>
           <span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${e.date}</span>
           ${e.eta ? `<span style="font-family:'DM Mono',monospace;font-size:10px;color:${overdue ? 'var(--red)' : 'var(--muted)'}">ETA ${e.eta}${overdue ? ' ⚠ overdue' : ''}</span>` : ''}
+          ${e.receivedAt ? `<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">rec'd ${e.receivedAt}</span>` : ''}
+          ${e.color ? `<span style="font-size:10px;color:var(--muted)">${String(e.color).replace(/</g,'&lt;')}</span>` : ''}
           ${fitTolChip(s.id, e.round)}
           <span style="flex:1"></span>
           <select onchange="sampleSetResult('${s.id}',${idx},this.value)" class="fs" style="min-height:30px;font-size:10px;padding:3px 6px">
@@ -8600,11 +8660,39 @@ window.sampleLogRound = function(styleId){
   const round = document.getElementById('smp-round')?.value || 'Proto';
   const eta = document.getElementById('smp-eta')?.value || '';
   const note = (document.getElementById('smp-note')?.value || '').trim();
+  const receivedAt = document.getElementById('smp-received')?.value || '';
+  const color = (document.getElementById('smp-color')?.value || '').trim();
   if (!s.sampleLog) s.sampleLog = [];
-  s.sampleLog.push({ round, date: sampleToday(), eta, result: '', note });
+  const entry = { round, date: sampleToday(), eta, result: '', note };
+  if (receivedAt) entry.receivedAt = receivedAt;
+  if (color) entry.color = color;
+  s.sampleLog.push(entry);
   sampleSyncBadge(s);
   logActivity(`Sample round logged: ${s.name} → ${round}${eta ? ' (ETA ' + eta + ')' : ''}`);
   save(); renderSamples(); openSampleCard(styleId);
+};
+// Bulk-gating conditions ("submit waistband photo before cutting") — live on
+// the style, nag on Today until each is checked off.
+window.gateAdd = function(styleId){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
+  const inp = document.getElementById('smp-gate');
+  const text = ((inp && inp.value) || '').trim(); if (!text) return;
+  if (!s.gates) s.gates = [];
+  const round = document.getElementById('smp-round')?.value || s.sample || '';
+  s.gates.push({ id: 'GT'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), round, text, done: false, at: new Date().toISOString().slice(0,10) });
+  save(); openSampleCard(styleId);
+};
+window.gateToggle = function(styleId, id, done){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s || !s.gates) return;
+  const g = s.gates.find(x => x.id === id); if (!g) return;
+  g.done = !!done; g.doneAt = done ? new Date().toISOString().slice(0,10) : '';
+  save(); openSampleCard(styleId);
+  try { buildTodayFocus(); } catch(e){}
+};
+window.gateDel = function(styleId, id){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s || !s.gates) return;
+  s.gates = s.gates.filter(x => x.id !== id);
+  save(); openSampleCard(styleId);
 };
 window.sampleSetResult = function(styleId, idx, v){
   const s = STATE.styles.find(x => x.id === styleId); if (!s || !s.sampleLog || !s.sampleLog[idx]) return;
@@ -14756,6 +14844,15 @@ function buildTodayFocus() {
         act:"cpGoto('plm');setTimeout(function(){openDp('"+sid+"')},150)" });
     });
   } catch(e){}
+  // 7c. Open bulk-gating conditions: an "approved with corrections" means the
+  //     factory owes something BEFORE cutting bulk — these are blocking, so
+  //     they sit high until checked off on the sample card.
+  (STATE.styles||[]).filter(s => s.status !== 'archived' && (s.gates||[]).some(g => !g.done)).forEach(s => {
+    const open = (s.gates||[]).filter(g => !g.done);
+    items.push({ key:'gate|'+s.id, pri:'high',
+      text:`Gate before bulk: ${open[0].text.slice(0,80)}${open.length>1?` (+${open.length-1} more)`:''} — ${s.name}`,
+      act:"cpGoto('plm');setTimeout(function(){openSampleCard('"+s.id+"')},150)" });
+  });
   // 8. Missing API keys — dismissible setup nags. Connection state lives in
   //    Settings; once dismissed they stay out of the daily focus on this device.
   const dismissedNags = (()=>{ try { return JSON.parse(localStorage.getItem('venia-dismissed-nags')||'[]'); } catch(e){ return []; } })();
