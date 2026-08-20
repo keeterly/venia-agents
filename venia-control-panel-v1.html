@@ -1034,7 +1034,7 @@ html.share-mode #techpack-content{ padding:0 0 calc(24px + var(--sab)) !importan
 @media print{
   .sidebar,.topbar,.mob-header,.mob-nav,.mob-drawer,.mob-drawer-overlay,
   .dpanel,.dpanel-overlay,.overlay,.toast,.sec-actions,.filters,#tp-style-select,
-  #sk-launch,#sk-dock,.cp-global-bar{display:none!important}
+  #sk-launch,#sk-dock,.cp-global-bar,#fc-panel{display:none!important}
   body{background:white;overflow:visible!important;display:block}
   .main{margin-left:0!important;overflow:visible!important}
   .content{padding:0!important;overflow:visible!important}
@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '264';
+  const BUILD = '265';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7468,7 +7468,7 @@ function openDp(styleId) {
 
     <div class="dp-section dp-full">
       <div class="dp-sec-title">POM <span style="color:var(--muted)">(${pomPoints.length} points)</span></div>
-      ${pomPoints.length ? `<div class="tp-pom-wrap"><table class="pom-table" style="min-width:360px"><thead><tr><th>Point</th><th>XS</th><th>S</th><th>M</th><th>L</th><th>XL</th></tr></thead><tbody>${pomPoints.map(p=>`<tr><td>${p.point}</td><td>${p.xs}</td><td>${p.s}</td><td>${p.m}</td><td>${p.l}</td><td>${p.xl}</td></tr>`).join('')}</tbody></table></div>` : '<div style="font-size:11px;color:var(--muted);font-style:italic">No POM sheet. Go to POM tab to add measurements.</div>'}
+      ${pomPoints.length ? (()=>{ const dz = (z=>z.length?z:['XS','S','M','L','XL'])(expandSizes(s.sizes)); return `<div class="tp-pom-wrap"><table class="pom-table" style="min-width:360px"><thead><tr><th>Point</th>${dz.map(sz=>`<th>${sz}</th>`).join('')}</tr></thead><tbody>${pomPoints.map(p=>`<tr><td>${p.point}</td>${dz.map(sz=>`<td>${p[sz.toLowerCase()]??''}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`; })() : '<div style="font-size:11px;color:var(--muted);font-style:italic">No POM sheet. Go to POM tab to add measurements.</div>'}
     </div>
 
     <div class="dp-section">
@@ -7506,6 +7506,16 @@ function openDp(styleId) {
       ${dpCommentsHtml(s)}
     </div>
 
+    <div class="dp-section dp-full">
+      <div class="dp-sec-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Factory Thread</span>
+        ${s.shareToken?`<span style="font-size:10px;color:var(--muted)">two-way · via share link</span>`:''}
+      </div>
+      <div id="dp-fc">${s.shareToken
+        ? '<div style="font-size:10px;color:var(--muted)">Loading factory comments…</div>'
+        : '<div style="font-size:11px;color:var(--muted);font-style:italic">Share the tech pack (Tech Pack → ⇱ Share) to open a two-way thread with your factory.</div>'}</div>
+    </div>
+
     <div class="dp-full" style="padding:10px 0 4px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="openColorwayModal('${s.id}')">Colorways (${(s.colorways||[]).length})</button>
       <button class="btn btn-ghost btn-sm" onclick="dpViewTechPack()">Tech Pack</button>
@@ -7515,6 +7525,7 @@ function openDp(styleId) {
   document.getElementById('dp-overlay').classList.add('open');
   document.getElementById('dpanel').classList.add('open');
   if (isMobile()) document.body.style.overflow = 'hidden';
+  if (s.shareToken && typeof window.dpFcLoad === 'function') setTimeout(() => window.dpFcLoad(s.id), 30);
 }
 
 // Inline spec edits from the style detail — saves instantly, keeps SKUs in
@@ -14529,6 +14540,21 @@ function buildTodayFocus() {
                   act:"cpGoto('mk');setTimeout(function(){agNavGo('mk','calendar')},150)"});
     }
   });
+  // 7b. Unresolved factory comments on shared tech packs. Fetched in ONE
+  //     batched edge-function call (fcRefreshSummary) and cached on
+  //     window.__fcSummary so this feed stays synchronous. Factory text is
+  //     external input — escaped before it touches the DOM.
+  try {
+    const fc = window.__fcSummary || {};
+    const fesc = window.__fcEsc || (x => String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'));
+    Object.keys(fc).forEach(sid => {
+      const e = fc[sid]; if (!e || !e.count) return;
+      const s = (STATE.styles||[]).find(x => x.id === sid); if (!s) return;
+      items.push({ key:'fc|'+sid, pri:'med',
+        text:`Factory asked: “${fesc(String(e.latest||'').slice(0,70))}${(e.latest||'').length>70?'…':''}” — ${s.name}${e.count>1?` (+${e.count-1} more)`:''}`,
+        act:"cpGoto('plm');setTimeout(function(){openDp('"+sid+"')},150)" });
+    });
+  } catch(e){}
   // 8. Missing API keys — dismissible setup nags. Connection state lives in
   //    Settings; once dismissed they stay out of the daily focus on this device.
   const dismissedNags = (()=>{ try { return JSON.parse(localStorage.getItem('venia-dismissed-nags')||'[]'); } catch(e){ return []; } })();
@@ -24037,6 +24063,44 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         '<span style="color:#777">Live tech pack — always current' + (upd ? ' · updated ' + upd : '') + '</span>';
       var tc = document.getElementById('techpack-content');
       if (tc) tc.prepend(bar);
+      // Two-way thread: the factory asks/flags right under the document and
+      // VENIA's replies land back here. All calls token-scoped via the
+      // factory-comments function; nothing else in the workspace is reachable.
+      var cw = document.createElement('div');
+      cw.id = 'fc-panel';
+      cw.style.cssText = 'max-width:900px;margin:0 auto;padding:26px 20px 70px;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;background:#fff';
+      cw.innerHTML =
+        '<div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;font-weight:700;border-top:2px solid #000;padding-top:14px;color:#000">Comments & Questions</div>'
+        + '<div style="font-size:11px;color:#888;margin:6px 0 10px">Write to VENIA about this tech pack — they see it immediately and their replies appear here.</div>'
+        + '<div id="fc-list" style="margin-bottom:12px"><div style="font-size:11px;color:#888">Loading…</div></div>'
+        + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+        + '<input id="fc-name" placeholder="Your name" style="flex:0 0 140px;padding:9px 10px;border:1px solid #ccc;font-size:12px;background:#fff;color:#000" value="' + fcEsc(localStorage.getItem('venia_fc_name')||'') + '">'
+        + '<input id="fc-body" placeholder="Question or note for VENIA…" style="flex:1;min-width:200px;padding:9px 10px;border:1px solid #ccc;font-size:12px;background:#fff;color:#000" onkeydown="if(event.key===&quot;Enter&quot;)window.fcShareSend()">'
+        + '<button onclick="window.fcShareSend()" style="padding:9px 18px;background:#000;color:#fff;border:none;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer">Send</button></div>';
+      if (tc) tc.appendChild(cw);
+      window.__fcShareToken = token;
+      window.fcShareLoad = async function(){
+        var list = document.getElementById('fc-list'); if (!list) return;
+        try {
+          var rr = await c.functions.invoke('factory-comments', { body: { token: window.__fcShareToken, action: 'list' } });
+          var rows = (rr.data && rr.data.comments) || [];
+          list.innerHTML = rows.length ? rows.map(function(x){ return fcRowHtml(x, '', false); }).join('')
+                                       : '<div style="font-size:11px;color:#888;font-style:italic">No comments yet.</div>';
+        } catch(e2){ list.innerHTML = '<div style="font-size:11px;color:#888">Could not load comments — reload to retry.</div>'; }
+      };
+      window.fcShareSend = async function(){
+        var nameEl = document.getElementById('fc-name'), bodyEl = document.getElementById('fc-body');
+        var nm = ((nameEl && nameEl.value) || '').trim(), body = ((bodyEl && bodyEl.value) || '').trim();
+        if (!body) return;
+        try { localStorage.setItem('venia_fc_name', nm); } catch(e2){}
+        try {
+          var rr = await c.functions.invoke('factory-comments', { body: { token: window.__fcShareToken, action: 'add', body: body, from: 'factory', author_name: nm } });
+          if (rr.data && rr.data.error) throw new Error(rr.data.error);
+          if (bodyEl) bodyEl.value = '';
+          window.fcShareLoad();
+        } catch(e2){ alert('Could not send — ' + ((e2&&e2.message)||e2)); }
+      };
+      window.fcShareLoad();
     } catch(e){
       shareFail('Could not load', 'Something went wrong loading this tech pack. Reload to try again.');
     }
@@ -24104,6 +24168,86 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       logActivity('Factory link revoked');
     } catch(e){ showToast('Revoke failed','error'); }
   };
+
+  // ── TWO-WAY FACTORY COMMENTS (Build 265) ─────────────────────────────────
+  // The venia_share_comments table has RLS with no policies; every read/write
+  // goes through the factory-comments edge function, which validates the share
+  // token (service role). Factory text is EXTERNAL input — always escaped.
+  function fcEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fcRowHtml(r, token, founderSide){
+    var who = r.author === 'venia'
+      ? ('VENIA' + (r.author_name ? ' · ' + fcEsc(r.author_name) : ''))
+      : (fcEsc(r.author_name) || 'Factory');
+    var when = r.created_at ? new Date(r.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+    var mut = founderSide ? 'var(--muted)' : '#888';
+    return '<div style="padding:8px 0;border-bottom:1px solid ' + (founderSide?'var(--border)':'#e0e0e0') + '">'
+      + '<div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline">'
+      + '<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;color:' + (r.author==='venia' ? (founderSide?'var(--gold)':'#c9a96e') : (founderSide?'var(--ink)':'#000')) + '">' + who + '</span>'
+      + '<span style="font-size:10px;color:' + mut + '">' + when + (r.resolved ? ' · ✓ resolved' : '') + '</span></div>'
+      + '<div style="font-size:12px;line-height:1.6;margin-top:3px;white-space:pre-wrap;color:' + (founderSide?'var(--ink)':'#000') + '">' + fcEsc(r.body) + '</div>'
+      + (founderSide && token && r.author==='factory' && !r.resolved
+        ? '<button class="btn btn-ghost btn-sm" style="margin-top:4px" onclick="fcResolve(\'' + token + '\',\'' + r.id + '\')">✓ Resolve</button>' : '')
+      + '</div>';
+  }
+  window.__fcRowHtml = fcRowHtml; window.__fcEsc = fcEsc;
+  window.dpFcLoad = async function(styleId){
+    var s = STATE.styles.find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
+    var box = document.getElementById('dp-fc'); if (!box) return;
+    var c = sb(); if (!c){ box.innerHTML = '<div style="font-size:10px;color:var(--muted)">Cloud connection needed for the factory thread.</div>'; return; }
+    try {
+      var r = await c.functions.invoke('factory-comments', { body: { token: s.shareToken, action: 'list' } });
+      if (r.data && r.data.error === 'revoked'){ box.innerHTML = '<div style="font-size:11px;color:var(--muted);font-style:italic">The share link was revoked — issue a new one (Tech Pack → ⇱ Share) to reopen the thread.</div>'; return; }
+      var rows = (r.data && r.data.comments) || [];
+      box.innerHTML =
+        (rows.length ? rows.map(function(x){ return fcRowHtml(x, s.shareToken, true); }).join('')
+                     : '<div style="font-size:11px;color:var(--muted);font-style:italic">No comments yet — the factory writes from the bottom of the shared tech pack.</div>')
+        + '<div style="display:flex;gap:8px;margin-top:10px">'
+        + '<input class="fi" id="dp-fc-input" placeholder="Reply to the factory…" style="flex:1;font-size:12px;min-height:auto;padding:8px 10px" onkeydown="if(event.key===&quot;Enter&quot;)fcReply(&quot;' + styleId + '&quot;)">'
+        + '<button class="btn btn-gold btn-sm" onclick="fcReply(\'' + styleId + '\')">Send</button></div>'
+        + (window.veniaAuthUser ? '' : '<div style="font-size:10px;color:var(--muted);margin-top:6px">Sign in under Settings → Team so replies post verified as VENIA.</div>');
+    } catch(e){ box.innerHTML = '<div style="font-size:10px;color:var(--muted)">Could not load the thread — ' + fcEsc((e&&e.message)||e) + '</div>'; }
+  };
+  window.fcReply = async function(styleId){
+    var s = STATE.styles.find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
+    var inp = document.getElementById('dp-fc-input'); var body = ((inp && inp.value) || '').trim(); if (!body) return;
+    var c = sb(); if (!c) return;
+    var who = (typeof veniaWho === 'function' && veniaWho()) || '';
+    var name = who === 'keeter' ? 'Keeter' : who === 'christine' ? 'Christine' : '';
+    try {
+      var r = await c.functions.invoke('factory-comments', { body: { token: s.shareToken, action: 'add', body: body, from: 'venia', author_name: name } });
+      if (r.data && r.data.error) throw new Error(r.data.error);
+      logActivity('Factory thread reply: ' + s.name);
+      window.dpFcLoad(styleId);
+    } catch(e){ showToast('Reply failed — ' + ((e&&e.message)||e), 'error'); }
+  };
+  window.fcResolve = async function(token, id){
+    var c = sb(); if (!c) return;
+    try {
+      var r = await c.functions.invoke('factory-comments', { body: { token: token, action: 'resolve', id: id, resolved: true } });
+      if (r.data && r.data.error) throw new Error(r.data.error === 'founders only' ? 'Sign in under Settings → Team to resolve comments' : r.data.error);
+      var held = (STATE.styles||[]).find(function(x){ return x.shareToken === token; });
+      if (held) window.dpFcLoad(held.id);
+      if (window.fcRefreshSummary) window.fcRefreshSummary();
+      showToast('Resolved','success');
+    } catch(e){ showToast(String((e&&e.message)||e), 'error'); }
+  };
+  // Today-feed cache: ONE batched call covering every shared style; the feed
+  // itself stays synchronous and reads window.__fcSummary.
+  window.fcRefreshSummary = async function(){
+    try {
+      var c = sb(); if (!c) return;
+      var tokens = (STATE.styles||[]).map(function(s){ return s.shareToken; }).filter(Boolean);
+      if (!tokens.length){ window.__fcSummary = {}; return; }
+      var r = await c.functions.invoke('factory-comments', { body: { action: 'summary', tokens: tokens } });
+      window.__fcSummary = (r.data && r.data.styles) || {};
+      try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+    } catch(e){}
+  };
+  // Boot fetch after sync settles; refresh every 10 min while the app is open.
+  if (!window.VENIA_SHARE) {
+    setTimeout(function(){ try { window.fcRefreshSummary(); } catch(e){} }, 6000);
+    setInterval(function(){ try { if (!document.hidden) window.fcRefreshSummary(); } catch(e){} }, 600000);
+  }
 })();
 
 // ── TEAM AUTH (Supabase email + password) — Step A: ADDITIVE ──────────────
