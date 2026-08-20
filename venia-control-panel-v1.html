@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '259';
+  const BUILD = '260';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6428,6 +6428,25 @@ function renderMaterials(filter) {
       ${m.moq ? `<div class="mat-detail">MOQ: <span>${m.moq}${/\d$/.test(String(m.moq).trim())?' '+m.unit:''}</span></div>` : ''}
       ${m.width ? `<div class="mat-detail">Width: <span>${m.width}</span></div>` : ''}
       ${m.content?`<div class="mat-detail" style="margin-top:4px;font-size:10px;color:var(--muted)">${m.content}</div>`:''}
+      ${(function(){
+        // Fabric liability — required (BOM yield × outstanding PO units) vs
+        // on hand + on order. All derived except on-hand, which is optional.
+        const req = matRequired(m.id), onOrder = matOnOrder(m.id);
+        const onHand = parseFloat(m.qtyOnHand)||0;
+        const short = Math.round(Math.max(0, req - onHand - onOrder)*10)/10;
+        return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
+            <span>On hand</span>
+            <input class="pom-input" style="width:56px" value="${m.qtyOnHand!=null?m.qtyOnHand:''}" placeholder="—" onchange="matSetOnHand('${m.id}',this.value)" title="Optional — update when fabric arrives or gets cut">
+            <span>${m.unit||''}</span>
+            ${onOrder?`<span>· on order <b style="color:var(--ink)">${onOrder}</b></span>`:''}
+            ${req?`<span>· open POs need <b style="color:var(--ink)">${req}</b></span>`:''}
+          </div>
+          ${req && short > 0 ? `<div style="font-size:10px;color:var(--red);font-weight:700;margin-top:4px">⚠ Short ${short} ${m.unit||''} for committed production</div>`
+            : (req ? `<div style="font-size:10px;color:var(--green);margin-top:4px">✓ Covered for committed production</div>` : '')}
+          <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="poOrderFabric('${m.id}')">Order fabric →</button>
+        </div>`;
+      })()}
       ${lots.length ? `
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
           <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">${lots.length} Lot${lots.length>1?'s':''}</div>
@@ -8674,8 +8693,9 @@ function setReorderQty(id,qty){const s=STATE.styles.find(x=>x.id===id);if(s){s.r
 //  The missing leg between "sold" and "stocked": consolidate demand into a
 //  per-size factory PO, track deposit/balance, receive goods into stock.
 // ═══════════════════════════════════════════════
-const PO_STATUSES = { draft:'Draft', placed:'Placed', production:'In production', shipped:'Shipped', received:'Received', cancelled:'Cancelled' };
-const PO_STATUS_COLORS = { draft:'var(--muted)', placed:'var(--blue)', production:'var(--amber)', shipped:'var(--purple)', received:'var(--green)', cancelled:'var(--border-mid)' };
+const PO_STATUSES = { draft:'Draft', placed:'Placed', production:'In production', shipped:'Shipped', partial:'Partially received', received:'Received', cancelled:'Cancelled' };
+const PO_STATUS_COLORS = { draft:'var(--muted)', placed:'var(--blue)', production:'var(--amber)', shipped:'var(--purple)', partial:'var(--teal)', received:'var(--green)', cancelled:'var(--border-mid)' };
+const PO_MILESTONES = [['cut','Cut start'],['mid','Mid inspection'],['top','TOP approved'],['packed','Packed']];
 function poList(){ if (!STATE.pos) STATE.pos = []; return STATE.pos; }
 function poDeposit(po){ return Math.round((po.total||0) * (po.depositPct!=null?po.depositPct:30)) / 100 * 1; }
 function poAmounts(po){
@@ -8698,13 +8718,69 @@ function poOwed(po){
 // Gap to commit = forecast − on-PO − stock: what you still owe the factory.
 let PO_DEMAND_SEASON = null;
 function poUnitsForStyle(styleId){
+  // OUTSTANDING units only: received units live in s.stock — counting them
+  // here too double-counted the same garments in the demand gap (pre-existing
+  // bug the skeptic's audit surfaced; partial receiving made it visible).
   let n = 0;
   (STATE.pos||[]).forEach(po => {
-    if (po.status === 'cancelled') return;
-    (po.items||[]).forEach(it => { if (it.styleId === styleId) n += (it.qty||0); });
+    if (po.status === 'cancelled' || po.status === 'received') return;
+    if (po.type === 'fabric') return;   // yardage is not garment units
+    (po.items||[]).forEach(it => { if (it.styleId === styleId) n += Math.max(0, (it.qty||0) - (it.receivedQty||0)); });
   });
   return n;
 }
+// Fabric liability — everything derived, nothing to maintain by hand:
+// required = BOM yield (waste-inclusive) × outstanding garment units on POs.
+function matOnOrder(matId){
+  return (STATE.pos||[]).filter(po => po.type === 'fabric' && po.materialId === matId && !['received','cancelled'].includes(po.status))
+    .reduce((s,po) => s + (parseFloat(po.qty)||0), 0);
+}
+function matRequired(matId){
+  let req = 0;
+  (STATE.styles||[]).filter(s => s.status !== 'archived').forEach(s => {
+    const openUnits = poUnitsForStyle(s.id);
+    if (!openUnits) return;
+    ((STATE.bom||{})[s.id]||[]).filter(r => r.matId === matId).forEach(r => {
+      const waste = parseFloat(r.waste)||0;
+      req += (parseFloat(r.qty)||0) * (1 + waste/100) * openUnits;
+    });
+  });
+  return Math.round(req*10)/10;
+}
+window.matSetOnHand = function(matId, v){
+  const m = (STATE.materials||[]).find(x => x.id === matId); if (!m) return;
+  const n = parseFloat(v);
+  if (isNaN(n) || n <= 0) delete m.qtyOnHand; else m.qtyOnHand = Math.round(n*100)/100;
+  save(); renderMaterials();
+};
+// Fabric PO: a real, trackable purchase to a mill — payments and receiving ride
+// the same PO rails as garment POs; receiving lands in material stock.
+window.poOrderFabric = function(matId){
+  const m = (STATE.materials||[]).find(x => x.id === matId); if (!m) return;
+  const need = Math.max(0, matRequired(matId) - (parseFloat(m.qtyOnHand)||0) - matOnOrder(matId));
+  const qtyStr = prompt('Order how much ' + (m.name||'fabric') + '? (' + (m.unit||'yd') + ')' + (need ? '\nShortfall vs open POs: ' + need : ''), need ? String(Math.ceil(need)) : '');
+  if (qtyStr == null) return;
+  const qty = parseFloat(qtyStr);
+  if (isNaN(qty) || qty <= 0){ showToast('Enter a quantity'); return; }
+  if (m.moq && qty < parseFloat(m.moq) && !confirm('Below this supplier\'s MOQ (' + m.moq + '). Order anyway?')) return;
+  const cost = parseFloat(m.costPerUnit)||0;
+  const po = {
+    id: 'PO-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase(),
+    type: 'fabric', materialId: m.id,
+    vendor: m.supplier || 'Mill', season: '',
+    qty: qty, unit: m.unit || 'yd',
+    units: 0, items: [],
+    currency: 'USD', depositPct: 50,
+    total: Math.round(qty * cost * 100)/100,
+    exFactory: '', status: 'placed', notes: 'Fabric order — ' + (m.name||''),
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  };
+  poList().unshift(po);
+  save();
+  try { logActivity('Fabric PO ' + po.id + ' — ' + qty + ' ' + po.unit + ' of ' + (m.name||'') + ' from ' + po.vendor); } catch(e){}
+  renderMaterials();
+  showToast('Fabric PO ' + po.id + ' created — track it in Production', 'success');
+};
 function poSoldUnitsForStyle(styleId, season){
   let n = 0;
   (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && (!season || String(q.season||'').trim() === season))
@@ -8810,7 +8886,12 @@ function renderProduction(){
   if (!el) return;
   const pos = poList();
   const open = pos.filter(poOpen);
-  const unitsOnOrder = open.reduce((s,po)=>s+(po.units||0),0);
+  // Outstanding garment units only — fabric yardage and already-received
+  // partial lots don't belong in this number.
+  const unitsOnOrder = open.filter(po => po.type !== 'fabric')
+    .reduce((s,po) => s + ((po.items||[]).length
+      ? (po.items||[]).reduce((a,it) => a + Math.max(0, (it.qty||0) - (it.receivedQty||0)), 0)
+      : (po.units||0)), 0);
   const owed = pos.filter(po=>poOpen(po)).reduce((s,po)=>s+poOwed(po),0);
   const y0 = new Date(new Date().getFullYear(),0,1).toISOString();
   const paidYtd = pos.reduce((s,po)=>{
@@ -8820,9 +8901,17 @@ function renderProduction(){
   const rows = pos.slice().sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).map(po=>{
     const { dep, bal } = poAmounts(po);
     const pay = (paidAt, amt, tag) => `<span title="${tag} $${amt.toLocaleString()}" style="font-family:'DM Mono',monospace;font-size:10px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
+    const msLine = (po.type !== 'fabric' && po.ms && Object.keys(po.ms).some(k => po.ms[k] && po.ms[k].date)) ? (() => {
+      const today = new Date().toISOString().slice(0,10);
+      return `<div style="font-size:10px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap">${PO_MILESTONES.map(([k,l]) => {
+        const m = po.ms[k]; if (!m || !m.date) return '';
+        const late = !m.done && poOpen(po) && m.date < today;
+        return `<span style="font-family:'DM Mono',monospace;color:${m.done?'var(--green)':late?'var(--red)':'var(--muted)'}">${l.split(' ')[0]} ${m.done?'✓':m.date.slice(5)}${late?' ⚠':''}</span>`;
+      }).filter(Boolean).join('')}</div>`;
+    })() : '';
     return `<tr onclick="poOpenModal('${po.id}')" style="cursor:pointer">
-      <td data-label=""><div class="t-name">${po.id}</div><div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div></td>
-      <td data-label="Units" style="font-family:'DM Mono',monospace;font-size:11px">${po.units||0}</td>
+      <td data-label=""><div class="t-name">${po.id}${po.type==='fabric'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">FABRIC</span>':''}</div><div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div>${msLine}</td>
+      <td data-label="Units" style="font-family:'DM Mono',monospace;font-size:11px">${po.type==='fabric' ? (po.qty||0)+' '+slEsc(po.unit||'yd') : (po.units||0) + ((po.items||[]).some(it=>it.receivedQty) ? ' <span style="color:var(--teal)">('+(po.items||[]).reduce((a,it)=>a+(it.receivedQty||0),0)+' in)</span>' : '')}</td>
       <td data-label="Total" style="font-family:'DM Mono',monospace;font-size:11px">${slMoneyC(po.currency, po.total||0)}</td>
       <td data-label="Payments" class="po-pay-cell">${pay(po.depositPaidAt, dep, 'D')}${pay(po.balancePaidAt, bal, 'B')}</td>
       <td data-label="Ex-factory" style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${slEsc(po.exFactory||'—')}</td>
@@ -8994,6 +9083,16 @@ window.poOpenModal = function(id){
         ${payRow('Deposit', dep, po.depositDue, po.depositPaidAt, 'po-dep-due', 'poMarkDepositPaid')}
         ${payRow('Balance', bal, po.balanceDue, po.balancePaidAt, 'po-bal-due', 'poMarkBalancePaid')}
       </div>` : ''}
+      ${po && po.type !== 'fabric' ? `<div>
+        <div style="${lbl};margin-bottom:6px">WIP milestones — planned dates between placed and ex-factory</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px">
+          ${PO_MILESTONES.map(([k,l]) => `
+            <div><div style="font-size:10px;color:var(--muted);margin-bottom:3px">${l}</div>
+              <input id="po-ms-${k}" type="date" value="${slEsc((po.ms&&po.ms[k]&&po.ms[k].date)||'')}" style="${fld};padding:5px">
+              <label style="font-size:10px;color:var(--muted);display:flex;gap:4px;align-items:center;margin-top:3px;cursor:pointer"><input id="po-ms-${k}-done" type="checkbox" ${(po.ms&&po.ms[k]&&po.ms[k].done)?'checked':''}> done</label>
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
       <div><div style="${lbl}">Notes</div><textarea id="po-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(po?.notes||'')}</textarea></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px">
         ${po&&poOpen(po)&&po.status!=='draft' ? `<button class="btn btn-ghost btn-sm" onclick="poReceive('${po.id}')">⇣ Receive into stock</button>` : ''}
@@ -9025,6 +9124,15 @@ window.poSave = function(existingId){
   };
   const depDue = document.getElementById('po-dep-due'); if (depDue) data.depositDue = depDue.value||'';
   const balDue = document.getElementById('po-bal-due'); if (balDue) data.balanceDue = balDue.value||'';
+  // WIP milestones (present only when editing a garment PO)
+  if (document.getElementById('po-ms-cut')) {
+    data.ms = {};
+    PO_MILESTONES.forEach(([k]) => {
+      const d = document.getElementById('po-ms-'+k), c = document.getElementById('po-ms-'+k+'-done');
+      if (d && (d.value || (c && c.checked))) data.ms[k] = { date: d.value||'', done: !!(c && c.checked) };
+    });
+    if (!Object.keys(data.ms).length) delete data.ms;
+  }
   if (!data.vendor){ showToast('Name the factory'); return; }
   if (!items.length){ showToast('Add at least one style with units'); return; }
   const pos = poList();
@@ -9047,20 +9155,47 @@ window.poMarkDepositPaid = function(id){ const po = poList().find(p=>p.id===id);
 window.poMarkBalancePaid = function(id){ const po = poList().find(p=>p.id===id); if(!po) return; po.balancePaidAt = new Date().toISOString(); po.updatedAt = po.balancePaidAt; save(); try{logActivity('PO '+id+' balance paid');}catch(e){} poOpenModal(id); renderProduction(); };
 window.poReceive = function(id){
   const po = poList().find(p=>p.id===id); if(!po) return;
-  if (!confirm('Receive PO ' + id + ' — add ' + (po.units||0) + ' units into stock?')) return;
-  (po.items||[]).forEach(it=>{
-    const s = (STATE.styles||[]).find(x=>x.id===it.styleId);
-    if (s) s.stock = (s.stock||0) + (it.qty||0);
+  // Fabric POs receive into MATERIAL stock, whole-shipment.
+  if (po.type === 'fabric'){
+    const m = (STATE.materials||[]).find(x => x.id === po.materialId);
+    if (!confirm('Receive fabric PO ' + id + ' — add ' + (po.qty||0) + ' ' + (po.unit||'yd') + (m ? ' of ' + m.name : '') + ' into material stock?')) return;
+    if (m) m.qtyOnHand = Math.round(((parseFloat(m.qtyOnHand)||0) + (parseFloat(po.qty)||0)) * 100) / 100;
+    po.status = 'received'; po.receivedAt = new Date().toISOString(); po.updatedAt = po.receivedAt;
+    save();
+    try { logActivity('Fabric PO ' + id + ' received — ' + (po.qty||0) + ' ' + (po.unit||'yd') + ' into material stock'); } catch(e){}
+    closeModal('po-modal'); renderProduction();
+    try { renderMaterials(); } catch(e){}
+    showToast((po.qty||0) + ' ' + (po.unit||'yd') + ' received', 'success');
+    return;
+  }
+  // Garment POs receive PARTIALLY: real production ships in split lots.
+  const remaining = (po.items||[]).reduce((s,it) => s + Math.max(0, (it.qty||0) - (it.receivedQty||0)), 0);
+  if (!remaining){ showToast('Nothing left to receive on ' + id); return; }
+  const ans = prompt('Units received now (remaining ' + remaining + '):', String(remaining));
+  if (ans == null) return;
+  let n = Math.min(remaining, Math.max(0, parseInt(ans,10)||0));
+  if (!n){ showToast('Nothing received'); return; }
+  const receivedNow = n;
+  (po.items||[]).forEach(it => {
+    if (n <= 0) return;
+    const rem = Math.max(0, (it.qty||0) - (it.receivedQty||0));
+    const take = Math.min(rem, n);
+    if (!take) return;
+    it.receivedQty = (it.receivedQty||0) + take;
+    const s = (STATE.styles||[]).find(x => x.id === it.styleId);
+    if (s) s.stock = (s.stock||0) + take;
+    n -= take;
   });
-  po.status = 'received';
-  po.receivedAt = new Date().toISOString();
-  po.updatedAt = po.receivedAt;
+  const left = (po.items||[]).reduce((s,it) => s + Math.max(0, (it.qty||0) - (it.receivedQty||0)), 0);
+  po.status = left ? 'partial' : 'received';
+  if (!left) po.receivedAt = new Date().toISOString();
+  po.updatedAt = new Date().toISOString();
   save();
-  try { logActivity('PO ' + id + ' received — ' + (po.units||0) + ' units into stock'); } catch(e){}
+  try { logActivity('PO ' + id + ' — ' + receivedNow + ' units received into stock' + (left ? ' (' + left + ' still open)' : ' (complete)')); } catch(e){}
   try { window.updateInventoryNav && window.updateInventoryNav(); } catch(e){}
   closeModal('po-modal');
   renderProduction();
-  showToast((po.units||0) + ' units received into stock', 'success');
+  showToast(receivedNow + ' units received' + (left ? ' — ' + left + ' still open' : ' — PO complete'), 'success');
 };
 window.poDelete = function(id){
   if (!confirm('Delete ' + id + '?')) return;
@@ -14040,6 +14175,15 @@ function buildTodayFocus() {
     if (po.exFactory && ['placed','production'].includes(po.status)) {
       const xd = payDays(po.exFactory);
       if (xd >= 0 && xd <= 7) items.push({key:'po|'+po.id+'|exf', pri:'med', text:`PO ${po.id} ships ex-factory in ${xd}d — ${po.units||0} units (${po.vendor})`, act});
+    }
+    // WIP milestones: a factory quietly slipping shows up here, not at ex-factory.
+    if (po.type !== 'fabric' && po.ms) {
+      const MS_LBL = { cut:'Cut start', mid:'Mid inspection', top:'TOP approval', packed:'Packing' };
+      Object.entries(po.ms).forEach(([k, m]) => {
+        if (!m || !m.date || m.done) return;
+        const md = payDays(m.date);
+        if (md < 0) items.push({key:'po|'+po.id+'|ms'+k, pri: md < -7 ? 'high' : 'med', text:`WIP: ${MS_LBL[k]||k} ${-md}d overdue — ${po.id} (${po.vendor})`, act});
+      });
     }
   });
   // 7. Content going out in the next 48h.
