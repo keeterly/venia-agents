@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '267';
+  const BUILD = '268';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3657,6 +3657,9 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div><label class="fl" for="cs-duties" style="font-size:10px">Duties ($)</label><input class="fi fi-mono" id="cs-duties" type="number" step="0.01" placeholder="0.00" oninput="calcCostSheet()" style="margin-top:4px"></div>
           <div><label class="fl" for="cs-freight" style="font-size:10px">Freight ($)</label><input class="fi fi-mono" id="cs-freight" type="number" step="0.01" placeholder="0.00" oninput="calcCostSheet()" style="margin-top:4px"></div>
         </div>
+        <!-- Itemized labor: cutting / sewing / dyeing per contractor. When lines
+             exist they SUM into the Labor field above (per-unit dollars). -->
+        <div id="cs-labor-lines" style="margin-bottom:16px"></div>
         <div id="cs-results" style="display:none;background:var(--bg-off);border:1px solid var(--border);padding:14px">
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:12px">
             <div><div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Landed Cost</div><div style="font-size:20px;font-weight:700;font-family:'DM Mono',monospace" id="cs-landed">—</div></div>
@@ -4213,6 +4216,9 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="fg"><label class="fl" for="mm-content">Fiber Content</label><input class="fi" id="mm-content" placeholder="e.g. 100% Organic Cotton"></div>
           <div class="fg"><label class="fl" for="mm-color">Available Colors</label><input class="fi" id="mm-color" placeholder="e.g. Natural, Black, Sulfur"></div>
           <div class="fg"><label class="fl" for="mm-width">Fabric Width</label><input class="fi" id="mm-width" placeholder='e.g. 60", 148cm'></div>
+          <div class="fg"><label class="fl" for="mm-article">Article # (mill)</label><input class="fi fi-mono" id="mm-article" placeholder="Mill article / ref #"></div>
+          <div class="fg"><label class="fl" for="mm-weight">Weight</label><input class="fi" id="mm-weight" placeholder="e.g. 180 gsm, 7 oz"></div>
+          <div class="fg"><label class="fl" for="mm-sample-price">Sample Price / Unit</label><input class="fi fi-mono" id="mm-sample-price" type="number" step="0.01" placeholder="If ≠ production cost"></div>
           <div class="fg"><label class="fl" for="mm-moq">MOQ</label><input class="fi" id="mm-moq" placeholder="e.g. 50yd per colorway"></div>
           <div class="fg full"><label class="fl" for="mm-notes">Notes</label><textarea class="ft" id="mm-notes" placeholder="Mill notes, certifications, alternative suppliers, repeat ordering instructions…" style="min-height:60px"></textarea></div>
         </div>
@@ -7907,7 +7913,7 @@ function saveStyle() {
 function openMatModal(id=null) {
   document.getElementById('mat-modal-title').textContent = id ? 'Edit Material' : 'New Material';
   document.getElementById('mm-id').value = id||'';
-  const fields = ['name','supplier','cost','unit','lead','content','color','notes','width','moq'];
+  const fields = ['name','supplier','cost','unit','lead','content','color','notes','width','moq','article','weight','sample-price'];
   fields.forEach(f => { const el=document.getElementById(`mm-${f}`); if(el) el.value=''; });
 
   if (id) {
@@ -7921,6 +7927,9 @@ function openMatModal(id=null) {
       document.getElementById('mm-lead').value = m.leadDays||'';
       document.getElementById('mm-content').value = m.content||'';
       document.getElementById('mm-color').value = m.color||'';
+      document.getElementById('mm-article').value = m.article||'';
+      document.getElementById('mm-weight').value = m.weight||'';
+      document.getElementById('mm-sample-price').value = m.samplePrice||'';
       document.getElementById('mm-notes').value = m.notes||'';
       document.getElementById('mm-width').value = m.width||'';
       document.getElementById('mm-moq').value = m.moq||'';
@@ -8104,6 +8113,9 @@ function saveMaterial() {
     content: document.getElementById('mm-content').value,
     color: document.getElementById('mm-color').value,
     width: document.getElementById('mm-width').value,
+    article: document.getElementById('mm-article').value,
+    weight: document.getElementById('mm-weight').value,
+    samplePrice: parseFloat(document.getElementById('mm-sample-price').value)||0,
     moq: document.getElementById('mm-moq').value,
     notes: document.getElementById('mm-notes').value,
   };
@@ -8681,7 +8693,7 @@ window.poSeedMilestones = function(){
   const iso = (back) => { const d = new Date(exD); d.setDate(d.getDate() - back); return d.toISOString().slice(0,10); };
   // Cut starts ~70% of the lead before shipping, mid-line inspection near the
   // middle, TOP late in the run, packing 3 days out.
-  const plan = { cut: iso(Math.round(L*0.7)), mid: iso(Math.round(L*0.45)), top: iso(Math.round(L*0.22)), packed: iso(3) };
+  const plan = { cut: iso(Math.round(L*0.7)), mid: iso(Math.round(L*0.45)), top: iso(Math.round(L*0.22)), dye: iso(8), packed: iso(3) };
   let n = 0;
   Object.entries(plan).forEach(([k, d]) => {
     const el = document.getElementById('po-ms-'+k);
@@ -9056,7 +9068,9 @@ function setReorderQty(id,qty){const s=STATE.styles.find(x=>x.id===id);if(s){s.r
 // ═══════════════════════════════════════════════
 const PO_STATUSES = { draft:'Draft', placed:'Placed', production:'In production', shipped:'Shipped', partial:'Partially received', received:'Received', cancelled:'Cancelled' };
 const PO_STATUS_COLORS = { draft:'var(--muted)', placed:'var(--blue)', production:'var(--amber)', shipped:'var(--purple)', partial:'var(--teal)', received:'var(--green)', cancelled:'var(--border-mid)' };
-const PO_MILESTONES = [['cut','Cut start'],['mid','Mid inspection'],['top','TOP approved'],['packed','Packed']];
+// 'dye' sits between TOP and packing for garment-dyed styles (PROD-DYING is a
+// real slip point); dates are optional, so non-dyed POs just leave it blank.
+const PO_MILESTONES = [['cut','Cut start'],['mid','Mid inspection'],['top','TOP approved'],['dye','Dye / wash'],['packed','Packed']];
 function poList(){ if (!STATE.pos) STATE.pos = []; return STATE.pos; }
 function poDeposit(po){ return Math.round((po.total||0) * (po.depositPct!=null?po.depositPct:30)) / 100 * 1; }
 function poAmounts(po){
@@ -10305,6 +10319,91 @@ function careSectionHTML(s){
   </div>`;
 }
 
+// ── ISO 4915 STITCH LIBRARY ─────────────────────────────────────────────────
+// Stitch classes with schematic thread-path diagrams (our own drawings — the
+// ISO numbers and generic schematics are industry standard). A seam callout
+// picks a class; the diagram renders beside it on screen AND on the printed
+// tech pack, with a legend of every stitch used — so a contractor sees the
+// thread path, not just a name.
+const STITCH_LIB = [
+  ['301', 'Lockstitch — single needle'],
+  ['101', 'Chainstitch — single thread'],
+  ['401', 'Chainstitch — 2-thread'],
+  ['304', 'Zigzag lockstitch'],
+  ['103', 'Blind hem'],
+  ['406', 'Coverstitch — bottom (2N)'],
+  ['605', 'Coverstitch — top & bottom'],
+  ['504', 'Overlock — 3-thread'],
+  ['514', 'Overlock — 4-thread'],
+  ['516', 'Safety stitch — 5-thread (overlock + chain)'],
+  ['BT',  'Bartack — reinforcement'],
+];
+function stitchName(iso){ const e = STITCH_LIB.find(x => x[0] === iso); return e ? e[1] : ''; }
+// 150×44 schematic per class. Fabric plane = light line at y22; needle thread
+// above, looper/bobbin below; overlock family shows the wrapped fabric edge.
+function stitchSvg(iso, w) {
+  w = w || 150;
+  const zig = (y1,y2,x0,x1,step) => { let d='M'+x0+','+y1; for(let x=x0;x<x1;x+=step){ d+=' L'+(x+step/2)+','+y2+' L'+(x+step)+','+y1; } return d; };
+  const loops = (y,x0,x1,r,step) => { let d=''; for(let x=x0;x<x1;x+=step){ d+='M'+x+','+y+' a'+r+','+(r*0.72)+' 0 1 0 '+(step*0.8)+',0 '; } return d; };
+  const fab = `<line x1="4" y1="22" x2="${w-4}" y2="22" stroke="currentColor" stroke-width=".7" opacity=".28"/>`;
+  let body = '';
+  if (iso === '301') body = fab
+    + `<path d="${zig(9,22,8,w-20,22)}" fill="none" stroke="currentColor" stroke-width="1.4"/>`
+    + `<path d="${zig(35,22,8,w-20,22)}" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".55"/>`
+    + Array.from({length: Math.floor((w-28)/22)}, (_,i)=>`<circle cx="${19+i*22}" cy="22" r="1.8" fill="currentColor"/>`).join('');
+  else if (iso === '101') body = fab
+    + `<line x1="8" y1="11" x2="${w-12}" y2="11" stroke="currentColor" stroke-width="1.4" stroke-dasharray="10 6"/>`
+    + `<path d="${loops(31,12,w-24,5,16)}" fill="none" stroke="currentColor" stroke-width="1.2"/>`;
+  else if (iso === '401') body = fab
+    + `<line x1="8" y1="11" x2="${w-12}" y2="11" stroke="currentColor" stroke-width="1.4" stroke-dasharray="10 6"/>`
+    + `<path d="${loops(30,12,w-24,5,16)}" fill="none" stroke="currentColor" stroke-width="1.2"/>`
+    + `<path d="${loops(33,18,w-24,4,16)}" fill="none" stroke="currentColor" stroke-width="1" opacity=".6"/>`;
+  else if (iso === '304') body = fab
+    + `<path d="${zig(12,32,8,w-16,20)}" fill="none" stroke="currentColor" stroke-width="1.5"/>`;
+  else if (iso === '103') { let d='';
+    for (let x=8; x<w-24; x+=30) d += `M${x},20 h16 l6,9 l6,-9`;
+    body = fab + `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.4"/>`; }
+  else if (iso === '406' || iso === '605') body = fab
+    + `<line x1="8" y1="14" x2="${w-12}" y2="14" stroke="currentColor" stroke-width="1.5"/>`
+    + `<line x1="8" y1="22" x2="${w-12}" y2="22" stroke="currentColor" stroke-width="1.5"/>`
+    + (iso==='605' ? `<path d="${zig(12,24,8,w-16,16)}" fill="none" stroke="currentColor" stroke-width=".9" opacity=".65"/>` : '')
+    + `<path d="${zig(30,22,8,w-16,16)}" fill="none" stroke="currentColor" stroke-width="1" opacity=".7"/>`;
+  else if (iso === '504' || iso === '514' || iso === '516') {
+    const edge = w - 26, nl = iso==='504' ? [20] : [16, 24];
+    const x0 = iso === '516' ? 62 : 8;
+    let wrap='';
+    for (let y of [8, 36]) for (let x=x0; x<edge; x+=18) wrap += `M${x},${y===8?nl[0]:nl[nl.length-1]} L${edge+16},${y} `;
+    body = `<line x1="${edge}" y1="6" x2="${edge}" y2="38" stroke="currentColor" stroke-width="1.6"/>`
+      + `<line x1="4" y1="22" x2="${edge}" y2="22" stroke="currentColor" stroke-width=".7" opacity=".28"/>`
+      + nl.map(y=>`<line x1="${x0}" y1="${y}" x2="${edge}" y2="${y}" stroke="currentColor" stroke-width="1.3"/>`).join('')
+      + `<path d="${wrap}" fill="none" stroke="currentColor" stroke-width=".8" opacity=".6"/>`
+      + (iso==='516' ? `<line x1="8" y1="11" x2="50" y2="11" stroke="currentColor" stroke-width="1.2" stroke-dasharray="7 5"/><path d="${loops(31,10,44,4,14)}" fill="none" stroke="currentColor" stroke-width="1"/>` : '');
+  }
+  else if (iso === 'BT') body = fab
+    + `<path d="${zig(10,34,52,102,7)}" fill="none" stroke="currentColor" stroke-width="1.6"/>`
+    + `<line x1="50" y1="10" x2="104" y2="10" stroke="currentColor" stroke-width="1"/><line x1="50" y1="34" x2="104" y2="34" stroke="currentColor" stroke-width="1"/>`;
+  else return '';
+  return `<svg viewBox="0 0 ${w} 44" width="${w}" height="44" role="img" aria-label="ISO ${iso} stitch diagram">${body}</svg>`;
+}
+// Sewing operations — the per-location seam table a factory actually sews
+// from ("ALL SELF SEAMS = 1/2in / 516", "HEM = 3in fold back + 4 rows 301").
+window.tpSewAdd = function(styleId){
+  const s = STATE.styles.find(x=>x.id===styleId); if (!s) return;
+  if (!s.sewOps) s.sewOps = [];
+  s.sewOps.push({ id: 'so'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), loc:'', ins:'', stitch:'' });
+  save(); renderTechPack(styleId);
+};
+window.tpSewSet = function(styleId, id, field, val){
+  const s = STATE.styles.find(x=>x.id===styleId); if (!s || !s.sewOps) return;
+  const op = s.sewOps.find(o=>o.id===id); if (!op) return;
+  op[field] = val; save();
+  if (field === 'stitch') renderTechPack(styleId);   // repaint the diagram cell
+};
+window.tpSewDel = function(styleId, id){
+  const s = STATE.styles.find(x=>x.id===styleId); if (!s || !s.sewOps) return;
+  s.sewOps = s.sewOps.filter(o=>o.id!==id); save(); renderTechPack(styleId);
+};
+
 function renderTechPackWork(s) {
   if (!s) return;
   const bom = STATE.bom[s.id] || [];
@@ -10458,6 +10557,27 @@ function renderTechPackWork(s) {
         ${ef('SPI','spi','e.g. 12 SPI')} ${ef('Thread Color','thread','e.g. Match, Black')}
         ${ef('Topstitch','topstitch','e.g. 1/8" edgestitch')}
       </div>
+      <div class="tp-subhead" style="margin-top:20px">Sewing Operations — by location <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">stitches per ISO 4915, diagram prints on the factory doc</span></div>
+      ${(s.sewOps||[]).length ? `<div class="tbl-wrap"><table style="width:100%;border-collapse:collapse;min-width:640px">
+        <thead><tr>
+          <th style="text-align:left;padding:6px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);width:170px">Location</th>
+          <th style="text-align:left;padding:6px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border)">Instruction / seam allowance</th>
+          <th style="text-align:left;padding:6px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);width:210px">Stitch (ISO 4915)</th>
+          <th style="border-bottom:1px solid var(--border);width:160px"></th><th style="border-bottom:1px solid var(--border);width:30px"></th>
+        </tr></thead>
+        <tbody>${(s.sewOps||[]).map(op=>`<tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:5px 6px"><input class="tpi" list="tp-sew-locs" style="width:100%" value="${(op.loc||'').replace(/"/g,'&quot;')}" placeholder="e.g. All self seams" onchange="tpSewSet('${s.id}','${op.id}','loc',this.value)"></td>
+          <td style="padding:5px 6px"><input class="tpi" style="width:100%" value="${(op.ins||'').replace(/"/g,'&quot;')}" placeholder="e.g. 1/2&amp;quot; SA, overlock thread looped inside" onchange="tpSewSet('${s.id}','${op.id}','ins',this.value)"></td>
+          <td style="padding:5px 6px"><select class="fs" style="min-height:auto;padding:5px 6px;font-size:11px;width:100%" onchange="tpSewSet('${s.id}','${op.id}','stitch',this.value)">
+            <option value="">— stitch —</option>
+            ${STITCH_LIB.map(([iso,nm])=>`<option value="${iso}" ${op.stitch===iso?'selected':''}>${iso} — ${nm}</option>`).join('')}
+          </select></td>
+          <td style="padding:2px 6px;color:var(--ink)">${op.stitch?stitchSvg(op.stitch,150):''}</td>
+          <td style="padding:5px 2px;text-align:center"><button class="btn btn-danger btn-sm" onclick="tpSewDel('${s.id}','${op.id}')">✕</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>` : `<div style="font-size:10px;color:var(--muted);font-style:italic;margin-bottom:8px">No operations yet — itemize each seam location the way the factory sews it.</div>`}
+      <datalist id="tp-sew-locs"><option>All self seams</option><option>All lining seams</option><option>Side seams</option><option>Shoulder seams</option><option>Armhole</option><option>Sleeve hem</option><option>Body hem</option><option>CF / placket</option><option>CB seam</option><option>Neckline / collar</option><option>Waistband</option><option>Pocket join</option><option>Strap join</option><option>Topstitch — edge</option></datalist>
+      <button class="btn btn-ghost btn-sm" style="margin-bottom:6px" onclick="tpSewAdd('${s.id}')">+ Add operation</button>
       <div class="tp-subhead" style="margin-top:20px">Dyeing &amp; Finishing</div>
       <div class="tpg">
         ${ef('Fabric State','fabricState','',['finished','pfd','greige'])}
@@ -10615,6 +10735,8 @@ function renderTechPackWork(s) {
                             ${['Straight grain','Cross grain','Bias (45°)','On fold — straight','On fold — bias','No grain (leather)'].map(g2=>`<option ${p.grain===g2?'selected':''}>${g2}</option>`).join('')}
                           </select>
                         </div>
+                        <label style="display:flex;align-items:center;gap:4px;background:#f7f7f7;padding:5px 8px;border:1px solid #e0e0e0;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${p.fuse?'#000':'var(--muted)'};cursor:pointer;flex-shrink:0" title="Piece gets fusible interfacing"><input type="checkbox" ${p.fuse?'checked':''} onchange="tpUpdatePiece('${s.id}',${p._idx},'fuse',this.checked)">Fuse</label>
+                        <label style="display:flex;align-items:center;gap:4px;background:#f7f7f7;padding:5px 8px;border:1px solid #e0e0e0;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${p.rsu?'#000':'var(--muted)'};cursor:pointer;flex-shrink:0" title="Right side up — one-way lay / nap direction"><input type="checkbox" ${p.rsu?'checked':''} onchange="tpUpdatePiece('${s.id}',${p._idx},'rsu',this.checked)">RSU</label>
                         <input style="font-size:11px;border:none;border-bottom:1px solid #e0e0e0;outline:none;font-family:'Helvetica Neue',sans-serif;color:#666;background:transparent;padding:5px 0;flex:1;min-width:100px" value="${p.notes||''}" placeholder="Notes: SA, notches, markings…" onchange="tpUpdatePiece('${s.id}',${p._idx},'notes',this.value)">
                       </div>
                     </div>
@@ -12253,6 +12375,8 @@ function renderTechPackPrint(s) {
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Piece Name</th>
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Component</th>
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Cut</th>
+                <th style="padding:4px 6px;text-align:center;font-weight:400;letter-spacing:1px">Fuse</th>
+                <th style="padding:4px 6px;text-align:center;font-weight:400;letter-spacing:1px">RSU</th>
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Material</th>
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Lot</th>
                 <th style="padding:4px 6px;text-align:left;font-weight:400;letter-spacing:1px">Grain</th>
@@ -12268,6 +12392,8 @@ function renderTechPackPrint(s) {
                     <td style="padding:5px 6px;font-weight:700;color:#000">${p.name||'—'}</td>
                     <td style="padding:5px 6px;color:#666">${p.component||'—'}</td>
                     <td style="padding:5px 6px;font-family:'DM Mono',monospace">${p.cut||'—'}</td>
+                    <td style="padding:5px 6px;text-align:center;font-weight:700">${p.fuse?'●':''}</td>
+                    <td style="padding:5px 6px;text-align:center;font-weight:700">${p.rsu?'●':''}</td>
                     <td style="padding:5px 6px;color:#666">${p.fabric||'—'}</td>
                     <td style="padding:5px 6px;font-family:'DM Mono',monospace;font-size:10px">${p.lotNo||'—'}</td>
                     <td style="padding:5px 6px;color:#666">${p.grain||'—'}</td>
@@ -12392,7 +12518,12 @@ function renderTechPackPrint(s) {
             <thead><tr style="border-bottom:1px solid #000">
               ${['Material','Qty','Unit','Placement','Supplier','$/Unit','Total'].map(h=>`<th style="text-align:left;padding:5px 6px;font-size:7.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:400">${h}</th>`).join('')}
             </tr></thead>
-            <tbody>${items.map((item,i)=>`<tr style="border-bottom:1px solid #f0f0f0;background:${i%2?'#fafafa':'#fff'}">
+            <tbody>${items.map((item,i)=>{
+              // Mill specs travel with the fabric row — the factory orders
+              // and checks goods against article # / content / weight / width.
+              const m = item.matId ? (STATE.materials||[]).find(x=>x.id===item.matId) : null;
+              const specs = m ? [m.article?('Art. '+m.article):'', m.content||'', m.weight||'', m.width?('W '+m.width):''].filter(Boolean).join(' · ') : '';
+              return `<tr style="border-bottom:${specs?'none':'1px solid #f0f0f0'};background:${i%2?'#fafafa':'#fff'}">
               <td style="padding:7px 6px;font-size:11px;color:#000;font-weight:600">${item.matName}</td>
               <td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px">${item.qty}</td>
               <td style="padding:7px 6px;font-size:10px;color:var(--muted)">${item.unit}</td>
@@ -12400,7 +12531,8 @@ function renderTechPackPrint(s) {
               <td style="padding:7px 6px;font-size:10px;color:#666">${item.supplier||'—'}</td>
               <td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px">$${(parseFloat(item.costPerUnit)||0).toFixed(2)}</td>
               <td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px;font-weight:700">$${((parseFloat(item.qty)||0)*(parseFloat(item.costPerUnit)||0)).toFixed(2)}</td>
-            </tr>`).join('')}</tbody>
+            </tr>${specs?`<tr style="border-bottom:1px solid #f0f0f0;background:${i%2?'#fafafa':'#fff'}"><td colspan="7" style="padding:0 6px 7px;font-size:10px;color:#888">${specs}</td></tr>`:''}`;
+            }).join('')}</tbody>
           </table>
         </div>`).join('') : '<div style="font-size:10px;color:var(--muted);font-style:italic;padding:8px 0">No BOM items added. Go to Bill of Materials to add.</div>'}
       ${bomTotal&&s.cogs ? `<div style="margin-top:8px;padding:8px;background:${bomTotal>s.cogs?'#fff8f8':'#f0f8f0'};border:1px solid ${bomTotal>s.cogs?'#f5c6c6':'#c8e6c9'}">
@@ -12434,6 +12566,33 @@ function renderTechPackPrint(s) {
       <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in centimeters (cm) unless otherwise noted. Tolerance applies to all sizes.</div>
       ` : '<div style="font-size:10px;color:var(--muted);font-style:italic;padding:8px 0">No measurements added. Go to POM / Measurements to add.</div>'}
     </div>
+
+    <!-- Sewing operations + ISO 4915 stitch legend -->
+    ${(s.sewOps||[]).length ? `<div style="padding:18px 28px;border-bottom:1px solid #e0e0e0">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#000;font-weight:700;margin-bottom:12px">Sewing Operations — stitches per ISO 4915</div>
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:#000;color:#fff">
+          <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">Location</th>
+          <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">Instruction / Seam Allowance</th>
+          <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;width:190px">Stitch</th>
+        </tr></thead>
+        <tbody>${(s.sewOps||[]).map((op,i)=>`<tr style="border-bottom:1px solid #e0e0e0;background:${i%2?'#fafafa':'#fff'}">
+          <td style="padding:8px 10px;font-size:11px;font-weight:700;color:#000">${op.loc||'—'}</td>
+          <td style="padding:8px 10px;font-size:11px;color:#333">${op.ins||'—'}</td>
+          <td style="padding:8px 10px;font-size:10px;color:#000;white-space:nowrap">${op.stitch?`<span style="font-family:'DM Mono',monospace;font-weight:700">${op.stitch}</span> ${stitchName(op.stitch)}`:'—'}</td>
+        </tr>`).join('')}</tbody>
+      </table>
+      ${(()=>{ const used=[...new Set((s.sewOps||[]).map(o=>o.stitch).filter(Boolean))]; if(!used.length) return '';
+        return `<div style="margin-top:14px">
+          <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Stitch Legend — ISO 4915 schematic thread paths</div>
+          <div style="display:flex;flex-wrap:wrap;gap:14px">
+            ${used.map(iso=>`<div style="border:1px solid #e0e0e0;padding:8px 12px;color:#000">
+              ${stitchSvg(iso,170)}
+              <div style="font-size:10px;margin-top:4px"><span style="font-family:'DM Mono',monospace;font-weight:700">${iso}</span> · ${stitchName(iso)}</div>
+            </div>`).join('')}
+          </div>
+        </div>`; })()}
+    </div>` : ''}
 
     <!-- Packaging -->
     ${s.packaging ? `<div style="padding:14px 28px;border-bottom:1px solid #e0e0e0;display:flex;align-items:flex-start;gap:16px">
@@ -14565,7 +14724,7 @@ function buildTodayFocus() {
     }
     // WIP milestones: a factory quietly slipping shows up here, not at ex-factory.
     if (po.type !== 'fabric' && po.ms) {
-      const MS_LBL = { cut:'Cut start', mid:'Mid inspection', top:'TOP approval', packed:'Packing' };
+      const MS_LBL = { cut:'Cut start', mid:'Mid inspection', top:'TOP approval', dye:'Dye / wash', packed:'Packing' };
       Object.entries(po.ms).forEach(([k, m]) => {
         if (!m || !m.date || m.done) return;
         const md = payDays(m.date);
@@ -22917,7 +23076,48 @@ function loadCostSheetData(d) {
   ['material','labor','overhead','duties','freight'].forEach(k=>{
     const el = document.getElementById('cs-'+k); if(el) el.value=d[k]||'';
   });
+  __csLaborLines = Array.isArray(d.laborLines) ? d.laborLines.map(x=>({...x})) : [];
+  csLaborRender();
   calcCostSheet();
+}
+
+// ── Itemized labor / service lines (cutting, sewing, dyeing, grading…) ──
+// Per-unit dollars per operation + contractor; the sum feeds the Labor field
+// so the landed math stays one number while the breakdown is kept.
+let __csLaborLines = [];
+const CS_LABOR_OPS = ['Cutting','Sewing','Dyeing','Grading','Marking','Finishing','Pattern','Other'];
+function csLaborSum(){ return Math.round(__csLaborLines.reduce((t,l)=>t+(parseFloat(l.price)||0),0)*100)/100; }
+function csLaborRender(){
+  const box = document.getElementById('cs-labor-lines'); if (!box) return;
+  box.innerHTML = `
+    ${__csLaborLines.length ? `<div style="border:1px solid var(--border)">
+      <div style="display:grid;grid-template-columns:1.2fr 1.4fr 110px 34px;gap:0;background:var(--bg-off);border-bottom:1px solid var(--border)">
+        ${['Operation','Contractor','$ / unit',''].map(h=>`<div style="padding:6px 10px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">${h}</div>`).join('')}
+      </div>
+      ${__csLaborLines.map((l,i)=>`<div style="display:grid;grid-template-columns:1.2fr 1.4fr 110px 34px;gap:0;border-bottom:1px solid var(--border)">
+        <input class="fi" list="cs-labor-ops" style="min-height:auto;padding:6px 10px;font-size:11px;border:none" value="${(l.op||'').replace(/"/g,'&quot;')}" placeholder="Sewing" onchange="csLaborSet(${i},'op',this.value)">
+        <input class="fi" style="min-height:auto;padding:6px 10px;font-size:11px;border:none;border-left:1px solid var(--border)" value="${(l.contractor||'').replace(/"/g,'&quot;')}" placeholder="Contractor" onchange="csLaborSet(${i},'contractor',this.value)">
+        <input class="fi fi-mono" type="number" step="0.01" style="min-height:auto;padding:6px 10px;font-size:11px;border:none;border-left:1px solid var(--border)" value="${l.price!=null&&l.price!==''?l.price:''}" placeholder="0.00" oninput="csLaborSet(${i},'price',this.value)">
+        <button class="btn btn-danger btn-sm" style="border:none;border-left:1px solid var(--border)" onclick="csLaborDel(${i})">✕</button>
+      </div>`).join('')}
+      <div style="padding:7px 10px;font-size:10px;color:var(--muted);display:flex;justify-content:space-between"><span>Per-unit $ — divide lot fees by run size</span><span style="font-family:'DM Mono',monospace;color:var(--ink);font-weight:700">Σ $${csLaborSum().toFixed(2)} → Labor</span></div>
+    </div>` : ''}
+    <datalist id="cs-labor-ops">${CS_LABOR_OPS.map(o=>`<option>${o}</option>`).join('')}</datalist>
+    <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="csLaborAdd()">+ Itemize labor (cut / sew / dye per contractor)</button>`;
+}
+window.csLaborAdd = function(){ __csLaborLines.push({ op:'', contractor:'', price:'' }); csLaborRender(); };
+window.csLaborDel = function(i){ __csLaborLines.splice(i,1); csLaborRender(); csLaborApply(); };
+window.csLaborSet = function(i, k, v){ if (!__csLaborLines[i]) return; __csLaborLines[i][k]=v; if (k==='price') csLaborApply(); };
+function csLaborApply(){
+  const el = document.getElementById('cs-labor'); if (!el) return;
+  if (__csLaborLines.length){ el.value = csLaborSum() || ''; }
+  csLaborRenderSumOnly();
+  calcCostSheet();
+}
+function csLaborRenderSumOnly(){
+  const box = document.getElementById('cs-labor-lines'); if (!box) return;
+  const span = box.querySelector('span[style*="DM Mono"]');
+  if (span) span.textContent = 'Σ $' + csLaborSum().toFixed(2) + ' → Labor';
 }
 
 function calcCostSheet() {
@@ -22965,6 +23165,9 @@ function saveCostSheet() {
   ['material','labor','overhead','duties','freight'].forEach(k=>{
     d[k] = parseFloat(document.getElementById('cs-'+k)?.value)||0;
   });
+  // Keep the labor breakdown with the sheet (rows with any content only).
+  const lines = __csLaborLines.filter(l => (l.op||'').trim() || (l.contractor||'').trim() || parseFloat(l.price));
+  if (lines.length) d.laborLines = lines.map(l => ({ op:(l.op||'').trim(), contractor:(l.contractor||'').trim(), price: parseFloat(l.price)||0 }));
   const all = JSON.parse(localStorage.getItem('venia-cost-sheets')||'{}');
   all[sid] = d;
   localStorage.setItem('venia-cost-sheets', JSON.stringify(all));
