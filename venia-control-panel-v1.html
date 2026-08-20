@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '263';
+  const BUILD = '264';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4810,7 +4810,16 @@ function save() {
 // record" from "I deleted a record" — additions from both sides survive,
 // deletions still propagate, and only a genuine same-record conflict falls back
 // to newest-wins. Pure functions, exhaustively unit-tested.
-function _mEq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+// Key-sorted stable stringify: _mRec3/_mObject rebuild records by iterating
+// local-then-cloud keys, which reshuffles serialized key order — raw
+// JSON.stringify equality then reports identical records as "changed",
+// spawning phantom conflicts and duplicate log rows.
+function _mStr(v) {
+  if (Array.isArray(v)) return '[' + v.map(_mStr).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ':' + _mStr(v[k]); }).join(',') + '}';
+  return String(JSON.stringify(v));
+}
+function _mEq(a, b) { return _mStr(a) === _mStr(b); }
 function _mRecArray(v) { return Array.isArray(v) && v.every(function (x) { return x && typeof x === 'object' && !Array.isArray(x); }); }
 function _mById(arr) {
   const m = Object.create(null), noid = [];
@@ -4822,8 +4831,11 @@ function _mNewer(a, b) {
   const tb = Date.parse((b && (b.updatedAt || b.createdAt)) || '') || 0;
   return ta >= tb ? a : b;
 }
-// Merge arrays of {id} records.
-function _mArray(base, local, cloud) {
+// Merge arrays of {id} records. Optional `conflict(baseRec, localRec, cloudRec)`
+// resolves a genuine same-record conflict field-by-field instead of newest-wins
+// (used for styles and POM points, where two founders legitimately touch
+// DIFFERENT fields of the same record between syncs).
+function _mArray(base, local, cloud, conflict) {
   const B = _mById(base).m, L = _mById(local), C = _mById(cloud);
   const out = [], seen = Object.create(null);
   Object.keys(L.m).forEach(function (id) { seen[id] = 1; });
@@ -4834,13 +4846,16 @@ function _mArray(base, local, cloud) {
       if (_mEq(L.m[id], C.m[id])) out.push(L.m[id]);
       else if (inB && _mEq(C.m[id], B[id])) out.push(L.m[id]);    // only local changed
       else if (inB && _mEq(L.m[id], B[id])) out.push(C.m[id]);    // only cloud changed
-      else out.push(_mNewer(L.m[id], C.m[id]));                   // both changed → newest
+      else out.push(conflict ? conflict(inB ? B[id] : undefined, L.m[id], C.m[id])
+                             : _mNewer(L.m[id], C.m[id]));        // both changed
     } else if (inL && !inC) {
       if (!inB) out.push(L.m[id]);                                // local added (cloud never had it)
-      // else: cloud deleted it → drop
+      else if (!_mEq(L.m[id], B[id])) out.push(L.m[id]);          // cloud deleted BUT local edited → edit wins (never lose work)
+      // else: cloud deleted an untouched record → drop
     } else if (!inL && inC) {
       if (!inB) out.push(C.m[id]);                                // cloud added
-      // else: local deleted it → drop
+      else if (!_mEq(C.m[id], B[id])) out.push(C.m[id]);          // local deleted BUT cloud edited → edit wins
+      // else: local deleted an untouched record → drop
     }
   });
   // Keep BOTH sides' id-less rows (activity-log entries carry no id). The old
@@ -4872,6 +4887,128 @@ function _mObject(base, local, cloud) {
   });
   return out;
 }
+// Field-level 3-way merge of ONE record both sides edited. Per field:
+// unchanged side loses, changed side wins; when BOTH changed a field —
+//  · arrays (sampleLog, fitNotes, fitPhotos, notes): keep the newer side's
+//    array and append the other side's genuinely NEW rows (not in base, not in
+//    winner) — a round logged on one phone survives a cost edit on the other;
+//  · plain objects (a POM point's `rounds`): per-key via _mObject, so a fit
+//    session round on phone A and one on phone B both land;
+//  · scalars: the newer record's value.
+function _mRec3(base, local, cloud) {
+  base = base || {};
+  const newerIsL = _mNewer(local, cloud) === local;
+  const out = {}, seen = Object.create(null);
+  Object.keys(local).forEach(function (f) { seen[f] = 1; });
+  Object.keys(cloud).forEach(function (f) { seen[f] = 1; });
+  Object.keys(seen).forEach(function (f) {
+    const bv = base[f], lv = local[f], cv = cloud[f];
+    if (_mEq(lv, cv)) { if (lv !== undefined) out[f] = lv; return; }
+    const lCh = !_mEq(lv, bv), cCh = !_mEq(cv, bv);
+    if (lCh && !cCh) { if (lv !== undefined) out[f] = lv; return; }
+    if (cCh && !lCh) { if (cv !== undefined) out[f] = cv; return; }
+    if (Array.isArray(lv) && Array.isArray(cv)) {
+      const win = newerIsL ? lv : cv, lose = newerIsL ? cv : lv;
+      const bArr = Array.isArray(bv) ? bv : [];
+      // Row identity, not row bytes: an in-place EDIT on the losing side must
+      // read as a conflict on the SAME row (winner keeps its version), never
+      // as a new row — else a stale sampleLog edit resurrects as a duplicate
+      // and lands LAST, flipping the badge sampleSyncBadge derives from it.
+      const kOf = function (r) {
+        if (r && typeof r === 'object') {
+          if (r.id != null) return 'id:' + r.id;
+          if (r.round !== undefined) return 'rd:' + r.round + ':' + (r.date || r.at || '');
+        }
+        try { return _mStr(r); } catch (e) { return String(r); }
+      };
+      const bMap = Object.create(null); bArr.forEach(function (r) { bMap[kOf(r)] = r; });
+      const loseMap = Object.create(null); lose.forEach(function (r) { loseMap[kOf(r)] = r; });
+      const wk = Object.create(null); win.forEach(function (r) { wk[kOf(r)] = 1; });
+      // Per-row 3-way pass over the winner's rows: if the winner left a row
+      // untouched (equals base) but the loser edited it, the loser's edit wins
+      // — a "revise" verdict set on the other phone must not silently vanish.
+      const mergedRows = win.map(function (r) {
+        const k = kOf(r), lr = loseMap[k], br = bMap[k];
+        if (lr !== undefined && !_mEq(lr, r) && br !== undefined && _mEq(r, br)) return lr;
+        return r;
+      });
+      out[f] = mergedRows.concat(lose.filter(function (r) { const k = kOf(r); return !wk[k] && !(k in bMap); }));
+    } else if (lv && cv && typeof lv === 'object' && typeof cv === 'object' && !Array.isArray(lv) && !Array.isArray(cv)) {
+      out[f] = _mObject((bv && typeof bv === 'object' && !Array.isArray(bv)) ? bv : {}, lv, cv);
+    } else {
+      const v = newerIsL ? lv : cv;
+      out[f] = (v === undefined) ? (newerIsL ? cv : lv) : v;
+    }
+  });
+  return out;
+}
+// Deterministic ids for rows that never carried one (POM points, BOM lines):
+// both devices compute the SAME id from row content, so _mArray's per-record
+// merge reaches them without a stamping migration — no transition-window
+// duplicate risk between app versions.
+function _mStampIds(arr, prefix, keyFn) {
+  const counts = Object.create(null), taken = Object.create(null);
+  (arr || []).forEach(function (r) { if (r && typeof r === 'object' && r.id != null) taken[r.id] = 1; });
+  return (arr || []).map(function (r) {
+    if (!r || typeof r !== 'object') return r;
+    const k = (keyFn(r) || 'row');
+    counts[k] = (counts[k] || 0) + 1;
+    if (r.id != null) return r;
+    // Never collide with an id another row already carries (e.g. a row that
+    // was stamped 'pp-chest' long ago and later renamed): bump the occurrence
+    // suffix deterministically until free.
+    let n = counts[k], id = prefix + '-' + k + (n > 1 ? '-' + n : '');
+    while (taken[id]) { n++; id = prefix + '-' + k + '-' + n; }
+    taken[id] = 1;
+    return Object.assign({}, r, { id: id });
+  });
+}
+function _mSlug(v) { return String(v == null ? '' : v).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-'); }
+function _mStampPom(arr) { return _mStampIds(arr, 'pp', function (r) { return _mSlug(r.point); }); }
+function _mStampBom(arr) { return _mStampIds(arr, 'bl', function (r) { return _mSlug(r.matId || r.matName); }); }
+// Load-time backfill: every existing POM/BOM row gets a persistent id (content-
+// derived, so both devices mint the SAME id from converged state). Ids must
+// exist BEFORE edits diverge — merge-time stamping alone couldn't survive a
+// rename, which changed the computed id and orphaned the row's fit history.
+function veniaRowIdBackfill() {
+  try {
+    Object.keys((window.STATE && STATE.pom) || {}).forEach(function (sid) {
+      if (Array.isArray(STATE.pom[sid])) STATE.pom[sid] = _mStampPom(STATE.pom[sid]);
+    });
+    Object.keys((window.STATE && STATE.bom) || {}).forEach(function (sid) {
+      if (Array.isArray(STATE.bom[sid])) STATE.bom[sid] = _mStampBom(STATE.bom[sid]);
+    });
+  } catch (e) {}
+}
+// Merge {styleId: [rows]} maps (pom/bom) per style key — and on a genuine
+// same-style conflict, per ROW instead of pusher-takes-the-whole-array.
+function _mKeyedMap(base, local, cloud, stamp) {
+  base = base || {}; local = local || {}; cloud = cloud || {};
+  const out = {}, seen = Object.create(null);
+  Object.keys(local).forEach(function (k) { seen[k] = 1; });
+  Object.keys(cloud).forEach(function (k) { seen[k] = 1; });
+  Object.keys(seen).forEach(function (sid) {
+    const inL = sid in local, inC = sid in cloud, inB = sid in base;
+    if (inL && inC) {
+      if (_mEq(local[sid], cloud[sid])) { out[sid] = local[sid]; return; }
+      if (inB && _mEq(cloud[sid], base[sid])) { out[sid] = local[sid]; return; }
+      if (inB && _mEq(local[sid], base[sid])) { out[sid] = cloud[sid]; return; }
+      // A corrupted (non-array) side must NOT be coerced to [] and fed through
+      // delete-inference — that reads as "this side deleted every row" and
+      // wipes the healthy side's data. Keep the healthy side wholesale.
+      if (!Array.isArray(local[sid]) || !Array.isArray(cloud[sid])) {
+        out[sid] = Array.isArray(local[sid]) ? local[sid] : cloud[sid];
+        return;
+      }
+      out[sid] = _mArray(
+        stamp(Array.isArray(base[sid]) ? base[sid] : []),
+        stamp(local[sid]),
+        stamp(cloud[sid]), _mRec3);
+    } else if (inL && !inC) { if (!inB) out[sid] = local[sid]; }
+    else if (!inL && inC) { if (!inB) out[sid] = cloud[sid]; }
+  });
+  return out;
+}
 // Merge a scalar / non-record value: whichever side changed from base wins.
 function _mScalar(base, local, cloud) {
   const lChanged = !_mEq(local, base), cChanged = !_mEq(cloud, base);
@@ -4898,6 +5035,36 @@ function mergeSnapshots(base, local, cloud) {
       const merged = _mObject(b || {}, l, c);
       merged.cards = _mArray((b && Array.isArray(b.cards)) ? b.cards : [], Array.isArray(l.cards) ? l.cards : [], Array.isArray(c.cards) ? c.cards : []);
       out[k] = merged;
+      return;
+    }
+    // Two founders touch the SAME style between syncs (a fit session on one
+    // phone, a cost edit on the other): whole-record newest-wins dropped one
+    // side's work. Styles conflict-merge field-by-field; nested fit arrays
+    // (sampleLog/fitNotes/fitPhotos) keep both sides' additions.
+    if (k === 'styles' && (_mRecArray(l) || _mRecArray(c))) {
+      out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : [], _mRec3);
+      return;
+    }
+    // pom/bom are {styleId: [rows]}: a same-style conflict merged whole-array
+    // (pusher wins), wiping the other phone's POM rounds / BOM lines. Merge
+    // per row via deterministic content ids; a same-point conflict merges its
+    // `rounds` history per round key.
+    if ((k === 'pom' || k === 'bom') && l && c && typeof l === 'object' && typeof c === 'object' && !Array.isArray(l) && !Array.isArray(c)) {
+      out[k] = _mKeyedMap(b, l, c, k === 'pom' ? _mStampPom : _mStampBom);
+      // The measured mirror must agree with the MERGED round history in the
+      // output itself — not only after applySnapshot's fixup — because this
+      // blob is also what gets pushed to the cloud and read by share views.
+      if (k === 'pom') {
+        const order = ['Proto','SMS1','SMS2','TOP','Approved'];
+        Object.keys(out[k]).forEach(function (sid) {
+          (Array.isArray(out[k][sid]) ? out[k][sid] : []).forEach(function (p) {
+            if (!p || !p.rounds) return;
+            const rs = Object.keys(p.rounds).filter(function (r) { return p.rounds[r] && p.rounds[r].m != null; })
+              .sort(function (a2, b2) { return order.indexOf(a2) - order.indexOf(b2); });
+            if (rs.length) { p.measured = p.rounds[rs[rs.length - 1]].m; p.measuredRound = rs[rs.length - 1]; }
+          });
+        });
+      }
       return;
     }
     if (_mRecArray(l) || _mRecArray(c)) out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
@@ -6176,6 +6343,7 @@ function saveCustomBomLine(styleId) {
   if (!name) { toast('Name required'); return; }
   if (!STATE.bom[styleId]) STATE.bom[styleId] = [];
   STATE.bom[styleId].push({
+    id: 'bl'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
     matId: 'custom-'+Date.now(),
     matName: name,
     lineType: document.getElementById('cc-type').value,
@@ -6263,6 +6431,7 @@ function saveBomLine(styleId) {
   if (!mat) return;
   if (!STATE.bom[styleId]) STATE.bom[styleId] = [];
   STATE.bom[styleId].push({
+    id: 'bl'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
     matId: mat.id, matName: mat.name,
     qty: parseFloat(document.getElementById('bom-qty').value)||1,
     unit: document.getElementById('bom-unit').value||mat.unit,
@@ -6382,7 +6551,7 @@ function savePomPoint(styleId) {
   const style = STATE.styles.find(s=>s.id===styleId);
   let sizes = style ? expandSizes(style.sizes) : [];
   if (!sizes.length) sizes = ['XS','S','M','L','XL'];
-  const entry = { point, tol: parseFloat(document.getElementById('pom-new-tol').value)||0.25, comment: document.getElementById('pom-new-comment').value };
+  const entry = { id: 'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point, tol: parseFloat(document.getElementById('pom-new-tol').value)||0.25, comment: document.getElementById('pom-new-comment').value };
   sizes.forEach(sz => { const k=sz.toLowerCase(); const el=document.getElementById('pom-new-'+k); entry[k] = el ? (parseFloat(el.value)||0) : 0; });
   STATE.pom[styleId].push(entry);
   save();
@@ -11814,10 +11983,13 @@ function syncPatternToBOM(styleId) {
       _fromPattern: true, // marker so we know this was auto-synced
     };
     if (existingIdx >= 0) {
-      // Update existing — preserve any manual cost override
+      // Update existing — preserve any manual cost override (and its id)
       bom[existingIdx] = { ...bom[existingIdx], ...bomLine, costPerUnit: bom[existingIdx].costPerUnit || bomLine.costPerUnit };
     } else {
-      bom.push(bomLine);
+      // Deterministic id: this sync runs independently on BOTH devices from
+      // the same pattern data — a random id here would mint two different
+      // rows for the same fabric line and duplicate it on merge.
+      bom.push({ id: 'bl-pat-' + matId, ...bomLine });
     }
   });
 
@@ -22505,6 +22677,15 @@ function loadRevenueGoals() {
     try { prMigrateStylistPulls(); } catch(e){}
     // Sample badges reconcile to their logs once per boot (one truth).
     try { ((window.STATE && STATE.styles) || []).forEach(sampleSyncBadge); } catch(e){}
+    // Every POM/BOM row gets its persistent merge id before any edit diverges.
+    try { veniaRowIdBackfill(); } catch(e){}
+    // The measured mirror re-derives from round history once per boot, so a
+    // cross-device merge of rounds can never leave a stale mirror behind.
+    try {
+      Object.keys((window.STATE && STATE.pom) || {}).forEach(function(sid){
+        (STATE.pom[sid] || []).forEach(function(p){ if (p && p.rounds) pomMirrorMeasured(p); });
+      });
+    } catch(e){}
     // Fit notes fold into style records once the first cloud pull has settled.
     try { fitNotesMigrate(); } catch(e){}
     try { var fb = document.getElementById('foot-build'); if (fb) fb.textContent = window.VENIA_BUILD || '—'; } catch(e){}
@@ -23430,6 +23611,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       var keys = window.SYNC_KEYS || [];
       for (var i = 0; i < keys.length; i++) { var k = keys[i]; if (k in data) STATE[k] = data[k]; }
+      // Post-merge hygiene on every LIVE apply (not just boot): rows minted on
+      // another device get their merge ids, and the measured mirror re-derives
+      // from the merged round history — otherwise a mid-session merge could
+      // leave measuredRound pointing at the wrong round until next reload.
+      try { if (typeof window.veniaRowIdBackfill === 'function') window.veniaRowIdBackfill(); } catch (e) {}
+      try {
+        Object.keys(STATE.pom || {}).forEach(function (sid) {
+          (STATE.pom[sid] || []).forEach(function (p) { if (p && p.rounds && typeof pomMirrorMeasured === 'function') pomMirrorMeasured(p); });
+        });
+      } catch (e) {}
       // Re-baseline the edit-stamp cache to the applied data, so the next local
       // save diffs against what's now on screen (not our pre-merge state).
       try { if (typeof window.veniaStampUpdated === 'function') window.veniaStampUpdated(true); } catch (e) {}
