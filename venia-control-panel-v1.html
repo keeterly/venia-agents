@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '265';
+  const BUILD = '266';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8650,6 +8650,45 @@ window.__fitSess = null;
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && window.__fitSess) { try { fitSessSaveCurrent(); save(); } catch(e){} }
 });
+// Camera WITHOUT leaving the fitting flow: pins the shot to the style's fit
+// photos, labeled with the current point + round (offline-safe — the upload
+// path falls back to an embedded image when there's no signal).
+window.fitSessPhoto = function(){
+  const S = window.__fitSess; if (!S) return;
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  if (typeof veniaUploadImage !== 'function'){ showToast('Photo upload unavailable','warning'); return; }
+  fitSessSaveCurrent();
+  const p = ((STATE.pom||{})[S.styleId]||[])[S.idx];
+  veniaUploadImage('fit-' + s.id + '-' + S.round, function(url){
+    if (!url) return;
+    if (!s.fitPhotos) s.fitPhotos = [];
+    s.fitPhotos.push({ url, label: (p && p.point ? p.point + ' — ' : '') + S.round + ' fitting', round: S.round });
+    save();
+    showToast('Photo pinned to ' + S.round, 'success');
+  });
+};
+// Seed the PO modal's blank WIP milestone dates backward from ex-factory,
+// using the vendor's stored lead time. Fill-blank-only — hand-planned dates
+// are never overwritten.
+window.poSeedMilestones = function(){
+  const exf = document.getElementById('po-exfactory')?.value;
+  if (!exf){ showToast('Set the ex-factory date first','warning'); return; }
+  const vName = (document.getElementById('po-vendor')?.value||'').trim().toLowerCase();
+  const v = (STATE.vendors||[]).find(x => String(x.name||'').toLowerCase() === vName);
+  const leadW = parseFloat(v && v.lead) || 12;
+  const L = Math.max(14, Math.round(leadW * 7));
+  const exD = new Date(exf + 'T00:00:00');
+  const iso = (back) => { const d = new Date(exD); d.setDate(d.getDate() - back); return d.toISOString().slice(0,10); };
+  // Cut starts ~70% of the lead before shipping, mid-line inspection near the
+  // middle, TOP late in the run, packing 3 days out.
+  const plan = { cut: iso(Math.round(L*0.7)), mid: iso(Math.round(L*0.45)), top: iso(Math.round(L*0.22)), packed: iso(3) };
+  let n = 0;
+  Object.entries(plan).forEach(([k, d]) => {
+    const el = document.getElementById('po-ms-'+k);
+    if (el && !el.value){ el.value = d; n++; }
+  });
+  showToast(n ? ('Suggested '+n+' date'+(n>1?'s':'')+' from '+(v ? v.name + "'s" : 'a')+' '+leadW+'-week lead — adjust freely') : 'All milestone dates already set', n ? 'success' : 'info');
+};
 window.fitSessionStart = function(styleId, round){
   const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
   const points = (STATE.pom||{})[styleId] || [];
@@ -8770,6 +8809,7 @@ function fitSessRender(){
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0">
         <button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessNav(-1)">‹ Back</button>
+        <button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessPhoto()">📷 Photo</button>
         ${bad.length ? `<button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessFileNote()">File fit note</button>` : ''}
         ${t.n ? (bad.length
           ? `<button class="btn btn-gold btn-sm" style="flex:1;min-height:44px" onclick="fitSessResult('revise')">Mark ${S.round}: Revise</button>`
@@ -8794,6 +8834,7 @@ function fitSessRender(){
         oninput="fitSessDelta(this.value)"
         style="width:100%;box-sizing:border-box;font-family:'DM Mono',monospace;font-size:30px;padding:12px 14px;border:1px solid var(--border-mid);background:var(--bg);color:var(--ink);outline:none;margin-top:6px">
       <div id="fs-delta" style="font-size:14px;min-height:22px;margin-top:6px"><span style="color:var(--muted)">—</span></div>
+      <button class="btn btn-ghost btn-sm" style="align-self:flex-start;min-height:38px;margin-top:4px" onclick="fitSessPhoto()">📷 Pin photo to ${S.round}</button>
     </div>
     <div style="display:flex;gap:8px;flex-shrink:0;max-width:420px;margin:0 auto;width:100%">
       <button class="btn btn-ghost btn-sm" style="flex:1;min-height:48px;${S.idx===0?'opacity:.4;pointer-events:none':''}" onclick="fitSessNav(-1)">‹ Prev</button>
@@ -9404,7 +9445,7 @@ window.poOpenModal = function(id){
         ${payRow('Balance', bal, po.balanceDue, po.balancePaidAt, 'po-bal-due', 'poMarkBalancePaid')}
       </div>` : ''}
       ${po && po.type !== 'fabric' ? `<div>
-        <div style="${lbl};margin-bottom:6px">WIP milestones — planned dates between placed and ex-factory</div>
+        <div style="${lbl};margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span>WIP milestones — planned dates between placed and ex-factory</span><button class="btn btn-ghost btn-sm" onclick="poSeedMilestones()" title="Fill blank dates backward from ex-factory using the vendor's lead time">⚡ Suggest dates</button></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px">
           ${PO_MILESTONES.map(([k,l]) => `
             <div><div style="font-size:10px;color:var(--muted);margin-bottom:3px">${l}</div>
@@ -9446,6 +9487,7 @@ window.poSave = function(existingId){
   const balDue = document.getElementById('po-bal-due'); if (balDue) data.balanceDue = balDue.value||'';
   // WIP milestones (present only when editing a garment PO)
   if (document.getElementById('po-ms-cut')) {
+    // (dates may have been seeded by poSeedMilestones — read like any other)
     data.ms = {};
     PO_MILESTONES.forEach(([k]) => {
       const d = document.getElementById('po-ms-'+k), c = document.getElementById('po-ms-'+k+'-done');
