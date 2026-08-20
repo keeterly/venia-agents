@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '260';
+  const BUILD = '261';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6571,6 +6571,16 @@ function renderVendors(filter) {
         const col = days > 180 ? 'var(--red)' : days > 90 ? 'var(--amber)' : 'var(--green)';
         return '<div class="vendor-detail">Last activity: <span style="color:' + col + '">' + la + ' (' + days + 'd ago)</span></div>';
       })()}
+      ${(function(){
+        // On-time scorecard — pure derivation from PO data captured during
+        // normal receiving; renders only when history exists (no rot).
+        const done = (STATE.pos||[]).filter(po => (po.vendorId === v.id || po.vendor === v.name)
+          && po.status === 'received' && po.exFactory && po.receivedAt);
+        if (!done.length) return '';
+        const onTime = done.filter(po => String(po.receivedAt).slice(0,10) <= po.exFactory).length;
+        const col = onTime === done.length ? 'var(--green)' : onTime ? 'var(--amber)' : 'var(--red)';
+        return '<div class="vendor-detail">On-time: <span style="color:' + col + ';font-weight:700">' + onTime + '/' + done.length + ' POs</span></div>';
+      })()}
       ${assignedStyles.length ? `
         <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
           <div style="font-size:10px;color:var(--muted)">${assignedStyles.length} style${assignedStyles.length>1?'s':''} · ${activeStyles.length} in-work</div>
@@ -10916,7 +10926,12 @@ function generatePO(vendorId) {
   // Order quantity makes this a real, orderable PO (not just a cost list).
   const moqNum = parseInt(String(vendor.moq||'').replace(/[^0-9]/g,'')) || 0;
   const defQty = moqNum || 50;
-  const qtyStr = prompt(`Units per style for this PO to ${vendor.name}`+(moqNum?` — vendor MOQ ${moqNum} units`:'')+`:`, defQty);
+  // Soft capacity check: what this factory already has in work, next to its lead.
+  const inWork = (STATE.pos||[]).filter(po => (po.vendorId === vendor.id || po.vendor === vendor.name)
+    && po.type !== 'fabric' && !['received','cancelled'].includes(po.status))
+    .reduce((s,po) => s + (po.items||[]).reduce((a,it) => a + Math.max(0,(it.qty||0)-(it.receivedQty||0)), 0), 0);
+  const capLine = inWork ? `\nAlready in work with ${vendor.name}: ${inWork} units (lead ${vendor.lead||'?'} days) — sanity-check the drop date.` : '';
+  const qtyStr = prompt(`Units per style for this PO to ${vendor.name}`+(moqNum?` — vendor MOQ ${moqNum} units`:'')+`:`+capLine, defQty);
   if (qtyStr === null) return;
   const qty = parseInt(qtyStr) || defQty;
 
@@ -11077,6 +11092,18 @@ function generatePO(vendorId) {
     </div>
   </div>
 
+  ${(function(){
+    // Live tech-pack links ride the PO — the factory gets specs and the order
+    // in one document (links stay current; revoke kills them instantly).
+    const base = window.VENIA_PUBLIC_BASE || location.origin;
+    const links = styles.filter(s => s.shareToken);
+    if (!links.length) return '';
+    return `<div style="margin:18px 0;padding:12px 14px;border:1px solid #ddd">
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#666;margin-bottom:8px;font-weight:700">Tech Packs — live links</div>
+      ${links.map(s => `<div style="font-size:10px;padding:2px 0"><b>${s.styleId||s.name}</b> — ${base}/?share=${s.shareToken}</div>`).join('')}
+      <div style="font-size:9px;color:#888;margin-top:6px">Links always show the latest saved spec. Styles not listed: request a link from VENIA.</div>
+    </div>`;
+  })()}
   <div class="sig">
     ${['Authorized by (VENIA)','Vendor Acknowledged','Production Manager'].map(r=>`<div>
       <div class="sig-line"></div>
@@ -23724,6 +23751,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         row = { token: token };
       }
       var base = window.VENIA_PUBLIC_BASE || location.origin;
+      // Cache the token on the style so printed POs can carry the live
+      // tech-pack link without an async round-trip (cleared on revoke).
+      if (s.shareToken !== row.token){ s.shareToken = row.token; save(); }
       shareModal(base + '/?share=' + row.token, row.token, s);
     } catch(e){
       showToast('Could not create link — ' + (e.message||e), 'error');
@@ -23735,6 +23765,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!confirm('Revoke this factory link? Anyone holding it loses access immediately.')) return;
     try {
       await c.from('venia_shares').update({ revoked: true }).eq('token', token);
+      var held = (STATE.styles||[]).find(function(x){ return x.shareToken === token; });
+      if (held){ delete held.shareToken; save(); }
       var ov = document.getElementById('tp-share-overlay'); if (ov) ov.remove();
       showToast('Link revoked','success');
       logActivity('Factory link revoked');
