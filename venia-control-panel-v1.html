@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '266';
+  const BUILD = '267';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14639,7 +14639,7 @@ function buildTodayFocus() {
     return `<button onclick="event.stopPropagation();todayAssign('${slEsc(i.key)}')" title="${a ? 'Assigned to ' + a.to + ' — tap to reassign' : 'Unassigned — tap to assign'}" style="background:${a ? col : 'none'};border:1px solid ${col};color:${a ? 'var(--bg)' : col};cursor:pointer;font-size:11px;font-weight:700;line-height:1;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%">${lbl}</button>`;
   };
   const digestOff = localStorage.getItem('venia-digest-optin') === 'off';
-  const footer = `<div style="padding-top:8px;font-size:10px;color:var(--muted)">Morning digest ${digestOff ? 'off' : 'on'} · <span onclick="todayDigestToggle()" style="cursor:pointer;text-decoration:underline">${digestOff ? 'turn on' : 'turn off'}</span></div>`;
+  const footer = `<div style="padding-top:8px;font-size:10px;color:var(--muted)">Morning brief ${digestOff ? 'off' : 'on'} — 7:00 AM push to this device · <span onclick="todayDigestToggle()" style="cursor:pointer;text-decoration:underline">${digestOff ? 'turn on' : 'turn off'}</span></div>`;
   const html = header + (!shown.length
     ? `<span style="color:var(--muted)">${view === 'mine' ? 'Nothing assigned to you — tap ＋ on an item under All.' : 'All clear — nothing urgent today.'}</span>`
     : shown.map(i =>
@@ -14690,9 +14690,9 @@ window.todayDigestToggle = function(){
   localStorage.setItem('venia-digest-optin', wasOff ? 'on' : 'off');
   try {
     if (wasOff && window.Notification && Notification.permission === 'default') {
-      Notification.requestPermission().then(function(res){ if (res === 'granted') veniaDigestPushSet(true); });
+      Notification.requestPermission().then(function(res){ if (res === 'granted') veniaDigestPushSet(true, true); else toast('Notifications blocked — allow them in your browser settings','warn'); });
     } else {
-      veniaDigestPushSet(wasOff);   // flag this device's push sub on the server
+      veniaDigestPushSet(wasOff, true);   // flag this device's push sub on the server (loud: confirm or explain)
     }
   } catch(e){}
   buildTodayFocus();
@@ -14702,27 +14702,41 @@ window.todayDigestToggle = function(){
 // phones with the digest turned on — even when the app is closed. The client's
 // only jobs: keep the shared digest content fresh, and keep this device's
 // push-subscription flag matching the toggle.
-async function veniaDigestPushSet(on){
+async function veniaDigestPushSet(on, loud){
   try {
-    const c = window.__sbClient; if (!c) return;
+    const c = window.__sbClient; if (!c){ if (loud) toast('Cloud connection needed','warn'); return; }
     if (on && typeof window.veniaPushEnsure === 'function') await window.veniaPushEnsure();
-    if (!('serviceWorker' in navigator)) return;
+    if (!('serviceWorker' in navigator)){ if (loud) toast('Notifications unsupported in this browser','warn'); return; }
     const reg = await navigator.serviceWorker.ready;
     const sub = (reg && reg.pushManager) ? await reg.pushManager.getSubscription() : null;
-    if (!sub || !sub.endpoint) return;
-    await c.from('venia_push_subs').update({ digest: !!on }).eq('id', sub.endpoint);
-  } catch(e){}
+    if (!sub || !sub.endpoint){ if (loud) toast('Allow notifications first — the permission prompt should appear','warn'); return; }
+    // .select() returns the updated row — empty means RLS blocked it (not
+    // signed in) and the toggle silently did nothing. Say so instead.
+    const r = await c.from('venia_push_subs').update({ digest: !!on }).eq('id', sub.endpoint).select('digest');
+    if (loud) {
+      if (r.error || !r.data || !r.data.length) toast('Could not update this device — sign in under Settings → Team, then toggle again','warn');
+      else toast(on ? 'This device gets the 7 AM brief ✓' : 'Morning push off on this device');
+    }
+  } catch(e){ if (loud) toast('Could not update — ' + ((e&&e.message)||e),'warn'); }
 }
 let __digestPubAt = 0, __digestFlagSynced = false;
 function veniaDigestPublish(items){
   try {
     const c = window.__sbClient; if (!c) return;
-    if (typeof veniaWho === 'function' && !veniaWho()) return;   // founder session publishes; RLS enforces it anyway
-    // Once per session, mirror the local toggle onto this device's sub row.
-    if (!__digestFlagSynced && window.Notification && Notification.permission === 'granted') {
+    // Mirror the local toggle onto THIS device's sub row once per session —
+    // deliberately AHEAD of the founder-email publisher gate below: flagging
+    // your own phone for the 7 AM push only needs a signed-in session (RLS
+    // enforces that). Hiding this behind the publisher check is exactly how
+    // two subscribed phones sat with digest=false and never got the brief.
+    if (!__digestFlagSynced && window.veniaAuthUser && window.Notification && Notification.permission === 'granted') {
       __digestFlagSynced = true;
       veniaDigestPushSet(localStorage.getItem('venia-digest-optin') !== 'off');
     }
+    if (typeof veniaWho === 'function' && !veniaWho()) return;   // founder session publishes; RLS enforces it anyway
+    // Never publish before the first cloud pull settles: a pre-sync boot sees
+    // a sparse local feed and would clobber the shared digest with an empty
+    // list right before the 7 AM function reads it.
+    if (!window.__sbSyncDone) return;
     if (Date.now() - __digestPubAt < 30 * 60 * 1000) return;    // fresh enough
     const slim = (items||[]).filter(i => i.pri === 'high' || i.pri === 'med').slice(0, 10)
       .map(i => ({ pri: i.pri, text: String(i.text||'').slice(0, 140), key: i.key || '' }));
