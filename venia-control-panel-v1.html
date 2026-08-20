@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '261';
+  const BUILD = '262';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5116,6 +5116,18 @@ function handleAdd() {
   else if (p === 'vendors') openVendorModal();
   else if (p === 'production') poOpenModal(null);
   else if (p === 'pr') openPrCart();
+  // The + button works everywhere it shows — a live-looking dead tap is worse
+  // than no button (mobile audit gap #5).
+  else if (p === 'samples') {
+    const s = (STATE.styles||[]).filter(x => x.status !== 'archived')
+      .sort((a,b) => ((b.sampleLog||[]).length) - ((a.sampleLog||[]).length))[0];
+    if (s) openSampleCard(s.id); else openStyleModal();
+  }
+  else if (p === 'fitnotes') { const el = document.getElementById('fn-style'); if (el) el.focus(); }
+  else if (p === 'timeline') { const s = (STATE.styles||[]).find(x => x.status !== 'archived' && x.drop); if (s) openDp(s.id); else openStyleModal(); }
+  else if (p === 'inventory') { const inp = document.querySelector('#page-inventory input'); if (inp) inp.focus(); else toast('Stock adjusts from each style row'); }
+  else if (p === 'techpack' || p === 'bom' || p === 'pom') openStyleModal();
+  else if (p === 'costs') goTo('styles', document.querySelector('[data-page=styles]'));
 }
 
 // ═══════════════════════════════════════════════
@@ -5408,7 +5420,7 @@ function renderRangePlan(){
     const t = (plan.cats||{})[c]||0, n = a.cats[c]||0;
     return `<div style="margin-bottom:9px">
       <div style="display:flex;justify-content:space-between"><span style="font-size:10px;color:var(--ink)">${slEsc(c)}</span>
-      <span style="font-family:'DM Mono',monospace;font-size:10px;color:${t&&n>=t?'var(--green)':'var(--muted)'}">${n}${t?' / '+t:''}</span></div>
+      <span style="font-family:'DM Mono',monospace;font-size:10px;color:${t&&n>t?'var(--amber)':t&&n>=t?'var(--green)':'var(--muted)'};font-weight:${t&&n>t?'700':'400'}">${n}${t?' / '+t:''}${t&&n>t?' over':''}</span></div>
       ${t?bar(n,t,n>=t):''}
     </div>`;
   }).join('');
@@ -5422,7 +5434,22 @@ function renderRangePlan(){
         <div style="font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Line Size</div>
         <div style="font-family:'DM Mono',monospace;font-size:24px;font-weight:300;color:${totalMet?'var(--green)':'var(--ink)'}">${a.styles}<span style="font-size:12px;color:var(--muted)"> / ${plan.total||'—'} styles</span></div>
         ${plan.total?bar(a.styles,plan.total,totalMet):''}
+        ${(function(){
+          // New vs carryover: how much of the season is genuinely new work.
+          const ss = (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season);
+          const co = ss.filter(s => s.carryover).length;
+          return co ? `<div style="font-size:10px;color:var(--muted);margin-top:5px">${ss.length-co} new · ${co} carryover</div>` : '';
+        })()}
         <div style="margin-top:14px">${catRows||'<div style="font-size:10px;color:var(--muted)">No styles in this season yet.</div>'}</div>
+        ${(function(){
+          // Over-quota is a decision, not a stat — say it at line-sheet-freeze time.
+          const overs = catKeys.map(c => ({ c, t:(plan.cats||{})[c]||0, n:a.cats[c]||0 }))
+            .filter(x => x.t && x.n > x.t);
+          if (!overs.length) return '';
+          return `<div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);font-size:10px;color:var(--amber);font-weight:700;cursor:pointer" onclick="STATE.seasonFilter='${slEsc(season)}';goTo('styles',document.querySelector('[data-page=styles]'))">
+            ${overs.map(x => (x.n - x.t) + ' over in ' + slEsc(x.c)).join(' · ')} — pick what to cut →
+          </div>`;
+        })()}
       </div>
       <div style="background:var(--bg);padding:20px">
         <div style="font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;font-weight:700">Margin (landed)</div>
@@ -5436,7 +5463,28 @@ function renderRangePlan(){
         ${plan.sellIn?bar(a.booked,plan.sellIn,sMet):''}
         <div style="font-size:9.5px;color:var(--muted);margin-top:12px;line-height:1.5">Accepted quotes · ${slEsc(season)}. <span style="cursor:pointer;text-decoration:underline" onclick="cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)">Open quotes →</span></div>
       </div>
-    </div></div>`;
+    </div>
+    ${(function(){
+      // Season palette — every colorway across the season's styles, at a glance.
+      const sw = [];
+      const seen = {};
+      (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season)
+        .forEach(s => (s.colorways||[]).forEach(cw => {
+          if (!cw || !cw.name) return;
+          const k = (cw.hex||'') + '|' + String(cw.name).toLowerCase();
+          if (seen[k]) { seen[k].n++; return; }
+          seen[k] = { hex: cw.hex||'#ccc', name: cw.name, n: 1 };
+          sw.push(seen[k]);
+        }));
+      if (!sw.length) return '';
+      return `<div style="background:var(--bg);padding:14px 20px;margin-top:1px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <span style="font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Palette</span>
+        ${sw.map(x => `<span title="${slEsc(x.name)}${x.n>1?' × '+x.n:''}" style="display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--muted)">
+          <span style="width:18px;height:18px;background:${slEsc(x.hex)};border:1px solid var(--border-mid);display:inline-block"></span>${slEsc(x.name)}${x.n>1?' ×'+x.n:''}
+        </span>`).join('')}
+      </div>`;
+    })()}
+    </div>`;
 }
 window.rpOpenModal = function(season){
   if (!STATE.rangePlan) STATE.rangePlan = {};
@@ -5686,7 +5734,7 @@ function renderStyles() {
       <td><div style="display:flex;align-items:center;gap:10px">${s.photoUrl?`<img src="${s.photoUrl}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">`:''}<div class="t-name">${s.name}</div></div></td>
       <td><span class="t-mono">${s.styleId}</span></td>
       <td><span class="b-tag">${s.category}</span></td>
-      <td style="font-size:10px">${s.season}</td>
+      <td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>
       <td>${stageBadge(s.status)}</td>
       <td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>
       <td style="font-family:'DM Mono',monospace;font-size:10px">${s.retail?'$'+s.retail:'—'}</td>
@@ -6635,7 +6683,7 @@ function scStripHTML(season){
     const col = days < 0 ? 'var(--muted)' : days <= 3 ? 'var(--red)' : days <= 14 ? 'var(--amber)' : 'var(--ink)';
     const sub = days < 0 ? 'passed' : days === 0 ? 'today' : 'in ' + days + 'd';
     return `<div style="min-width:84px;flex-shrink:0">
-      <div style="font-size:7px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap">${m.label}</div>
+      <div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);white-space:nowrap">${m.label}</div>
       <div style="font-family:'DM Mono',monospace;font-size:10.5px;color:${col};margin-top:3px">${fmtSc(cal[m.key])}</div>
       <div style="font-size:10px;color:${col}">${sub}</div>
     </div>`;
@@ -6806,7 +6854,7 @@ function renderGantt(filter) {
       const real = sched._src && sched._src[m.key];
       return `<div style="flex:1;min-width:56px;text-align:center">
         <div style="width:10px;height:10px;border-radius:50%;margin:0 auto;background:${done?'var(--green)':'transparent'};border:2px solid ${color}"></div>
-        <div style="font-size:7px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:5px;white-space:nowrap">${m.label}</div>
+        <div style="font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:5px;white-space:nowrap">${m.label}</div>
         <div ${real?`title="${slEsc(real)}"`:''} style="font-size:8.5px;font-family:'DM Mono',monospace;display:inline-block;color:${done ? 'var(--muted)' : color === 'var(--border-mid)' ? 'var(--muted)' : color}${real?';border-bottom:1px solid var(--gold)':''}">${fmt(due)}</div>
       </div>`;
     }).join('');
@@ -7118,6 +7166,12 @@ function openDp(styleId) {
   STATE.currentStyleId = styleId;
   document.getElementById('dp-name').textContent = s.name;
   const dpMargin = s.retail && s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
+  // Margin judged against THIS season's target when one is set (range plan),
+  // not a generic 60/40 rule.
+  const dpTm = (((STATE.rangePlan||{})[s.season])||{}).targetMargin || 0;
+  const dpMCol = dpMargin == null ? 'var(--ink)'
+    : dpTm ? (dpMargin >= dpTm ? 'var(--green)' : dpMargin < dpTm - 5 ? 'var(--red)' : 'var(--amber)')
+    : (dpMargin > 60 ? 'var(--green)' : dpMargin < 40 ? 'var(--red)' : 'var(--ink)');
   document.getElementById('dp-meta').innerHTML = `
     ${s.photoUrl
       ? `<img src="${s.photoUrl}" alt="" style="width:100%;max-height:220px;object-fit:cover;border:1px solid var(--border);margin-top:8px;cursor:pointer" onclick="dpUploadHero('${s.id}')" title="Tap to replace photo">`
@@ -7125,17 +7179,18 @@ function openDp(styleId) {
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px">
       ${stageBadge(s.status)}
       <span class="b-tag">${s.category}</span>
+      <span class="b-tag" onclick="dpToggleCarryover('${s.id}')" title="Tap to toggle — carryover styles repeat from a previous season" style="cursor:pointer;${s.carryover?'border-color:var(--ink);color:var(--ink);font-weight:700':''}">${s.carryover?'↺ Carryover':'New'}</span>
       <span style="font-size:10px;color:var(--muted)">${s.season}</span>
       ${s.drop?`<span style="font-size:10px;color:var(--muted)">Drop ${new Date(s.drop).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>`:''}
     </div>
     ${dpMargin !== null ? `
     <div style="margin-top:8px">
       <div style="display:flex;justify-content:space-between;margin-bottom:3px">
-        <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Retail Margin</span>
-        <span style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${dpMargin>60?'var(--green)':dpMargin<40?'var(--red)':'var(--ink)'}">${dpMargin}%</span>
+        <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Retail Margin${dpTm?` <span style="text-transform:none;letter-spacing:0">/ ${dpTm}% target</span>`:''}</span>
+        <span style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${dpMCol}">${dpMargin}%</span>
       </div>
       <div style="height:3px;background:var(--border);overflow:hidden">
-        <div style="height:100%;width:${Math.min(dpMargin,100)}%;background:${dpMargin>60?'var(--green)':dpMargin<40?'var(--red)':'var(--ink)'};transition:width .3s"></div>
+        <div style="height:100%;width:${Math.min(dpMargin,100)}%;background:${dpMCol};transition:width .3s"></div>
       </div>
     </div>` : ''}`;
 
@@ -7312,6 +7367,12 @@ function dpAdvanceStage() {
   renderStyles();
 }
 
+window.dpToggleCarryover = function(styleId){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
+  if (s.carryover) delete s.carryover; else s.carryover = true;
+  save(); openDp(styleId);
+  try { renderStyles(); } catch(e){}
+};
 function dpViewBom() { if(STATE.currentStyleId) { closeDp(); goTo('bom', document.querySelector('[data-page=bom]')); setTimeout(()=>{ document.getElementById('bom-style-select').value=STATE.currentStyleId; bomSelectStyle(STATE.currentStyleId); },50); } }
 function dpViewPom() { if(STATE.currentStyleId) { closeDp(); goTo('pom', document.querySelector('[data-page=pom]')); setTimeout(()=>{ document.getElementById('pom-style-select').value=STATE.currentStyleId; pomSelectStyle(STATE.currentStyleId); },50); } }
 function dpViewTechPack() { if(STATE.currentStyleId) { const sid=STATE.currentStyleId; closeDp(); goTo('techpack', document.querySelector('[data-page=techpack]')); setTimeout(()=>{ const sel=document.getElementById('tp-style-select'); if(sel){sel.value=sid; renderTechPack(sid);} },50); } }
@@ -8117,6 +8178,8 @@ function renderMobileStyleCards(list, containerId) {
   } else {
     cardList.innerHTML = list.map(s => {
       const margin = s.retail && s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
+      const tm = (((STATE.rangePlan||{})[s.season])||{}).targetMargin || 0;
+      const mCol = margin == null ? '' : tm ? (margin >= tm ? 'var(--green)' : margin < tm - 5 ? 'var(--red)' : 'var(--amber)') : '';
       return `<div class="mob-style-card" onclick="openDp('${s.id}')">
         <div class="mob-style-card-top">
           <div style="display:flex;align-items:center;gap:10px;min-width:0">
@@ -8136,7 +8199,7 @@ function renderMobileStyleCards(list, containerId) {
         </div>
         <div class="mob-style-card-bottom">
           <div class="mob-price">${s.retail ? '$'+s.retail : '—'}</div>
-          <div class="mob-margin">${margin !== null ? margin+'% margin' : ''}</div>
+          <div class="mob-margin"${mCol?` style="color:${mCol};font-weight:700"`:''}>${margin !== null ? margin+'% margin'+(tm?' / '+tm+'%':'') : ''}</div>
           <div class="mob-margin" style="flex:none;text-align:right">${(()=>{ const ss = typeof styleSalesFor === 'function' ? styleSalesFor(s) : null; return ss && ss.u ? 'sold ×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : ''; })()}</div>
           <div>${priorityDot(s.priority)}</div>
         </div>
@@ -8200,7 +8263,7 @@ function renderSamples(filter='all') {
         <div style="font-family:'DM Mono',monospace;font-size:26px;color:${overdueN?'var(--red)':'var(--ink)'}">${overdueN}</div>
       </div>
     </div>
-    <div class="tbl-wrap"><table><thead><tr>
+    <div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
       <th>Style</th><th>Round</th><th>Last activity</th><th>ETA</th><th>Notes</th><th>Vendor</th><th>Drop</th>
     </tr></thead><tbody>
     ${list.map(s=>{
@@ -8208,13 +8271,13 @@ function renderSamples(filter='all') {
       const overdue = sampleOverdue(s);
       const notesN = (s.sampleLog||[]).filter(e=>e.note).length;
       return `<tr onclick="openSampleCard('${s.id}')">
-      <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId} · <span onclick="event.stopPropagation();openDp('${s.id}')" style="cursor:pointer;text-decoration:underline">style →</span></div></td>
-      <td><span style="display:inline-block;padding:2px 9px;border:1px solid;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${SAMPLE_COLORS[s.sample]||'var(--muted)'};border-color:${SAMPLE_COLORS[s.sample]||'var(--border)'}">${s.sample||'—'}</span></td>
-      <td style="font-size:10px">${last ? `<span style="font-family:'DM Mono',monospace;color:var(--muted)">${last.date}</span> ${sampleResultChip(last.result)} ${fitTolChip(s.id, last.round)}` : '<span style="color:var(--muted)">no rounds logged</span>'}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:10px;color:${overdue?'var(--red)':'var(--muted)'};font-weight:${overdue?'700':'400'}">${last && last.eta ? last.eta + (overdue ? ' ⚠' : '') : '—'}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${notesN||'—'}</td>
-      <td style="font-size:10px;color:var(--muted)">${s.vendor||'—'}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:10px">${s.drop||'—'}</td>
+      <td data-label=""><div class="t-name">${s.name}</div><div class="t-id">${s.styleId} · <span onclick="event.stopPropagation();openDp('${s.id}')" style="cursor:pointer;text-decoration:underline">style →</span></div></td>
+      <td data-label="Round"><span style="display:inline-block;padding:2px 9px;border:1px solid;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${SAMPLE_COLORS[s.sample]||'var(--muted)'};border-color:${SAMPLE_COLORS[s.sample]||'var(--border)'}">${s.sample||'—'}</span></td>
+      <td data-label="Last activity" style="font-size:10px">${last ? `<span style="font-family:'DM Mono',monospace;color:var(--muted)">${last.date}</span> ${sampleResultChip(last.result)} ${fitTolChip(s.id, last.round)}` : '<span style="color:var(--muted)">no rounds logged</span>'}</td>
+      <td data-label="ETA" style="font-family:'DM Mono',monospace;font-size:10px;color:${overdue?'var(--red)':'var(--muted)'};font-weight:${overdue?'700':'400'}">${last && last.eta ? last.eta + (overdue ? ' ⚠' : '') : '—'}</td>
+      <td data-label="Notes" style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${notesN||'—'}</td>
+      <td data-label="Vendor" style="font-size:10px;color:var(--muted)">${s.vendor||'—'}</td>
+      <td data-label="Drop" style="font-family:'DM Mono',monospace;font-size:10px">${s.drop||'—'}</td>
     </tr>`;}).join('')}
     </tbody></table></div>`;
 }
@@ -8665,7 +8728,7 @@ function renderInventory(filter='all') {
       <div class="stat-card"><div class="stat-label">Stock Value (Retail)</div><div class="stat-val">$${(totalVal/1000).toFixed(0)}k</div></div>
       <div class="stat-card"><div class="stat-label">Need Reorder</div><div class="stat-val" style="color:${needsReorder>0?'var(--red)':'var(--green)'}">${needsReorder}</div></div>
     </div>
-    <div class="tbl-wrap"><table><thead><tr>
+    <div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
       <th>Style</th><th>Season</th><th>Status</th><th>Stock Level</th><th>Edit Stock</th><th>Reorder At</th><th>Units Sold</th><th>Retail</th><th>Stock Value</th><th>Reorder Qty</th>
     </tr></thead><tbody>
     ${styles.map(s=>{
@@ -8673,18 +8736,18 @@ function renderInventory(filter='all') {
       const isLow=stock<reorder&&stock>0;const isOut=stock===0;
       const stockVal=(stock*(s.retail||0)).toLocaleString();
       return `<tr onclick="openDp('${s.id}')">
-        <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId}</div></td>
-        <td style="font-size:10px">${s.season}</td>
-        <td>${stageBadge(s.status)}</td>
-        <td><span style="font-family:'DM Mono',monospace;font-size:14px;font-weight:700;color:${isOut?'var(--red)':isLow?'var(--amber)':'var(--green)'}">${stock}</span>
+        <td data-label=""><div class="t-name">${s.name}</div><div class="t-id">${s.styleId}</div></td>
+        <td data-label="Season" style="font-size:10px">${s.season}</td>
+        <td data-label="Status">${stageBadge(s.status)}</td>
+        <td data-label="Stock"><span style="font-family:'DM Mono',monospace;font-size:14px;font-weight:700;color:${isOut?'var(--red)':isLow?'var(--amber)':'var(--green)'}">${stock}</span>
           ${isOut?'<span style="margin-left:6px;font-size:10px;letter-spacing:1px;color:var(--red);text-transform:uppercase">Out</span>':isLow?'<span style="margin-left:6px;font-size:10px;letter-spacing:1px;color:var(--amber);text-transform:uppercase">Low</span>':''}
         </td>
-        <td><input type="number" class="fi fi-mono" style="width:65px;font-size:11px;padding:4px 0;min-height:auto" value="${stock||''}" placeholder="0" onchange="setStock('${s.id}',this.value)" onclick="event.stopPropagation()" title="Units in stock"></td>
-        <td style="font-family:'DM Mono',monospace;font-size:11px">${reorder}</td>
-        <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${sold}</td>
-        <td style="font-family:'DM Mono',monospace;font-size:11px">${s.retail?'$'+s.retail:'—'}</td>
-        <td style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ink)">$${stockVal}</td>
-        <td><input type="number" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" placeholder="Qty" value="${s.reorderQty||''}" onchange="setReorderQty('${s.id}',this.value)" onclick="event.stopPropagation()"></td>
+        <td data-label="Edit stock"><input type="number" class="fi fi-mono" style="width:65px;font-size:11px;padding:4px 0;min-height:auto" value="${stock||''}" placeholder="0" onchange="setStock('${s.id}',this.value)" onclick="event.stopPropagation()" title="Units in stock"></td>
+        <td data-label="Reorder at" style="font-family:'DM Mono',monospace;font-size:11px">${reorder}</td>
+        <td data-label="Units sold" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${sold}</td>
+        <td data-label="Retail" style="font-family:'DM Mono',monospace;font-size:11px">${s.retail?'$'+s.retail:'—'}</td>
+        <td data-label="Stock value" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ink)">$${stockVal}</td>
+        <td data-label="Reorder qty"><input type="number" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" placeholder="Qty" value="${s.reorderQty||''}" onchange="setReorderQty('${s.id}',this.value)" onclick="event.stopPropagation()"></td>
       </tr>`;
     }).join('')}
     </tbody></table></div>`;
@@ -28952,6 +29015,15 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   /* Stacked rows have no horizontal overflow — the "more columns" fade would
      just wash out the right-hand values. */
   .tbl-wrap:has(.stack-tbl)::after{ content:none; }
+  /* Filter/tab rows: swipe instead of silently clipping, with a trailing fade
+     so a thumb can tell there's more (mobile audit gap #4). */
+  .tabs, .filters{
+    overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; scrollbar-width:none;
+    mask-image:linear-gradient(90deg,#000 90%,transparent);
+    -webkit-mask-image:linear-gradient(90deg,#000 90%,transparent);
+  }
+  .tabs::-webkit-scrollbar, .filters::-webkit-scrollbar{ display:none; }
+  .tabs > *{ flex-shrink:0; white-space:nowrap; }
 }
 @media (max-width:560px){
   .sk-close{ min-width:44px; min-height:44px; font-size:18px; border-color:#666; background:#1c1c1c; }
