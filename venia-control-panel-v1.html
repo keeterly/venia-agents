@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '262';
+  const BUILD = '263';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5209,7 +5209,7 @@ function renderDashboard() {
     </div>
     <div class="stat-card" style="cursor:pointer" onclick="goTo('costs',document.querySelector('[data-page=costs]'))">
       <div class="stat-label">Catalog Retail Value</div>
-      <div class="stat-val" style="font-size:20px">$${(totalRetail/1000).toFixed(0)}k</div>
+      <div class="stat-val" style="font-size:20px">${totalRetail < 10000 ? '$'+totalRetail.toLocaleString() : '$'+(totalRetail/1000).toFixed(totalRetail < 100000 ? 1 : 0)+'k'}</div>
       <div class="stat-sub">Live styles · full price</div>
     </div>
   `;
@@ -6308,10 +6308,18 @@ function pomSelectStyle(styleId) {
   const baseSz = sizes[bi], baseK = baseSz.toLowerCase();
 
   const devCell = (p) => {
-    const spec = parseFloat(p[baseK]), meas = parseFloat(p.measured), tol = parseFloat(p.tol)||0;
+    // Judge the measurement against the spec/tol FROZEN when it was taken
+    // (p.rounds snapshot) — editing today's spec must not silently flip a
+    // past round's verdict. Live spec is only the fallback for hand-typed
+    // values that predate the round system.
+    const e = p.rounds && p.measuredRound && p.rounds[p.measuredRound];
+    const spec = (e && e.spec != null) ? parseFloat(e.spec) : parseFloat(p[baseK]);
+    const tol = (e && e.tol != null) ? (parseFloat(e.tol)||0) : (parseFloat(p.tol)||0);
+    const meas = parseFloat(p.measured);
     if (isNaN(meas) || isNaN(spec)) return `<span style="color:var(--muted)">—</span>`;
     const d = Math.round((meas-spec)*100)/100, oot = Math.abs(d) > tol;
-    return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>`;
+    const tag = e ? `<span style="color:var(--muted);font-size:9px;font-family:'DM Mono',monospace"> ${p.measuredRound}</span>` : '';
+    return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px" title="${e?'vs '+p.measuredRound+' spec '+spec+' · tol ±'+tol+' (frozen at measure time)':'vs current spec'}">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>${tag}`;
   };
 
   const html = `
@@ -6425,7 +6433,24 @@ function pomGrade(styleId) {
 
 function updatePom(styleId, idx, field, val) {
   if (!STATE.pom[styleId]) return;
-  STATE.pom[styleId][idx][field] = isNaN(parseFloat(val)) ? val : parseFloat(val);
+  const p = STATE.pom[styleId][idx];
+  p[field] = isNaN(parseFloat(val)) ? val : parseFloat(val);
+  // A measurement typed straight into the sheet joins the round system —
+  // tagged to the style's current sample round with the spec/tol frozen now.
+  // Otherwise it would bypass fitTolSummary and get silently overwritten by
+  // pomMirrorMeasured on the next fit session.
+  if (field === 'measured') {
+    const m = parseFloat(val);
+    if (!isNaN(m)) {
+      const style = STATE.styles.find(s => s.id === styleId);
+      const rk = style && style.sample ? (style.sample === 'Approved' ? 'TOP' : style.sample) : 'Proto';
+      const bk = style ? pomBaseInfo(style).baseK : 'm';
+      const spec = parseFloat(p[bk]);
+      if (!p.rounds) p.rounds = {};
+      p.rounds[rk] = { m, spec: isNaN(spec) ? null : spec, tol: parseFloat(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+      pomMirrorMeasured(p);
+    }
+  }
   save();
   updatePomDev(styleId, idx);
 }
@@ -6440,10 +6465,16 @@ function updatePomDev(styleId, idx) {
   if (bi<0) bi = Math.floor((sizes.length-1)/2);
   const baseK = sizes[bi].toLowerCase();
   const p = STATE.pom[styleId][idx]; if (!p) return;
-  const spec=parseFloat(p[baseK]), meas=parseFloat(p.measured), tol=parseFloat(p.tol)||0;
+  // Same frozen-snapshot rule as devCell in pomSelectStyle: a past round's
+  // verdict is judged against the spec/tol captured when it was measured.
+  const e = p.rounds && p.measuredRound && p.rounds[p.measuredRound];
+  const spec = (e && e.spec != null) ? parseFloat(e.spec) : parseFloat(p[baseK]);
+  const tol = (e && e.tol != null) ? (parseFloat(e.tol)||0) : (parseFloat(p.tol)||0);
+  const meas = parseFloat(p.measured);
   if (isNaN(meas)||isNaN(spec)) { cell.innerHTML='<span style="color:var(--muted)">—</span>'; return; }
   const d=Math.round((meas-spec)*100)/100, oot=Math.abs(d)>tol;
-  cell.innerHTML=`<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>`;
+  const tag = e ? `<span style="color:var(--muted);font-size:9px;font-family:'DM Mono',monospace"> ${p.measuredRound}</span>` : '';
+  cell.innerHTML=`<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>${tag}`;
 }
 
 function removePomPoint(styleId, idx) {
@@ -7639,13 +7670,40 @@ function saveStyle() {
 
   if (id) {
     const idx = STATE.styles.findIndex(x=>x.id===id);
-    if (idx!==-1) STATE.styles[idx] = {...STATE.styles[idx],...data};
+    if (idx!==-1) {
+      const prevSample = STATE.styles[idx].sample;
+      STATE.styles[idx] = {...STATE.styles[idx],...data};
+      // The badge is derived from the round log everywhere else — a manual
+      // change here must land IN the log, or the badge shows a round that
+      // never happened (and the boot reconcile would revert it anyway).
+      const st = STATE.styles[idx];
+      if (data.sample && data.sample !== prevSample) {
+        if (!st.sampleLog) st.sampleLog = [];
+        const last = st.sampleLog[st.sampleLog.length-1];
+        const derived = last ? ((last.round==='TOP' && last.result==='approved') ? 'Approved' : last.round) : null;
+        if (derived !== data.sample) {
+          const today = new Date().toISOString().slice(0,10);
+          if (data.sample === 'Approved') st.sampleLog.push({ round:'TOP', date: today, eta:'', result:'approved', note:'Set from style editor' });
+          else st.sampleLog.push({ round: data.sample, date: today, eta:'', result:'', note:'Set from style editor' });
+        }
+        sampleSyncBadge(st);
+      }
+    }
     logActivity(`Style updated: ${name}`);
     toast(name+' updated');
   } else {
     data.styleId = genStyleId(season, cat, gender);
     data.id = 'STY'+Date.now();
     data.notes = [];
+    // A style created already mid-development gets its starting round on the
+    // log, so the badge always has a dated event behind it. Proto = fresh
+    // style, nothing has happened yet — no entry.
+    if (data.sample && data.sample !== 'Proto') {
+      const today = new Date().toISOString().slice(0,10);
+      data.sampleLog = data.sample === 'Approved'
+        ? [{ round:'TOP', date: today, eta:'', result:'approved', note:'Starting point at style creation' }]
+        : [{ round: data.sample, date: today, eta:'', result:'', note:'Starting point at style creation' }];
+    }
     // Quick-create starts minimal — seed a default size run so the style isn't an
     // empty shell; SKUs generate as soon as a colorway is added. All editable.
     if (!data.sizes) data.sizes = 'XS,S,M,L,XL';
@@ -8388,7 +8446,7 @@ function pomMirrorMeasured(p){
   const order = ['Proto','SMS1','SMS2','TOP','Approved'];
   const rs = Object.keys(p.rounds||{}).filter(r => p.rounds[r] && p.rounds[r].m != null)
     .sort((a,b) => order.indexOf(a) - order.indexOf(b));
-  if (rs.length) p.measured = p.rounds[rs[rs.length-1]].m;
+  if (rs.length) { p.measured = p.rounds[rs[rs.length-1]].m; p.measuredRound = rs[rs.length-1]; }
 }
 // n measured / ok in tolerance for one style+round — pure derivation, no entry.
 function fitTolSummary(styleId, round){
@@ -8408,6 +8466,10 @@ function fitTolChip(styleId, round){
   return `<span style="font-family:'DM Mono',monospace;font-size:10px;font-weight:700;color:${t.ok===t.n?'var(--green)':'var(--amber)'}">${t.ok}/${t.n} in tol</span>`;
 }
 window.__fitSess = null;
+// Phone locks / app backgrounds mid-fitting: flush the in-progress point.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && window.__fitSess) { try { fitSessSaveCurrent(); save(); } catch(e){} }
+});
 window.fitSessionStart = function(styleId, round){
   const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
   const points = (STATE.pom||{})[styleId] || [];
@@ -8449,6 +8511,11 @@ window.fitSessNav = function(dir){
 };
 window.fitSessDelta = function(v){
   const S = window.__fitSess; if (!S) return;
+  // Autosave the keystroke (debounced): a fitting gets interrupted — a call,
+  // the next size handed over, the phone locks — and without this the point
+  // being typed is silently lost unless Prev/Next was tapped.
+  clearTimeout(window.__fitSessSaveT);
+  window.__fitSessSaveT = setTimeout(() => { if (window.__fitSess){ fitSessSaveCurrent(); save(); } }, 700);
   const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
   const p = ((STATE.pom||{})[S.styleId]||[])[S.idx]; if (!p) return;
   const { baseK } = pomBaseInfo(s);
@@ -10020,6 +10087,9 @@ function renderTechPackWork(s) {
   if (!s) return;
   const bom = STATE.bom[s.id] || [];
   const pom = STATE.pom[s.id] || [];
+  // The POM grid must show the style's REAL size run (numeric runs included) —
+  // this section feeds the factory-facing document, not just the screen.
+  const tpSizes = (() => { const z = expandSizes(s.sizes); return z.length ? z : ['XS','S','M','L','XL']; })();
   const bomTotal = bom.reduce((sum,i)=>sum+bomExt(i),0);   // waste-inclusive, single source (bomExt)
   const margin = s.retail&&s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
   const callouts = s.callouts||[];
@@ -10492,13 +10562,13 @@ function renderTechPackWork(s) {
           <thead><tr>
             <th class="tpph" style="text-align:left">Measurement</th>
             <th class="tpph">How to Measure</th>
-            ${['XS','S','M','L','XL'].map(sz=>`<th class="tpph">${sz}</th>`).join('')}
+            ${tpSizes.map(sz=>`<th class="tpph">${sz}</th>`).join('')}
             <th class="tpph">Tol</th>
           </tr></thead>
           <tbody>${pom.map((p,idx)=>`<tr>
             <td class="tppd">${p.point}</td>
             <td class="tppd"><input class="tpi" style="font-size:10px;width:110px" value="${p.comment||''}" placeholder="How to…" onchange="tpUpdatePom('${s.id}',${idx},'comment',this.value)"></td>
-            ${['xs','s','m','l','xl'].map(sz=>`<td class="tppd"><input class="tppi" value="${p[sz]||''}" onchange="tpUpdatePom('${s.id}',${idx},'${sz}',this.value)"></td>`).join('')}
+            ${tpSizes.map(sz=>{const k=sz.toLowerCase();return `<td class="tppd"><input class="tppi" value="${p[k]||''}" onchange="tpUpdatePom('${s.id}',${idx},'${k}',this.value)"></td>`;}).join('')}
             <td class="tppd"><input class="tppi" style="width:38px" value="${p.tol||''}" onchange="tpUpdatePom('${s.id}',${idx},'tol',this.value)"></td>
           </tr>`).join('')}</tbody>
         </table>
@@ -11808,6 +11878,8 @@ function renderTechPackPrint(s) {
   const styleId = s.id;
   const bom = STATE.bom[styleId] || [];
   const pom = STATE.pom[styleId] || [];
+  // Factory document: the grade-spec grid carries the style's real size run.
+  const tpSizes = (() => { const z = expandSizes(s.sizes); return z.length ? z : ['XS','S','M','L','XL']; })();
   const bomTotal = bom.reduce((sum,i)=>sum+bomExt(i),0);   // waste-inclusive, single source (bomExt)
   const margin = s.retail&&s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
   const now = new Date();
@@ -12121,7 +12193,7 @@ function renderTechPackPrint(s) {
           <tr style="background:#000;color:#fff">
             <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">Measurement Point</th>
             <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">How to Measure</th>
-            ${['XS','S','M','L','XL'].map(sz=>`<th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">${sz}</th>`).join('')}
+            ${tpSizes.map(sz=>`<th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">${sz}</th>`).join('')}
             <th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">TOL</th>
           </tr>
         </thead>
@@ -12129,7 +12201,7 @@ function renderTechPackPrint(s) {
           ${pom.map((p,i)=>`<tr style="border-bottom:1px solid #e0e0e0;background:${i%2?'#fafafa':'#fff'}">
             <td style="padding:9px 10px;font-size:11px;color:#000;font-weight:700">${p.point}</td>
             <td style="padding:9px 10px;font-size:10px;color:#666;max-width:150px">${p.comment||''}</td>
-            ${['xs','s','m','l','xl'].map(sz=>`<td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:11px;font-weight:600">${p[sz]||'—'}</td>`).join('')}
+            ${tpSizes.map(sz=>`<td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:11px;font-weight:600">${p[sz.toLowerCase()]||'—'}</td>`).join('')}
             <td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${p.tol||'—'}</td>
           </tr>`).join('')}
         </tbody>
@@ -23272,21 +23344,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.getElementById('sb-sql-pre').textContent = sql;
   };
 
-  // Patch save() — debounced silent push to Supabase after every local save
-  ;(function(){
-    var _prevSave = window.save;
-    if (typeof _prevSave === 'function') {
-      window.save = function() {
-        _prevSave.apply(this, arguments);
-        if (_sb) {
-          clearTimeout(_sbPushTimer);
-          _sbPushTimer = setTimeout(function(){
-            window.supabasePushAll(true);
-          }, 4000);
-        }
-      };
-    }
-  })();
+  // RETIRED: the debounced narrow-table push that ran after every save().
+  // The lossless venia_workspace blob (pushed by the sync layer) is the source
+  // of truth; the narrow tables (venia_styles/venia_bom/venia_pom) drop
+  // sampleLog / fitNotes / POM rounds and cost a network write per edit.
+  // supabasePushAll stays callable from the Settings button for a manual push.
 
   // Pre-configure VENIA CC project on first load
   ;(function(){
@@ -23617,13 +23679,29 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       return (blob && blob.size < file.size) ? blob : file;
     } catch(e){ return file; }
   }
+  // No cloud (offline in a fitting, Supabase not wired): shrink hard and keep
+  // the photo as an embedded data-URI so image capture never dead-ends. The
+  // URI lives in the state blob, so the size cap matters.
+  async function localPhotoFallback(file, onDone, err){
+    try {
+      var bmp = await createImageBitmap(file);
+      var MAX = 640, scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
+      var cv = document.createElement('canvas');
+      cv.width = Math.max(1, Math.round(bmp.width * scale)); cv.height = Math.max(1, Math.round(bmp.height * scale));
+      cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+      var dataUrl = cv.toDataURL('image/jpeg', 0.62);
+      if (dataUrl.length > 240000) throw new Error('photo too large to store locally');
+      onDone(dataUrl, null);
+      if (typeof showToast==='function') showToast(err ? 'Upload failed — photo saved locally instead' : 'Offline — photo saved locally','warning');
+    } catch(e2){ if (typeof showToast==='function') showToast('Photo failed: ' + ((err&&err.message)||e2.message||e2),'error'); }
+  }
   function pickAndUpload(keyBase, onDone){
-    var c = sb();
-    if (!c){ if (typeof showToast==='function') showToast('Connect to Supabase to upload photos','warning'); return; }
     var inp = document.createElement('input');
     inp.type = 'file'; inp.accept = 'image/*';
     inp.onchange = async function(){
       var file = inp.files && inp.files[0]; if (!file) return;
+      var c = sb();
+      if (!c){ localPhotoFallback(file, onDone); return; }
       if (typeof showToast==='function') showToast('Uploading photo…','info');
       try {
         var body = await compressImage(file);
@@ -23634,7 +23712,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         if (up.error) throw up.error;
         var url = c.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
         onDone(url, path);
-      } catch(e){ if (typeof showToast==='function') showToast('Upload failed: ' + (e.message||e),'error'); }
+      } catch(e){ localPhotoFallback(file, onDone, e); }
     };
     inp.click();
   }
@@ -28887,7 +28965,13 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   #sk-launch{
     width:46px; height:46px; padding:0; justify-content:center; border-radius:50%;
     right:14px; bottom:calc(66px + var(--sab)) !important;
+    transition:opacity .2s, transform .15s, box-shadow .15s;
   }
+  /* While the list is moving under the thumb, get out of the way — the bubble
+     was sitting on Notes cells, stat values, and row buttons on every screen. */
+  #sk-launch.sk-scrolling{ opacity:.18; pointer-events:none; }
+  /* Bottom clearance so end-of-list actions are never trapped under the FAB. */
+  .content{ padding-bottom:calc(126px + var(--sab)) !important; }
   #sk-launch span:last-child{ display:none; }
   .sk-launch-mark{ font-size:19px; }
   /* The second (pencil) FAB is gone: stacked launchers were riding over
@@ -29170,6 +29254,17 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
 <script>
 // ── ENI & NIGMA: state ───────────────────────────────────────
 const SK = { agent:'eni', open:false, history:{eni:[],nigma:[]}, greeted:{eni:false,nigma:false} };
+// Phone: fade the launcher while any pane is scrolling so it never blocks the
+// content riding under it (capture phase catches inner-container scrolls).
+;(function(){
+  let t;
+  document.addEventListener('scroll', function(){
+    if (window.innerWidth > 768 || SK.open) return;
+    const fab = document.getElementById('sk-launch'); if (!fab) return;
+    fab.classList.add('sk-scrolling');
+    clearTimeout(t); t = setTimeout(() => fab.classList.remove('sk-scrolling'), 550);
+  }, { capture:true, passive:true });
+})();
 // Conversations survive reloads (device-local; capped like the live history).
 function skSaveHistory(){
   // Never persist image blobs — keep localStorage lean and text-only. The chat
