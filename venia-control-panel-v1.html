@@ -816,6 +816,14 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .tpst{font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;color:var(--ink)}
 .tpsb{padding:18px;touch-action:pan-y}
 .tps-plain{padding:0;touch-action:pan-y}
+/* Read-view rows: filled fields read as dense text, tap to edit in place */
+.tp-read{cursor:pointer}
+.tp-read .tp-read-v{font-size:12px;color:var(--ink);padding:5px 0;display:flex;justify-content:space-between;gap:8px;align-items:baseline;border-bottom:1px dashed transparent;word-break:break-word}
+.tp-read:hover .tp-read-v{border-bottom-color:var(--border-mid)}
+.tp-read-pen{color:var(--muted);font-size:10px;opacity:0;transition:opacity .12s;flex-shrink:0}
+.tp-read:hover .tp-read-pen{opacity:1}
+.tp-more{background:none;border:none;color:var(--muted);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;padding:2px 0 10px;display:block}
+.tp-more:hover{color:var(--ink)}
 /* Empty sections shrink to a single header row (BOM/POM before first entry) */
 .tps-slim .tpsh{cursor:default;border-bottom:none}
 /* Sewing-ops table: proper columns on desktop, stacked rows on the phone —
@@ -1690,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '270';
+  const BUILD = '271';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10112,6 +10120,32 @@ function tpSecPill(sec, r){
     ? `<span style="font-size:10px;font-weight:700;color:var(--green);letter-spacing:1px">✓</span>`
     : `<span style="font-size:10px;font-weight:700;color:var(--amber);font-family:'DM Mono',monospace" title="${mine.filter(i=>!i.ok).map(i=>i.label).join(' · ')}">⚠ ${ok}/${mine.length}</span>`;
 }
+// Row-local tap-to-edit for read-view rows. NEVER calls renderTechPack —
+// swaps this row's display/input in place, so scroll and collapse survive.
+window.tpRowEdit = function(row){
+  if (row.classList.contains('editing')) return;
+  const v = row.querySelector('.tp-read-v'), e = row.querySelector('.tp-read-e');
+  if (!v || !e) return;
+  row.classList.add('editing');
+  v.style.display = 'none'; e.style.display = '';
+  const inp = e.querySelector('input,select,textarea');
+  if (!inp) return;
+  inp.focus();
+  try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch(_){}
+  inp.addEventListener('blur', function(){
+    const nv = inp.value;
+    v.innerHTML = (String(nv).trim() ? String(nv).replace(/</g,'&lt;') : '<span style="color:var(--muted)">—</span>')
+      + '<span class="tp-read-pen">✎</span>';
+    v.style.display = ''; e.style.display = 'none';
+    row.classList.remove('editing');
+  }, { once: true });
+};
+window.tpMoreToggle = function(btn){
+  const d = btn.nextElementSibling; if (!d) return;
+  const open = d.style.display !== 'none';
+  d.style.display = open ? 'none' : '';
+  btn.textContent = open ? btn.dataset.label : '− show less';
+};
 // Jump straight to a section from the readiness chip / jump bar.
 window.tpJump = function(sec){
   const s = STATE.styles.find(x => x.id === TP_STYLE_ID); if (!s) return;
@@ -10608,9 +10642,36 @@ function renderTechPackWork(s) {
   const sampleColors = {Proto:'#8e44ad',SMS1:'#2980b9',SMS2:'#16a085',TOP:'#d35400',Approved:'#27ae60'};
 
   const ef = (label, key, placeholder='', type='text', opts=null) => {
-    const val = s[key]||'';
-    if (opts) return `<div class="tpf"><div class="tpl">${label}</div><select class="tpi" onchange="tpUpdate('${s.id}','${key}',this.value)">${opts.map(o=>`<option value="${o}" ${val===o?'selected':''}>${o||'— select —'}</option>`).join('')}</select></div>`;
-    return `<div class="tpf"><div class="tpl">${label}</div><input class="tpi" type="${type}" value="${val}" placeholder="${placeholder}" onchange="tpUpdate('${s.id}','${key}',this.value)"></div>`;
+    // Option lists were being passed as the 4th arg into the `type` slot —
+    // every "dropdown" silently degraded to a free-text input. Normalize.
+    if (Array.isArray(type)) { opts = type; type = 'text'; }
+    const val = s[key];
+    const has = !(val === undefined || val === null || String(val).trim() === '');
+    const editor = opts
+      ? `<select class="tpi" onchange="tpUpdate('${s.id}','${key}',this.value)">${opts.map(o=>`<option value="${o}" ${String(val||'')===String(o)?'selected':''}>${o||'— select —'}</option>`).join('')}</select>`
+      : `<input class="tpi" type="${type}" value="${val==null?'':String(val).replace(/"/g,'&quot;')}" placeholder="${placeholder}" onchange="tpUpdate('${s.id}','${key}',this.value)">`;
+    // A FILLED text field renders as a dense read row — most visits are reads,
+    // not edits. Tap swaps in the live input for THIS ROW ONLY (tpRowEdit
+    // never calls renderTechPack, so scroll/collapse state can't be lost).
+    if (has && !opts && type === 'text') {
+      return `<div class="tpf tp-read" onclick="tpRowEdit(this)"><div class="tpl">${label}</div><div class="tp-read-v">${String(val).replace(/</g,'&lt;')}<span class="tp-read-pen">✎</span></div><div class="tp-read-e" style="display:none">${editor}</div></div>`;
+    }
+    return `<div class="tpf"><div class="tpl">${label}</div>${editor}</div>`;
+  };
+  // Optional field: renders normally when FILLED; when empty it folds into the
+  // next foldFlush() "+ n more" strip instead of costing a screen row.
+  let _fold = [];
+  const efo = (...args) => {
+    const key = args[1], val = s[key];
+    const has = !(val === undefined || val === null || String(val).trim() === '');
+    const h = ef(...args);
+    if (has) return h;
+    _fold.push(h); return '';
+  };
+  const foldFlush = (cls='tpg') => {
+    if (!_fold.length) return '';
+    const n = _fold.length, rows = _fold.join(''); _fold = [];
+    return `<button class="tp-more" data-label="+ ${n} more field${n>1?'s':''}" onclick="tpMoreToggle(this)">+ ${n} more field${n>1?'s':''}</button><div class="${cls}" style="display:none;margin-bottom:16px">${rows}</div>`;
   };
   const ta = (label, key, ph='', rows=2) => `<div class="tpf tpff"><div class="tpl">${label}</div><textarea class="tpi tpta" rows="${rows}" onchange="tpUpdate('${s.id}','${key}',this.value)" placeholder="${ph}">${s[key]||''}</textarea></div>`;
 
@@ -10652,9 +10713,10 @@ function renderTechPackWork(s) {
       </div>
       <div class="tp-subhead">Files &amp; Links</div>
       <div class="tpg2" style="margin-bottom:12px">
-        ${ef('CLO3D File Name','cloFile','e.g. hamlet_v4.zprj')}
+        ${efo('CLO3D File Name','cloFile','e.g. hamlet_v4.zprj')}
         ${ef('CLO3D Status','cloStatus','',['none','draft','review','approved'])}
       </div>
+      ${foldFlush('tpg2')}
       <div class="tpf tpff" style="margin-bottom:12px">
         <div class="tpl">CLO3D / File Link (Drive, Dropbox, Frame.io…)</div>
         <div style="display:flex;gap:8px;align-items:center">
@@ -10745,14 +10807,15 @@ function renderTechPackWork(s) {
         ${ef('Seam Finish','seamFinish','',['','French seam','Flat-felled','Serged / Overlocked','Hong Kong finish','Bound seam','Turned & stitched','Raw edge'])}
         ${ef('Seam Allowance','seamAllow','',['','3/8" (1cm)','1/2" (1.3cm)','5/8" (1.6cm)','3/4" (2cm)','1" (2.5cm)'])}
         ${ef('Closure','closure','',['','Invisible zip','Exposed zip','Button','Hook & eye','Snap','Drawstring','None / Pull-on','Other'])}
-        ${ef('Closure Placement','closurePlace','e.g. CB, Side seam')}
+        ${efo('Closure Placement','closurePlace','e.g. CB, Side seam')}
         ${ef('Hem Type','hemType','',['','Clean hem','Blind hem','Rolled hem','Lettuce edge','Bound hem','Raw edge','Horsehair'])}
-        ${ef('Hem Allowance','hemAllow','e.g. 2cm')}
-        ${ef('Interlining','interlining','e.g. Woven fusible, None')}
+        ${efo('Hem Allowance','hemAllow','e.g. 2cm')}
+        ${efo('Interlining','interlining','e.g. Woven fusible, None')}
         ${ef('Main Stitch','stitchType','',['','Lockstitch (301)','Chainstitch (401)','Overlock (504)','Cover stitch (406)','Flatlock'])}
-        ${ef('SPI','spi','e.g. 12 SPI')} ${ef('Thread Color','thread','e.g. Match, Black')}
-        ${ef('Topstitch','topstitch','e.g. 1/8" edgestitch')}
+        ${efo('SPI','spi','e.g. 12 SPI')} ${efo('Thread Color','thread','e.g. Match, Black')}
+        ${efo('Topstitch','topstitch','e.g. 1/8" edgestitch')}
       </div>
+      ${foldFlush('tpg')}
       <div class="tp-subhead" style="margin-top:20px">Sewing Operations — by location <span style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted)">stitches per ISO 4915, diagram prints on the factory doc</span></div>
       ${(s.sewOps||[]).length ? `<div class="tbl-wrap"><table class="tp-sew-tbl">
         <thead><tr>
@@ -10778,21 +10841,26 @@ function renderTechPackWork(s) {
       <div class="tpg">
         ${ef('Fabric State','fabricState','',['finished','pfd','greige'])}
         ${ef('Dye / Wash','dyeTech','',['none','piece-dye','garment-dye','tie-dye','discharge','reactive','pigment','overdye'])}
-        ${ef('Dye House','dyeHouse','')} ${ef('Lab Dip','labDip','',['','requested','received','approved','rejected — redo'])}
-        ${ef('Shrinkage Note','shrinkage','e.g. allow 5%')}
+        ${efo('Dye House','dyeHouse','')} ${ef('Lab Dip','labDip','',['','requested','received','approved','rejected — redo'])}
+        ${efo('Shrinkage Note','shrinkage','e.g. allow 5%')}
       </div>
+      ${foldFlush('tpg')}
       <div class="tp-subhead" style="margin-top:20px">Label Content — Legal</div>
       <div class="tpg2" style="margin-bottom:10px">
-        ${ef('Fiber Composition','fiberContent','e.g. 100% wool · Lining: 100% cupro')}
-        ${ef('Country of Origin','coo','e.g. Made in Portugal')}
+        <!-- ONE write surface: fiber & origin are edited in ⑦ Care Label &
+             Legal (which derives fiber from the BOM). These read-only mirrors
+             killed the silent-divergence trap of two editable copies. -->
+        <div class="tpf"><div class="tpl">Fiber Composition</div><div style="font-size:12px;padding:5px 0;color:${s.fiberContent?'var(--ink)':'var(--muted)'}">${s.fiberContent?String(s.fiberContent).replace(/</g,'&lt;'):`<a href="#" onclick="event.preventDefault();tpJump('care')" style="color:var(--muted)">— set in ⑦ Care Label &amp; Legal →</a>`}</div></div>
+        <div class="tpf"><div class="tpl">Country of Origin</div><div style="font-size:12px;padding:5px 0;color:${s.coo?'var(--ink)':'var(--muted)'}">${s.coo?String(s.coo).replace(/</g,'&lt;'):`<a href="#" onclick="event.preventDefault();tpJump('care')" style="color:var(--muted)">— set in ⑦ Care Label &amp; Legal →</a>`}</div></div>
       </div>
       ${ta('Care Instructions','careInstructions','e.g. Hand wash cold. Do not bleach. Dry flat. Cool iron. Or dry clean.',2)}
       <div style="font-size:10px;color:var(--muted);margin:6px 0 14px;line-height:1.5">Fibre composition and origin are mandatory on garments sold in the EU (Reg. 1007/2011); care instructions are expected trade practice. This block prints on the factory tech pack.</div>
       <div class="tp-subhead" style="margin-top:20px">Labeling &amp; Packaging</div>
       <div class="tpg2" style="margin-bottom:14px">
         ${ef('Main Label Placement','labelPlace','e.g. CB neck')} ${ef('Care Label Placement','carePlace','e.g. Left side seam, 6cm from hem')}
-        ${ef('Size Label','sizeLabel','e.g. Woven, Printed')} ${ef('Hang Tag Location','hangLoc','e.g. Left cuff')}
+        ${efo('Size Label','sizeLabel','e.g. Woven, Printed')} ${efo('Hang Tag Location','hangLoc','e.g. Left cuff')}
       </div>
+      ${foldFlush('tpg2')}
       ${ta('Packaging Instructions','packaging','e.g. Fold flat, tissue wrap, VENIA dust bag…',2)}
     </div>
   </div>
@@ -11134,10 +11202,11 @@ function renderTechPackWork(s) {
     ${secBody('cost')}
       <div class="tpg">
         ${ef('COGS (USD)','cogs','0.00','number')} ${ef('Wholesale Price','wholesale','0.00','number')} ${ef('Retail Price','retail','0.00','number')}
-        ${ef('Dye / Finish Cost','dyeCost','0.00','number')} ${ef('Freight Per Unit','freight','0.00','number')} ${ef('Duty Rate (%)','duty','0','number')}
+        ${efo('Dye / Finish Cost','dyeCost','0.00','number')} ${efo('Freight Per Unit','freight','0.00','number')} ${efo('Duty Rate (%)','duty','0','number')}
         ${ef('Production Region','prodRegion','',['','domestic-la','domestic-ny','domestic-other','intl-italy','intl-portugal','intl-korea','intl-china','intl-india','intl-peru','intl-other'])}
         ${ef('Lead Time (wks)','lead','12','number')} ${ef('Vendor / Factory','vendor','')}
       </div>
+      ${foldFlush('tpg')}
       ${margin!==null?`<div style="margin-top:14px;padding:12px;background:#f7f7f7;display:flex;gap:24px;flex-wrap:wrap">
         <div><div class="tpl" style="margin-bottom:4px">Retail Margin</div><div style="font-size:22px;font-weight:700;color:${margin>60?'#27ae60':margin<40?'#c0392b':'#000'}">${margin}%</div></div>
         ${s.wholesale&&s.cogs?`<div><div class="tpl" style="margin-bottom:4px">WS Margin</div><div style="font-size:22px;font-weight:700">${Math.round(((s.wholesale-s.cogs)/s.wholesale)*100)}%</div></div>`:''}
