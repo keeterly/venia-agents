@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '258';
+  const BUILD = '259';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8181,7 +8181,7 @@ function renderSamples(filter='all') {
       return `<tr onclick="openSampleCard('${s.id}')">
       <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId} · <span onclick="event.stopPropagation();openDp('${s.id}')" style="cursor:pointer;text-decoration:underline">style →</span></div></td>
       <td><span style="display:inline-block;padding:2px 9px;border:1px solid;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${SAMPLE_COLORS[s.sample]||'var(--muted)'};border-color:${SAMPLE_COLORS[s.sample]||'var(--border)'}">${s.sample||'—'}</span></td>
-      <td style="font-size:10px">${last ? `<span style="font-family:'DM Mono',monospace;color:var(--muted)">${last.date}</span> ${sampleResultChip(last.result)}` : '<span style="color:var(--muted)">no rounds logged</span>'}</td>
+      <td style="font-size:10px">${last ? `<span style="font-family:'DM Mono',monospace;color:var(--muted)">${last.date}</span> ${sampleResultChip(last.result)} ${fitTolChip(s.id, last.round)}` : '<span style="color:var(--muted)">no rounds logged</span>'}</td>
       <td style="font-family:'DM Mono',monospace;font-size:10px;color:${overdue?'var(--red)':'var(--muted)'};font-weight:${overdue?'700':'400'}">${last && last.eta ? last.eta + (overdue ? ' ⚠' : '') : '—'}</td>
       <td style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${notesN||'—'}</td>
       <td style="font-size:10px;color:var(--muted)">${s.vendor||'—'}</td>
@@ -8216,6 +8216,7 @@ window.openSampleCard = function(styleId){
         <select id="smp-round" class="fs" style="min-height:38px;font-size:12px;flex:1;min-width:100px">${SAMPLE_STAGES.map(st => `<option value="${st}" ${st === nextRound ? 'selected' : ''}>${st}</option>`).join('')}</select>
         <input id="smp-eta" type="date" class="fi" style="min-height:38px;font-size:12px;flex:1;min-width:130px" title="Expected back / due">
         <button class="btn btn-ghost btn-sm" style="min-height:38px" onclick="sampleCardPhoto('${s.id}')" title="Snap the sample — pins to this round">📷</button>
+        <button class="btn btn-ghost btn-sm" style="min-height:38px" onclick="fitSessionStart('${s.id}')" title="Walk the tape through the POM points — spec vs measured, stamped to this round">Fit session</button>
         <button class="btn btn-gold btn-sm" style="min-height:38px" onclick="sampleLogRound('${s.id}')">＋ Log</button>
       </div>
       <input id="smp-note" class="fi" placeholder="Note — what was requested / changed" style="width:100%;box-sizing:border-box;min-height:38px;font-size:13px;margin-top:8px">
@@ -8228,6 +8229,7 @@ window.openSampleCard = function(styleId){
           <span style="display:inline-block;padding:2px 9px;border:1px solid ${SAMPLE_COLORS[e.round]||'var(--border)'};font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${SAMPLE_COLORS[e.round]||'var(--muted)'}">${e.round}</span>
           <span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${e.date}</span>
           ${e.eta ? `<span style="font-family:'DM Mono',monospace;font-size:10px;color:${overdue ? 'var(--red)' : 'var(--muted)'}">ETA ${e.eta}${overdue ? ' ⚠ overdue' : ''}</span>` : ''}
+          ${fitTolChip(s.id, e.round)}
           <span style="flex:1"></span>
           <select onchange="sampleSetResult('${s.id}',${idx},this.value)" class="fs" style="min-height:30px;font-size:10px;padding:3px 6px">
             ${Object.keys(SAMPLE_RESULTS).map(k => `<option value="${k}" ${(e.result || '') === k ? 'selected' : ''}>${SAMPLE_RESULTS[k][0]}</option>`).join('')}
@@ -8273,6 +8275,193 @@ window.sampleSetNote = function(styleId, idx, v){
   s.sampleLog[idx].note = String(v || '').trim();
   save();
 };
+
+// ═══ FIT SESSION (PLM gauntlet build 259) ════════════════════════════════════
+// The patternmaker's killer question: can a founder run a fit session ON A
+// PHONE — walk the tape through the POM points, see spec vs measured instantly,
+// and have it stamped to the round? Per-round values live in pom
+// row.rounds[round] = {m, spec, tol, at} — spec and tolerance are SNAPSHOTTED
+// at measure time so a later spec edit never rewrites fit history. row.measured
+// stays a real stored field mirroring the LATEST round (three legacy renderers
+// and the sync export read it as plain data).
+function pomBaseInfo(style){
+  let sizes = expandSizes(style.sizes);
+  if (!sizes.length) sizes = ['XS','S','M','L','XL'];
+  let bi = -1;
+  if (style.baseSize){ const bs = style.baseSize.toUpperCase(); bi = sizes.findIndex(sz => new RegExp('\\b'+sz+'\\b').test(bs)); }
+  if (bi < 0) bi = Math.floor((sizes.length-1)/2);
+  return { sizes, baseSz: sizes[bi], baseK: sizes[bi].toLowerCase() };
+}
+function pomMirrorMeasured(p){
+  const order = ['Proto','SMS1','SMS2','TOP','Approved'];
+  const rs = Object.keys(p.rounds||{}).filter(r => p.rounds[r] && p.rounds[r].m != null)
+    .sort((a,b) => order.indexOf(a) - order.indexOf(b));
+  if (rs.length) p.measured = p.rounds[rs[rs.length-1]].m;
+}
+// n measured / ok in tolerance for one style+round — pure derivation, no entry.
+function fitTolSummary(styleId, round){
+  const rows = (STATE.pom||{})[styleId] || [];
+  let n = 0, ok = 0;
+  rows.forEach(p => {
+    const e = p.rounds && p.rounds[round];
+    if (!e || e.m == null || e.spec == null) return;
+    n++;
+    if (Math.abs(e.m - e.spec) <= (parseFloat(e.tol)||0)) ok++;
+  });
+  return { n, ok };
+}
+function fitTolChip(styleId, round){
+  const t = fitTolSummary(styleId, round);
+  if (!t.n) return '';
+  return `<span style="font-family:'DM Mono',monospace;font-size:10px;font-weight:700;color:${t.ok===t.n?'var(--green)':'var(--amber)'}">${t.ok}/${t.n} in tol</span>`;
+}
+window.__fitSess = null;
+window.fitSessionStart = function(styleId, round){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
+  const points = (STATE.pom||{})[styleId] || [];
+  if (!points.length){ showToast('No POM points yet — add measurement points in Tech Pack → POM first','warning'); return; }
+  round = round || document.getElementById('smp-round')?.value || s.sample || 'Proto';
+  window.__fitSess = { styleId, round, idx: 0 };
+  fitSessRender();
+};
+window.fitSessClose = function(){
+  const ex = document.getElementById('fit-session'); if (ex) ex.remove();
+  window.__fitSess = null;
+  save();
+  try { renderSamples(); } catch(e){}
+  try { if (typeof currentPomStyleId !== 'undefined' && currentPomStyleId) pomSelectStyle(currentPomStyleId); } catch(e){}
+};
+window.fitSessSaveCurrent = function(){
+  const S = window.__fitSess; if (!S) return;
+  const points = (STATE.pom||{})[S.styleId] || [];
+  const p = points[S.idx]; if (!p) return;
+  const el = document.getElementById('fs-meas'); if (!el) return;
+  const v = el.value.trim();
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  const { baseK } = pomBaseInfo(s);
+  if (v === '' || isNaN(parseFloat(v))) {
+    if (p.rounds) delete p.rounds[S.round];
+  } else {
+    if (!p.rounds) p.rounds = {};
+    const spec = parseFloat(p[baseK]);
+    p.rounds[S.round] = { m: parseFloat(v), spec: isNaN(spec) ? null : spec, tol: parseFloat(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+  }
+  pomMirrorMeasured(p);
+};
+window.fitSessNav = function(dir){
+  const S = window.__fitSess; if (!S) return;
+  fitSessSaveCurrent();
+  save();
+  S.idx = Math.max(0, S.idx + dir);
+  fitSessRender();
+};
+window.fitSessDelta = function(v){
+  const S = window.__fitSess; if (!S) return;
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  const p = ((STATE.pom||{})[S.styleId]||[])[S.idx]; if (!p) return;
+  const { baseK } = pomBaseInfo(s);
+  const spec = parseFloat(p[baseK]), m = parseFloat(v), tol = parseFloat(p.tol)||0;
+  const el = document.getElementById('fs-delta'); if (!el) return;
+  if (isNaN(m) || isNaN(spec)){ el.innerHTML = '<span style="color:var(--muted)">—</span>'; return; }
+  const d = Math.round((m - spec) * 100) / 100, oot = Math.abs(d) > tol;
+  el.innerHTML = `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:700">${d>0?'+':''}${d} ${oot?'⚠ out of tolerance':'✓ in spec'}</span>`;
+};
+window.fitSessResult = function(result){
+  const S = window.__fitSess; if (!S) return;
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  if (!s.sampleLog) s.sampleLog = [];
+  let idx = -1;
+  for (let i = s.sampleLog.length - 1; i >= 0; i--) if (s.sampleLog[i].round === S.round) { idx = i; break; }
+  if (idx < 0){ s.sampleLog.push({ round: S.round, date: new Date().toISOString().slice(0,10), result: '', note: 'Fit session' }); idx = s.sampleLog.length - 1; }
+  s.sampleLog[idx].result = result;
+  sampleSyncBadge(s);
+  save();
+  showToast(S.round + ' marked ' + result, 'success');
+  fitSessClose();
+};
+window.fitSessFileNote = function(){
+  const S = window.__fitSess; if (!S) return;
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  const points = (STATE.pom||{})[S.styleId] || [];
+  const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) > (parseFloat(e.tol)||0); });
+  if (!bad.length){ showToast('Everything in tolerance — nothing to file','info'); return; }
+  if (!s.fitNotes) s.fitNotes = [];
+  const t = fitTolSummary(S.styleId, S.round);
+  s.fitNotes.push({ id:'FN'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    round: S.round, size: pomBaseInfo(s).baseSz,
+    issue: 'Fit session: ' + bad.length + ' of ' + t.n + ' points out of tolerance',
+    note: bad.map(p => { const e = p.rounds[S.round]; const d = Math.round((e.m - e.spec)*100)/100; return p.point + ' ' + (d>0?'+':'') + d; }).join('; '),
+    status:'Open', at:new Date().toISOString().slice(0,10) });
+  save();
+  showToast('Fit note filed','success');
+};
+function fitSessRender(){
+  const S = window.__fitSess; if (!S) return;
+  const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
+  const points = (STATE.pom||{})[S.styleId] || [];
+  const { baseSz, baseK } = pomBaseInfo(s);
+  let ex = document.getElementById('fit-session');
+  if (!ex){
+    ex = document.createElement('div');
+    ex.id = 'fit-session';
+    ex.style.cssText = 'position:fixed;inset:0;z-index:9600;background:var(--bg);display:flex;flex-direction:column;padding:calc(14px + var(--sat,0px)) 18px calc(18px + var(--sab,0px));overflow-y:auto';
+    document.body.appendChild(ex);
+  }
+  const head = `
+    <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--gold);font-weight:700">Fit session · ${S.round} · ${baseSz} sample</div>
+        <div style="font-size:15px;font-weight:700;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.name}</div>
+      </div>
+      <button onclick="fitSessSaveCurrent();fitSessClose()" aria-label="Close" style="background:var(--bg-off);border:none;color:var(--ink);width:36px;height:36px;border-radius:50%;font-size:15px;cursor:pointer;flex-shrink:0">✕</button>
+    </div>
+    <div style="height:3px;background:var(--border);margin:12px 0;flex-shrink:0"><div style="height:100%;width:${Math.round(Math.min(S.idx,points.length)/points.length*100)}%;background:var(--ink)"></div></div>`;
+  if (S.idx >= points.length){
+    const t = fitTolSummary(S.styleId, S.round);
+    const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) > (parseFloat(e.tol)||0); });
+    ex.innerHTML = head + `
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;text-align:center;gap:8px">
+        <div style="font-family:'DM Mono',monospace;font-size:44px;font-weight:300;color:${t.n && t.ok===t.n ? 'var(--green)' : 'var(--ink)'}">${t.ok}/${t.n}</div>
+        <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">points in tolerance</div>
+        ${bad.length ? `<div style="text-align:left;max-width:420px;margin:14px auto 0;border:1px solid var(--border);padding:12px 14px">
+          <div class="micro-label" style="margin-bottom:8px">Out of tolerance</div>
+          ${bad.map(p => { const e = p.rounds[S.round]; const d = Math.round((e.m - e.spec)*100)/100;
+            return `<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0"><span>${p.point}</span><span style="font-family:'DM Mono',monospace;color:var(--red);font-weight:700">${d>0?'+':''}${d}</span></div>`; }).join('')}
+        </div>` : (t.n ? `<div style="font-size:12px;color:var(--green)">Clean — the ${baseSz} sample measures to spec.</div>` : `<div style="font-size:12px;color:var(--muted)">No points measured this session.</div>`)}
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;flex-shrink:0">
+        <button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessNav(-1)">‹ Back</button>
+        ${bad.length ? `<button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessFileNote()">File fit note</button>` : ''}
+        ${t.n ? (bad.length
+          ? `<button class="btn btn-gold btn-sm" style="flex:1;min-height:44px" onclick="fitSessResult('revise')">Mark ${S.round}: Revise</button>`
+          : `<button class="btn btn-gold btn-sm" style="flex:1;min-height:44px" onclick="fitSessResult('approved')">Mark ${S.round}: Approved</button>`) : ''}
+        <button class="btn btn-ghost btn-sm" style="flex:1;min-height:44px" onclick="fitSessClose()">Done</button>
+      </div>`;
+    return;
+  }
+  const p = points[S.idx];
+  const e = (p.rounds||{})[S.round];
+  const spec = parseFloat(p[baseK]);
+  ex.innerHTML = head + `
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:6px;max-width:420px;margin:0 auto;width:100%">
+      <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">Point ${S.idx+1} of ${points.length}</div>
+      <div style="font-size:20px;font-weight:700;color:var(--ink)">${p.point||'—'}</div>
+      ${p.comment ? `<div style="font-size:11px;color:var(--muted)">${String(p.comment).replace(/</g,'&lt;')}</div>` : ''}
+      <div style="display:flex;align-items:baseline;gap:12px;margin-top:14px">
+        <span style="font-family:'DM Mono',monospace;font-size:44px;font-weight:300;color:var(--ink)">${isNaN(spec)?'—':spec}</span>
+        <span style="font-size:12px;color:var(--muted)">spec (${baseSz}) · tol ± ${p.tol||0}</span>
+      </div>
+      <input id="fs-meas" type="number" step="0.1" inputmode="decimal" placeholder="measured" value="${e && e.m != null ? e.m : ''}"
+        oninput="fitSessDelta(this.value)"
+        style="width:100%;box-sizing:border-box;font-family:'DM Mono',monospace;font-size:30px;padding:12px 14px;border:1px solid var(--border-mid);background:var(--bg);color:var(--ink);outline:none;margin-top:6px">
+      <div id="fs-delta" style="font-size:14px;min-height:22px;margin-top:6px"><span style="color:var(--muted)">—</span></div>
+    </div>
+    <div style="display:flex;gap:8px;flex-shrink:0;max-width:420px;margin:0 auto;width:100%">
+      <button class="btn btn-ghost btn-sm" style="flex:1;min-height:48px;${S.idx===0?'opacity:.4;pointer-events:none':''}" onclick="fitSessNav(-1)">‹ Prev</button>
+      <button class="btn btn-gold btn-sm" style="flex:2;min-height:48px" onclick="fitSessNav(1)">${S.idx === points.length-1 ? 'Finish ›' : 'Next ›'}</button>
+    </div>`;
+  setTimeout(() => { const el = document.getElementById('fs-meas'); if (el){ el.focus(); fitSessDelta(el.value); } }, 60);
+}
 
 function filterSamples(filter, el) {
   if(el){document.querySelectorAll('#samples-filters .pill').forEach(b=>b.classList.remove('active'));el.classList.add('active');}
