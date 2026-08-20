@@ -1676,7 +1676,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '257';
+  const BUILD = '258';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3751,19 +3751,10 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
     <div class="page" id="page-fitnotes">
       <div class="sec-head">
         <div class="sec-title">Fit Notes</div>
-        <div class="sec-actions">
-          <button class="btn btn-gold btn-sm" onclick="addFitNoteRow()">+ Add Row</button>
-        </div>
       </div>
-      <div class="tbl-wrap">
-        <table>
-          <thead><tr>
-            <th>Style #</th><th>Size</th><th>Fit Issue</th><th>Grader Note</th><th>Status</th><th></th>
-          </tr></thead>
-          <!-- Rows are rendered by renderFitNotes() (seeded + editable, persisted to venia_fitnotes). -->
-          <tbody id="fitnotes-tbody"></tbody>
-        </table>
-      </div>
+      <!-- Fit notes are real records on the style (s.fitNotes) — grouped per
+           style, filed from here or from a sample round. renderFitNotes(). -->
+      <div id="fitnotes-body"></div>
     </div>
 
     <!-- ── LINE SHEET ── -->
@@ -7274,6 +7265,15 @@ function dpAdvanceStage() {
   const stages = ['concept','design','sms','development','production','active','sale'];
   const idx = stages.indexOf(s.status);
   if (idx < 0 || idx >= stages.length-1) { toast('Already at final stage'); return; }
+  // Entering production is the one high-stakes hop: warn (never block) when
+  // the development record is incomplete — a factory is about to cut real fabric.
+  if (stages[idx+1] === 'production') {
+    const missing = [];
+    if (!((STATE.bom||{})[id]||[]).length) missing.push('BOM (no materials listed)');
+    if (!((STATE.pom||{})[id]||[]).length) missing.push('POM (no measurement spec)');
+    if (!(s.sampleLog||[]).some(e => e.round === 'TOP' && e.result === 'approved')) missing.push('an approved TOP sample');
+    if (missing.length && !confirm('Heads up — ' + s.name + ' is moving into PRODUCTION without:\n\n• ' + missing.join('\n• ') + '\n\nAdvance anyway?')) return;
+  }
   const prev = s.status;
   s.status = stages[idx+1];
   save();
@@ -8242,6 +8242,15 @@ window.openSampleCard = function(styleId){
   </div>`;
   document.body.appendChild(ov);
 };
+// ONE truth for the sample stage (panel finding ×2): the badge is always
+// derived from the round log — a status can never exist without the round
+// that produced it. Styles with an empty log keep their legacy badge.
+function sampleSyncBadge(s){
+  const log = (s && s.sampleLog) || [];
+  if (!log.length) return;
+  const last = log[log.length - 1];
+  s.sample = (last.round === 'TOP' && last.result === 'approved') ? 'Approved' : last.round;
+}
 window.sampleLogRound = function(styleId){
   const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
   const round = document.getElementById('smp-round')?.value || 'Proto';
@@ -8249,14 +8258,14 @@ window.sampleLogRound = function(styleId){
   const note = (document.getElementById('smp-note')?.value || '').trim();
   if (!s.sampleLog) s.sampleLog = [];
   s.sampleLog.push({ round, date: sampleToday(), eta, result: '', note });
-  s.sample = round;
+  sampleSyncBadge(s);
   logActivity(`Sample round logged: ${s.name} → ${round}${eta ? ' (ETA ' + eta + ')' : ''}`);
   save(); renderSamples(); openSampleCard(styleId);
 };
 window.sampleSetResult = function(styleId, idx, v){
   const s = STATE.styles.find(x => x.id === styleId); if (!s || !s.sampleLog || !s.sampleLog[idx]) return;
   s.sampleLog[idx].result = v;
-  if (v === 'approved' && idx === s.sampleLog.length - 1 && s.sampleLog[idx].round === 'TOP') s.sample = 'Approved';
+  sampleSyncBadge(s);
   save(); renderSamples(); openSampleCard(styleId);
 };
 window.sampleSetNote = function(styleId, idx, v){
@@ -8273,10 +8282,11 @@ function filterSamples(filter, el) {
 function advanceSample(styleId, stage) {
   const s=STATE.styles.find(x=>x.id===styleId);
   if(s){
-    s.sample=stage;
-    // Log the round transition so there's a dated history, not just a status.
+    // Log the round transition so there's a dated history, not just a status —
+    // the badge derives from the log (sampleSyncBadge), never set directly.
     if(!s.sampleLog) s.sampleLog=[];
     s.sampleLog.push({ round:stage, date:new Date().toISOString().slice(0,10), result:'', note:'' });
+    sampleSyncBadge(s);
     logActivity(`Sample updated: ${s.name} → ${stage}`);save();renderSamples();toast(`${s.name} → ${stage}`);
   }
 }
@@ -8297,19 +8307,26 @@ function dpSampleRoundsHtml(s) {
         ${e.note?`<div style="font-size:11px;color:var(--soft);line-height:1.5;margin-top:2px">${e.note}</div>`:''}
       </div>
     </div>`).join('') : '<div style="font-size:11px;color:var(--muted);font-style:italic">No sample rounds logged yet.</div>';
-  // One fit truth: rows filed on the Fit Notes page under this style code show
-  // up here too, so the fit story reads in one place.
+  // One fit truth: real s.fitNotes records lead; legacy tuple rows that
+  // haven't folded in yet (content-key mismatch) still show so nothing hides.
   let fitRows = '';
   try {
     const clean = (v) => String(v==null?'':v).replace(/</g,'&lt;');
-    const mine = (JSON.parse(localStorage.getItem('venia_fitnotes')||'[]') || []).filter(r =>
-      Array.isArray(r) && String(r[0]||'').trim().toLowerCase() === String(s.styleId||'').trim().toLowerCase() && (r[2]||r[3]));
-    if (mine.length) fitRows = '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)">'
+    const notes = (s.fitNotes||[]).slice();
+    const keys = {}; notes.forEach(n => { keys[fnContentKey(n)] = 1; });
+    (typeof fnLegacyRows === 'function' ? fnLegacyRows() : []).filter(r =>
+      String(r[0]||'').trim().toLowerCase() === String(s.styleId||'').trim().toLowerCase())
+      .forEach(r => {
+        const n = { round:'', size:String(r[1]||'').trim(), issue:String(r[2]||'').trim(), note:String(r[3]||'').trim(), status:(r[4]==='Resolved'?'Resolved':'Open'), legacy:true };
+        if (!keys[fnContentKey(n)]) notes.push(n);
+      });
+    if (notes.length) fitRows = '<div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--border)">'
       + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">Fit notes · <span style="cursor:pointer;text-decoration:underline" onclick="goTo(\'fitnotes\')">open page →</span></div>'
-      + mine.map(r => `<div style="display:flex;gap:8px;font-size:11px;padding:4px 0;align-items:baseline">
-          <span style="color:${r[4]==='Resolved'?'var(--green)':'var(--amber)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0">${clean(r[4]||'Open')}</span>
-          ${r[1]?`<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);flex-shrink:0">${clean(r[1])}</span>`:''}
-          <span style="color:var(--soft)">${clean(r[2]||'')}${r[3]?' — '+clean(r[3]):''}</span>
+      + notes.map(n => `<div style="display:flex;gap:8px;font-size:11px;padding:4px 0;align-items:baseline">
+          <span style="color:${n.status==='Resolved'?'var(--green)':'var(--amber)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0">${clean(n.status||'Open')}</span>
+          ${n.round?`<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);flex-shrink:0">${clean(n.round)}</span>`:''}
+          ${n.size?`<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);flex-shrink:0">${clean(n.size)}</span>`:''}
+          <span style="color:var(--soft)">${clean(n.issue||'')}${n.note?' — '+clean(n.note):''}</span>
         </div>`).join('') + '</div>';
   } catch(e){}
   return `
@@ -8339,7 +8356,7 @@ function dpAddSampleRound(styleId) {
   if (!round) return;
   if (!s.sampleLog) s.sampleLog = [];
   s.sampleLog.push({ round, date:new Date().toISOString().slice(0,10), result, note });
-  s.sample = (result === 'approved' && round === 'TOP') ? 'Approved' : round; // keep current round in sync
+  sampleSyncBadge(s);
   save();
   logActivity(`Sample round logged: ${s.name} — ${round}${result?' ('+result+')':''}`);
   openDp(styleId);
@@ -16965,7 +16982,7 @@ function agentRunLogSampleRound(action, chatBody){
   const prevSample = s.sample || '';
   if (!s.sampleLog) s.sampleLog = [];
   s.sampleLog.push({ round, date: new Date().toISOString().slice(0,10), eta, result, note: String(action.note||'').trim() });
-  s.sample = (result === 'approved' && round === 'TOP') ? 'Approved' : round;
+  sampleSyncBadge(s);
   save();
   try { logActivity('Sample round logged by agent: ' + (s.name||s.styleId) + ' → ' + round + (result ? ' (' + result + ')' : '')); } catch(e){}
   try { if (document.getElementById('samples-content')) renderSamples(); } catch(e){}
@@ -16976,7 +16993,7 @@ function agentRunLogSampleRound(action, chatBody){
 }
 window.agentUndoSampleRound = function(styleId, prevSample, btn){
   const s = (STATE.styles||[]).find(x => x.id === styleId);
-  if (s && s.sampleLog && s.sampleLog.length){ s.sampleLog.pop(); s.sample = prevSample || ''; save(); }
+  if (s && s.sampleLog && s.sampleLog.length){ s.sampleLog.pop(); s.sample = prevSample || ''; sampleSyncBadge(s); save(); }
   try { if (document.getElementById('samples-content')) renderSamples(); } catch(e){}
   if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Round removed — the style is back where it was.</div>'; }
 };
@@ -21748,55 +21765,125 @@ function renderStyleBoard() {
 
 // ── FIT NOTES ──
 // First run starts with one blank editable row — never demo data.
-var FITNOTES_SEED = [
-  ['','','','','Open'],
-];
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-// Build one editable fit-note row from [sku, size, issue, note, status].
-function fitNoteRowHTML(v) {
-  v = v || ['','','','','Open'];
-  var resolved = (v[4] === 'Resolved');
-  return '<td><input class="pom-input" list="fitnotes-styles" style="width:80px" placeholder="VEN-00X" value="'+esc(v[0])+'" onchange="saveFitNotes()"></td>'
-    + '<td><input class="pom-input" style="width:40px" placeholder="S/M/L" value="'+esc(v[1])+'" onchange="saveFitNotes()"></td>'
-    + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Describe fit issue…" value="'+esc(v[2])+'" onchange="saveFitNotes()"></td>'
-    + '<td><input style="border:none;border-bottom:1px solid #e0e0e0;padding:6px 0;font-size:11px;width:100%;outline:none;font-family:Helvetica Neue,sans-serif" placeholder="Grader note…" value="'+esc(v[3])+'" onchange="saveFitNotes()"></td>'
-    + '<td><select style="border:none;border-bottom:1px solid #e0e0e0;font-size:10px;outline:none;cursor:pointer;width:90px" onchange="saveFitNotes()"><option'+(resolved?'':' selected')+'>Open</option><option'+(resolved?' selected':'')+'>Resolved</option></select></td>'
-    + '<td><button class="btn btn-ghost btn-sm" onclick="this.closest(\'tr\').remove();saveFitNotes();showToast(\'Row removed\')">✕</button></td>';
+// ── FIT NOTES v2 (PLM gauntlet build 258) ───────────────────────────────────
+// Notes are real records on the style (s.fitNotes[]), keyed by id and synced
+// with the style itself. The legacy venia_fitnotes tuple blob is preserved
+// forever — it whole-blob-merges across devices, so deleting rows from it is
+// a data-loss race — and folds in additively, deduped by content.
+function fnContentKey(n){
+  return [n.round||'', n.size||'', n.issue||'', n.note||''].join('|').toLowerCase().replace(/\s+/g,' ').trim();
 }
-function addFitNoteRow() {
-  var tbody = document.getElementById('fitnotes-tbody');
-  if (!tbody) return;
-  var tr = document.createElement('tr');
-  tr.innerHTML = fitNoteRowHTML(null);
-  tbody.appendChild(tr);
-  saveFitNotes();
-  showToast('Row added');
+function fnLegacyRows(){
+  try { return (JSON.parse(localStorage.getItem('venia_fitnotes')||'[]')||[]).filter(function(r){ return Array.isArray(r) && (r[2]||r[3]); }); }
+  catch(e){ return []; }
 }
-function renderFitNotes() {
-  var tbody = document.getElementById('fitnotes-tbody');
-  if (!tbody) return;
-  var rows;
-  try { rows = JSON.parse(localStorage.getItem('venia_fitnotes') || 'null'); } catch(e) { rows = null; }
-  if (!rows || !rows.length) rows = FITNOTES_SEED;
-  tbody.innerHTML = rows.map(function(r){ return '<tr>' + fitNoteRowHTML(r) + '</tr>'; }).join('');
-  // Style# suggests real PLM codes, so notes filed here also surface on the
-  // style's detail panel (dpSampleRoundsHtml matches on the code).
-  var dl = document.getElementById('fitnotes-styles');
-  if (!dl) { dl = document.createElement('datalist'); dl.id = 'fitnotes-styles'; document.body.appendChild(dl); }
-  dl.innerHTML = ((window.STATE && STATE.styles) || []).filter(function(s){ return s.styleId && s.status !== 'archived'; })
-    .map(function(s){ return '<option value="' + esc(s.styleId) + '">' + esc(s.name||'') + '</option>'; }).join('');
-}
-function saveFitNotes() {
+// Additive + idempotent + cross-device safe: copies legacy tuples onto their
+// matching styles unless an identical note already exists; twins from two
+// devices migrating independently converge in the content dedupe below.
+// Waits for the first cloud pull so the MERGED copy migrates, not a stale one.
+function fitNotesMigrate(){
+  if (!window.__sbSyncDone) { setTimeout(fitNotesMigrate, 2500); return; }
   try {
-    var tbody = document.getElementById('fitnotes-tbody');
-    if (!tbody) return;
-    var rows = [];
-    tbody.querySelectorAll('tr').forEach(function(tr) {
-      var inputs = tr.querySelectorAll('input,select');
-      rows.push(Array.from(inputs).map(function(el){ return el.value; }));
+    var changed = false;
+    fnLegacyRows().forEach(function(r){
+      var code = String(r[0]||'').trim().toLowerCase(); if (!code) return;
+      var s = (STATE.styles||[]).find(function(x){ return String(x.styleId||'').trim().toLowerCase() === code; });
+      if (!s) return;
+      var n = { round:'', size:String(r[1]||'').trim(), issue:String(r[2]||'').trim(), note:String(r[3]||'').trim(), status:(r[4]==='Resolved'?'Resolved':'Open'), at:'', legacy:true };
+      if (!s.fitNotes) s.fitNotes = [];
+      var key = fnContentKey(n);
+      if (s.fitNotes.some(function(x){ return fnContentKey(x) === key; })) return;
+      n.id = 'FN' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+      s.fitNotes.push(n); changed = true;
     });
-    localStorage.setItem('venia_fitnotes', JSON.stringify(rows));
-  } catch(e) {}
+    (STATE.styles||[]).forEach(function(s){
+      if (!s.fitNotes || s.fitNotes.length < 2) return;
+      var seen = {};
+      var kept = s.fitNotes.filter(function(n){ var k = fnContentKey(n); if (seen[k]) return false; seen[k] = 1; return true; });
+      if (kept.length !== s.fitNotes.length){ s.fitNotes = kept; changed = true; }
+    });
+    if (changed){ save(); try { if (STATE.currentPage === 'fitnotes') renderFitNotes(); } catch(e){} }
+  } catch(e){}
+}
+window.addFitNote = function(){
+  var sid = document.getElementById('fn-style') ? document.getElementById('fn-style').value : '';
+  var s = (STATE.styles||[]).find(function(x){ return x.id === sid; });
+  if (!s){ showToast('Pick a style','warning'); return; }
+  var issue = (document.getElementById('fn-issue') ? document.getElementById('fn-issue').value : '').trim();
+  var note = (document.getElementById('fn-note') ? document.getElementById('fn-note').value : '').trim();
+  if (!issue && !note){ showToast('Describe the fit issue','warning'); return; }
+  if (!s.fitNotes) s.fitNotes = [];
+  s.fitNotes.push({ id:'FN'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    round: document.getElementById('fn-round') ? document.getElementById('fn-round').value : '',
+    size: (document.getElementById('fn-size') ? document.getElementById('fn-size').value : '').trim(),
+    issue: issue, note: note, status:'Open', at:new Date().toISOString().slice(0,10) });
+  save();
+  ['fn-size','fn-issue','fn-note'].forEach(function(id){ var el=document.getElementById(id); if(el) el.value=''; });
+  renderFitNotes(); showToast('Fit note filed','success');
+};
+window.fnToggle = function(styleId, noteId){
+  var s = (STATE.styles||[]).find(function(x){ return x.id===styleId; }); if (!s) return;
+  var n = (s.fitNotes||[]).find(function(x){ return x.id===noteId; }); if (!n) return;
+  n.status = n.status === 'Resolved' ? 'Open' : 'Resolved';
+  save(); renderFitNotes();
+};
+window.fnDelete = function(styleId, noteId){
+  if (!confirm('Delete this fit note?')) return;
+  var s = (STATE.styles||[]).find(function(x){ return x.id===styleId; }); if (!s) return;
+  s.fitNotes = (s.fitNotes||[]).filter(function(x){ return x.id!==noteId; });
+  save(); renderFitNotes();
+};
+function renderFitNotes() {
+  var el = document.getElementById('fitnotes-body');
+  if (!el) return;
+  var styles = ((window.STATE && STATE.styles) || []).filter(function(s){ return s.status !== 'archived'; });
+  var rounds = ['','Proto','SMS1','SMS2','TOP'];
+  var form = '<div style="background:var(--bg);border:1px solid var(--border);padding:16px;margin-bottom:16px">'
+    + '<div class="micro-label" style="margin-bottom:10px">File a fit note</div>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+    + '<select id="fn-style" class="fs" style="min-height:38px;font-size:12px;flex:1;min-width:150px">'
+      + '<option value="">— Style —</option>'
+      + styles.map(function(s){ return '<option value="'+s.id+'">'+esc(s.name)+' ('+esc(s.styleId)+')</option>'; }).join('') + '</select>'
+    + '<select id="fn-round" class="fs" style="min-height:38px;font-size:12px;width:100px">' + rounds.map(function(r){ return '<option value="'+r+'">'+(r||'Round?')+'</option>'; }).join('') + '</select>'
+    + '<input id="fn-size" class="fi" placeholder="Size" style="min-height:38px;font-size:12px;width:70px">'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">'
+    + '<input id="fn-issue" class="fi" placeholder="Fit issue — e.g. waist tight, sleeve 2cm long" style="min-height:38px;font-size:13px;flex:2;min-width:200px">'
+    + '<input id="fn-note" class="fi" placeholder="Pattern / grader note" style="min-height:38px;font-size:13px;flex:1;min-width:140px">'
+    + '<button class="btn btn-gold btn-sm" style="min-height:38px" onclick="addFitNote()">＋ File</button>'
+    + '</div></div>';
+  var groups = styles.filter(function(s){ return (s.fitNotes||[]).length; }).map(function(s){
+    var open = (s.fitNotes||[]).filter(function(n){ return n.status !== 'Resolved'; }).length;
+    return '<div style="background:var(--bg);border:1px solid var(--border);margin-bottom:12px">'
+      + '<div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;cursor:pointer" onclick="openDp(\''+s.id+'\')">'
+      + (s.photoUrl ? '<img src="'+esc(s.photoUrl)+'" alt="" style="width:32px;height:32px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">' : '')
+      + '<div style="flex:1;min-width:0"><span class="t-name">'+esc(s.name)+'</span> <span class="t-mono" style="font-size:10px;color:var(--muted)">'+esc(s.styleId)+'</span></div>'
+      + (open ? '<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--amber);font-weight:700">'+open+' open</span>'
+              : '<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--green)">all resolved</span>')
+      + '</div>'
+      + s.fitNotes.map(function(n){
+        return '<div style="display:flex;gap:10px;align-items:baseline;padding:9px 16px;border-bottom:1px solid var(--bg-off);font-size:12px;flex-wrap:wrap">'
+          + '<button onclick="fnToggle(\''+s.id+'\',\''+n.id+'\')" style="background:none;border:1px solid '+(n.status==='Resolved'?'var(--green)':'var(--amber)')+';color:'+(n.status==='Resolved'?'var(--green)':'var(--amber)')+';font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:2px 8px;cursor:pointer;flex-shrink:0">'+(n.status==='Resolved'?'Resolved':'Open')+'</button>'
+          + (n.round ? '<span class="t-mono" style="font-size:10px;color:var(--muted);flex-shrink:0">'+esc(n.round)+'</span>' : '')
+          + (n.size ? '<span class="t-mono" style="font-size:10px;color:var(--muted);flex-shrink:0">'+esc(n.size)+'</span>' : '')
+          + '<span style="flex:1;min-width:140px;color:var(--ink)">'+esc(n.issue||'')+(n.note?' <span style="color:var(--muted)">— '+esc(n.note)+'</span>':'')+'</span>'
+          + (n.at ? '<span class="t-mono" style="font-size:10px;color:var(--muted);flex-shrink:0">'+esc(n.at)+'</span>' : '')
+          + '<button onclick="fnDelete(\''+s.id+'\',\''+n.id+'\')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;flex-shrink:0;padding:2px 6px">✕</button>'
+          + '</div>';
+      }).join('')
+      + '</div>';
+  }).join('');
+  var matchedCodes = {};
+  styles.forEach(function(s){ matchedCodes[String(s.styleId||'').trim().toLowerCase()] = 1; });
+  var orphans = fnLegacyRows().filter(function(r){ return !matchedCodes[String(r[0]||'').trim().toLowerCase()]; });
+  var legacyHtml = orphans.length ? '<div style="background:var(--bg-off);border:1px solid var(--border);padding:12px 16px;margin-top:4px">'
+    + '<div class="micro-label" style="margin-bottom:8px">Legacy notes (style code not in the line)</div>'
+    + orphans.map(function(r){ return '<div style="font-size:11px;color:var(--muted);padding:3px 0">'+esc(r[0]||'?')+' · '+esc(r[1]||'')+' — '+esc(r[2]||'')+(r[3]?' ('+esc(r[3])+')':'')+'</div>'; }).join('')
+    + '</div>' : '';
+  el.innerHTML = form
+    + (groups || '<div class="empty"><div class="empty-icon">◫</div><div class="empty-text">No fit notes yet — file the first one above, or log them from a sample round.</div></div>')
+    + legacyHtml;
 }
 
 // ── QUICK REPLY TEMPLATES ──
@@ -21921,6 +22008,10 @@ function loadRevenueGoals() {
     updateBudgetTotal();
     // One-record-per-event migration runs at boot, not on first Money visit.
     try { prMigrateStylistPulls(); } catch(e){}
+    // Sample badges reconcile to their logs once per boot (one truth).
+    try { ((window.STATE && STATE.styles) || []).forEach(sampleSyncBadge); } catch(e){}
+    // Fit notes fold into style records once the first cloud pull has settled.
+    try { fitNotesMigrate(); } catch(e){}
     try { var fb = document.getElementById('foot-build'); if (fb) fb.textContent = window.VENIA_BUILD || '—'; } catch(e){}
     try { pkLoadPressKit(); } catch(e){}
   }
