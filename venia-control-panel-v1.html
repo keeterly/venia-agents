@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '272';
+  const BUILD = '273';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1719,6 +1719,19 @@ body{padding-top:44px;box-sizing:border-box;}
   if (window.VENIA_SHARE) {
     $('venia-auth-gate').classList.add('hidden');
     document.documentElement.classList.add('share-mode');
+  }
+  // Freelance sales agent (?agent=TOKEN): her own lead portal. The token is
+  // the credential AND the scope — the workspace never loads in this mode.
+  window.VENIA_AGENT = new URLSearchParams(location.search).get('agent') || null;
+  if (window.VENIA_AGENT) {
+    $('venia-auth-gate').classList.add('hidden');
+    document.documentElement.classList.add('share-mode');
+    // Defence in depth: replace the app shell outright so no VENIA markup —
+    // and nothing a previous user of this browser left in localStorage — can
+    // render behind the portal. The portal builds its own DOM from scratch.
+    document.addEventListener('DOMContentLoaded', function(){
+      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff"></div>';
+    });
   }
   // Stripe returns the STYLIST here after paying (?pay=success|cancelled) —
   // they should see a branded confirmation, never the app or its gate.
@@ -2507,6 +2520,14 @@ body{padding-top:44px;box-sizing:border-box;}
           <div style="margin-top:1px;background:var(--bg);border:1px solid var(--border);padding:20px">
             <div style="font-size:11px;font-weight:700;color:var(--ink);margin-bottom:8px">Data stored</div>
             <div id="set-data-summary" style="font-size:11px;color:var(--muted);line-height:2"></div>
+          </div>
+          <div style="margin-top:20px;padding:16px;background:var(--bg-off);border:1px solid var(--border)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div style="font-size:11px;font-weight:700;color:var(--ink)">Sales agent portals</div>
+              <button class="btn btn-ghost btn-sm" onclick="agNewAgent()">+ New agent link</button>
+            </div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:12px">A freelance agent gets one link — no login. She can add and track <strong>only her own leads</strong>; nothing else in VENIA is sent to her browser, and nothing enters the buyer CRM until you validate it. Revoke any time.</div>
+            <div id="set-agents" style="font-size:11px;color:var(--muted)">Loading…</div>
           </div>
           <div style="margin-top:20px;padding:16px;background:var(--bg-off);border:1px solid var(--border)">
             <div style="font-size:11px;font-weight:700;color:var(--ink);margin-bottom:6px">More tools</div>
@@ -15069,6 +15090,14 @@ function buildTodayFocus() {
       text:`Gate before bulk: ${open[0].text.slice(0,80)}${open.length>1?` (+${open.length-1} more)`:''} — ${s.name}`,
       act:"cpGoto('plm');setTimeout(function(){openSampleCard('"+s.id+"')},150)" });
   });
+  // 7d. Agent leads awaiting validation — nothing enters the CRM until the
+  //     founder decides, so this sits with the actionable items.
+  try {
+    const ap = window.__agPending || [];
+    if (ap.length) items.push({ key:'agleads', pri:'med',
+      text:`${ap.length} agent lead${ap.length>1?'s':''} to validate — ${String(ap[0].name||'').slice(0,40)}${ap.length>1?' +'+(ap.length-1)+' more':''}`,
+      act:"agInboxOpen()" });
+  } catch(e){}
   // 8. Missing API keys — dismissible setup nags. Connection state lives in
   //    Settings; once dismissed they stay out of the daily focus on this device.
   const dismissedNags = (()=>{ try { return JSON.parse(localStorage.getItem('venia-dismissed-nags')||'[]'); } catch(e){ return []; } })();
@@ -16403,6 +16432,7 @@ function setSaveContact() {
 function setUpdateDataSummary() {
   const el = document.getElementById('set-data-summary');
   if (!el) return;
+  try { if (window.agRenderAgents) window.agRenderAgents(); } catch(e){}
   const db = dbRead();
   const summary = [
     ['Leads', (db.leads||[]).length],
@@ -16744,7 +16774,7 @@ const AG_SECTIONS = {
   sl: {
     overview:    { title:'Sales · Overview',         actions:``,      suggests:['Quote follow-ups','Account review','Forecast FW26'] },
     linesheets:  { title:'Sales · Line Sheets',      actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slExportBuyers()">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenLinesheetModal(null)">+ Build Sheet</button>`,    suggests:['Build a FW26 line sheet for a new European account','Update pricing on the FW26 line sheet','Create a capsule-only line sheet for specialty retail'] },
-    buyers:      { title:'Sales · Buyers (CRM)',     actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slExportBuyers()">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenBuyerModal(null)">+ Add Buyer</button>`,      suggests:['Top 5 prospects for FW26 we haven\'t contacted','Which accounts haven\'t bought in 2 seasons?','Research Voo Store Berlin — are they a fit?'] },
+    buyers:      { title:'Sales · Buyers (CRM)',     actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agInboxOpen()">Agent leads${(window.__agPending||[]).length?' ('+(window.__agPending||[]).length+')':''}</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slExportBuyers()">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenBuyerModal(null)">+ Add Buyer</button>`,      suggests:['Top 5 prospects for FW26 we haven\'t contacted','Which accounts haven\'t bought in 2 seasons?','Research Voo Store Berlin — are they a fit?'] },
     quotes:      { title:'Sales · Quotes',           actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slExportBuyers()">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenQuoteModal(null)">+ New Quote</button>`,      suggests:['Follow up cold quotes','Generate a quote for Need Supply','How do I improve my quote-to-order conversion?'] },
     orders:      { title:'Sales · Wholesale Orders',           actions:``,                                                                           suggests:['Order summary for FW26 so far','Which deliveries are at risk of being late?','Who are the reorder candidates from SS26?'] },
     health:      { title:'Sales · Account Health',   actions:``,                                                                           suggests:['Full account health report','Which accounts are at risk of churning?','Who are my top 5 accounts this season?'] },
@@ -23233,6 +23263,8 @@ function loadRevenueGoals() {
     try { ((window.STATE && STATE.styles) || []).forEach(sampleSyncBadge); } catch(e){}
     // Every POM/BOM row gets its persistent merge id before any edit diverges.
     try { veniaRowIdBackfill(); } catch(e){}
+    // Pending agent leads (founder sessions only; portal/share modes skip).
+    try { setTimeout(function(){ if (window.agPendingRefresh) window.agPendingRefresh(); }, 7000); } catch(e){}
     // The measured mirror re-derives from round history once per boot, so a
     // cross-device merge of rounds can never leave a stale mirror behind.
     try {
@@ -24249,7 +24281,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   }
   async function pushNow(){
-    if (window.VENIA_SHARE) return;   // share view is strictly read-only — never write the workspace
+    if (window.VENIA_SHARE || window.VENIA_AGENT) return;   // share/agent views are strictly read-only — never write the workspace
     // Never push before the first pull decision: a fresh browser seeds demo
     // data and save()s during init — pushing that would clobber the real
     // workspace before we've even looked at it.
@@ -24427,6 +24459,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Called by sbInit once the client is ready.
   window.sbLiveStart = function(){
     if (window.VENIA_SHARE) { if (typeof window.shareBoot === 'function') window.shareBoot(); return; }
+    // Agent portal: boot ONLY the portal. The workspace blob is never pulled,
+    // so no VENIA data beyond her own leads ever reaches this browser.
+    if (window.VENIA_AGENT) { if (typeof window.agentBoot === 'function') window.agentBoot(); return; }
     if (started || !sb()) return;
     started = true;
     startRealtime();
@@ -24676,6 +24711,356 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){
       shareFail('Could not load', 'Something went wrong loading this tech pack. Reload to try again.');
     }
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════
+  //  SALES AGENT PORTAL (?agent=TOKEN)
+  //  A freelance agent's own lead desk. The token is the credential AND the
+  //  scope — she sees only leads she created. Nothing else in the workspace
+  //  is ever fetched into this browser. Every call goes through the
+  //  agent-portal edge function (service role over RLS-locked tables).
+  // ═══════════════════════════════════════════════════════════════════════
+  // MUST match the server's normalization so client-side overlap warnings
+  // agree with the server's uniqueness rule.
+  // Conservative on purpose: fold case, accents, punctuation and "&"/"and",
+  // and drop only a LEADING article. Stripping words like store/boutique/
+  // atelier anywhere would collapse genuinely different accounts ("The Store"
+  // and "The Boutique" both → empty) and falsely merge them.
+  function agNorm(v){
+    const out = String(v==null?'':v).toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g,'')
+      .replace(/&/g,' and ')
+      .replace(/[^a-z0-9]+/g,' ')
+      .trim().replace(/\s+/g,' ')
+      .replace(/^(the|le|la|les|l|el|il) /,'');
+    return out.trim();
+  }
+  window.agNorm = agNorm;
+  const AG_STAGES = [['new','New'],['contacted','Contacted'],['meeting','Meeting booked'],['intent','Order intent']];
+  function agEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  async function agCall(body){
+    const c = sb();
+    if (!c) throw new Error('No connection');
+    const r = await c.functions.invoke('agent-portal', { body });
+    if (r.error) throw new Error(r.error.message || 'request failed');
+    if (r.data && r.data.error) throw new Error(r.data.error);
+    return r.data || {};
+  }
+  window.agentBoot = async function(){
+    const token = window.VENIA_AGENT; if (!token) return;
+    if (window.__agBooted) return; window.__agBooted = true;
+    if (!document.getElementById('ag-root')) {
+      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff"></div>';
+    }
+    document.getElementById('ag-root').innerHTML =
+      '<div style="min-height:60vh;display:flex;align-items:center;justify-content:center;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#888">Loading your leads…</div>';
+    let me;
+    try { me = await agCall({ token, action:'me' }); }
+    catch(e){
+      shareFail('Link not active', 'This portal link is no longer valid. Ask VENIA for a fresh link.');
+      return;
+    }
+    window.__agToken = token; window.__agMe = me;
+    agRender();
+  };
+  // The portal must open even if the app's own sync boot path never runs
+  // (no founder session, cold cache): poll briefly for the Supabase client.
+  if (window.VENIA_AGENT) {
+    let tries = 0;
+    const t = setInterval(function(){
+      if (window.__agBooted) { clearInterval(t); return; }
+      if (sb()) { clearInterval(t); window.agentBoot(); return; }
+      if (++tries > 60) { clearInterval(t); shareFail('Connection unavailable', 'Could not reach VENIA. Check your connection and reload.'); }
+    }, 250);
+  }
+  function agRender(){
+    const me = window.__agMe || {}; const leads = me.leads || [];
+    const counts = AG_STAGES.map(([k]) => leads.filter(l => (l.stage||'new') === k).length);
+    const approved = leads.filter(l => l.status === 'approved' || l.status === 'merged').length;
+    const root = document.getElementById('ag-root'); if (!root) return;
+    root.innerHTML = `
+      <div style="max-width:720px;margin:0 auto;padding:calc(18px + var(--sat,0px)) 16px calc(28px + var(--sab,0px));font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#000">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:16px">
+          <div style="font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:19px;letter-spacing:6px;text-transform:uppercase">VENIA</div>
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e">Sales agent portal</div>
+          <div style="margin-left:auto;font-size:11px;color:#666">${agEsc(me.agent?.name||'')}${me.agent?.note?' · '+agEsc(me.agent.note):''}</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:1px;background:#e0e0e0;border:1px solid #e0e0e0;margin-bottom:18px">
+          ${AG_STAGES.map(([k,label],i)=>`<div style="background:#fff;padding:10px 8px;text-align:center">
+            <div style="font-family:'DM Mono',monospace;font-size:22px;font-weight:300">${counts[i]}</div>
+            <div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#888;margin-top:2px">${label}</div>
+          </div>`).join('')}
+          <div style="background:#fff;padding:10px 8px;text-align:center">
+            <div style="font-family:'DM Mono',monospace;font-size:22px;font-weight:300;color:#27ae60">${approved}</div>
+            <div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#888;margin-top:2px">Validated</div>
+          </div>
+        </div>
+
+        <div style="border:1px solid #e0e0e0;padding:14px;margin-bottom:20px">
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-bottom:10px">Add a lead</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px">
+            <input id="ag-name" placeholder="Store / account name *" style="${AGI}">
+            <input id="ag-city" placeholder="City" style="${AGI}">
+            <input id="ag-country" placeholder="Country" style="${AGI}">
+            <input id="ag-contact" placeholder="Buyer / contact name" style="${AGI}">
+            <input id="ag-email" type="email" placeholder="Email" style="${AGI}">
+            <input id="ag-phone" placeholder="Phone" style="${AGI}">
+            <select id="ag-type" style="${AGI}">${['','Boutique','Concept store','Department store','Online retailer','Showroom','Other'].map(t=>`<option value="${t}">${t||'Type…'}</option>`).join('')}</select>
+            <select id="ag-stage" style="${AGI}">${AG_STAGES.map(([k,l])=>`<option value="${k}">${l}</option>`).join('')}</select>
+          </div>
+          <textarea id="ag-notes" rows="2" placeholder="What was said — buying window, categories, price reaction…" style="${AGI};width:100%;box-sizing:border-box;margin-top:8px;resize:vertical;font-family:inherit"></textarea>
+          <div id="ag-warn" style="display:none;font-size:11px;color:#b26a00;background:#fff8ee;border:1px solid #f0d6a8;padding:8px 10px;margin-top:8px"></div>
+          <button onclick="agAddLead()" style="margin-top:10px;width:100%;padding:12px;background:#000;color:#fff;border:none;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer">＋ Add lead</button>
+        </div>
+
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-bottom:8px">My leads (${leads.length})</div>
+        ${leads.length ? leads.map(l => agLeadRow(l)).join('') :
+          '<div style="font-size:12px;color:#888;font-style:italic;padding:14px 0">No leads yet — add the first one above.</div>'}
+        <div style="margin-top:22px;font-size:10px;color:#999;line-height:1.6;border-top:1px solid #e0e0e0;padding-top:12px">
+          Leads you add are reviewed by VENIA before they enter the buyer CRM. You'll see the outcome on each card.
+        </div>
+      </div>`;
+  }
+  const AGI = "padding:10px 11px;border:1px solid #ccc;font-size:14px;background:#fff;color:#000;outline:none;font-family:inherit";
+  function agLeadRow(l){
+    const badge = l.status === 'approved' ? ['✓ In CRM','#27ae60']
+      : l.status === 'merged' ? ['✓ Merged with existing account','#27ae60']
+      : l.status === 'declined' ? ['Not taken','#b03030']
+      : ['Pending review','#b26a00'];
+    return `<div style="border:1px solid #e0e0e0;padding:12px;margin-bottom:8px">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <div style="font-size:14px;font-weight:700;flex:1;min-width:0">${agEsc(l.name)}</div>
+        <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;color:${badge[1]}">${badge[0]}</span>
+      </div>
+      <div style="font-size:11px;color:#666;margin-top:2px">${[l.city,l.country,l.type].filter(Boolean).map(agEsc).join(' · ')||'—'}</div>
+      ${l.contact||l.email ? `<div style="font-size:11px;color:#666;margin-top:2px">${agEsc(l.contact||'')}${l.email?' · '+agEsc(l.email):''}</div>` : ''}
+      ${l.notes ? `<div style="font-size:11px;color:#333;margin-top:6px;white-space:pre-wrap">${agEsc(l.notes)}</div>` : ''}
+      ${l.decided_note ? `<div style="font-size:11px;color:#b26a00;margin-top:6px">VENIA: ${agEsc(l.decided_note)}</div>` : ''}
+      <div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap">
+        ${AG_STAGES.map(([k,label])=>`<button onclick="agSetStage('${l.id}','${k}')" style="padding:6px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:1px solid ${((l.stage||'new')===k)?'#000':'#ddd'};background:${((l.stage||'new')===k)?'#000':'#fff'};color:${((l.stage||'new')===k)?'#fff':'#666'};cursor:pointer">${label}</button>`).join('')}
+      </div>
+    </div>`;
+  }
+  window.agAddLead = async function(){
+    const g = id => (document.getElementById(id)?.value || '').trim();
+    const lead = { name:g('ag-name'), city:g('ag-city'), country:g('ag-country'), contact:g('ag-contact'),
+                   email:g('ag-email'), phone:g('ag-phone'), type:g('ag-type'), stage:g('ag-stage')||'new', notes:g('ag-notes') };
+    const warn = document.getElementById('ag-warn');
+    if (!lead.name){ if (warn){ warn.textContent = 'Store / account name is required.'; warn.style.display='block'; } return; }
+    try {
+      const r = await agCall({ token: window.__agToken, action:'add', lead });
+      if (r.duplicate){
+        if (warn){
+          warn.innerHTML = 'You already added <strong>' + agEsc(r.existing?.name || lead.name) + '</strong>' +
+            (r.existing?.city ? ' (' + agEsc(r.existing.city) + ')' : '') + ' — it\'s in your list below, no duplicate created.';
+          warn.style.display = 'block';
+        }
+        return;
+      }
+      ['ag-name','ag-city','ag-country','ag-contact','ag-email','ag-phone','ag-notes'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+      if (warn) warn.style.display='none';
+      window.__agMe = await agCall({ token: window.__agToken, action:'me' });
+      agRender();
+    } catch(e){ if (warn){ warn.textContent = 'Could not save — ' + (e.message||e); warn.style.display='block'; } }
+  };
+  window.agSetStage = async function(id, stage){
+    try {
+      const r = await agCall({ token: window.__agToken, action:'stage', id, stage });
+      if (r.leads) { window.__agMe = { ...(window.__agMe||{}), leads: r.leads }; agRender(); }
+    } catch(e){}
+  };
+
+  // ── FOUNDER SIDE: agent-lead inbox, overlap detection, validation ────────
+  // Nothing an agent submits enters the buyer CRM until it's validated here.
+  // Overlap is checked against the LIVE CRM using the same normalization the
+  // server dedupes with, so a lead that's really an existing account offers
+  // "merge into" instead of creating a second record.
+  window.agLeadCrmMatch = function(lead){
+    const key = agNorm(lead.name);
+    const city = agNorm(lead.city);
+    const mail = String(lead.email||'').trim().toLowerCase();
+    let best = null;
+    (STATE.slBuyers||[]).forEach(b => {
+      const bn = agNorm(b.name);
+      if (!bn) return;
+      let score = 0;
+      if (bn === key) score = city && agNorm(b.location) && agNorm(b.location) !== city ? 80 : 100;
+      else if (bn.includes(key) || key.includes(bn)) score = 70;
+      if (mail){
+        const emails = [b.email, ...((b.contacts||[]).map(c=>c.email))].filter(Boolean).map(x=>String(x).toLowerCase());
+        if (emails.includes(mail)) score = Math.max(score, 95);
+        // Same email domain is a strong hint for the same account.
+        const dom = mail.split('@')[1];
+        if (dom && emails.some(x => x.split('@')[1] === dom)) score = Math.max(score, 85);
+      }
+      if (score && (!best || score > best.score)) best = { buyer: b, score };
+    });
+    return best;
+  };
+  window.agInboxOpen = async function(){
+    let data;
+    try { data = await agCall({ action:'inbox' }); }
+    catch(e){ showToast('Could not load agent leads — ' + (e.message||e), 'error'); return; }
+    const agents = {}; (data.agents||[]).forEach(a => agents[a.token] = a.name || 'Agent');
+    const pending = (data.leads||[]).filter(l => l.status === 'pending');
+    const ov = document.createElement('div');
+    ov.id = 'ag-inbox';
+    ov.style.cssText = 'position:fixed;inset:0;background:var(--overlay-backdrop);z-index:9600;display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+    ov.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);max-width:760px;width:100%;max-height:88vh;overflow-y:auto;padding:20px" onclick="event.stopPropagation()">
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700">Agent leads — awaiting validation</div>
+        <span style="margin-left:auto;font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${pending.length} pending</span>
+        <button onclick="document.getElementById('ag-inbox').remove()" style="background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer">✕</button>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:14px;line-height:1.6">Nothing here is in the CRM yet. Approving creates a buyer tagged with the agent as source; merging folds the lead into the existing account instead of creating a duplicate.</div>
+      ${pending.length ? pending.map(l => {
+        const m = agLeadCrmMatch(l);
+        return `<div style="border:1px solid var(--border);padding:12px;margin-bottom:10px" data-lead="${l.id}">
+          <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+            <div style="font-size:14px;font-weight:700;color:var(--ink)">${agEsc(l.name)}</div>
+            <span style="font-size:10px;color:var(--muted)">${[l.city,l.country,l.type].filter(Boolean).map(agEsc).join(' · ')}</span>
+            <span style="margin-left:auto;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--gold)">${agEsc(agents[l.token]||'Agent')}</span>
+          </div>
+          ${l.contact||l.email||l.phone ? `<div style="font-size:11px;color:var(--muted);margin-top:3px">${[l.contact,l.email,l.phone].filter(Boolean).map(agEsc).join(' · ')}</div>` : ''}
+          ${l.notes ? `<div style="font-size:11px;color:var(--ink);margin-top:6px;white-space:pre-wrap">${agEsc(l.notes)}</div>` : ''}
+          ${m ? `<div style="margin-top:9px;padding:8px 10px;background:var(--bg-off);border:1px solid var(--amber);font-size:11px;color:var(--ink)">
+              ⚠ Looks like <strong>${agEsc(m.buyer.name)}</strong>${m.buyer.location?' ('+agEsc(m.buyer.location)+')':''} already in the CRM${m.score<100?' — possible match':''}.
+              <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="agDecide('${l.id}','merged','${m.buyer.id}')">Merge into it</button>
+            </div>` : ''}
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="btn btn-gold btn-sm" onclick="agDecide('${l.id}','approved','')">✓ Add to CRM</button>
+            <button class="btn btn-ghost btn-sm" onclick="agDecide('${l.id}','declined','')">Decline</button>
+          </div>
+        </div>`;
+      }).join('') : '<div style="font-size:12px;color:var(--muted);font-style:italic;padding:16px 0">Nothing pending — every agent lead has been reviewed.</div>'}
+    </div>`;
+    document.body.appendChild(ov);
+    window.__agInbox = data;
+  };
+  window.agDecide = async function(id, status, buyerId){
+    const data = window.__agInbox || {};
+    const lead = (data.leads||[]).find(l => l.id === id); if (!lead) return;
+    const agents = {}; (data.agents||[]).forEach(a => agents[a.token] = a.name || 'Agent');
+    const who = agents[lead.token] || 'Agent';
+    let note = '';
+    if (status === 'approved'){
+      // Last-moment overlap re-check: the CRM may have changed since the
+      // inbox opened (or the other founder just added the same store).
+      const m = agLeadCrmMatch(lead);
+      if (m && m.score >= 95 && !confirm(`"${m.buyer.name}" already looks like this account.\n\nAdd a SEPARATE record anyway? (Cancel to merge instead.)`)) {
+        status = 'merged'; buyerId = m.buyer.id;
+      }
+    }
+    if (status === 'approved'){
+      if (!STATE.slBuyers) STATE.slBuyers = [];
+      const now = new Date().toISOString();
+      const contacts = (lead.contact || lead.email) ? [{ name: lead.contact||'', email: lead.email||'', role:'' }] : [];
+      const b = {
+        id: 'BUY' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+        name: lead.name, location: lead.city || '', country: lead.country || '',
+        type: lead.type || '', stage: 'new', tier: '',
+        contacts, contactName: lead.contact || '', email: lead.email || '', phone: lead.phone || '',
+        website: '', address: '', notes: lead.notes || '',
+        source: 'agent:' + who, agentLeadId: lead.id,
+        createdAt: now, updatedAt: now, lastContact: now.slice(0,10), log: [],
+      };
+      STATE.slBuyers.unshift(b);
+      buyerId = b.id;
+      note = 'Added to the VENIA buyer CRM';
+      logActivity('Agent lead approved: ' + lead.name + ' (' + who + ')');
+    } else if (status === 'merged'){
+      const b = (STATE.slBuyers||[]).find(x => x.id === buyerId);
+      if (b){
+        // Additive merge — never overwrite what the CRM already knows.
+        if (!b.phone && lead.phone) b.phone = lead.phone;
+        if (!b.country && lead.country) b.country = lead.country;
+        if (!b.location && lead.city) b.location = lead.city;
+        if (!b.type && lead.type) b.type = lead.type;
+        if (lead.email){
+          if (!b.contacts) b.contacts = [];
+          const has = b.contacts.some(c => String(c.email||'').toLowerCase() === lead.email.toLowerCase());
+          if (!has) b.contacts.push({ name: lead.contact||'', email: lead.email, role:'' });
+          if (!b.email) b.email = lead.email;
+          if (!b.contactName && lead.contact) b.contactName = lead.contact;
+        }
+        if (lead.notes) b.notes = (b.notes ? b.notes + '\n\n' : '') + '[' + who + '] ' + lead.notes;
+        if (!b.source) b.source = 'agent:' + who;
+        b.updatedAt = new Date().toISOString();
+        note = 'Merged into your existing ' + b.name + ' record';
+        logActivity('Agent lead merged: ' + lead.name + ' → ' + b.name);
+      }
+    } else {
+      note = 'Not taken forward for now';
+    }
+    save();
+    try { await agCall({ action:'decide', id, status, note, buyerId: buyerId || '' }); }
+    catch(e){ showToast('Saved locally, but the agent portal did not update — ' + (e.message||e), 'warning'); }
+    const ov = document.getElementById('ag-inbox'); if (ov) ov.remove();
+    showToast(status === 'declined' ? 'Lead declined' : status === 'merged' ? 'Merged — no duplicate created' : 'Added to the buyer CRM', 'success');
+    try { renderPage(STATE.currentPage); } catch(e){}
+    try { buildTodayFocus(); } catch(e){}
+    agPendingRefresh();
+  };
+  // ── Settings: create / copy / revoke agent portal links ─────────────────
+  window.agNewAgent = async function(){
+    const name = prompt('Agent name (as it should appear on her portal):', '');
+    if (name === null) return;
+    const note = prompt('What is this link for? (e.g. "Paris Fashion Week SS27")', 'Paris Fashion Week') || '';
+    const c = sb(); if (!c){ showToast('Cloud connection needed','warning'); return; }
+    const token = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
+    try {
+      const ins = await c.from('venia_agents').insert({ token, name: String(name||'').trim().slice(0,80), note: note.trim().slice(0,120) });
+      if (ins.error) throw ins.error;
+      logActivity('Sales agent portal created: ' + name);
+      agRenderAgents();
+      const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?agent=' + token;
+      try { await navigator.clipboard.writeText(url); showToast('Link created and copied — send it to ' + name, 'success'); }
+      catch(e){ prompt('Send this link to ' + name + ':', url); }
+    } catch(e){ showToast('Could not create link — ' + (e.message||e), 'error'); }
+  };
+  window.agRenderAgents = async function(){
+    const box = document.getElementById('set-agents'); if (!box) return;
+    const c = sb(); if (!c){ box.textContent = 'Connect to the cloud to manage agent links.'; return; }
+    try {
+      const q = await c.from('venia_agents').select('token, name, note, revoked, created_at').order('created_at', { ascending: false });
+      const rows = (q.data)||[];
+      if (!rows.length){ box.innerHTML = '<span style="font-style:italic">No agent links yet.</span>'; return; }
+      const counts = {};
+      (( (window.__agInbox||{}).leads )||[]).forEach(l => { counts[l.token] = (counts[l.token]||0)+1; });
+      box.innerHTML = rows.map(a => {
+        const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?agent=' + a.token;
+        return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span style="font-weight:700;color:${a.revoked?'var(--muted)':'var(--ink)'};${a.revoked?'text-decoration:line-through':''}">${agEsc(a.name||'Agent')}</span>
+          ${a.note?`<span style="color:var(--muted)">${agEsc(a.note)}</span>`:''}
+          ${a.revoked?'<span style="color:var(--red);font-size:10px;letter-spacing:1px;text-transform:uppercase">Revoked</span>':''}
+          <span style="flex:1"></span>
+          ${a.revoked?'' : `<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${url}').then(function(){showToast('Link copied','success')})">Copy link</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="agRevokeAgent('${a.token}')">Revoke</button>`}
+        </div>`;
+      }).join('');
+    } catch(e){ box.textContent = 'Could not load agent links.'; }
+  };
+  window.agRevokeAgent = async function(token){
+    if (!confirm('Revoke this agent portal? Her link stops working immediately. Leads she already submitted are kept.')) return;
+    const c = sb(); if (!c) return;
+    try {
+      await c.from('venia_agents').update({ revoked: true }).eq('token', token);
+      logActivity('Sales agent portal revoked');
+      showToast('Portal revoked','success');
+      agRenderAgents();
+    } catch(e){ showToast('Revoke failed','error'); }
+  };
+  // Today-feed signal: pending agent leads, fetched once per app open.
+  window.agPendingRefresh = async function(){
+    if (window.VENIA_AGENT || window.VENIA_SHARE) return;
+    try {
+      if (typeof veniaWho === 'function' && !veniaWho()) return;   // founders only
+      const d = await agCall({ action:'inbox' });
+      window.__agPending = (d.leads||[]).filter(l => l.status === 'pending');
+      try { buildTodayFocus(); } catch(e){}
+    } catch(e){}
   };
 
   // ── Owner side: create / copy / revoke a link for the open style ──
