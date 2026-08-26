@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '279';
+  const BUILD = '280';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5957,7 +5957,15 @@ function renderStyles() {
       <td onclick="event.stopPropagation()" style="text-align:center;width:32px">
         <input type="checkbox" ${BULK_SELECTED.has(s.id)?'checked':''} onchange="bulkToggle('${s.id}',this.checked)" style="cursor:pointer;accent-color:var(--ink)">
       </td>
-      <td><div style="display:flex;align-items:center;gap:10px">${s.photoUrl?`<img src="${s.photoUrl}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">`:''}<div class="t-name">${s.name}</div></div></td>
+      <td><div style="display:flex;align-items:center;gap:10px">${s.photoUrl?`<img src="${s.photoUrl}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">`:''}<div><div class="t-name">${s.name}</div>${(()=>{ 
+        // Same silhouette, different fabrication: show the material and how
+        // many siblings share the pattern, so two ADA CORSETs never read as a
+        // duplicate row.
+        const fam = s.family; if (!fam) return '';
+        const sibs = (STATE.styles||[]).filter(x => x.status!=='archived' && x.family === fam);
+        if (sibs.length < 2) return '';
+        return `<div style="font-size:10px;color:var(--muted);letter-spacing:.5px">${s.fabric ? esc(s.fabric) + ' · ' : ''}1 of ${sibs.length} fabrications</div>`;
+      })()}</div></div></td>
       <td><span class="t-mono">${s.styleId}</span></td>
       <td><span class="b-tag">${s.category}</span></td>
       <td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>
@@ -18216,7 +18224,7 @@ function agentImageActionSpec() {
     + '\n\nACTION — add_styles: CREATE new styles in PLM from a line list, range plan, or a list the user pastes/shares. This is how a season gets built — use it whenever the user asks you to create/add styles, set up a line, or turn a line list into PLM records. Style codes are generated automatically; never invent one.\n'
     + 'Emit ONE fenced json block:\n'
     + '{"type":"add_styles","season":"SS27","styles":[{"name":"ISOLDE TOP","category":"Tops","gender":"womens","retail":240,"wholesale":96,"colors":"Ivory, Black","sizes":"XS,S,M,L,XL","fabric":"Silk crepe de chine","drop":"","status":"concept","desc":"One line of design intent"}]}\n'
-    + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple colorways of ONE garment are ONE style with the colors listed in "colors" — never one style per colorway. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
+    + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple COLOURWAYS of one garment are ONE style with the colors listed in "colors" — never one style per colorway. But multiple FABRICATIONS (the same silhouette in a different material — leather vs a printed cloth) are SEPARATE styles: emit one entry per fabrication with its own "fabric", price and vendor, because they carry different BOMs, costs and often different factories. The app names the second one "NAME — FABRIC" automatically. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
     + '\n\nACTION — update_styles: CHANGE fields on styles that ALREADY exist (status/stage, season, prices, vendor, drop, fabric…). Use this for "move everything back to SMS", "set the FW26 drop date", "put these three into production". Never use add_styles for an existing style.\n'
     + 'Emit ONE fenced json block:\n'
     + '{"type":"update_styles","match":{"season":"SS27","status":"development"},"set":{"status":"sms"}}\n'
@@ -18760,15 +18768,30 @@ function agentRunAddStyles(action, chatBody) {
   const topSeason = String(action.season || '').trim();
   // Dedupe against the line AND within this batch: a style name already in PLM
   // is never duplicated, it's reported as skipped.
-  const seen = new Set((STATE.styles || []).map(x => styleNameKey(x.name)).filter(Boolean));
-  const built = [], skipped = [];
+  // Identity is name + FABRICATION, not name alone. The same silhouette in
+  // leather and in a printed cloth is two styles — different BOM, different
+  // cost, often a different factory — so keying on name alone silently
+  // swallowed the second one. Same name AND same fabric is still a duplicate.
+  // Identity = name + FABRICATION. Only a genuinely DIFFERENT material makes a
+  // new record; a row with no fabric can never fork an existing style, and a
+  // row that names the fabric of a style missing one fills the blank instead
+  // of creating a twin. Same name + same fabric is always a duplicate.
+  const built = [], skipped = [], filled = [];
   rows.slice(0, 25).forEach(r => {
-    const name = String(r && r.name || '').trim();
-    if (!name) return;
-    const key = styleNameKey(name);
-    if (!key) return;
-    if (seen.has(key)) { skipped.push(name); return; }
-    seen.add(key);
+    let name = String(r && r.name || '').trim();
+    const baseKey = styleNameKey(name);
+    if (!baseKey) return;
+    const fabric = String(r.fabric || '').trim();
+    const fabKey = styleNameKey(fabric);
+    const family = baseKey;
+    const sibs = (STATE.styles || []).filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === family);
+    if (sibs.length) {
+      if (!fabKey) { skipped.push(name); return; }                                  // no fabric → never forks
+      if (sibs.some(x => styleNameKey(x.fabric) === fabKey)) { skipped.push(name + ' (' + fabric + ')'); return; }
+      const blank = sibs.find(x => !String(x.fabric || '').trim());
+      if (blank) { blank.fabric = fabric; blank.updatedAt = new Date().toISOString(); filled.push(blank.name + ' → ' + fabric); return; }
+      name = name + ' — ' + fabric.toUpperCase();                                   // real second fabrication
+    }
     const season = String(r.season || topSeason || '').trim();
     const category = AGENT_STYLE_CATS.includes(r.category) ? r.category : 'Tops';
     const gender = ['womens','mens','unisex'].includes(String(r.gender||'').toLowerCase()) ? String(r.gender).toLowerCase() : 'womens';
@@ -18778,6 +18801,8 @@ function agentRunAddStyles(action, chatBody) {
       id: 'STY' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
       styleId: genStyleId(season, category, gender),
       name, season, category, gender, status,
+      // Base name shared by every fabrication of the same silhouette.
+      family,
       retail: num(r.retail), wholesale: num(r.wholesale), cogs: num(r.cogs),
       colors: String(r.colors || '').trim(),
       sizes: String(r.sizes || '').trim() || 'XS,S,M,L,XL',
@@ -18793,10 +18818,14 @@ function agentRunAddStyles(action, chatBody) {
     built.push(st);
   });
   const overflow = rows.length > 25 ? rows.length - 25 : 0;
+  if (filled.length) { try { save(); } catch(e){} }
   if (!built.length) {
-    appendAgentNote(chatBody, skipped.length === 1
-      ? '“' + skipped[0] + '” is already in PLM — nothing to create.'
-      : 'Those ' + skipped.length + ' styles are already in PLM — nothing new to create.');
+    const msg = filled.length
+      ? 'No new styles — but I filled in the fabric on ' + filled.length + ' existing one' + (filled.length>1?'s':'') + ': ' + filled.slice(0,4).join(', ') + '.'
+      : skipped.length === 1
+        ? '“' + skipped[0] + '” is already in PLM — nothing to create.'
+        : 'Those ' + skipped.length + ' styles are already in PLM — nothing new to create.';
+    appendAgentNote(chatBody, msg);
     return;
   }
   save();
@@ -23613,6 +23642,13 @@ function loadRevenueGoals() {
     try { ((window.STATE && STATE.styles) || []).forEach(sampleSyncBadge); } catch(e){}
     // Every POM/BOM row gets its persistent merge id before any edit diverges.
     try { veniaRowIdBackfill(); } catch(e){}
+    // Styles created before fabrication-aware identity get their family key,
+    // derived from the name with any " — FABRIC" suffix stripped.
+    try {
+      ((window.STATE && STATE.styles) || []).forEach(function(st){
+        if (st && !st.family && st.name) st.family = styleNameKey(String(st.name).split(/\s+[—–-]\s+/)[0]);
+      });
+    } catch(e){}
     // Pending agent leads (founder sessions only; portal/share modes skip).
     try { setTimeout(function(){ if (window.agPendingRefresh) window.agPendingRefresh(); }, 7000); } catch(e){}
     // The measured mirror re-derives from round history once per boot, so a
