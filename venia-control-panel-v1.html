@@ -398,6 +398,17 @@ thead th{
   font-weight:700;
 }
 thead th:hover{color:var(--ink)}
+/* Resizable / hideable columns (Styles list). table-layout:fixed is what makes
+   a <col> width authoritative; without it the browser treats width as a hint. */
+.col-tbl{table-layout:fixed}
+.col-tbl thead th{position:relative;overflow:hidden;text-overflow:ellipsis;padding-left:11px;padding-right:11px}
+.col-tbl td{overflow:hidden;padding-left:11px;padding-right:11px}
+.col-clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.col-grip{position:absolute;top:0;right:0;bottom:0;width:10px;cursor:col-resize;z-index:3}
+.col-grip::after{content:'';position:absolute;top:5px;bottom:5px;right:4px;width:2px;background:transparent;transition:background .12s}
+.col-grip:hover::after,.col-grip.dragging::after{background:var(--ink)}
+body.dragging-col{user-select:none;cursor:col-resize}
+#col-menu{position:absolute;z-index:9000;background:var(--white);border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.14);padding:8px 0;min-width:200px}
 tbody tr{border-bottom:1px solid var(--border);transition:background .1s;cursor:pointer;transition:background .1s}
 tbody tr:last-child{border-bottom:none}
 tbody tr:hover{background:var(--bg-hover)}
@@ -1698,7 +1709,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '282';
+  const BUILD = '283';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3519,6 +3530,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button class="pill" onclick="filterStyles('sale',this)">Sale</button>
         <button class="pill" onclick="filterStyles('archived',this)" title="Archived styles — hidden everywhere else, restorable any time">Archived</button>
         <button class="btn btn-ghost btn-sm" id="btn-archive-season" onclick="archiveSeason()" style="display:none;white-space:nowrap;color:var(--muted)" title="Archive every style in the selected season">⌸ Archive season</button>
+        <button class="btn btn-ghost btn-sm" id="btn-style-cols" onclick="stColMenu(event)" style="white-space:nowrap" title="Choose which columns show — and drag any column edge to resize it">▦ Columns</button>
         <input class="search" placeholder="Search styles…" oninput="filterStylesSearch(this.value)">
       </div>
       <!-- Bulk actions bar (appears when rows are selected) -->
@@ -3535,18 +3547,10 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button onclick="clearBulkSelection()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:14px;cursor:pointer;margin-left:auto">✕</button>
       </div>
       <div class="tbl-wrap">
-        <table><thead><tr>
-          <th style="width:32px"><input type="checkbox" id="bulk-select-all" onchange="bulkToggleAll(this.checked)" style="cursor:pointer;accent-color:var(--ink)"></th>
-          <th onclick="sortStyles('name')">Style ↕</th>
-          <th onclick="sortStyles('styleId')">Style ID ↕</th>
-          <th onclick="sortStyles('category')">Category ↕</th>
-          <th onclick="sortStyles('season')">Season ↕</th>
-          <th onclick="sortStyles('status')">Stage ↕</th>
-          <th>Drop</th>
-          <th onclick="sortStyles('retail')">Retail ↕</th>
-          <th title="Live Shopify — units · revenue since Jan 1 last year">Sold</th>
-          <th onclick="sortStyles('priority')">Priority ↕</th>
-        </tr></thead>
+        <!-- Header + widths are rendered from STYLE_COLS (see stRenderHead) so
+             the Columns menu and the drag-to-resize grips have one source of
+             truth. Don't hand-write <th> here — it would drift. -->
+        <table id="styles-tbl" class="col-tbl"><colgroup id="styles-colgroup"></colgroup><thead><tr id="styles-head"></tr></thead>
         <tbody id="styles-table"></tbody></table>
       </div>
       <!-- One way to create a style: the same modal everywhere (auto style
@@ -6172,6 +6176,162 @@ window.llUndoImport = function(btn){
   if (btn && btn.parentNode) btn.parentNode.remove();
   showToast('Import reverted', 'success');
 };
+// ═══════════════════════════════════════════════
+//  STYLES TABLE COLUMNS — show/hide + drag to resize
+// ═══════════════════════════════════════════════
+// One declarative model drives the <colgroup>, the <thead> and every row, so a
+// hidden or resized column can't fall out of sync between them.
+//
+// Preferences live in localStorage, NOT in STATE: a phone and a 27" monitor
+// want different columns, and this is a per-device view setting — syncing it
+// brand-wide would have one founder's layout stomp the other's.
+const STYLE_COLS = [
+  { key: 'name',     label: 'Style',    sort: 'name',     w: 210, lock: true },
+  { key: 'styleId',  label: 'Style ID', sort: 'styleId',  w: 104 },
+  { key: 'category', label: 'Category', sort: 'category', w: 122 },
+  { key: 'fabric',   label: 'Fabric',   sort: 'fabric',   w: 126, title: 'Primary fabrication — the same silhouette in two materials is two styles' },
+  { key: 'season',   label: 'Season',   sort: 'season',   w: 92 },
+  { key: 'status',   label: 'Stage',    sort: 'status',   w: 124 },
+  { key: 'drop',     label: 'Drop',                       w: 84 },
+  { key: 'retail',   label: 'Retail',   sort: 'retail',   w: 84 },
+  { key: 'sold',     label: 'Sold',                       w: 92, title: 'Live Shopify — units · revenue since Jan 1 last year' },
+  { key: 'priority', label: 'Priority', sort: 'priority', w: 92 },
+];
+const ST_SEL_W = 32;                       // the checkbox gutter — never resized
+const ST_COL_VIS_KEY = 'venia_style_cols', ST_COL_W_KEY = 'venia_style_colw';
+let ST_COL_HIDDEN = {}, ST_COL_W = {};
+try { ST_COL_HIDDEN = JSON.parse(localStorage.getItem(ST_COL_VIS_KEY) || '{}') || {}; } catch (e) { ST_COL_HIDDEN = {}; }
+try { ST_COL_W = JSON.parse(localStorage.getItem(ST_COL_W_KEY) || '{}') || {}; } catch (e) { ST_COL_W = {}; }
+
+function stColSave() {
+  try {
+    localStorage.setItem(ST_COL_VIS_KEY, JSON.stringify(ST_COL_HIDDEN));
+    localStorage.setItem(ST_COL_W_KEY, JSON.stringify(ST_COL_W));
+  } catch (e) {}
+}
+function stColWidth(c) { const w = +ST_COL_W[c.key]; return (w >= 56 && w <= 640) ? w : c.w; }
+function stColsVisible() { return STYLE_COLS.filter(c => c.lock || !ST_COL_HIDDEN[c.key]); }
+function stColToggle(key, on) {
+  const c = STYLE_COLS.find(x => x.key === key);
+  if (!c || c.lock) return;
+  if (on) delete ST_COL_HIDDEN[key]; else ST_COL_HIDDEN[key] = 1;
+  stColSave(); renderStyles(); stColMenuRender();
+}
+function stColReset() { ST_COL_HIDDEN = {}; ST_COL_W = {}; stColSave(); renderStyles(); stColMenuRender(); }
+
+// Row cells: one renderer per column key. Adding a column = one entry here and
+// one in STYLE_COLS; nothing else in renderStyles has to change.
+const ST_CELL = {
+  name: (s) => `<td><div style="display:flex;align-items:center;gap:10px;min-width:0">${s.photoUrl?`<img src="${s.photoUrl}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">`:''}<div style="min-width:0"><div class="t-name col-clip" title="${esc(s.name)}">${s.name}</div>${(()=>{
+        // Same silhouette, different fabrication: say how many siblings share
+        // the pattern so two ADA CORSETs never read as a duplicate row. The
+        // material itself lives in the Fabric column now.
+        const fam = s.family; if (!fam) return '';
+        const sibs = (STATE.styles||[]).filter(x => x.status!=='archived' && x.family === fam);
+        if (sibs.length < 2) return '';
+        return `<div style="font-size:10px;color:var(--muted);letter-spacing:.5px">1 of ${sibs.length} fabrications</div>`;
+      })()}</div></div></td>`,
+  styleId:  (s) => `<td><span class="t-mono">${s.styleId}</span></td>`,
+  category: (s) => `<td><span class="b-tag">${s.category}</span></td>`,
+  fabric:   (s) => `<td style="font-size:10px" title="${s.fabric?esc(s.fabric):''}"><div class="col-clip">${s.fabric?esc(s.fabric):'<span style="color:var(--muted)">—</span>'}</div></td>`,
+  season:   (s) => `<td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
+  status:   (s) => `<td>${stageBadge(s.status)}</td>`,
+  drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
+  retail:   (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px">${s.retail?'$'+s.retail:'—'}</td>`,
+  sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>`,
+  priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
+};
+
+function stRenderHead() {
+  const head = document.getElementById('styles-head');
+  const cg = document.getElementById('styles-colgroup');
+  if (!head || !cg) return;
+  const cols = stColsVisible();
+  cg.innerHTML = `<col style="width:${ST_SEL_W}px">` + cols.map(c => `<col style="width:${stColWidth(c)}px">`).join('');
+  head.innerHTML = `<th style="width:${ST_SEL_W}px"><input type="checkbox" id="bulk-select-all" onchange="bulkToggleAll(this.checked)" style="cursor:pointer;accent-color:var(--ink)"></th>`
+    + cols.map(c => `<th ${c.sort?`onclick="sortStyles('${c.sort}')"`:'style="cursor:default"'}${c.title?` title="${esc(c.title)}"`:''}>${c.label}${c.sort?' ↕':''}<span class="col-grip" title="Drag to resize" onmousedown="stColGrip(event,'${c.key}')" ontouchstart="stColGrip(event,'${c.key}')" onclick="event.stopPropagation()"></span></th>`).join('');
+  stColApplyWidths();
+}
+
+// Live width application during a drag — touches only the <col> elements and
+// the table width, so no row HTML is regenerated while the pointer moves.
+function stColApplyWidths() {
+  const cg = document.getElementById('styles-colgroup');
+  const tbl = document.getElementById('styles-tbl');
+  if (!cg) return;
+  const cols = stColsVisible(), kids = cg.children;
+  let total = ST_SEL_W;
+  cols.forEach((c, i) => { const w = stColWidth(c); total += w; if (kids[i+1]) kids[i+1].style.width = w + 'px'; });
+  if (tbl) { tbl.style.width = total + 'px'; tbl.style.minWidth = '100%'; }
+}
+
+let ST_DRAG = null;
+function stColGrip(e, key) {
+  const col = STYLE_COLS.find(c => c.key === key); if (!col) return;
+  const pt = e.touches ? e.touches[0] : e;
+  e.preventDefault(); e.stopPropagation();
+  ST_DRAG = { key, startX: pt.clientX, startW: stColWidth(col), grip: e.currentTarget };
+  if (ST_DRAG.grip && ST_DRAG.grip.classList) ST_DRAG.grip.classList.add('dragging');
+  document.body.classList.add('dragging-col');
+  document.addEventListener('mousemove', stColMove);
+  document.addEventListener('mouseup', stColUp);
+  document.addEventListener('touchmove', stColMove, { passive: false });
+  document.addEventListener('touchend', stColUp);
+}
+function stColMove(e) {
+  if (!ST_DRAG) return;
+  const pt = e.touches ? e.touches[0] : e;
+  if (e.touches && e.cancelable) e.preventDefault();
+  ST_COL_W[ST_DRAG.key] = Math.max(56, Math.min(640, Math.round(ST_DRAG.startW + (pt.clientX - ST_DRAG.startX))));
+  stColApplyWidths();
+}
+function stColUp() {
+  if (!ST_DRAG) return;
+  if (ST_DRAG.grip && ST_DRAG.grip.classList) ST_DRAG.grip.classList.remove('dragging');
+  ST_DRAG = null;
+  document.body.classList.remove('dragging-col');
+  document.removeEventListener('mousemove', stColMove);
+  document.removeEventListener('mouseup', stColUp);
+  document.removeEventListener('touchmove', stColMove);
+  document.removeEventListener('touchend', stColUp);
+  stColSave();
+}
+
+function stColMenu(e) {
+  e.stopPropagation();
+  const open = document.getElementById('col-menu');
+  if (open) { open.remove(); document.removeEventListener('click', stColMenuAway); return; }
+  const m = document.createElement('div');
+  m.id = 'col-menu';
+  // Clicks inside the menu never reach the document, so re-rendering the list
+  // after a toggle can't make the away-handler think you clicked outside.
+  m.onclick = (ev) => ev.stopPropagation();
+  document.body.appendChild(m);
+  const r = e.currentTarget.getBoundingClientRect();
+  m.style.top = (r.bottom + window.scrollY + 6) + 'px';
+  m.style.left = Math.max(8, Math.min(r.left + window.scrollX, window.innerWidth - 216)) + 'px';
+  stColMenuRender();
+  setTimeout(() => document.addEventListener('click', stColMenuAway), 0);
+}
+function stColMenuAway() {
+  const m = document.getElementById('col-menu');
+  if (m) m.remove();
+  document.removeEventListener('click', stColMenuAway);
+}
+function stColMenuRender() {
+  const m = document.getElementById('col-menu');
+  if (!m) return;
+  const shown = stColsVisible().length;
+  m.innerHTML = `<div style="padding:2px 14px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Columns · ${shown} of ${STYLE_COLS.length}</div>`
+    + STYLE_COLS.map(c => `<label style="display:flex;align-items:center;gap:9px;padding:6px 14px;font-size:11px;color:var(--ink);cursor:${c.lock?'default':'pointer'};opacity:${c.lock?'.5':'1'}">
+        <input type="checkbox" ${(c.lock || !ST_COL_HIDDEN[c.key])?'checked':''} ${c.lock?'disabled':''} onchange="stColToggle('${c.key}',this.checked)" style="accent-color:var(--ink);cursor:inherit">
+        <span>${c.label}</span>${c.lock?'<span style="margin-left:auto;font-size:9px;color:var(--muted)">always</span>':''}</label>`).join('')
+    + `<div style="border-top:1px solid var(--border);margin-top:6px;padding:9px 14px 2px;display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <span style="font-size:9px;color:var(--muted);letter-spacing:.3px">Drag a column edge to resize</span>
+        <button onclick="stColReset()" style="background:none;border:none;color:var(--ink);font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;font-weight:700;padding:0">Reset</button>
+      </div>`;
+}
+
 function renderStyles() {
   // Update filter pill counts
   const all = STATE.styles.filter(s=>s.status!=='archived');
@@ -6216,29 +6376,15 @@ function renderStyles() {
   });
   const tb = document.getElementById('styles-table');
   if (!tb) return;
-  if (!list.length) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles here — <b>+ New Style</b> starts the line, or clear the search/filter.</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); return; }
+  stRenderHead();
+  const cols = stColsVisible();
+  if (!list.length) { tb.innerHTML = `<tr><td colspan="${cols.length+1}"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles here — <b>+ New Style</b> starts the line, or clear the search/filter.</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); return; }
   tb.innerHTML = list.map(s => `
     <tr onclick="openDp('${s.id}')" style="background:${BULK_SELECTED.has(s.id)?'var(--bg-hover)':''}">
-      <td onclick="event.stopPropagation()" style="text-align:center;width:32px">
+      <td onclick="event.stopPropagation()" style="text-align:center;padding-left:8px;padding-right:8px">
         <input type="checkbox" ${BULK_SELECTED.has(s.id)?'checked':''} onchange="bulkToggle('${s.id}',this.checked)" style="cursor:pointer;accent-color:var(--ink)">
       </td>
-      <td><div style="display:flex;align-items:center;gap:10px">${s.photoUrl?`<img src="${s.photoUrl}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border:1px solid var(--border);flex-shrink:0">`:''}<div><div class="t-name">${s.name}</div>${(()=>{ 
-        // Same silhouette, different fabrication: show the material and how
-        // many siblings share the pattern, so two ADA CORSETs never read as a
-        // duplicate row.
-        const fam = s.family; if (!fam) return '';
-        const sibs = (STATE.styles||[]).filter(x => x.status!=='archived' && x.family === fam);
-        if (sibs.length < 2) return '';
-        return `<div style="font-size:10px;color:var(--muted);letter-spacing:.5px">${s.fabric ? esc(s.fabric) + ' · ' : ''}1 of ${sibs.length} fabrications</div>`;
-      })()}</div></div></td>
-      <td><span class="t-mono">${s.styleId}</span></td>
-      <td><span class="b-tag">${s.category}</span></td>
-      <td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>
-      <td>${stageBadge(s.status)}</td>
-      <td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:10px">${s.retail?'$'+s.retail:'—'}</td>
-      <td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>
-      <td>${priorityDot(s.priority)}</td>
+      ${cols.map(c => ST_CELL[c.key](s)).join('')}
     </tr>`).join('');
 
   setTimeout(plmSalesRefresh, 0);
@@ -8845,6 +8991,7 @@ function renderMobileStyleCards(list, containerId) {
         </div>
         <div class="mob-style-card-meta">
           <span class="b-tag">${s.category||''}</span>
+          ${s.fabric ? `<span class="b-tag" style="background:var(--bg);border:1px solid var(--border)">${esc(s.fabric)}</span>` : ''}
           ${s.gender ? `<span class="b-tag" style="text-transform:capitalize">${s.gender}</span>` : ''}
           <span style="font-size:10px;color:var(--muted)">${s.season||''}</span>
           ${s.drop ? `<span style="font-size:10px;color:var(--muted)">Drop: ${s.drop}</span>` : ''}
@@ -30841,6 +30988,10 @@ body{ padding-top:calc(44px + var(--sat)); }
   .mob-style-card-bottom{ display:flex; align-items:center; gap:10px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
   .mob-price{ font-family:'DM Mono',monospace; font-size:14px; font-weight:700; color:var(--ink); }
   .mob-margin{ flex:1; font-size:10px; color:var(--muted); }
+  /* The column picker steers the desktop table; phones render cards instead,
+     so the button would be a no-op control. */
+  #btn-style-cols{ display:none; }
+  .col-grip{ display:none; }
 }
 
 /* Hide the assistant FAB while any modal is open so it can't cover Save/Cancel */
