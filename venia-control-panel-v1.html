@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '274';
+  const BUILD = '275';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -12325,6 +12325,52 @@ window.driveChooseFolder = async function(){
     if (STATE.currentPage === 'gdrive') renderGDrivePage();
   } catch(e){ showToast('Could not open the picker — ' + (e.message || e), 'error'); }
 };
+// ── Read a picked Drive file's CONTENT (not just its link) ────────────────
+// drive.file scope means this only ever works on files the founder PICKS in
+// the Google Picker — the app can never roam the Drive. Google-native docs are
+// exported to text/CSV; real files are downloaded with alt=media.
+const DRIVE_EXPORT = {
+  'application/vnd.google-apps.spreadsheet': 'text/csv',
+  'application/vnd.google-apps.document':    'text/plain',
+  'application/vnd.google-apps.presentation':'text/plain',
+};
+window.driveReadDoc = async function(doc){
+  if (!doc || !doc.id) throw new Error('no file');
+  const tok = await driveTokenSmart();
+  const mime = String(doc.mimeType || '');
+  const H = { Authorization: 'Bearer ' + tok };
+  // Google-native → export
+  if (DRIVE_EXPORT[mime]) {
+    const to = DRIVE_EXPORT[mime];
+    const r = await fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '/export?mimeType=' + encodeURIComponent(to) + '&supportsAllDrives=true', { headers: H });
+    if (!r.ok) throw new Error('Drive export failed (HTTP ' + r.status + ')');
+    const text = await r.text();
+    // Sheets export gives the FIRST tab only — say so rather than silently
+    // handing over a partial line list.
+    return { kind:'text', name: doc.name || 'Drive file', text,
+             note: mime.endsWith('spreadsheet') ? 'first tab only' : '' };
+  }
+  // Everything else → download bytes
+  const r = await fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '?alt=media&supportsAllDrives=true', { headers: H });
+  if (!r.ok) throw new Error('Drive download failed (HTTP ' + r.status + ')');
+  if (/^image\//.test(mime)) {
+    const blob = await r.blob();
+    return { kind:'image', name: doc.name || 'image', blob };
+  }
+  if (/spreadsheetml|ms-excel/.test(mime) || /\.xlsx?$/i.test(doc.name || '')) {
+    const X = await skLoadXLSX();
+    const wb = X.read(await r.arrayBuffer(), { type:'array' });
+    const first = wb.SheetNames[0];
+    let text = X.utils.sheet_to_csv(wb.Sheets[first]);
+    return { kind:'text', name: doc.name || 'Spreadsheet', text,
+             note: wb.SheetNames.length > 1 ? ('sheet "' + first + '" of ' + wb.SheetNames.length) : '' };
+  }
+  if (/^text\/|json|csv|tab-separated/.test(mime)) {
+    return { kind:'text', name: doc.name || 'File', text: await r.text(), note:'' };
+  }
+  throw new Error('That file type isn’t readable yet (' + (mime || 'unknown') + '). Sheets, Docs, Slides, CSV, Excel and images work.');
+};
+
 window.driveUpload = async function(file, cb){
   try {
     if (!file) return;
@@ -30637,6 +30683,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     <input type="file" id="sk-file-input" accept=".csv,.tsv,.txt,.xlsx,.xls" style="display:none" onchange="skFilePick(this)">
     <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
     <button class="sk-cam" onclick="document.getElementById('sk-file-input').click()" aria-label="Attach a spreadsheet or CSV" title="Attach a spreadsheet (Excel / CSV) — Eni reads it">▤</button>
+    <button class="sk-cam" onclick="skDrivePick()" aria-label="Attach from Google Drive" title="Pick a file from Google Drive — Eni reads its contents">▲</button>
     <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" oninput="skAutoGrow(this)"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();skSend();}"></textarea>
     <button class="sk-send" onclick="skSend()" aria-label="Send">↑</button>
@@ -30864,6 +30911,54 @@ async function skFilePick(input){
   if (chip){
     chip.style.display = 'flex';
     chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">▤</span><span class="sk-photo-label">' + escHtml(file.name) + ' — ' + totalRows + ' rows' + (truncated ? ' (first ' + keptRows + ' attach)' : '') + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
+  }
+  const f = document.getElementById('sk-field'); if (f) f.focus();
+}
+// ── Attach straight from Google Drive ────────────────────────
+// Same pipeline as a local attach: the picked file's CONTENT rides into the
+// conversation, so Eni can act on it (create styles, read a line list, cost a
+// sheet). drive.file scope means she only ever sees files you pick.
+async function skDrivePick(){
+  if (typeof driveReady !== 'function' || !driveReady()){
+    if (typeof showToast==='function') showToast('Connect Google Drive first — Settings → API Keys (Client ID + API key)','warning');
+    return;
+  }
+  let doc;
+  try { doc = await window.drivePick(); }
+  catch(e){ if (typeof showToast==='function') showToast('Could not open Drive — ' + (e && e.message || e), 'error'); return; }
+  if (!doc) return;
+  if (typeof showToast==='function') showToast('Reading “' + doc.name + '” from Drive…','info');
+  let got;
+  try { got = await window.driveReadDoc(doc); }
+  catch(e){ if (typeof showToast==='function') showToast(String(e && e.message || e), 'error'); return; }
+
+  if (got.kind === 'image'){
+    const block = await skPhotoToBlock(got.blob);
+    if (!block){ if (typeof showToast==='function') showToast('Could not read that image','error'); return; }
+    SK.pendingPhoto = block;
+    const chip = document.getElementById('sk-photo-chip');
+    if (chip){
+      chip.style.display = 'flex';
+      chip.innerHTML = '<img src="' + block.dataUrl + '" alt="Drive image"><span class="sk-photo-label">' + escHtml(got.name) + '</span><button class="sk-photo-x" onclick="skPhotoClear()" aria-label="Remove">✕</button>';
+    }
+    const f0 = document.getElementById('sk-field'); if (f0) f0.focus();
+    return;
+  }
+
+  // Text/CSV: identical cap and chip as a local spreadsheet attach.
+  const lines = String(got.text||'').replace(/\r\n?/g,'\n').split('\n').filter(function(l){ return l.trim() !== ''; });
+  const totalRows = Math.max(0, lines.length - 1);
+  let out = lines.slice(0, 401).join('\n');
+  if (out.length > 25000) out = out.slice(0, 25000).split('\n').slice(0, -1).join('\n');
+  const keptRows = Math.max(0, out.split('\n').length - 1);
+  const truncated = keptRows < totalRows;
+  if (!out.trim()){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
+  const label = got.name + (got.note ? ' (' + got.note + ')' : '');
+  SK.pendingFile = { name: label, text: out, rows: totalRows, truncated, keptRows, source: 'Google Drive' };
+  const chip = document.getElementById('sk-file-chip');
+  if (chip){
+    chip.style.display = 'flex';
+    chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">▲</span><span class="sk-photo-label">' + escHtml(label) + ' — ' + totalRows + ' rows' + (truncated ? ' (first ' + keptRows + ' attach)' : '') + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
   }
   const f = document.getElementById('sk-field'); if (f) f.focus();
 }
