@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '273';
+  const BUILD = '274';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18057,6 +18057,10 @@ function agentImageActionSpec() {
     + '{"type":"apply_style_specs","styleName":"exact style name or code from PLM Context","patternCard":{"baseSize":"","gradeRule":"","patternVer":"","patternLoc":"","patternPieces":0,"liningPieces":0},"construction":{"seamFinish":"","seamAllow":"","closure":"","hemType":"","interlining":"","stitchType":"","spi":"","thread":"","topstitch":"","shrinkage":"","fiberContent":"","coo":"","careInstructions":""},"pieces":[{"name":"","component":"Shell","cut":"","grain":"","notes":""}]}\n'
     + '```\n'
     + 'Rules for apply_style_specs: use a style name/code that appears in the PLM Context — if none is given or it is ambiguous, ask which style instead of emitting the block. Include ONLY fields legible on the card; omit or "" the rest. "component" ∈ Shell/Lining/Interlining/Facing/Underlining/Interfacing.'
+    + '\n\nACTION — add_styles: CREATE new styles in PLM from a line list, range plan, or a list the user pastes/shares. This is how a season gets built — use it whenever the user asks you to create/add styles, set up a line, or turn a line list into PLM records. Style codes are generated automatically; never invent one.\n'
+    + 'Emit ONE fenced json block:\n'
+    + '{"type":"add_styles","season":"SS27","styles":[{"name":"ISOLDE TOP","category":"Tops","gender":"womens","retail":240,"wholesale":96,"colors":"Ivory, Black","sizes":"XS,S,M,L,XL","fabric":"Silk crepe de chine","drop":"","status":"concept","desc":"One line of design intent"}]}\n'
+    + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple colorways of ONE garment are ONE style with the colors listed in "colors" — never one style per colorway. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
     + '\n\nACTION — generate_care_label: recommend a garment care label from the fibre content + construction of a style. Choose the care from what the fibres actually need (e.g. wool/silk/cashmere → hand wash cold or dry clean, no tumble; cotton/linen → machine wash warm; delicate trims/linings → gentler). "codes" MUST be drawn ONLY from this fixed set — one per family, no invented codes:\n'
     + 'wash: wash.machine.30 | wash.machine.40 | wash.machine.60 | wash.gentle.30 | wash.hand | wash.no\n'
     + 'bleach: bleach.any | bleach.nonchlorine | bleach.no\n'
@@ -18189,6 +18193,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'update_buyers') return agentRunUpdateBuyers(action, chatBody);
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
+  if (action.type === 'add_styles') return agentRunAddStyles(action, chatBody);
   if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
   if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
   if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
@@ -18573,6 +18578,100 @@ window.agentUndoMaterial = function(idsStr, btn){
   save();
   try { if (STATE.currentPage === 'materials' && typeof renderMaterials==='function') renderMaterials(); } catch(e){}
   if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Fabric removed from Materials.</div>'; }
+};
+
+// ── Bulk style creation: turn a line list into real PLM style records ───────
+// Same shape saveStyle() writes, same genStyleId() codes, plus a hard dedupe
+// so re-running a line list (or Eni re-proposing it) can never create twins.
+function styleNameKey(name) {
+  return String(name || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ')
+    .trim().replace(/^(the|le|la|les|l) /, '').trim();
+}
+const AGENT_STYLE_CATS = ['Tops','Bottoms','Outerwear','Dresses','Accessories'];
+const AGENT_STYLE_STATUS = ['concept','design','sms','development','production','active','sale'];
+function agentRunAddStyles(action, chatBody) {
+  const rows = Array.isArray(action.styles) ? action.styles : [];
+  if (!rows.length) { appendAgentNote(chatBody, 'Give me the line list — name plus whatever you have (category, price, colorways, fabric) — and I\'ll create the styles.'); return; }
+  if (!STATE.styles) STATE.styles = [];
+  const topSeason = String(action.season || '').trim();
+  // Dedupe against the line AND within this batch: a style name already in PLM
+  // is never duplicated, it's reported as skipped.
+  const seen = new Set((STATE.styles || []).map(x => styleNameKey(x.name)).filter(Boolean));
+  const built = [], skipped = [];
+  rows.slice(0, 25).forEach(r => {
+    const name = String(r && r.name || '').trim();
+    if (!name) return;
+    const key = styleNameKey(name);
+    if (!key) return;
+    if (seen.has(key)) { skipped.push(name); return; }
+    seen.add(key);
+    const season = String(r.season || topSeason || '').trim();
+    const category = AGENT_STYLE_CATS.includes(r.category) ? r.category : 'Tops';
+    const gender = ['womens','mens','unisex'].includes(String(r.gender||'').toLowerCase()) ? String(r.gender).toLowerCase() : 'womens';
+    const status = AGENT_STYLE_STATUS.includes(String(r.status||'').toLowerCase()) ? String(r.status).toLowerCase() : 'concept';
+    const num = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+    const st = {
+      id: 'STY' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+      styleId: genStyleId(season, category, gender),
+      name, season, category, gender, status,
+      retail: num(r.retail), wholesale: num(r.wholesale), cogs: num(r.cogs),
+      colors: String(r.colors || '').trim(),
+      sizes: String(r.sizes || '').trim() || 'XS,S,M,L,XL',
+      fabric: String(r.fabric || '').trim(),
+      fabric2: String(r.fabric2 || '').trim(),
+      drop: String(r.drop || '').trim(),
+      desc: String(r.desc || r.description || '').trim(),
+      vendor: String(r.vendor || '').trim(),
+      lead: 12, sample: 'Proto', notes: [],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    STATE.styles.unshift(st);
+    built.push(st);
+  });
+  const overflow = rows.length > 25 ? rows.length - 25 : 0;
+  if (!built.length) {
+    appendAgentNote(chatBody, skipped.length === 1
+      ? '“' + skipped[0] + '” is already in PLM — nothing to create.'
+      : 'Those ' + skipped.length + ' styles are already in PLM — nothing new to create.');
+    return;
+  }
+  save();
+  try { buildSkus(); } catch (e) {}
+  try { populateStyleSelects(); } catch (e) {}
+  try { logActivity('PLM: ' + built.length + ' style(s) created by agent' + (skipped.length ? ' (' + skipped.length + ' already existed)' : '')); } catch (e) {}
+  try { if (STATE.currentPage === 'styles' || STATE.currentPage === 'plm') renderPage(STATE.currentPage); } catch (e) {}
+  const ids = built.map(b => b.id);
+  const list = built.slice(0, 8).map(b =>
+    '<div style="display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-size:11px"><span style="color:var(--ink)">' + escHtml(b.name) + '</span>'
+    + '<span style="font-family:\'DM Mono\',monospace;color:var(--muted)">' + escHtml(b.styleId) + '</span></div>').join('');
+  const el = document.createElement('div');
+  el.className = 'ag-msg from-agent';
+  el.innerHTML = '<div class="ag-msg-meta">Agent</div><div class="ag-msg-bubble">'
+    + '<div style="font-size:11px;color:var(--ink);margin-bottom:7px"><strong>' + built.length + ' style' + (built.length>1?'s':'') + ' created</strong>'
+    + (skipped.length ? ' · ' + skipped.length + ' already existed' : '')
+    + (overflow ? ' · ' + overflow + ' more in the list — say “continue” and I’ll add them' : '') + '</div>'
+    + list + (built.length > 8 ? '<div style="font-size:10px;color:var(--muted);padding-top:3px">…and ' + (built.length-8) + ' more</div>' : '')
+    + '<div style="display:flex;gap:8px;margin-top:9px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="cpGoto(\'plm\');setTimeout(function(){goTo(\'styles\',document.querySelector(\'[data-page=styles]\'))},120)">Open Styles</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="agentUndoStyles(\'' + ids.join(',') + '\',this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(el);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+// Undo a bulk creation — removes exactly the records that batch created.
+window.agentUndoStyles = function (idCsv, btn) {
+  const ids = new Set(String(idCsv || '').split(',').filter(Boolean));
+  if (ids.size && window.STATE && Array.isArray(STATE.styles)) {
+    STATE.styles = STATE.styles.filter(s => !ids.has(s.id));
+    save();
+    try { buildSkus(); } catch (e) {}
+    try { populateStyleSelects(); } catch (e) {}
+    try { renderPage(STATE.currentPage); } catch (e) {}
+    try { logActivity('PLM: agent style creation undone (' + ids.size + ')'); } catch (e) {}
+  }
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Styles removed.</div>'; }
 };
 
 // Execute apply_style_specs: write pattern-card + construction fields to a style.
