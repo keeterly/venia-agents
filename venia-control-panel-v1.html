@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '276';
+  const BUILD = '277';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30937,23 +30937,97 @@ async function skFilePick(input){
     if (typeof showToast==='function') showToast('Could not read that file — ' + (e && e.message || 'try CSV'), 'error');
     return;
   }
-  // Cap what rides into the conversation: 400 data rows / ~25KB keeps the call
-  // and localStorage sane. The agent is told when rows were cut.
+  skAttachRows(file.name, text, '▤');
+}
+// ── Windowed attach ──────────────────────────────────────────
+// A 1,000-row line list sent in one call times the relay out (504) — the
+// input is huge AND the reply is long. Instead the whole file is held in
+// memory and only a WINDOW of rows rides into each turn, sized to what the
+// agent can act on in one batch. When rows remain, a Continue button feeds
+// the next window. Small calls, no timeouts, nothing lost.
+const SK_ROW_WINDOW = 50;
+function skAttachRows(name, text, icon){
   const lines = String(text||'').replace(/\r\n?/g,'\n').split('\n').filter(function(l){ return l.trim() !== ''; });
-  const totalRows = Math.max(0, lines.length - 1);   // minus the header row
-  let out = lines.slice(0, 401).join('\n');
-  if (out.length > 25000) out = out.slice(0, 25000).split('\n').slice(0, -1).join('\n');   // drop the cut-off partial line
-  const keptRows = Math.max(0, out.split('\n').length - 1);
-  const truncated = keptRows < totalRows;
-  if (!out.trim()){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
-  SK.pendingFile = { name: file.name, text: out, rows: totalRows, truncated, keptRows };
+  if (!lines.length){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
+  const header = lines[0];
+  const rows = lines.slice(1);
+  if (!rows.length){ if (typeof showToast==='function') showToast('That file has a header but no rows','warning'); return; }
+  SK.fileSet = { name, icon: icon || '▤', header, rows, total: rows.length, sent: 0 };
+  skQueueWindow();
+  const f = document.getElementById('sk-field'); if (f) f.focus();
+}
+// Load the next window of rows into the pending attachment + chip.
+function skQueueWindow(){
+  const F = SK.fileSet; if (!F) return false;
+  const from = F.sent, to = Math.min(F.total, from + SK_ROW_WINDOW);
+  if (from >= F.total) return false;
+  const slice = F.rows.slice(from, to);
+  const more = F.total - to;
+  SK.pendingFile = {
+    name: F.name, text: F.header + '\n' + slice.join('\n'),
+    rows: F.total, from: from + 1, to, more,
+    window: true,
+  };
+  F.pending = to;
   const chip = document.getElementById('sk-file-chip');
   if (chip){
     chip.style.display = 'flex';
-    chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">▤</span><span class="sk-photo-label">' + escHtml(file.name) + ' — ' + totalRows + ' rows' + (truncated ? ' (first ' + keptRows + ' attach)' : '') + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
+    chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">' + F.icon + '</span><span class="sk-photo-label">'
+      + escHtml(F.name) + ' — rows ' + (from+1) + '–' + to + ' of ' + F.total
+      + (more ? ' · ' + more + ' after this' : ' · last batch')
+      + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
   }
-  const f = document.getElementById('sk-field'); if (f) f.focus();
+  return true;
 }
+// Offer the next window once a batch lands.
+function skOfferNextRows(){
+  const F = SK.fileSet; if (!F) return;
+  F.sent = F.pending || F.sent;
+  const left = F.total - F.sent;
+  const body = document.getElementById('sk-body'); if (!body) return;
+  if (left <= 0){
+    const done = document.createElement('div');
+    done.className = 'ag-msg from-agent';
+    done.innerHTML = '<div class="ag-msg-bubble" style="font-size:11px;color:var(--muted)">✓ All ' + F.total + ' rows of ' + escHtml(F.name) + ' have been sent.</div>';
+    body.appendChild(done); body.scrollTop = body.scrollHeight;
+    SK.fileSet = null;
+    return;
+  }
+  const el = document.createElement('div');
+  el.className = 'ag-msg from-agent';
+  el.innerHTML = '<div class="ag-msg-bubble"><div style="font-size:11px;color:var(--ink);margin-bottom:7px">'
+    + left + ' row' + (left>1?'s':'') + ' left in ' + escHtml(F.name)
+    + (SK.autoRows ? ' · <span style="color:var(--gold)">auto-continuing…</span>' : '') + '</div>'
+    + (SK.autoRows
+        ? '<button class="btn btn-ghost btn-sm" onclick="skStopRows(this)">■ Stop after this batch</button>'
+        : '<button class="btn btn-gold btn-sm" onclick="skSendNextRows(this)">Send next ' + Math.min(SK_ROW_WINDOW, left) + ' rows →</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="skAutoRows(this)">Work through all ' + left + ' →</button>')
+    + '</div>';
+  body.appendChild(el); body.scrollTop = body.scrollHeight;
+  // Hands-off mode: keep feeding batches until the file is done or stopped.
+  // Capped so a mis-click can never run away with the API budget.
+  if (SK.autoRows) {
+    SK.autoCount = (SK.autoCount || 0) + 1;
+    if (SK.autoCount > 40) { SK.autoRows = false; return; }
+    setTimeout(function(){ if (SK.autoRows && SK.fileSet) window.skSendNextRows(null); }, 900);
+  }
+}
+window.skAutoRows = function(btn){
+  SK.autoRows = true; SK.autoCount = 0;
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Working through the file — you can stop any time.</div>'; }
+  window.skSendNextRows(null);
+};
+window.skStopRows = function(btn){
+  SK.autoRows = false;
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Stopped — the rest of the file is still queued.</div>'; }
+};
+window.skSendNextRows = function(btn){
+  if (btn){ const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Sending the next rows…</div>'; }
+  if (!skQueueWindow()) return;
+  const f = document.getElementById('sk-field');
+  if (f) f.value = 'Continue with these rows — same instructions as before.';
+  skSend();
+};
 // ── Attach straight from Google Drive ────────────────────────
 // Same pipeline as a local attach: the picked file's CONTENT rides into the
 // conversation, so Eni can act on it (create styles, read a line list, cost a
@@ -30992,25 +31066,13 @@ async function skDrivePick(){
     return;
   }
 
-  // Text/CSV: identical cap and chip as a local spreadsheet attach.
-  const lines = String(got.text||'').replace(/\r\n?/g,'\n').split('\n').filter(function(l){ return l.trim() !== ''; });
-  const totalRows = Math.max(0, lines.length - 1);
-  let out = lines.slice(0, 401).join('\n');
-  if (out.length > 25000) out = out.slice(0, 25000).split('\n').slice(0, -1).join('\n');
-  const keptRows = Math.max(0, out.split('\n').length - 1);
-  const truncated = keptRows < totalRows;
-  if (!out.trim()){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
-  const label = got.name + (got.note ? ' (' + got.note + ')' : '');
-  SK.pendingFile = { name: label, text: out, rows: totalRows, truncated, keptRows, source: 'Google Drive' };
-  const chip = document.getElementById('sk-file-chip');
-  if (chip){
-    chip.style.display = 'flex';
-    chip.innerHTML = '<span class="sk-photo-label" style="font-size:14px">▲</span><span class="sk-photo-label">' + escHtml(label) + ' — ' + totalRows + ' rows' + (truncated ? ' (first ' + keptRows + ' attach)' : '') + '</span><button class="sk-photo-x" onclick="skFileClear()" aria-label="Remove file">✕</button>';
-  }
-  const f = document.getElementById('sk-field'); if (f) f.focus();
+  // Text/CSV rides in as windowed rows, same as a local attach.
+  skAttachRows(got.name + (got.note ? ' (' + got.note + ')' : ''), got.text, '▲');
 }
 function skFileClear(){
   SK.pendingFile = null;
+  SK.fileSet = null;
+  SK.autoRows = false;
   const chip = document.getElementById('sk-file-chip');
   if (chip){ chip.style.display = 'none'; chip.innerHTML = ''; }
 }
@@ -31087,10 +31149,14 @@ async function skSend(preset){
   SK.greeted[SK.agent] = true;
   // Display shows a compact file marker; the STORED turn carries the full CSV
   // text so this call — and later "continue" turns — can read the rows.
-  const dispText = msg + (fileAtt ? '\n▤ ' + fileAtt.name + ' (' + fileAtt.rows + ' rows)' : '');
+  const span = fileAtt && fileAtt.window ? ('rows ' + fileAtt.from + '–' + fileAtt.to + ' of ' + fileAtt.rows) : '';
+  const dispText = msg + (fileAtt ? '\n▤ ' + fileAtt.name + (span ? ' (' + span + ')' : ' (' + fileAtt.rows + ' rows)') : '');
   const fullText = fileAtt
-    ? msg + '\n\n[Attached file "' + fileAtt.name + '" — ' + fileAtt.rows + ' data rows as CSV'
-      + (fileAtt.truncated ? '; only the first ' + fileAtt.keptRows + ' are included below' : '') + ']\n' + fileAtt.text
+    ? msg + '\n\n[Attached file "' + fileAtt.name + '" — CSV, ' + (span || (fileAtt.rows + ' data rows'))
+      + (fileAtt.window && fileAtt.more
+          ? '. This is ONE BATCH of a larger file: act on these rows only, do not claim the whole list is done — ' + fileAtt.more + ' rows follow in the next message.'
+          : fileAtt.window ? '. This is the FINAL batch of the file.' : '')
+      + ']\n' + fileAtt.text
     : msg;
   skAppend('user', dispText, photo ? photo.dataUrl : undefined);
   // Stored turn keeps content as a plain string (+ preview img for this session);
@@ -31163,6 +31229,8 @@ async function skSend(preset){
       window.__agTurnPhoto = '';
     }
     agentEndWork(workKey, !!action);
+    // A windowed file keeps going: offer the next batch once this one lands.
+    if (fileAtt && fileAtt.window) { try { skOfferNextRows(); } catch(e){} }
   } catch(err){
     think.__done && think.__done();
     agentEndWork(workKey, false);
@@ -31172,7 +31240,17 @@ async function skSend(preset){
     const _em = String(err && err.message || '');
     const _busy = /overloaded|529|50[023]|429|rate.?limit|busy/i.test(_em);
     const _keyish = /401|403|\bkey\b|auth|not connected/i.test(_em);
-    const _footer = _busy
+    // A failed windowed batch must not advance the cursor — re-queue it so
+    // "try again" resends the same rows instead of skipping them.
+    let _requeued = false;
+    SK.autoRows = false;   // a failure stops hands-off mode; the founder decides
+    if (fileAtt && fileAtt.window && SK.fileSet) {
+      try { SK.fileSet.pending = SK.fileSet.sent; _requeued = skQueueWindow(); } catch(e){}
+    }
+    const _timeout = /504|502|timed? ?out|gateway/i.test(_em);
+    const _footer = _timeout
+      ? 'That batch was too big to finish in one call.' + (_requeued ? ' The same rows are re-attached — send “continue” to retry them.' : '') + ' Fewer rows per batch will go through.'
+      : _busy
       ? 'Your message (and any attached file) is saved in this chat — just send “try again” in a moment.'
       : _keyish
         ? 'Add your Claude API key in Settings → API Keys. <a style="color:#bbb;cursor:pointer;text-decoration:underline" onclick="skToggle();cpGoto(\'set\')">Open Settings →</a>'
