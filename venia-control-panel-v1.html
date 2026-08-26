@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '281';
+  const BUILD = '282';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5999,18 +5999,27 @@ function llParse(rows){
 function llReconcile(parsed, season){
   const existing = ((window.STATE && STATE.styles) || []).filter(x => x.status !== 'archived');
   const plan = { create: [], repair: [], ok: [], ambiguous: [] };
+  // One existing record can only be repaired ONCE. A style whose colourways
+  // swallowed two materials ("Parchment Viscose, Black Leather") would
+  // otherwise be claimed by both groups and overwrite itself — the second
+  // fabrication must become its own style.
+  const claimed = new Set();
+  // Exact matches first, so an already-correct record is never re-used as the
+  // repair target for a different material.
   parsed.styles.forEach(g => {
     const sibs = existing.filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === g.family);
-    const exact = sibs.find(x => styleNameKey(x.fabric) === styleNameKey(g.material) && g.material);
-    if (exact) { plan.ok.push({ g, style: exact }); return; }
-    // A style created from this list before the material was understood: its
-    // colours carry the material words and fabric is blank.
-    const swallowed = sibs.find(x => !String(x.fabric||'').trim()
-      && g.material && String(x.colors||'').toLowerCase().includes(g.material.toLowerCase()));
-    if (swallowed) { plan.repair.push({ g, style: swallowed }); return; }
+    const exact = sibs.find(x => g.material && styleNameKey(x.fabric) === styleNameKey(g.material));
+    if (exact) { claimed.add(exact); plan.ok.push({ g, style: exact }); g._done = true; }
+  });
+  parsed.styles.forEach(g => {
+    if (g._done) { delete g._done; return; }
+    const sibs = existing.filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === g.family);
     if (!g.material) { plan.ambiguous.push({ g, sibs }); return; }
-    const blank = sibs.find(x => !String(x.fabric||'').trim() && !plan.repair.some(r => r.style === x) );
-    if (blank && sibs.length === 1) { plan.repair.push({ g, style: blank }); return; }
+    const free = sibs.filter(x => !claimed.has(x) && !String(x.fabric||'').trim());
+    // Prefer the record whose colourways actually name this material.
+    const swallowed = free.find(x => String(x.colors||'').toLowerCase().includes(g.material.toLowerCase()));
+    const target = swallowed || (sibs.length === 1 ? free[0] : null);
+    if (target) { claimed.add(target); plan.repair.push({ g, style: target }); return; }
     plan.create.push({ g });
   });
   return plan;
@@ -31411,6 +31420,25 @@ function skAttachRows(name, text, icon){
   if (!rows.length){ if (typeof showToast==='function') showToast('That file has a header but no rows','warning'); return; }
   SK.fileSet = { name, icon: icon || '▤', header, rows, total: rows.length, sent: 0 };
   skQueueWindow();
+  // A product line list is structured data: parsing it beats transcribing it
+  // (colour vs material, prices per fabrication). Offer the importer instead
+  // of letting the chat re-read the same rows batch after batch.
+  try {
+    const cols = (typeof llMapColumns === 'function') ? llMapColumns(header.split(',')) : null;
+    if (cols && cols.name >= 0 && (cols.colour >= 0 || cols.retail >= 0)) {
+      const body = document.getElementById('sk-body');
+      if (body) {
+        const el = document.createElement('div');
+        el.className = 'ag-msg from-agent';
+        el.innerHTML = '<div class="ag-msg-bubble"><div style="font-size:11px;color:var(--ink);margin-bottom:6px">'
+          + 'That looks like a <strong>line list</strong>. The importer reads the whole file at once and splits each colour cell into its material (its own style, BOM and cost) and its colour (a colourway) — more accurate than reading it here in batches.</div>'
+          + '<button class="btn btn-gold btn-sm" onclick="skToggle(false);llOpenImport()">Open the line list importer →</button>'
+          + ' <button class="btn btn-ghost btn-sm" onclick="this.closest(\'.ag-msg-bubble\').innerHTML=\'<div style=&quot;font-size:11px;color:var(--muted)&quot;>Carry on in chat.</div>\'">Use chat anyway</button>'
+          + '</div>';
+        body.appendChild(el); body.scrollTop = body.scrollHeight;
+      }
+    }
+  } catch(e){}
   const f = document.getElementById('sk-field'); if (f) f.focus();
 }
 // Load the next window of rows into the pending attachment + chip.
@@ -31597,7 +31625,12 @@ async function skSend(preset){
   const photo = (preset==null) ? SK.pendingPhoto : null;
   const fileAtt = (preset==null) ? SK.pendingFile : null;
   if (!rawMsg && !photo && !fileAtt) return;
-  const msg = rawMsg || (fileAtt ? 'Read this file and act on what it contains — if it is a list of stores or buyers, add them to the Buyers CRM.' : rawMsg);
+  // A file sent with no words used to be told "if it is a list of stores or
+  // buyers, add them to the CRM" — which sent every product line list down the
+  // CRM path and produced a loop of "this isn't buyers". Ask, don't assume.
+  const msg = rawMsg || (fileAtt
+    ? 'Read this file and tell me what it contains and what you can do with it. Do not assume it is a buyer list.'
+    : rawMsg);
   if (photo) skPhotoClear();
   if (fileAtt) skFileClear();
   if (field){ field.value=''; field.style.height='auto'; }
