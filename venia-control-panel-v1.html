@@ -404,6 +404,11 @@ thead th:hover{color:var(--ink)}
 .col-tbl thead th{position:relative;overflow:hidden;text-overflow:ellipsis;padding-left:11px;padding-right:11px}
 .col-tbl td{overflow:hidden;padding-left:11px;padding-right:11px}
 .col-clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Editable in place — one click, no modal. */
+.col-tbl td.cell-edit{cursor:text}
+.col-tbl tbody tr:hover td.cell-edit{box-shadow:inset 0 -1px 0 var(--border-mid)}
+.col-tbl td.cell-edit:hover{background:var(--bg-off)}
+#cw-pop{position:absolute;z-index:9000;background:var(--white);border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.16);padding:8px 0;width:260px;max-height:340px;overflow-y:auto}
 .col-grip{position:absolute;top:0;right:0;bottom:0;width:10px;cursor:col-resize;z-index:3}
 .col-grip::after{content:'';position:absolute;top:5px;bottom:5px;right:4px;width:2px;background:transparent;transition:background .12s}
 .col-grip:hover::after,.col-grip.dragging::after{background:var(--ink)}
@@ -1709,7 +1714,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '285';
+  const BUILD = '286';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4805,7 +4810,7 @@ const SYNC_KEYS = [
   // Brain dump + shared
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
-  'googleApiKey', 'driveFolder', 'costPrefs', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
+  'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -6251,8 +6256,8 @@ const ST_CELL = {
       })()}</div></div></td>`,
   styleId:  (s) => `<td><span class="t-mono">${s.styleId}</span></td>`,
   category: (s) => `<td><span class="b-tag">${s.category}</span></td>`,
-  fabric:   (s) => `<td style="font-size:10px" title="${s.fabric?esc(s.fabric):''}"><div class="col-clip">${s.fabric?esc(s.fabric):'<span style="color:var(--muted)">—</span>'}</div></td>`,
-  colors:   (s) => `<td>${colorSwatches(s.colors, 6)}</td>`,
+  fabric:   (s) => `<td class="cell-edit" style="font-size:10px" title="${s.fabric?esc(s.fabric)+' — click to change':'Click to set the fabric'}" onclick="fabEdit('${s.id}',this,event)"><div class="col-clip">${s.fabric?esc(s.fabric):'<span style="color:var(--muted)">＋ fabric</span>'}</div></td>`,
+  colors:   (s) => `<td class="cell-edit" title="Click to edit colourways and set swatches" onclick="cwOpen('${s.id}',this,event)">${String(s.colors||'').trim() ? colorSwatches(s.colors, 6) : '<span style="color:var(--muted);font-size:10px">＋ colourways</span>'}</td>`,
   season:   (s) => `<td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
@@ -6260,6 +6265,167 @@ const ST_CELL = {
   sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>`,
   priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
 };
+
+// ── Colourway editor ─────────────────────────────────────────────────────
+// Opens straight off the Colorways cell, the mobile card, or the style panel.
+// Every change saves immediately — no modal, no tabs, no Save button. Setting
+// a swatch writes to the brand colour library (STATE.colorLib), so naming
+// SAND once colours every style that uses it.
+let CW_STYLE = null;
+function cwClose(){
+  const p = document.getElementById('cw-pop');
+  if (p) p.remove();
+  document.removeEventListener('click', cwAway);
+  document.removeEventListener('keydown', cwKey);
+  CW_STYLE = null;
+}
+function cwAway(){ cwClose(); }
+function cwKey(e){ if (e.key === 'Escape') { e.stopPropagation(); cwClose(); } }
+function cwList(st){ return String(st.colors||'').split(',').map(x=>x.trim()).filter(Boolean); }
+
+function cwOpen(styleId, anchor, ev){
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  const open = document.getElementById('cw-pop');
+  if (open && CW_STYLE === styleId) { cwClose(); return; }
+  cwClose();
+  const st = (STATE.styles||[]).find(x => x.id === styleId);
+  if (!st) return;
+  CW_STYLE = styleId;
+  const pop = document.createElement('div');
+  pop.id = 'cw-pop';
+  pop.onclick = (e) => e.stopPropagation();
+  document.body.appendChild(pop);
+  const r = (anchor && anchor.getBoundingClientRect) ? anchor.getBoundingClientRect() : { bottom: 80, left: 40 };
+  pop.style.top = Math.min(r.bottom + window.scrollY + 6, window.scrollY + window.innerHeight - 260) + 'px';
+  pop.style.left = Math.max(8, Math.min(r.left + window.scrollX, window.innerWidth - 268)) + 'px';
+  cwRender();
+  setTimeout(() => { document.addEventListener('click', cwAway); document.addEventListener('keydown', cwKey); }, 0);
+}
+
+function cwRender(){
+  const pop = document.getElementById('cw-pop');
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE);
+  if (!pop || !st) return;
+  const list = cwList(st);
+  pop.innerHTML = `
+    <div style="padding:2px 12px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">
+      Colorways · ${esc(st.name)}${st.fabric?` <span style="text-transform:none;letter-spacing:.3px;font-weight:400">in ${esc(st.fabric)}</span>`:''}
+    </div>
+    ${list.length ? list.map((c,i) => {
+      const hex = colorHex(c);
+      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 12px">
+        <label style="position:relative;width:20px;height:20px;flex:none;cursor:pointer" title="${hex?'Change this swatch':'Pick a swatch for '+esc(c)}">
+          <span style="position:absolute;inset:0;border-radius:50%;${hex?`background:${hex};border:1px solid rgba(0,0,0,.25)`:'background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px);border:1px solid var(--border)'}"></span>
+          <input type="color" value="${hex||'#cccccc'}" oninput="cwSetHex(${i},this.value)" style="opacity:0;width:20px;height:20px;border:none;padding:0;cursor:pointer">
+        </label>
+        <input class="fi" value="${esc(c)}" onchange="cwRename(${i},this.value)" placeholder="Colour name"
+          style="min-height:auto;padding:4px 6px;font-size:11px;flex:1;min-width:0">
+        <button onclick="cwRemove(${i})" title="Remove this colourway" style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:0 2px;flex:none">✕</button>
+      </div>`;
+    }).join('') : '<div style="padding:4px 12px 8px;font-size:10px;color:var(--muted)">No colourways yet.</div>'}
+    <div style="padding:6px 12px 2px;border-top:1px solid var(--border);margin-top:6px;display:flex;gap:8px;align-items:center">
+      <button onclick="cwAdd()" style="background:none;border:none;color:var(--ink);font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;cursor:pointer;padding:4px 0">+ Add colourway</button>
+      <span style="margin-left:auto;font-size:9px;color:var(--muted);text-align:right;line-height:1.4">Swatches are shared<br>across the brand</span>
+    </div>`;
+}
+
+function cwCommit(st, list, what){
+  st.colors = list.join(', ');
+  st.updatedAt = new Date().toISOString();
+  save();
+  try { buildSkus(); } catch(e){}
+  try { renderStyles(); } catch(e){}
+  try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
+  cwRender();
+  if (what) { try { logActivity(st.name + ': ' + what); } catch(e){} }
+}
+function cwSetHex(i, hex){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const list = cwList(st), name = list[i]; if (!name) return;
+  if (!STATE.colorLib) STATE.colorLib = {};
+  STATE.colorLib[colorKey(name)] = hex;
+  cwCommit(st, list, 'swatch set for ' + name);
+}
+function cwRename(i, val){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const list = cwList(st), was = list[i];
+  // A comma would split one colourway into two on the next parse; collapse the
+  // whitespace it leaves behind so the name stays tidy.
+  const next = String(val||'').replace(/,/g,' ').replace(/\s+/g,' ').trim();
+  if (!next) { cwRemove(i); return; }
+  // Carry the swatch across the rename, or the colour would go hatched on a typo fix.
+  const lib = STATE.colorLib || (STATE.colorLib = {});
+  const oldHex = lib[colorKey(was)];
+  if (oldHex && !lib[colorKey(next)]) lib[colorKey(next)] = oldHex;
+  list[i] = next;
+  cwCommit(st, list, 'colourway renamed to ' + next);
+}
+function cwRemove(i){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const list = cwList(st), gone = list[i];
+  list.splice(i, 1);
+  cwCommit(st, list, 'colourway removed: ' + gone);
+}
+function cwAdd(){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const list = cwList(st);
+  list.push('New colour');
+  cwCommit(st, list, 'colourway added');
+  setTimeout(() => {
+    const inputs = document.querySelectorAll('#cw-pop input.fi');
+    const last = inputs[inputs.length-1];
+    if (last) { last.focus(); last.select(); }
+  }, 0);
+}
+
+// ── Inline fabric edit, straight in the table cell ───────────────────────
+// The fabric is the one field that decides what a style IS, so it should cost
+// one click to change — not row → panel → Edit → tab 2 → Save.
+function fabEdit(styleId, cell, ev){
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  if (cell.querySelector('input')) return;
+  const st = (STATE.styles||[]).find(x => x.id === styleId); if (!st) return;
+  const was = st.fabric || '';
+  const listId = 'fab-opts';
+  if (!document.getElementById(listId)) {
+    const dl = document.createElement('datalist');
+    dl.id = listId;
+    document.body.appendChild(dl);
+  }
+  // Offer what the brand already uses — its own fabrics and material library.
+  const seen = {};
+  ((STATE.styles||[]).map(x => x.fabric).concat((STATE.materials||[]).map(m => m.name)))
+    .map(v => String(v||'').trim()).filter(Boolean)
+    .forEach(v => { seen[v.toLowerCase()] = v; });
+  document.getElementById(listId).innerHTML = Object.values(seen).sort()
+    .map(v => `<option value="${esc(v)}">`).join('');
+  cell.innerHTML = `<input class="fi" list="${listId}" value="${esc(was)}" placeholder="Fabric"
+    style="min-height:auto;padding:3px 5px;font-size:11px;width:100%">`;
+  const input = cell.querySelector('input');
+  input.focus(); input.select();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return; done = true;
+    const val = String(input.value||'').trim();
+    if (commit && val !== was) {
+      st.fabric = val;
+      st.updatedAt = new Date().toISOString();
+      save();
+      try { buildSkus(); } catch(e){}
+      try { logActivity(st.name + ': fabric → ' + (val || '—')); } catch(e){}
+      try { showToast('Fabric saved'); } catch(e){}
+    }
+    try { renderStyles(); } catch(e){}
+    try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
+  };
+  input.onblur = () => finish(true);
+  input.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  };
+  input.onclick = (e) => e.stopPropagation();
+}
 
 function stRenderHead() {
   const head = document.getElementById('styles-head');
@@ -7301,10 +7467,17 @@ const VENIA_COLOR_HEX = {
   violet:'#6a4a8c', purple:'#5c3f7a',
 };
 // "Black Leather", "dark navy", "Grey Melange" → the longest known phrase wins.
-function colorHex(name){
-  const k = String(name||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+function colorKey(name){
+  return String(name||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
     .replace(/[^a-z ]+/g,' ').replace(/\s+/g,' ').trim();
+}
+function colorHex(name){
+  const k = colorKey(name);
   if (!k) return null;
+  // The brand's own library wins. Set SAND once and every style that uses it
+  // shows the same chip — that's how a colour card actually works.
+  const lib = (window.STATE && STATE.colorLib) || {};
+  if (lib[k]) return lib[k];
   if (VENIA_COLOR_HEX[k]) return VENIA_COLOR_HEX[k];
   const w = k.split(' ');
   for (let n = w.length; n >= 1; n--) {
@@ -8045,7 +8218,10 @@ function openDp(styleId) {
       ${dpRow('Style ID',`<span class="t-mono">${s.styleId}</span>`)}
       ${dpRow('Drop / Delivery', s.drop||'—')}
       ${dpRow('Fabric', `<input class="fi" style="min-height:auto;padding:4px 6px;font-size:11px;width:170px;text-align:right" value="${(s.fabric||'').replace(/"/g,'&quot;')}" placeholder="—" onchange="dpQuickSet('${s.id}','fabric',this.value)" title="Edits save instantly">`)}
-      ${dpRow('Colorways', s.colors||'—')}
+      ${dpRow('Colorways', `<button onclick="cwOpen('${s.id}',this,event)" title="Edit colourways and set swatches" style="background:none;border:none;padding:2px 0;cursor:pointer;display:flex;align-items:center;gap:8px;justify-content:flex-end;width:100%">
+        ${String(s.colors||'').trim() ? colorSwatches(s.colors, 8, 14) + `<span style="font-size:11px;color:var(--soft);text-align:right">${esc(s.colors)}</span>` : '<span style="font-size:11px;color:var(--muted)">＋ Add colourways</span>'}
+        <span style="font-size:10px;color:var(--muted);flex:none">✎</span>
+      </button>`)}
       ${dpRow('Sizes', `<input class="fi" style="min-height:auto;padding:4px 6px;font-size:11px;width:170px;text-align:right;font-family:'DM Mono',monospace" value="${(s.sizes||'').replace(/"/g,'&quot;')}" placeholder="XS,S,M,L,XL" onchange="dpQuickSet('${s.id}','sizes',this.value)" title="Size run — drives SKUs, quotes and POs. Edits save instantly">`)}
       ${dpRow('Sample Round', s.sample||'—')}
       ${dpRow('Lead Time', s.lead ? s.lead+' weeks' : '—')}
@@ -9128,7 +9304,7 @@ function renderMobileStyleCards(list, containerId) {
           ${s.gender ? `<span class="b-tag" style="text-transform:capitalize">${s.gender}</span>` : ''}
           <span style="font-size:10px;color:var(--muted)">${s.season||''}</span>
           ${s.drop ? `<span style="font-size:10px;color:var(--muted)">Drop: ${s.drop}</span>` : ''}
-          ${String(s.colors||'').trim() ? `<span style="display:flex;align-items:center;gap:5px">${colorSwatches(s.colors, 8, 14)}</span>` : ''}
+          <span onclick="cwOpen('${s.id}',this,event)" title="Edit colourways" style="display:flex;align-items:center;gap:5px;padding:2px 4px;margin:-2px 0">${String(s.colors||'').trim() ? colorSwatches(s.colors, 8, 14) : '<span style="font-size:10px;color:var(--muted)">＋ colourways</span>'}</span>
         </div>
         <div class="mob-style-card-bottom">
           <div class="mob-price">${s.retail ? '$'+s.retail : '—'}</div>
