@@ -1709,7 +1709,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '283';
+  const BUILD = '284';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6083,7 +6083,7 @@ window.llPreview = async function(){
   const row = (label, n, colour, note) => n ? `<div style="display:flex;gap:10px;align-items:baseline;padding:4px 0"><span style="font-family:'DM Mono',monospace;font-size:14px;font-weight:700;color:${colour};min-width:34px">${n}</span><span style="font-size:11px;color:var(--ink)">${label}</span><span style="font-size:10px;color:var(--muted)">${note||''}</span></div>` : '';
   const sample = plan.create.slice(0, 10).map(c =>
     `<div style="display:flex;justify-content:space-between;gap:10px;font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">
-      <span style="color:var(--ink)">${escHtml(c.g.name)}${c.g.material ? ' — ' + escHtml(c.g.material.toUpperCase()) : ''}</span>
+      <span style="color:var(--ink)">${escHtml(c.g.name)}</span>${c.g.material ? `<span style="color:var(--muted)"> · ${escHtml(c.g.material)}</span>` : ''}
       <span style="color:var(--muted)">${escHtml(c.g.colours.join(', ')||'—')}${c.g.retail ? ' · $' + c.g.retail : ''}</span>
     </div>`).join('');
   out.innerHTML = `
@@ -6116,10 +6116,6 @@ window.llApply = function(){
     if (g.retail && !style.retail) style.retail = g.retail;
     style.family = g.family;
     style.updatedAt = new Date().toISOString();
-    if (styleNameKey(style.name) === g.family && plan.create.some(c => c.g.family === g.family)) {
-      undo.edits.push({ id: style.id, key:'name', was: style.name });
-      style.name = style.name + ' — ' + g.material.toUpperCase();
-    }
   });
   plan.create.forEach(({ g }) => {
     const cat = (function(n){ n = n.toLowerCase();
@@ -6129,12 +6125,12 @@ window.llApply = function(){
       if (/hat|belt|cloche|bag|scarf/.test(n)) return 'Accessories';
       return 'Tops'; })(g.name);
     const gender = GEN[String(g.gender||'').toLowerCase()] || 'womens';
-    const sameFamily = ((window.STATE && STATE.styles)||[]).some(x => (x.family||'') === g.family)
-      || plan.create.filter(c => c.g.family === g.family).length > 1;
     const st = {
       id: 'STY' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
       styleId: genStyleId(season, cat, gender),
-      name: sameFamily && g.material ? g.name + ' — ' + g.material.toUpperCase() : g.name,
+      // The material is NOT welded onto the name — it lives in the Fabric
+      // column, and s.family is what groups the fabrications of one silhouette.
+      name: g.name,
       family: g.family, season, category: cat, gender, status: 'concept',
       fabric: g.material, colors: g.colours.join(', '),
       sizes: g.sizes || 'XS,S,M,L,XL',
@@ -19202,7 +19198,8 @@ function agentRunAddStyles(action, chatBody) {
       if (sibs.some(x => styleNameKey(x.fabric) === fabKey)) { skipped.push(name + ' (' + fabric + ')'); return; }
       const blank = sibs.find(x => !String(x.fabric || '').trim());
       if (blank) { blank.fabric = fabric; blank.updatedAt = new Date().toISOString(); filled.push(blank.name + ' → ' + fabric); return; }
-      name = name + ' — ' + fabric.toUpperCase();                                   // real second fabrication
+      // A real second fabrication — a NEW record, but the same name. The
+      // material tells them apart in the Fabric column, not in the name.
     }
     const season = String(r.season || topSeason || '').trim();
     const category = AGENT_STYLE_CATS.includes(r.category) ? r.category : 'Tops';
@@ -23824,6 +23821,67 @@ function fnLegacyRows(){
 // matching styles unless an identical note already exists; twins from two
 // devices migrating independently converge in the content dedupe below.
 // Waits for the first cloud pull so the MERGED copy migrates, not a stale one.
+// ── One-time name repair: the fabrication belongs in the Fabric column ──
+// The line-list importer used to weld the material onto the style name
+// ("ADA CORSET — LEATHER") because the list had no Fabric column to tell two
+// fabrications of one silhouette apart. There is one now, so the suffix is
+// duplicate ink: the style is ADA CORSET in both materials, and the Fabric
+// column plus the "1 of N fabrications" line does the distinguishing.
+//
+// Strictly conservative — a suffix comes off ONLY when it matches that
+// record's own fabric field exactly (normalized). A style genuinely named
+// with a dash is never touched, and nothing is lost: the text removed is
+// already stored in s.fabric. Idempotent, so a second device that syncs the
+// repaired names simply finds nothing to do.
+//
+// Waits for the first cloud pull, like the other repairs here, so it renames
+// the MERGED copy rather than a stale local one.
+function styleFabricNameFix(){
+  if (!window.__sbSyncDone) { setTimeout(styleFabricNameFix, 2500); return; }
+  try {
+    if (STATE.fabNameFix) return;
+    const undo = [];
+    ((window.STATE && STATE.styles) || []).forEach(function(st){
+      if (!st || !st.name || !st.fabric) return;
+      const m = String(st.name).match(/^(.+?)\s+[—–-]\s+(.+)$/);
+      if (!m) return;
+      const base = m[1].trim(), tail = m[2].trim();
+      if (!base || !tail) return;
+      if (styleNameKey(tail) !== styleNameKey(st.fabric)) return;   // not its own material — leave it alone
+      undo.push({ id: st.id, was: st.name });
+      st.name = base;
+      if (!st.family) st.family = styleNameKey(base);
+      st.updatedAt = new Date().toISOString();
+    });
+    STATE.fabNameFix = 1;
+    save();
+    if (!undo.length) return;
+    try { renderStyles(); } catch(e){}
+    try { populateStyleSelects(); } catch(e){}
+    try { logActivity('Moved the fabric out of ' + undo.length + ' style name' + (undo.length>1?'s':'') + ' — it reads from the Fabric column now'); } catch(e){}
+    window.__fabNameUndo = undo;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + var(--sab,0px));z-index:9500;background:var(--ink);color:var(--white);padding:10px 14px;display:flex;gap:12px;align-items:center;font-size:11px';
+    bar.innerHTML = 'Fabric moved out of ' + undo.length + ' style name' + (undo.length>1?'s':'') + '. <button class="btn btn-ghost btn-sm" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="styleFabricNameUndo(this)">Undo</button>';
+    document.body.appendChild(bar);
+    setTimeout(function(){ if (bar.parentNode) bar.remove(); }, 30000);
+  } catch(e){}
+}
+function styleFabricNameUndo(btn){
+  const u = window.__fabNameUndo; if (!u) return;
+  u.forEach(function(e){
+    const st = ((window.STATE && STATE.styles) || []).find(function(x){ return x.id === e.id; });
+    if (st) { st.name = e.was; st.updatedAt = new Date().toISOString(); }
+  });
+  save();
+  try { renderStyles(); } catch(e){}
+  try { populateStyleSelects(); } catch(e){}
+  try { logActivity('Style-name repair undone — the fabric is back in the name'); } catch(e){}
+  window.__fabNameUndo = null;
+  if (btn && btn.parentNode) btn.parentNode.remove();
+  try { showToast('Names restored', 'success'); } catch(e){}
+}
+
 function fitNotesMigrate(){
   if (!window.__sbSyncDone) { setTimeout(fitNotesMigrate, 2500); return; }
   try {
@@ -24070,6 +24128,8 @@ function loadRevenueGoals() {
         (STATE.pom[sid] || []).forEach(function(p){ if (p && p.rounds) pomMirrorMeasured(p); });
       });
     } catch(e){}
+    // The fabric comes out of the style name once the first cloud pull settles.
+    try { styleFabricNameFix(); } catch(e){}
     // Fit notes fold into style records once the first cloud pull has settled.
     try { fitNotesMigrate(); } catch(e){}
     try { var fb = document.getElementById('foot-build'); if (fb) fb.textContent = window.VENIA_BUILD || '—'; } catch(e){}
