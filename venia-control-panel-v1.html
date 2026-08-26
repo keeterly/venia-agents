@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '278';
+  const BUILD = '279';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3526,6 +3526,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <span id="bulk-count" style="font-size:10px;letter-spacing:1px">0 selected</span>
         <div style="height:14px;width:1px;background:rgba(255,255,255,.2)"></div>
         <button onclick="bulkAdvanceStatus()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↑ Advance Stage</button>
+        <button onclick="bulkRevertStatus()" title="Step the selected styles back one stage" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↓ Move Back</button>
         <button onclick="bulkDuplicate()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⊕ Duplicate</button>
         <button onclick="bulkSetSeason()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">◇ Move to Season</button>
         <button id="bulk-archive-btn" onclick="bulkArchive()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⌸ Archive</button>
@@ -3974,6 +3975,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;padding:0 14px 12px">
       <button class="btn btn-ghost btn-sm" id="dp-advance-btn" style="font-size:10px;padding:8px 4px;text-align:center;border-color:var(--ink)" onclick="dpAdvanceStage()">↑ Advance</button>
+      <button class="btn btn-ghost btn-sm" id="dp-back-btn" style="font-size:10px;padding:8px 4px;text-align:center" onclick="dpRevertStage()" title="Step this style back one stage">↓ Back</button>
       <button class="btn btn-danger btn-sm perm-archive" style="font-size:10px;padding:8px 4px;text-align:center" onclick="dpArchive()">Archive</button>
       <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:8px 4px;text-align:center" onclick="closeDp()">✕ Close</button>
     </div>
@@ -6040,6 +6042,26 @@ function bulkAdvanceStatus() {
   logActivity(`Bulk advance: ${advanced} styles`);
 }
 
+// Advancing was one-way — an accidental bulk advance had no way home except
+// editing every style by hand. Same shape as bulkAdvanceStatus, one step back.
+function bulkRevertStatus() {
+  if (!BULK_SELECTED.size) return;
+  const stages = ['concept','design','sms','development','production','active'];
+  let moved = 0, atStart = 0;
+  BULK_SELECTED.forEach(id => {
+    const s = STATE.styles.find(x=>x.id===id);
+    if (!s) return;
+    const idx = stages.indexOf(s.status);
+    if (idx > 0) { s.status = stages[idx-1]; s.updatedAt = new Date().toISOString(); moved++; }
+    else if (idx === 0) atStart++;
+  });
+  save();
+  BULK_SELECTED.clear();
+  renderStyles();
+  toast(moved ? (moved + ' style' + (moved>1?'s':'') + ' moved back a stage') : 'Already at the first stage', moved ? 'success' : 'info');
+  if (moved) logActivity('Bulk stage revert: ' + moved + ' styles');
+}
+
 function bulkDuplicate() {
   if (!BULK_SELECTED.size) return;
   const newIds = [];
@@ -7647,6 +7669,23 @@ function closeDp() {
 }
 
 function dpEdit() { if(STATE.currentStyleId) { closeDp(); openStyleModal(STATE.currentStyleId); } }
+function dpRevertStage() {
+  const id = STATE.currentStyleId;
+  const s = STATE.styles.find(x=>x.id===id);
+  if (!s) return;
+  const stages = ['concept','design','sms','development','production','active','sale'];
+  const idx = stages.indexOf(s.status);
+  if (idx <= 0) { toast('Already at the first stage'); return; }
+  const prev = s.status;
+  s.status = stages[idx-1];
+  s.updatedAt = new Date().toISOString();
+  save();
+  logActivity(`${s.name}: ${prev} → ${s.status} (moved back)`);
+  toast(`↓ ${s.name} → ${s.status}`);
+  openDp(id);
+  renderStyles();
+}
+
 function dpAdvanceStage() {
   const id = STATE.currentStyleId;
   const s = STATE.styles.find(x=>x.id===id);
@@ -18178,6 +18217,11 @@ function agentImageActionSpec() {
     + 'Emit ONE fenced json block:\n'
     + '{"type":"add_styles","season":"SS27","styles":[{"name":"ISOLDE TOP","category":"Tops","gender":"womens","retail":240,"wholesale":96,"colors":"Ivory, Black","sizes":"XS,S,M,L,XL","fabric":"Silk crepe de chine","drop":"","status":"concept","desc":"One line of design intent"}]}\n'
     + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple colorways of ONE garment are ONE style with the colors listed in "colors" — never one style per colorway. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
+    + '\n\nACTION — update_styles: CHANGE fields on styles that ALREADY exist (status/stage, season, prices, vendor, drop, fabric…). Use this for "move everything back to SMS", "set the FW26 drop date", "put these three into production". Never use add_styles for an existing style.\n'
+    + 'Emit ONE fenced json block:\n'
+    + '{"type":"update_styles","match":{"season":"SS27","status":"development"},"set":{"status":"sms"}}\n'
+    + 'or target specific ones: {"type":"update_styles","names":["ISOLDE TOP","HAMLET CLOAK"],"set":{"drop":"2027-02-01"}}\n'
+    + 'Rules for update_styles: give EITHER "names" (style names/codes as they appear in the PLM Context) OR "match" (any of season / status / category / gender) — an empty match is refused, so say what to scope it to rather than guessing. "set" may contain: status, season, category, gender, drop, vendor, retail, wholesale, cogs, colors, sizes, fabric, fabric2, desc, lead. "status" ∈ concept/design/sms/development/production/active/sale (SMS = "sms"). Only include keys you are actually changing; blank values are ignored so a field is never wiped by accident. The change is reversible with one Undo, so bulk edits are safe to make.'
     + '\n\nACTION — generate_care_label: recommend a garment care label from the fibre content + construction of a style. Choose the care from what the fibres actually need (e.g. wool/silk/cashmere → hand wash cold or dry clean, no tumble; cotton/linen → machine wash warm; delicate trims/linings → gentler). "codes" MUST be drawn ONLY from this fixed set — one per family, no invented codes:\n'
     + 'wash: wash.machine.30 | wash.machine.40 | wash.machine.60 | wash.gentle.30 | wash.hand | wash.no\n'
     + 'bleach: bleach.any | bleach.nonchlorine | bleach.no\n'
@@ -18311,6 +18355,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
   if (action.type === 'add_styles') return agentRunAddStyles(action, chatBody);
+  if (action.type === 'update_styles') return agentRunUpdateStyles(action, chatBody);
   if (action.type === 'apply_style_specs') return agentRunApplyStyleSpecs(action, chatBody);
   if (action.type === 'add_to_brainstorm') return agentRunAddToBrainstorm(action, chatBody);
   if (action.type === 'log_coverage') return agentRunLogCoverage(action, chatBody);
@@ -18777,6 +18822,95 @@ function agentRunAddStyles(action, chatBody) {
   chatBody.appendChild(el);
   chatBody.scrollTop = chatBody.scrollHeight;
 }
+// Execute update_styles: change fields on EXISTING styles, by name or filter.
+// Every write snapshots the previous value so one Undo restores all of them —
+// which is what makes a 30-style bulk edit safe to attempt.
+const AGENT_STYLE_SET_KEYS = ['status','season','category','gender','drop','vendor','retail','wholesale','cogs','colors','sizes','fabric','fabric2','desc','lead'];
+function agentRunUpdateStyles(action, chatBody) {
+  const all = (window.STATE && STATE.styles) || [];
+  const set = (action && action.set) || {};
+  const keys = Object.keys(set).filter(k => AGENT_STYLE_SET_KEYS.includes(k) && String(set[k] ?? '').trim() !== '');
+  if (!keys.length) { appendAgentNote(chatBody, 'Tell me what to change — e.g. “move the SS27 styles back to SMS”.'); return; }
+
+  // Resolve the target set: explicit names, else a filter. An empty filter is
+  // refused — "change everything" must be asked for, never inferred.
+  let targets = [];
+  const names = Array.isArray(action.names) ? action.names.filter(Boolean) : [];
+  if (names.length) {
+    const want = names.map(n => styleNameKey(n));
+    targets = all.filter(x => want.includes(styleNameKey(x.name)) || names.some(n => String(x.styleId||'').toLowerCase() === String(n).toLowerCase()));
+  } else {
+    const m = (action && action.match) || {};
+    const f = ['season','status','category','gender'].filter(k => String(m[k]||'').trim() !== '');
+    if (!f.length) { appendAgentNote(chatBody, 'Which styles should I change? Give me a season, a stage, or the style names — I won’t change the whole line on a guess.'); return; }
+    targets = all.filter(x => f.every(k => String(x[k]||'').toLowerCase() === String(m[k]).toLowerCase()));
+  }
+  targets = targets.filter(x => x && x.status !== 'archived');
+  if (!targets.length) { appendAgentNote(chatBody, 'Nothing matched that — check the season or stage name against the styles in PLM.'); return; }
+
+  const norm = (k, v) => {
+    if (k === 'status') { const t = String(v).toLowerCase(); return AGENT_STYLE_STATUS.includes(t) ? t : null; }
+    if (k === 'category') return AGENT_STYLE_CATS.includes(v) ? v : null;
+    if (k === 'gender') { const t = String(v).toLowerCase(); return ['womens','mens','unisex'].includes(t) ? t : null; }
+    if (['retail','wholesale','cogs','lead'].includes(k)) { const n = parseFloat(v); return isNaN(n) ? null : n; }
+    return String(v).trim();
+  };
+  const undo = [];   // [{id, key, was}]
+  let changed = 0;
+  targets.forEach(st => {
+    let touched = false;
+    keys.forEach(k => {
+      const v = norm(k, set[k]);
+      if (v === null || v === undefined) return;
+      if (String(st[k] ?? '') === String(v)) return;     // already there — not a change
+      undo.push({ id: st.id, key: k, was: st[k] });
+      st[k] = v; touched = true;
+    });
+    if (touched) { st.updatedAt = new Date().toISOString(); changed++; }
+  });
+  if (!changed) { appendAgentNote(chatBody, 'Those styles are already set that way — nothing to change.'); return; }
+  save();
+  try { buildSkus(); } catch (e) {}
+  try { logActivity('PLM: ' + changed + ' style(s) updated by agent (' + keys.join(', ') + ')'); } catch (e) {}
+  try { if (STATE.currentPage === 'styles' || STATE.currentPage === 'plm') renderPage(STATE.currentPage); } catch (e) {}
+
+  window.__agUndoStyleEdits = window.__agUndoStyleEdits || {};
+  const token = 'U' + Date.now().toString(36);
+  window.__agUndoStyleEdits[token] = undo;
+  const what = keys.map(k => k + ' → ' + set[k]).join(', ');
+  const sample = targets.slice(0, 6).map(t => escHtml(t.name)).join(', ');
+  const el = document.createElement('div');
+  el.className = 'ag-msg from-agent';
+  el.innerHTML = '<div class="ag-msg-meta">Agent</div><div class="ag-msg-bubble">'
+    + '<div style="font-size:11px;color:var(--ink);margin-bottom:6px"><strong>' + changed + ' style' + (changed>1?'s':'') + ' updated</strong> — ' + escHtml(what) + '</div>'
+    + '<div style="font-size:10px;color:var(--muted)">' + sample + (targets.length > 6 ? ' +' + (targets.length-6) + ' more' : '') + '</div>'
+    + '<div style="display:flex;gap:8px;margin-top:9px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="cpGoto(\'plm\');setTimeout(function(){goTo(\'styles\',document.querySelector(\'[data-page=styles]\'))},120)">Open Styles</button>'
+    + '<button class="btn btn-ghost btn-sm" onclick="agentUndoStyleEdits(\'' + token + '\',this)">Undo</button>'
+    + '</div></div>';
+  chatBody.appendChild(el);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+// Restore every field this edit touched to what it was before.
+window.agentUndoStyleEdits = function (token, btn) {
+  const list = (window.__agUndoStyleEdits || {})[token] || [];
+  let n = 0;
+  list.forEach(u => {
+    const st = ((window.STATE && STATE.styles) || []).find(x => x.id === u.id);
+    if (!st) return;
+    if (u.was === undefined) delete st[u.key]; else st[u.key] = u.was;
+    n++;
+  });
+  if (n) {
+    save();
+    try { buildSkus(); } catch (e) {}
+    try { renderPage(STATE.currentPage); } catch (e) {}
+    try { logActivity('PLM: agent style edit undone (' + n + ' field change(s))'); } catch (e) {}
+  }
+  delete (window.__agUndoStyleEdits || {})[token];
+  if (btn) { const b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Reverted.</div>'; }
+};
+
 // Undo a bulk creation — removes exactly the records that batch created.
 window.agentUndoStyles = function (idCsv, btn) {
   const ids = new Set(String(idCsv || '').split(',').filter(Boolean));
