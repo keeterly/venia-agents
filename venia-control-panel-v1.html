@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '277';
+  const BUILD = '278';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2302,7 +2302,8 @@ body{padding-top:44px;box-sizing:border-box;}
                 <strong>1.</strong> APIs &amp; Services → <strong>Library</strong> → enable <strong>Google Calendar API</strong>, <strong>Google Drive API</strong> and <strong>Google Picker API</strong>.<br>
                 <strong>2.</strong> → <strong>Clients</strong> → create a <strong>Web application</strong> client. Authorized JavaScript origin: <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com</code>. Paste the Client ID above.<br>
                 <strong>3.</strong> On the consent screen add scopes <code style="font-family:'DM Mono',monospace">calendar.events</code> (planner writes events) and <code style="font-family:'DM Mono',monospace">drive.file</code> (Eni reads only the files you pick).<br>
-                <strong>4.</strong> → <strong>Credentials</strong> → <strong>Create credentials → API key</strong>, paste it in the Picker field below, and restrict it to those APIs + your domain.<br>
+                <strong>4.</strong> → <strong>Credentials</strong> → <strong>Create credentials → API key</strong> (an <code style="font-family:'DM Mono',monospace">AIza…</code> string — NOT the Client ID). Paste it in the Picker field below.<br>
+                <strong>If you see “The API developer key is invalid”:</strong> that key exists but Google won't accept it here. Open the key in Credentials and check two things — under <em>API restrictions</em> allow <strong>Google Picker API</strong> and <strong>Google Drive API</strong> (or set None), and under <em>Website restrictions</em> add <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com/*</code>. Newly enabled APIs can take a minute.<br>
                 Both values are public by design (safe in the browser) — the API key is not a secret and grants nothing on its own.</div>
             </details>
             <div style="margin-top:14px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
@@ -12260,6 +12261,16 @@ function deleteComment(styleId, commentId) {
 function driveApiKey(){ return (STATE.googleApiKey || localStorage.getItem('venia-google-apikey') || '').trim(); }
 window.setDriveApiKey = function(v){
   v = String(v || '').trim();
+  // Catch the classic paste mix-up before Google's opaque "developer key is
+  // invalid" dialog does: a Picker key is an AIza… string, not a client ID.
+  if (v && /apps\.googleusercontent\.com$/i.test(v)) {
+    showToast('That\'s the OAuth Client ID — the Picker key is a different value starting with AIza…', 'warning');
+    return;
+  }
+  if (v && !/^AIza[0-9A-Za-z_\-]{20,}$/.test(v)) {
+    showToast('That doesn\'t look like a Google API key (they start with AIza…). Credentials → Create credentials → API key.', 'warning');
+    return;
+  }
   STATE.googleApiKey = v || null;
   try { localStorage.setItem('venia-google-apikey', v); } catch(e){}
   save(); showToast(v ? 'API key saved' : 'API key cleared', 'success');
@@ -12300,8 +12311,28 @@ function loadPicker(){
     document.head.appendChild(sc);
   });
 }
+// Ask Drive whether this key/token pair actually works, so a misconfigured
+// project produces a sentence you can act on instead of Google's modal.
+async function drivePreflight(tok){
+  try {
+    const r = await fetch('https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)&supportsAllDrives=true&key=' + encodeURIComponent(driveApiKey()), {
+      headers: { Authorization: 'Bearer ' + tok } });
+    if (r.ok) return '';
+    let j = {}; try { j = await r.json(); } catch(_){}
+    const m = String((j.error && j.error.message) || ('HTTP ' + r.status));
+    if (/API key not valid|API_KEY_INVALID|developer key/i.test(m))
+      return 'That Picker API key is rejected by Google. In Cloud Console → Credentials, open the key and either remove restrictions or allow the Google Picker API + Google Drive API, and add https://creator.veniacollection.com as an allowed referrer.';
+    if (/has not been used|is disabled|SERVICE_DISABLED|not enabled/i.test(m))
+      return 'Enable the Google Drive API and Google Picker API for this project (APIs & Services → Library), then try again — new APIs take a minute to activate.';
+    if (/referer|referrer|blocked/i.test(m))
+      return 'The API key is restricted to other websites. Add https://creator.veniacollection.com to its allowed HTTP referrers.';
+    return 'Google rejected the request — ' + m;
+  } catch(e){ return ''; }   // network hiccup: let the picker try anyway
+}
 window.drivePick = async function(opts){
   const tok = await driveTokenSmart();
+  const problem = await drivePreflight(tok);
+  if (problem) { showToast(problem, 'error'); throw new Error(problem); }
   await loadPicker();
   return new Promise((resolve) => {
     let view;
