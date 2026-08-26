@@ -1698,7 +1698,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '275';
+  const BUILD = '276';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2298,14 +2298,20 @@ body{padding-top:44px;box-sizing:border-box;}
             </div>
             <details style="margin-top:8px">
               <summary style="font-size:10px;color:var(--muted);cursor:pointer;letter-spacing:.5px">How to connect →</summary>
-              <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.5">Google Cloud → APIs &amp; Services → <strong>Clients</strong> → create a <strong>Web application</strong> client with authorized JS origin <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com</code>. Enable the <strong>Calendar API</strong> and add the <code style="font-family:'DM Mono',monospace">calendar.events</code> scope (read + write, so the planner can add events). This ID is public (safe in the browser).</div>
+              <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.6">In <strong>Google Cloud Console</strong>, one project covers both Calendar and Drive:<br>
+                <strong>1.</strong> APIs &amp; Services → <strong>Library</strong> → enable <strong>Google Calendar API</strong>, <strong>Google Drive API</strong> and <strong>Google Picker API</strong>.<br>
+                <strong>2.</strong> → <strong>Clients</strong> → create a <strong>Web application</strong> client. Authorized JavaScript origin: <code style="font-family:'DM Mono',monospace">https://creator.veniacollection.com</code>. Paste the Client ID above.<br>
+                <strong>3.</strong> On the consent screen add scopes <code style="font-family:'DM Mono',monospace">calendar.events</code> (planner writes events) and <code style="font-family:'DM Mono',monospace">drive.file</code> (Eni reads only the files you pick).<br>
+                <strong>4.</strong> → <strong>Credentials</strong> → <strong>Create credentials → API key</strong>, paste it in the Picker field below, and restrict it to those APIs + your domain.<br>
+                Both values are public by design (safe in the browser) — the API key is not a secret and grants nothing on its own.</div>
             </details>
             <div style="margin-top:14px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
-              <div class="fg" style="flex:1"><label class="fl" for="set-google-pickerkey">Picker API key (Drive uploads &amp; attach — same Cloud project)</label>
+              <div class="fg" style="flex:1"><label class="fl" for="set-google-pickerkey">Picker API key — required for Drive attach in Eni (same Cloud project)</label>
                 <input class="fi fi-mono" id="set-google-pickerkey" placeholder="AIza…" style="font-size:10px">
               </div>
               <button class="btn btn-gold btn-sm" onclick="setDriveApiKey(document.getElementById('set-google-pickerkey').value)">Save</button>
             </div>
+            <div id="set-drive-status" style="margin-top:8px;font-size:10px;letter-spacing:.5px"></div>
           </div>
 
           <!-- News API -->
@@ -12257,6 +12263,7 @@ window.setDriveApiKey = function(v){
   STATE.googleApiKey = v || null;
   try { localStorage.setItem('venia-google-apikey', v); } catch(e){}
   save(); showToast(v ? 'API key saved' : 'API key cleared', 'success');
+  try { setDriveStatus(); } catch(e){}
   if (STATE.currentPage === 'gdrive') renderGDrivePage();
 };
 function driveReady(){ return !!(googleClientId() && driveApiKey()); }
@@ -16404,7 +16411,8 @@ function setGoogleClient() {
   if (typeof STATE !== 'undefined' && STATE) { STATE.googleClientId = val; if (typeof save === 'function') save(); }   // synced
   localStorage.setItem('venia-google-client-id', val);                                                                  // fast local read
   setGoogleDot();
-  toast('Google Client ID saved & synced — open Plan → Schedule → Connect calendar', 'success');
+  try { setDriveStatus(); } catch(e){}
+  toast('Google Client ID saved & synced' + (typeof driveApiKey==='function' && driveApiKey() ? ' — Drive attach is ready' : ' — add the Picker API key below for Drive'), 'success');
 }
 function setGoogleDot() {
   const has = !!googleClientId();
@@ -16475,10 +16483,42 @@ function setSaveContact() {
   document.getElementById('set-add-contact-form').style.display='none';
   setRenderContacts(); toast('Contact saved to PR → Editors & Stylists');
 }
+// Live Drive readiness in Settings: which of the two values is still missing,
+// and a real end-to-end test rather than "looks configured".
+function setDriveStatus(){
+  const el = document.getElementById('set-drive-status'); if (!el) return;
+  const hasId  = typeof googleClientId === 'function' && !!googleClientId();
+  const hasKey = typeof driveApiKey === 'function' && !!driveApiKey();
+  if (hasId && hasKey){
+    el.innerHTML = '<span style="color:var(--green);font-weight:700">✓ Drive ready</span>'
+      + ' <span style="color:var(--muted)">— the ▲ button in Eni can read files you pick.</span>'
+      + ' <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="driveTestConnection()">Test</button>';
+  } else {
+    const miss = !hasId && !hasKey ? 'Client ID and Picker API key' : !hasId ? 'OAuth Client ID' : 'Picker API key';
+    el.innerHTML = '<span style="color:var(--amber);font-weight:700">Still needed: ' + miss + '</span>'
+      + ' <span style="color:var(--muted)">— Eni’s ▲ Drive attach stays off until both are saved.</span>';
+  }
+}
+// Prove it works: opens the picker; picking anything confirms OAuth, the API
+// key, the enabled APIs and the drive.file scope in one shot.
+window.driveTestConnection = async function(){
+  try {
+    showToast('Pick any file to test the connection…','info');
+    const doc = await window.drivePick();
+    if (!doc) { showToast('Test cancelled','info'); return; }
+    const got = await window.driveReadDoc(doc);
+    const n = got.kind === 'image' ? 'image' : (String(got.text||'').split('\n').length + ' lines');
+    showToast('✓ Drive works — read “' + doc.name + '” (' + n + ')','success');
+  } catch(e){
+    const m = String(e && e.message || e);
+    showToast('Drive test failed — ' + m + (/API|403|not enabled/i.test(m) ? ' · check Drive API + Picker API are enabled' : ''), 'error');
+  }
+};
 function setUpdateDataSummary() {
   const el = document.getElementById('set-data-summary');
   if (!el) return;
   try { if (window.agRenderAgents) window.agRenderAgents(); } catch(e){}
+  try { setDriveStatus(); } catch(e){}
   const db = dbRead();
   const summary = [
     ['Leads', (db.leads||[]).length],
@@ -30919,8 +30959,15 @@ async function skFilePick(input){
 // conversation, so Eni can act on it (create styles, read a line list, cost a
 // sheet). drive.file scope means she only ever sees files you pick.
 async function skDrivePick(){
-  if (typeof driveReady !== 'function' || !driveReady()){
-    if (typeof showToast==='function') showToast('Connect Google Drive first — Settings → API Keys (Client ID + API key)','warning');
+  // Say exactly WHICH credential is missing — "connect Drive first" sends you
+  // hunting through two different Cloud settings.
+  const hasId  = typeof googleClientId === 'function' && !!googleClientId();
+  const hasKey = typeof driveApiKey === 'function' && !!driveApiKey();
+  if (!hasId || !hasKey){
+    const miss = !hasId && !hasKey ? 'OAuth Client ID and Picker API key'
+               : !hasId ? 'OAuth Client ID' : 'Picker API key';
+    if (typeof showToast==='function') showToast('Drive needs your ' + miss + ' — Settings → API Keys', 'warning');
+    if (typeof cpGoto === 'function') { cpGoto('set'); setTimeout(function(){ const el=document.getElementById(!hasId?'set-google-clientid':'set-google-pickerkey'); if (el){ el.scrollIntoView({block:'center'}); el.focus(); } }, 400); }
     return;
   }
   let doc;
