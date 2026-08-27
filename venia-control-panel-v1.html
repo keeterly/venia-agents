@@ -1727,6 +1727,10 @@ body{padding-top:44px;box-sizing:border-box;}
     </div>
   </div>
 
+  <div style="margin-top:18px">
+    <a href="?portal" style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a8a8a;text-decoration:none;border-bottom:1px solid #3a3a3a;padding-bottom:2px">Sales team sign-in →</a>
+  </div>
+
   <div class="vag-footer" id="vag-footer">© VENIA Collection</div>
 </div>
 <script>
@@ -1734,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '298';
+  const BUILD = '299';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1759,6 +1763,13 @@ body{padding-top:44px;box-sizing:border-box;}
   // Freelance sales agent (?agent=TOKEN): her own lead portal. The token is
   // the credential AND the scope — the workspace never loads in this mode.
   window.VENIA_AGENT = new URLSearchParams(location.search).get('agent') || null;
+  // A portal person with a real login has no token in the URL — her session
+  // lives in this browser. ?portal is the front door for signing in. Both put
+  // the app in portal mode, which is what keeps the workspace out of reach:
+  // every existing VENIA_AGENT guard applies unchanged.
+  try { window.__agSession = localStorage.getItem('venia_ag_session') || ''; } catch (e) { window.__agSession = ''; }
+  if (!window.VENIA_AGENT && window.__agSession) window.VENIA_AGENT = 'session';
+  if (!window.VENIA_AGENT && /[?&]portal(?:[=&]|$)/.test(location.search)) window.VENIA_AGENT = 'login';
   if (window.VENIA_AGENT) {
     $('venia-auth-gate').classList.add('hidden');
     document.documentElement.classList.add('share-mode');
@@ -2569,7 +2580,7 @@ body{padding-top:44px;box-sizing:border-box;}
               <div style="font-size:11px;font-weight:700;color:var(--ink)">People &amp; access</div>
               <button class="btn btn-ghost btn-sm" onclick="agNewAgent()">+ Add a person</button>
             </div>
-            <div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:12px">Everyone outside the two of you gets one link — no login, and <strong>never the workspace itself</strong>. What they can reach is decided here and enforced on the server, so a link can only ever return what its group allows: cost, margin, factory and production data are not sendable to a portal at all. New leads still wait for your validation before entering the CRM. Revoke any time.</div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:12px">Everyone outside the two of you signs in with their own email and password at <strong>creator.veniacollection.com/?portal</strong> — and <strong>never receives the workspace itself</strong>. What they can reach is decided here and enforced on the server, so an account can only ever return what its group allows: cost, margin, factory and production data are not sendable to a portal at all. New leads still wait for your validation before entering the CRM. Revoke any time.</div>
             <div id="set-agents" style="font-size:11px;color:var(--muted)">Loading…</div>
           </div>
           <div style="margin-top:20px;padding:16px;background:var(--bg-off);border:1px solid var(--border)">
@@ -27180,30 +27191,151 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.agNorm = agNorm;
   const AG_STAGES = [['new','New'],['contacted','Contacted'],['meeting','Meeting booked'],['intent','Order intent']];
   function agEsc(x){ return String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  // ── Credentials ─────────────────────────────────────────────────────────
+  // Two ways in, one identity. `session` is a real email + password login held
+  // in this browser; `token` is the original emailed link, still honoured so
+  // existing links keep working. The server resolves both to the same person.
+  const AG_SESSION_KEY = 'venia_ag_session';
+  function agSession(){ try { return localStorage.getItem(AG_SESSION_KEY) || ''; } catch(e){ return ''; } }
+  function agSetSession(v){ try { v ? localStorage.setItem(AG_SESSION_KEY, v) : localStorage.removeItem(AG_SESSION_KEY); } catch(e){} window.__agSession = v || ''; }
+  function agLinkToken(){
+    const v = window.VENIA_AGENT;
+    return (v && v !== 'session' && v !== 'login') ? v : '';
+  }
+  function agCred(body){
+    const s = agSession();
+    return s ? Object.assign({ session: s }, body) : Object.assign({ token: agLinkToken() }, body);
+  }
   async function agCall(body){
     const c = sb();
     if (!c) throw new Error('No connection');
     const r = await c.functions.invoke('agent-portal', { body });
-    if (r.error) throw new Error(r.error.message || 'request failed');
-    if (r.data && r.data.error) throw new Error(r.data.error);
+    if (r.error) {
+      // functions.invoke collapses every non-2xx into the same opaque message.
+      // The real sentence — and the reauth flag — are in the response body, so
+      // read it rather than showing "non-2xx status code" to a human.
+      let msg = r.error.message || 'request failed', reauth = false;
+      try {
+        const j = r.error.context && r.error.context.json ? await r.error.context.json() : null;
+        if (j && j.error) { msg = j.error; reauth = !!j.reauth; }
+      } catch(e){}
+      const err = new Error(msg); err.reauth = reauth; throw err;
+    }
+    if (r.data && r.data.error) { const err = new Error(r.data.error); err.reauth = !!r.data.reauth; throw err; }
     return r.data || {};
   }
   window.agentBoot = async function(){
-    const token = window.VENIA_AGENT; if (!token) return;
+    if (!window.VENIA_AGENT) return;
     if (window.__agBooted) return; window.__agBooted = true;
     if (!document.getElementById('ag-root')) {
       document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff;flex:1 1 auto;width:100%"></div>';
     }
+    if (!agSession() && !agLinkToken()) { agLoginRender(); return; }
     document.getElementById('ag-root').innerHTML =
-      '<div style="min-height:60vh;display:flex;align-items:center;justify-content:center;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#888">Loading your leads…</div>';
+      '<div style="min-height:60vh;display:flex;align-items:center;justify-content:center;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#888">Signing you in…</div>';
     let me;
-    try { me = await agCall({ token, action:'me' }); }
+    try { me = await agCall(agCred({ action:'me' })); }
     catch(e){
+      // An expired or ended session is not a broken link — it just means sign
+      // in again. Only a dead LINK is a dead end, because she has no password
+      // to fall back on in that case.
+      if (agSession()){ agSetSession(''); agLoginRender(e.message || ''); return; }
       shareFail('Link not active', 'This portal link is no longer valid. Ask VENIA for a fresh link.');
       return;
     }
-    window.__agToken = token; window.__agMe = me;
+    window.__agToken = agLinkToken(); window.__agMe = me;
+    if (me.mustChange && agSession()) { agPwRender(true); return; }
     agRender();
+  };
+
+  // ── Sign in ─────────────────────────────────────────────────────────────
+  const AG_DARK_IN = 'width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none;font-family:inherit';
+  function agShell(inner){
+    const root = document.getElementById('ag-root'); if (!root) return;
+    root.style.background = '#0a0a0a';
+    root.innerHTML =
+      '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));background:#0a0a0a;color:#fff;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif">'
+      + '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:30px;letter-spacing:8px;font-weight:700">VENIA</div>'
+      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#c9a96e;margin-top:8px">Sales agent portal</div>'
+      + inner + '</div>';
+  }
+  window.agLoginRender = function(msg){
+    agShell(
+      '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Sign in with the email VENIA set up for you.</div>'
+      + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
+      +   '<input id="ag-li-email" type="email" autocomplete="username" placeholder="Your email" style="' + AG_DARK_IN + '">'
+      +   '<input id="ag-li-pw" type="password" autocomplete="current-password" placeholder="Password" onkeydown="if(event.key===\'Enter\')agDoLogin()" style="' + AG_DARK_IN + '">'
+      +   '<button onclick="agDoLogin()" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Sign in</button>'
+      + '</div>'
+      + '<div id="ag-li-err" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center;max-width:300px">' + (msg ? agEsc(msg) : '') + '</div>'
+      + '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">Forgotten it? VENIA can set you a new password — there is no reset email.</div>'
+    );
+    const e = document.getElementById('ag-li-email'); if (e) e.focus();
+  };
+  window.agDoLogin = async function(){
+    const err = document.getElementById('ag-li-err');
+    const email = ((document.getElementById('ag-li-email')||{}).value||'').trim();
+    const pw = (document.getElementById('ag-li-pw')||{}).value||'';
+    if (!email || !pw){ if (err) err.textContent = 'Enter your email and password.'; return; }
+    if (err) err.textContent = 'Signing in…';
+    try {
+      const r = await agCall({ action:'login', email, password: pw });
+      agSetSession(r.session);
+      window.__agMe = { agent: r.agent, scopes: r.scopes, leads: [], mustChange: r.mustChange };
+      window.__agToken = '';
+      // Drop ?portal / ?agent from the address bar: the credential is the
+      // session now, and a URL she might paste to someone should carry nothing.
+      try { history.replaceState(null, '', location.pathname); } catch(e){}
+      if (r.mustChange) { agPwRender(true); return; }
+      window.__agMe = await agCall(agCred({ action:'me' }));
+      const root = document.getElementById('ag-root'); if (root) root.style.background = '#fff';
+      agRender();
+    } catch(e){ if (err) err.textContent = e.message || 'Could not sign in.'; }
+  };
+  window.agLogout = async function(){
+    try { await agCall(agCred({ action:'logout' })); } catch(e){}
+    agSetSession('');
+    window.__agMe = null; window.__agCrm = null; window.__agLine = null;
+    agLoginRender('You have been signed out.');
+  };
+
+  // ── Password ────────────────────────────────────────────────────────────
+  // `forced` is the first sign-in after VENIA set a password: there is no way
+  // past this screen except choosing her own, so the one the founder typed
+  // (and possibly sent over a messaging app) stops being the live credential.
+  window.agPwRender = function(forced, msg){
+    agShell(
+      '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">'
+      + (forced ? 'Choose your own password before you continue. Only you will know it.' : 'Change your password.') + '</div>'
+      + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
+      +   '<input id="ag-pw-cur" type="password" autocomplete="current-password" placeholder="' + (forced ? 'The password VENIA gave you' : 'Current password') + '" style="' + AG_DARK_IN + '">'
+      +   '<input id="ag-pw-new" type="password" autocomplete="new-password" placeholder="New password — 8 characters or more" style="' + AG_DARK_IN + '">'
+      +   '<input id="ag-pw-new2" type="password" autocomplete="new-password" placeholder="New password again" onkeydown="if(event.key===\'Enter\')agDoPw(' + (forced?'true':'false') + ')" style="' + AG_DARK_IN + '">'
+      +   '<button onclick="agDoPw(' + (forced?'true':'false') + ')" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Save password</button>'
+      + (forced ? '' : '<button onclick="agBackToPortal()" style="width:100%;min-height:44px;background:none;color:#8a8a8a;border:1px solid #333;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer">Cancel</button>')
+      + '</div>'
+      + '<div id="ag-pw-err" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center;max-width:300px">' + (msg ? agEsc(msg) : '') + '</div>'
+    );
+    const e = document.getElementById('ag-pw-cur'); if (e) e.focus();
+  };
+  window.agBackToPortal = function(){
+    const root = document.getElementById('ag-root'); if (root) root.style.background = '#fff';
+    agRender();
+  };
+  window.agDoPw = async function(forced){
+    const err = document.getElementById('ag-pw-err');
+    const cur = (document.getElementById('ag-pw-cur')||{}).value||'';
+    const a = (document.getElementById('ag-pw-new')||{}).value||'';
+    const b = (document.getElementById('ag-pw-new2')||{}).value||'';
+    if (a.length < 8){ if (err) err.textContent = 'Choose at least 8 characters.'; return; }
+    if (a !== b){ if (err) err.textContent = 'The two new passwords do not match.'; return; }
+    if (err) err.textContent = 'Saving…';
+    try {
+      await agCall(agCred({ action:'password', current: cur, next: a }));
+      window.__agMe = await agCall(agCred({ action:'me' }));
+      const root = document.getElementById('ag-root'); if (root) root.style.background = '#fff';
+      agRender();
+    } catch(e){ if (err) err.textContent = e.message || 'Could not save.'; }
   };
   // The portal must open even if the app's own sync boot path never runs
   // (no founder session, cold cache): poll briefly for the Supabase client.
@@ -27246,6 +27378,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     const tabs = agTabsOn();
     if (!AG_TAB || !tabs.some(t => t.k === AG_TAB)) AG_TAB = tabs.length ? tabs[0].k : '';
     const root = document.getElementById('ag-root'); if (!root) return;
+    root.style.background = '#fff';   // the sign-in screens paint it dark
+    const signedIn = !!agSession();
     root.innerHTML = `
       <div style="max-width:860px;margin:0 auto;padding:calc(18px + var(--sat,0px)) 16px calc(28px + var(--sab,0px));font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#000">
         <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border-bottom:2px solid #000;padding-bottom:12px">
@@ -27253,6 +27387,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e">Sales agent portal</div>
           <div style="margin-left:auto;font-size:11px;color:#666">${agEsc(me.agent?.name||'')}${me.agent?.note?' · '+agEsc(me.agent.note):''}</div>
         </div>
+        ${signedIn ? `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:7px 0 0;font-size:10px;letter-spacing:1px;text-transform:uppercase">
+          <span style="color:#aaa">${agEsc(me.agent?.email||'')}</span>
+          <span style="flex:1"></span>
+          <button onclick="agPwRender(false)" style="background:none;border:none;padding:0;color:#888;font:inherit;letter-spacing:1px;text-transform:uppercase;cursor:pointer;text-decoration:underline">Change password</button>
+          <button onclick="agLogout()" style="background:none;border:none;padding:0;color:#888;font:inherit;letter-spacing:1px;text-transform:uppercase;cursor:pointer;text-decoration:underline">Sign out</button>
+        </div>` : ''}
         ${tabs.length > 1 ? `<div style="display:flex;gap:0;border-bottom:1px solid #e0e0e0;margin-bottom:18px;overflow-x:auto">
           ${tabs.map(t => `<button onclick="agTab('${t.k}')" style="padding:12px 16px;border:none;border-bottom:2px solid ${AG_TAB===t.k?'#000':'transparent'};background:none;font-size:11px;letter-spacing:2px;text-transform:uppercase;font-weight:${AG_TAB===t.k?'700':'400'};color:${AG_TAB===t.k?'#000':'#888'};cursor:pointer;white-space:nowrap">${t.label}</button>`).join('')}
         </div>` : '<div style="height:16px"></div>'}
@@ -27668,21 +27808,63 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ['crm.own',     'Edit accounts she brought in'],
     ['line.read',   'See the linesheet (wholesale, retail, delivery)'],
   ];
+  // Readable rather than random-looking: she will type this once on a phone,
+  // and an unreadable string invites her to write it down badly.
+  function agSuggestPassword(){
+    const w = ['atelier','muslin','selvedge','bobbin','organza','placket','gusset','poplin','sateen','shantung','dartline','overlock'];
+    const pick = () => w[crypto.getRandomValues(new Uint32Array(1))[0] % w.length];
+    const n = 1000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 9000);
+    return pick() + '-' + n + '-' + pick();
+  }
   window.agNewAgent = async function(){
     const name = prompt('Name (as it should appear on her portal):', '');
     if (name === null) return;
-    const note = prompt('What is this link for? (e.g. "Paris Fashion Week SS27")', 'Paris Fashion Week') || '';
+    const email = (prompt('Her email — this is the username she signs in with:', '') || '').trim().toLowerCase();
+    if (!email){ showToast('An email is needed — it is her username','warning'); return; }
+    const note = prompt('What is she working on? (e.g. "Paris Fashion Week SS27")', 'Paris Fashion Week') || '';
     const c = sb(); if (!c){ showToast('Cloud connection needed','warning'); return; }
     const token = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
     try {
-      const ins = await c.from('venia_agents').insert({ token, name: String(name||'').trim().slice(0,80), note: note.trim().slice(0,120), role: 'agent' });
+      const ins = await c.from('venia_agents').insert({ token, name: String(name||'').trim().slice(0,80), note: note.trim().slice(0,120), role: 'agent', email });
       if (ins.error) throw ins.error;
-      logActivity('Sales agent portal created: ' + name);
+      logActivity('Portal account created: ' + name + ' (' + email + ')');
+      await agSetPassword(token, name, email);
       agRenderAgents();
-      const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?agent=' + token;
-      try { await navigator.clipboard.writeText(url); showToast('Link created and copied — send it to ' + name, 'success'); }
-      catch(e){ prompt('Send this link to ' + name + ':', url); }
-    } catch(e){ showToast('Could not create link — ' + (e.message||e), 'error'); }
+    } catch(e){
+      showToast(/duplicate|23505/i.test(String(e.message||e)) ? 'Someone already uses that email' : 'Could not create the account — ' + (e.message||e), 'error');
+    }
+  };
+  // The password is shown ONCE, here, for the founder to hand over. It is not
+  // stored anywhere readable and there is no reset email — she is forced to
+  // replace it on her first sign-in, so this one only has to survive the walk
+  // from this screen to her.
+  window.agSetPassword = async function(token, name, email){
+    const suggested = agSuggestPassword();
+    const pw = prompt('Password for ' + (name||'this person') + ' — she must change it on first sign-in.\n\nEdit it or press OK to use this one:', suggested);
+    if (pw === null) return false;
+    if (String(pw).length < 8){ showToast('At least 8 characters','warning'); return false; }
+    try {
+      await agCall({ action:'setpw', token, password: String(pw) });
+      const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?portal';
+      const msg = 'Sign in at ' + url + '\nEmail: ' + (email||'') + '\nPassword: ' + pw + '\n(You will be asked to choose your own password.)';
+      try { await navigator.clipboard.writeText(msg); showToast('Sign-in details copied — send them to ' + (name||'her'), 'success'); }
+      catch(e){ prompt('Send these details to ' + (name||'her') + ':', msg); }
+      logActivity('Portal password set: ' + (email||name||''));
+      return true;
+    } catch(e){ showToast('Could not set the password — ' + (e.message||e), 'error'); return false; }
+  };
+  window.agSetEmail = async function(token, current){
+    const em = (prompt('Email she signs in with:', current || '') || '').trim().toLowerCase();
+    if (!em) return;
+    try { await agCall({ action:'access', token, email: em }); showToast('Email saved','success'); }
+    catch(e){ showToast(e.message || 'Could not save the email', 'error'); }
+    agRenderAgents();
+  };
+  window.agEndSessions = async function(token, name){
+    if (!confirm('Sign ' + (name||'this person') + ' out on every device? Her password still works — she will just have to sign in again.')) return;
+    try { await agCall({ action:'endsessions', token }); showToast('Signed out everywhere','success'); }
+    catch(e){ showToast('Could not sign out — ' + (e.message||e), 'error'); }
+    agRenderAgents();
   };
   window.agRenderAgents = async function(){
     const box = document.getElementById('set-agents'); if (!box) return;
@@ -27712,6 +27894,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           <span style="flex:1"></span>
           <span style="font-size:10px;color:var(--muted)">${n} lead${n===1?'':'s'}${a.last_seen?' · seen '+agEsc(String(a.last_seen).slice(0,10)):' · never opened'}</span>
         </div>
+        ${a.revoked ? '' : `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:6px;font-size:10px">
+          <span style="letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Sign-in</span>
+          ${a.email
+            ? `<span style="font-family:'DM Mono',monospace">${agEsc(a.email)}</span>`
+            : '<span style="color:var(--amber)">no email yet — she cannot sign in</span>'}
+          <button class="btn btn-ghost btn-sm" onclick="agSetEmail('${a.token}','${agEsc(a.email||'')}')">${a.email?'Change email':'Add email'}</button>
+          ${a.pw_set_at
+            ? `<span style="color:${a.must_change?'var(--amber)':'var(--green)'}">${a.must_change?'password set — not yet used':'active'}</span>`
+            : '<span style="color:var(--muted)">no password set</span>'}
+          <button class="btn btn-ghost btn-sm" onclick="agSetPassword('${a.token}','${agEsc(a.name||'')}','${agEsc(a.email||'')}').then(function(){agRenderAgents()})">${a.pw_set_at?'Reset password':'Set password'}</button>
+          ${a.lock_until && new Date(a.lock_until) > new Date() ? '<span style="color:var(--red)">locked — too many attempts</span>' : ''}
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" onclick="agEndSessions('${a.token}','${agEsc(a.name||'')}')">Sign out everywhere</button>
+        </div>`}
         ${a.revoked ? '' : `
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
           <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Group</span>
@@ -27721,7 +27917,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           ${custom ? `<span style="font-size:10px;color:var(--amber)">Custom access</span>
             <button class="btn btn-ghost btn-sm" onclick="agResetScopes('${a.token}')">Use group default</button>` : ''}
           <span style="flex:1"></span>
-          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${url}').then(function(){showToast('Link copied','success')})">Copy link</button>
+          <button class="btn btn-ghost btn-sm" title="A no-password link, for someone who should not have an account at all" onclick="navigator.clipboard.writeText('${url}').then(function(){showToast('Link copied','success')})">Copy no-login link</button>
           <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="agRevokeAgent('${a.token}')">Revoke</button>
         </div>
         <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:4px">${agEsc(meta[2])}</div>
