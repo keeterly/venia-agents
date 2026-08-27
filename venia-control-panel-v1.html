@@ -1734,7 +1734,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '296';
+  const BUILD = '297';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4304,6 +4304,14 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <select class="fs" id="mm-type"><option>Fabric</option><option>Lining</option><option>Trim</option><option>Label</option><option>Packaging</option><option>Hardware</option><option>Thread</option></select>
           </div>
           <div class="fg"><label class="fl" for="mm-supplier">Supplier / Mill</label><input class="fi" id="mm-supplier" placeholder="Mill or supplier name"></div>
+          <div class="fg"><label class="fl" for="mm-sourcing">Sourcing</label>
+            <select class="fs" id="mm-sourcing" onchange="mmSourcingHint()">
+              <option value="">— Not set —</option>
+              <option value="nominated">Nominated — we buy it</option>
+              <option value="vendor">Vendor managed — factory buys it</option>
+            </select>
+            <div id="mm-sourcing-hint" style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:5px"></div>
+          </div>
           <div class="fg"><label class="fl" for="mm-cost">Base Cost / Unit (USD)</label><input class="fi fi-mono" id="mm-cost" type="number" step="0.01" placeholder="0.00"></div>
           <div class="fg"><label class="fl" for="mm-unit">Unit</label><input class="fi" id="mm-unit" placeholder="yd, m, pcs…"></div>
           <div class="fg"><label class="fl" for="mm-lead">Lead Time (days)</label><input class="fi fi-mono" id="mm-lead" type="number" placeholder="30"></div>
@@ -7853,6 +7861,13 @@ function bomSelectStyle(styleId) {
   if (!style) return;
   const items = STATE.bom[styleId] || [];
   const total = items.reduce((sum,item) => sum + bomExt(item), 0);
+  // Split out what the FACTORY buys: that cost is already inside their FOB
+  // price, so comparing the whole BOM against COGS would count it twice.
+  const vendorTotal = items.reduce((sum,item) => {
+    const m = item.matId ? bomMatFor(item.matId) : null;
+    return sum + (matIsVendorManaged(m) ? bomExt(item) : 0);
+  }, 0);
+  const oursTotal = total - vendorTotal;
 
   const typeColors = { Fabric:'var(--blue)', Trim:'var(--purple)', Label:'var(--green)', Packaging:'var(--amber)', Hardware:'var(--red)', Thread:'var(--teal)', Wash:'var(--teal)', Dye:'var(--purple)', Custom:'var(--muted)' };
 
@@ -7906,11 +7921,17 @@ function bomSelectStyle(styleId) {
     </div>
     ${items.length ? `
     <div class="bom-total-row" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--bg-off);border:1px solid var(--border);border-top:1px solid var(--border-mid);margin-top:1px;flex-wrap:wrap;gap:10px">
-      <div class="micro-label">Total Material Cost${BOM_FILTER!=='all'?' <span style="text-transform:none;letter-spacing:0;color:var(--muted)">(all lines, not just the filter)</span>':''}</div>
+      <div class="micro-label">Total Material Cost${BOM_FILTER!=='all'?' <span style="text-transform:none;letter-spacing:0;color:var(--muted)">(all lines, not just the filter)</span>':''}${vendorTotal>0?`<br><span style="text-transform:none;letter-spacing:0;color:var(--muted);font-size:10px">of which <b style="color:var(--soft)">$${vendorTotal.toFixed(2)}</b> is vendor managed — already inside the factory's price</span>`:''}</div>
       <div style="display:flex;align-items:center;gap:20px">
         <span style="font-family:'DM Mono',monospace;font-size:18px;font-weight:700;color:var(--ink)">$${total.toFixed(2)}</span>
         <span style="font-size:10px;color:var(--muted)">vs COGS <strong style="color:var(--ink)">$${style.cogs||'—'}</strong></span>
-        ${style.cogs ? (()=>{ const pct=Math.round(total/style.cogs*100); const over=total>style.cogs; return `<span style="font-size:10px;color:${over?'var(--red)':pct>70?'var(--amber)':'var(--green)'}">${over?'⚠ Materials exceed COGS':`Materials = ${pct}% of COGS`}</span><span style="font-size:10px;color:var(--muted)">remainder = CMT / labor / overhead</span>`; })() : ''}
+        ${style.cogs ? (()=>{
+          // Measure against the lines WE pay for. A vendor-managed line is in
+          // the factory's price, so including it here would report a cost
+          // overrun that does not exist.
+          const basis = oursTotal, pct = Math.round(basis/style.cogs*100), over = basis > style.cogs;
+          return `<span style="font-size:10px;color:${over?'var(--red)':pct>70?'var(--amber)':'var(--green)'}">${over?'⚠ Materials exceed COGS':`Materials = ${pct}% of COGS`}${vendorTotal>0?' <span style="color:var(--muted)">(our lines only)</span>':''}</span><span style="font-size:10px;color:var(--muted)">remainder = CMT / labor / overhead</span>`;
+        })() : ''}
       </div>
     </div>` : ''}
   `;
@@ -7923,6 +7944,10 @@ function bomRowHtml(styleId, item, idx, typeColors) {
     : (item.matId
       ? `<span title="Linked to the Materials library — cost follows that record" style="font-size:7px;letter-spacing:1px;text-transform:uppercase;border:1px solid var(--border-mid);color:var(--muted);padding:1px 5px;margin-left:6px">↔ Material</span>`
       : '');
+  const srcM = item.matId && typeof bomMatFor === 'function' ? bomMatFor(item.matId) : null;
+  const srcBadge = matSourcing(srcM)
+    ? `<span title="${esc(matSourcing(srcM).hint)}" style="font-size:7px;letter-spacing:1px;text-transform:uppercase;padding:1px 5px;margin-left:4px;${matIsVendorManaged(srcM)?'border:1px solid var(--border-mid);color:var(--muted)':'border:1px solid var(--ink);color:var(--ink)'}">${matSourcing(srcM).short}</span>`
+    : '';
   return `
     <div style="border:1px solid var(--border);border-bottom:none;background:var(--bg)" id="bom-row-${idx}">
       <!-- VIEW MODE -->
@@ -7931,7 +7956,7 @@ function bomRowHtml(styleId, item, idx, typeColors) {
           <span style="display:inline-block;width:3px;height:14px;background:${lineColor};flex-shrink:0"></span>
           ${item.matName}
           ${item.lineType ? `<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${lineColor};border:1px solid ${lineColor};padding:1px 5px">${item.lineType}</span>` : ''}
-          ${syncBadge}
+          ${syncBadge}${srcBadge}
         </div>
         <div data-l="Qty" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:${item.qty>0?'var(--silver)':'var(--red)'}">${item.qty}${parseFloat(item.waste)>0?`<span style="color:var(--muted);font-size:10px"> +${item.waste}%</span>`:''}${item.qty>0?'':'<span style="font-size:9px;letter-spacing:.5px"> set yield</span>'}</div>
         <div data-l="Unit" style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.unit}</div>
@@ -8422,6 +8447,7 @@ function renderMaterials(filter) {
       <div class="mat-name">${m.name}</div>
       <div class="mat-type">${m.type}</div>
       <div class="mat-detail">Supplier: <span>${m.supplier||'—'}</span></div>
+      ${matSourcing(m) ? `<div class="mat-detail"><span class="b-tag" title="${esc(matSourcing(m).hint)}" style="${matIsVendorManaged(m)?'border-color:var(--border-mid);color:var(--muted)':'border-color:var(--ink);color:var(--ink);font-weight:700'}">${matSourcing(m).short}</span></div>` : ''}
       <div class="mat-detail">Cost: <span style="color:${cost>0?'var(--gold)':'var(--muted)'}">${cost>0 ? '$'+cost.toFixed(2)+(unit?' / '+unit:'') : '—'}</span></div>
       <div class="mat-detail">Lead: <span>${m.leadDays>0 ? m.leadDays+' days' : '—'}</span></div>
       ${m.moq ? `<div class="mat-detail">MOQ: <span>${m.moq}${/\d$/.test(String(m.moq).trim())&&unit?' '+unit:''}</span></div>` : ''}
@@ -8433,6 +8459,15 @@ function renderMaterials(filter) {
         const req = matRequired(m.id), onOrder = matOnOrder(m.id);
         const onHand = parseFloat(m.qtyOnHand)||0;
         const short = Math.round(Math.max(0, req - onHand - onOrder)*10)/10;
+        // Vendor-managed fabric is the factory's to buy, hold and run short of.
+        // Telling US we are short of it — or offering us a PO for it — would be
+        // chasing someone else's exposure.
+        if (matIsVendorManaged(m)) {
+          return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.6">
+            The factory sources this inside their price${req?` — they need <b style="color:var(--soft)">${req} ${esc(unit||'')}</b> for the units we have on order`:''}.
+            <br>MOQ, leftovers and lead time sit with them.
+          </div>`;
+        }
         return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
             <span>On hand</span>
@@ -9859,6 +9894,7 @@ function openMatModal(id=null) {
   const fields = ['name','supplier','cost','unit','lead','content','color','notes','width','moq','article','weight','sample-price'];
   fields.forEach(f => { const el=document.getElementById(`mm-${f}`); if(el) el.value=''; });
   mmSetPhoto('');
+  const srcSel = document.getElementById('mm-sourcing'); if (srcSel) srcSel.value = '';
 
   if (id) {
     const m = STATE.materials.find(x=>x.id===id);
@@ -9866,6 +9902,7 @@ function openMatModal(id=null) {
       document.getElementById('mm-name').value = m.name||'';
       document.getElementById('mm-type').value = m.type||'Fabric';
       document.getElementById('mm-supplier').value = m.supplier||'';
+      document.getElementById('mm-sourcing').value = m.sourcing||'';
       document.getElementById('mm-cost').value = m.costPerUnit||'';
       document.getElementById('mm-unit').value = m.unit||'';
       document.getElementById('mm-lead').value = m.leadDays||'';
@@ -9878,6 +9915,7 @@ function openMatModal(id=null) {
       document.getElementById('mm-width').value = m.width||'';
       document.getElementById('mm-moq').value = m.moq||'';
       mmSetPhoto(m.photoUrl||'');
+      mmSourcingHint();
       mmRenderLots(m.lots||[]);
     }
   } else {
@@ -10045,6 +10083,26 @@ function mmRemoveLot(idx) {
   }
 }
 
+// ── Sourcing model ───────────────────────────────────────────────────────
+// Nominated: we pick the mill, we hold the price, and the fabric liability —
+// MOQ, leftovers, lead time — is OURS. It is a real cost line we pay.
+// Vendor managed: the garment factory sources it and its cost is already
+// inside their FOB price. Counting it again as a cost we pay double-counts,
+// and warning US about a shortfall is wrong — that exposure is theirs.
+const MAT_SOURCING = {
+  nominated: { label: 'Nominated',      short: 'NOMINATED',      hint: 'We choose the mill and hold the price. The fabric MOQ, the leftovers and the lead time are our exposure, and this is a cost line we pay.' },
+  vendor:    { label: 'Vendor managed', short: 'VENDOR MANAGED', hint: 'The factory sources it and its cost sits inside their FOB price. Their MOQ, their leftovers — and counting it again as our spend would double-count it.' },
+};
+function matSourcing(m){ return MAT_SOURCING[String((m&&m.sourcing)||'')] || null; }
+function matIsVendorManaged(m){ return String((m&&m.sourcing)||'') === 'vendor'; }
+function mmSourcingHint(){
+  const sel = document.getElementById('mm-sourcing');
+  const el = document.getElementById('mm-sourcing-hint');
+  if (!sel || !el) return;
+  const d = MAT_SOURCING[sel.value];
+  el.textContent = d ? d.hint : 'Who buys the fabric — you, or the garment factory as part of their price.';
+}
+
 // Material swatch photo — same upload path as style photos.
 function mmSetPhoto(url){
   const box = document.getElementById('mm-photo-box');
@@ -10071,6 +10129,7 @@ function saveMaterial() {
   const data = {
     name, type: document.getElementById('mm-type').value,
     supplier: document.getElementById('mm-supplier').value,
+    sourcing: (document.getElementById('mm-sourcing')||{}).value || '',
     costPerUnit: parseFloat(document.getElementById('mm-cost').value)||0,
     unit: document.getElementById('mm-unit').value,
     leadDays: parseInt(document.getElementById('mm-lead').value)||0,
