@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '300';
+  const BUILD = '301';
   const BUILD_DATE = '2026.08.27';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1986,6 +1986,7 @@ body{padding-top:44px;box-sizing:border-box;}
           <div class="ag-nav-item" onclick="cmdShowSection('cmd-orders',this)">Shopify Orders</div>
           <div class="ag-nav-item" onclick="cmdShowSection('cmd-revenue',this)">Revenue Goals</div>
           <div class="ag-nav-item" onclick="cmdShowSection('cmd-budget',this)">Budget Tracker</div>
+          <div class="ag-nav-item" onclick="cmdShowSection('cmd-bank',this)">Bank</div>
         </div>
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">Agent</div>
@@ -2209,6 +2210,13 @@ body{padding-top:44px;box-sizing:border-box;}
            budget, goals) so answers start from real numbers. -->
       <div id="cmd-cfo" class="cmd-section" style="display:none">
         <div class="ag-content" id="cmd-cfo-body"><div style="padding:30px;color:var(--muted);font-size:11px">Loading…</div></div>
+      </div>
+
+      <!-- BANK — live feed via Stripe Financial Connections (read-only). The
+           founder links accounts in Stripe's own modal; VENIA never sees bank
+           credentials, and this section renders only what synced to STATE. -->
+      <div id="cmd-bank" class="cmd-section" style="display:none">
+        <div class="ag-content" id="cmd-bank-body"><div style="padding:30px;color:var(--muted);font-size:11px">Loading…</div></div>
       </div>
 
     </main>
@@ -4876,6 +4884,8 @@ const SYNC_KEYS = [
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
   'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
+  // Finance — the bank feed (linked-account metadata + categorized transactions)
+  'finBank', 'finTxns',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -16962,6 +16972,7 @@ function cmdShowSection(id, navEl) {
   if (id === 'cmd-pipeline')   cmdRenderPipeline();
   if (id === 'cmd-revenue')    revRender();
   if (id === 'cmd-cfo')        cmdRenderCfo();
+  if (id === 'cmd-bank')       cmdRenderBank();
 }
 
 // The Money door and pulse land on the P&L — the daily money check is 1 tap.
@@ -18656,11 +18667,11 @@ HOW YOU THINK:
 - Cash first. Booked is not collected; an invoice is not money. Keep DTC (paid at order) and wholesale (paid on terms, via Stripe invoice) separate.
 - Margin discipline: landed cost is the real cost. A style below its margin floor gets flagged, not excused.
 - Two-person realism: no finance team. Recommend the move that takes an hour, not the process that takes a quarter.
-- Honest partials: the app does not yet track rent, payroll, software, or bank balances. When asked about burn or runway, use what the snapshot has (COGS, marketing spend, factory commitments) and say plainly that operating expenses outside the app must be added — never present partial burn as total burn.
+- Honest partials: real expenses, burn, and runway come from the live bank feed (Money → Bank). When the snapshot's BANK section says "not connected", those numbers do not exist — say so and never present partial burn as total burn. When it is connected, treat heavy uncategorized volume as a caveat on burn.
 
 WHAT YOU CAN DO:
-- Read: live DTC revenue (Shopify), wholesale orders with AR aging (Stripe-confirmed), the quotes pipeline, per-style unit economics, factory PO commitments, the marketing budget, revenue goals.
-- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), reprice styles (update_styles with retail/wholesale/cogs).
+- Read: live DTC revenue (Shopify), wholesale orders with AR aging (Stripe-confirmed), the quotes pipeline, per-style unit economics, factory PO commitments, the marketing budget, revenue goals, and — once connected — live bank balances and transactions (Stripe Financial Connections, read-only).
+- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), reprice styles (update_styles with retail/wholesale/cogs).
 - Draft: AR chase emails, pricing proposals, a monthly money summary.
 - You NEVER move money. Invoices, card captures, and refunds are sent by a human with the access code — you prepare, they pull the trigger.
 
@@ -18679,7 +18690,7 @@ const SUGGESTS = {
   mk: ['Write 5 Instagram captions for new arrivals','Plan a launch campaign','What should I post this week?','Write a reel concept'],
   sl: ['Write a wholesale outreach email','Help me follow up with a warm lead','What accounts should we target?','Draft a trade show follow-up'],
   br: ['Where is VENIA positioned in the market?','How should we approach FW26 creative?','Write our brand manifesto','Review our visual identity direction'],
-  fin: ['Where does the money stand today?','Which invoices need chasing?','Which styles are underwater on margin?','Can we afford a $3k shoot this month?'],
+  fin: ['Where does the money stand today?','What is our burn and runway?','Which invoices need chasing?','Which styles are underwater on margin?','Can we afford a $3k shoot this month?'],
 };
 const WORKFLOWS = {
   pr: {
@@ -18720,7 +18731,8 @@ const WORKFLOWS = {
     'AR Chase List': `Build the AR chase list from the FINANCE SNAPSHOT. List open invoices oldest first with amount and days overdue. For each overdue account, draft a short chase email in VENIA's voice — warm and matter-of-fact up to 14 days over, firmer with a requested payment date past 30. I'll review and send them myself.`,
     'Price a Style': `Help me price a style. Ask which style (or take the landed cost I give you), then back-solve: wholesale at our target wholesale margin, retail at target retail margin, and the keystone check between them. Show the honest floor — the price below which the style loses money on landed cost — and sanity-check against VENIA's $280–$1,400 retail range and where comparable styles in the line sit.`,
     'Can We Afford It': `I'm going to name a spend. Answer from the FINANCE SNAPSHOT, not vibes: (1) what it does to operating YTD; (2) what cash is actually collected vs merely booked; (3) what would have to be true for the spend to pay back — units, orders, or placements — against our current run rate; (4) a clear yes / no / yes-if. The snapshot does not include rent, payroll, or non-marketing overhead — say so where it changes the answer.`,
-    'Monthly Money Summary': `Write the monthly money summary for the founders from the FINANCE SNAPSHOT: what came in (DTC and wholesale, vs the prior period where the snapshot shows it), what went out (COGS, marketing spend, factory payments), margins, AR status, revenue-goal progress, and the three numbers that need a decision this month. Under a page, plain language. Save it to the Brand Library with save_brand_doc (kind "note", titled "Money Summary — <month year>").`,
+    'Monthly Money Summary': `Write the monthly money summary for the founders from the FINANCE SNAPSHOT: what came in (DTC and wholesale, vs the prior period where the snapshot shows it), what went out (COGS, marketing spend, factory payments, and bank-feed expenses by category if connected), margins, AR status, revenue-goal progress, and the three numbers that need a decision this month. Under a page, plain language. Save it to the Brand Library with save_brand_doc (kind "note", titled "Money Summary — <month year>").`,
+    'Burn & Runway': `From the BANK section of the FINANCE SNAPSHOT: (1) cash on hand across accounts, with the as-of dates; (2) average monthly net burn or surplus over the last 90 days (transfers excluded) and how the last 30 days compare; (3) the runway estimate, what it assumes, and the one change that would add 2+ months; (4) the biggest spend categories and the one to challenge first. If the bank is not connected, or uncategorized transactions are distorting the picture, say exactly what to do first (Money → Bank) instead of estimating.`,
   },
 };
 
@@ -20032,7 +20044,12 @@ function agentFinActionSpec() {
     + '```venia:action\n'
     + '{"type":"set_revenue_goal","name":"FW26 Wholesale","target":50000,"current":0,"period":"seasonal","source":""}\n'
     + '```\n'
-    + '"period" ∈ monthly | quarterly | annual | seasonal. "source" binds the goal to live actuals — "" (manual) | dtc-30 | dtc-ytd | wholesale-ytd | total-ytd; prefer a live source when one fits so the goal tracks itself. "target" is required; "current" only matters for manual goals.';
+    + '"period" ∈ monthly | quarterly | annual | seasonal. "source" binds the goal to live actuals — "" (manual) | dtc-30 | dtc-ytd | wholesale-ytd | total-ytd; prefer a live source when one fits so the goal tracks itself. "target" is required; "current" only matters for manual goals.\n'
+    + '\nACTION — set_txn_category: categorize bank-feed transactions (Money → Bank) so burn and runway read true.\n'
+    + '```venia:action\n'
+    + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"}]}\n'
+    + '```\n'
+    + 'Use ONLY transaction ids that appear in the FINANCE SNAPSHOT. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | fees | taxes | transfer | other. Movements between VENIA\'s own accounts are "transfer" (excluded from burn). Up to 40 per block; when a line is genuinely ambiguous, leave it out and ask instead of guessing.';
 }
 
 // Ops writes (Backbone E3): the production/press verbs the founders kept
@@ -20363,7 +20380,40 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'add_pitch') return agentRunAddPitch(action, chatBody);
   if (action.type === 'set_budget') return agentRunSetBudget(action, chatBody);
   if (action.type === 'set_revenue_goal') return agentRunSetRevenueGoal(action, chatBody);
+  if (action.type === 'set_txn_category') return agentRunSetTxnCategory(action, chatBody);
 }
+
+function agentRunSetTxnCategory(action, chatBody){
+  const items = Array.isArray(action.items) ? action.items.slice(0, 40) : [];
+  const txns = STATE.finTxns || [];
+  const prev = {};
+  let n = 0; const missed = [];
+  items.forEach(it => {
+    if (!it) return;
+    const cat = String(it.category||'').toLowerCase().trim();
+    if (FIN_CATEGORIES.indexOf(cat) < 0) return;
+    const t = txns.find(x => x.id === String(it.id||''));
+    if (!t) { missed.push(String(it.id||'')); return; }
+    if (!(t.id in prev)) prev[t.id] = t.category || '';
+    t.category = cat; n++;
+  });
+  if (!n) { appendAgentNote(chatBody, 'None of those matched transactions in the bank feed — nothing was changed.'); return; }
+  window.__agPrevTxnCats = prev;
+  save();
+  try { cmdRenderBank(); } catch(e){}
+  agentActionCard(chatBody, n + ' transaction' + (n>1?'s':'') + ' categorized',
+    '<div style="font-size:11px">' + n + ' categorized' + (missed.length ? ' · ' + missed.length + ' id' + (missed.length>1?'s':'') + ' not found (skipped)' : '') + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Money → Bank</div>',
+    'agentUndoTxnCats()');
+}
+window.agentUndoTxnCats = function(){
+  const prev = window.__agPrevTxnCats; if (!prev) return;
+  (STATE.finTxns||[]).forEach(t => { if (t.id in prev) t.category = prev[t.id]; });
+  window.__agPrevTxnCats = null;
+  save();
+  try { cmdRenderBank(); } catch(e){}
+  showToast('Category changes undone', 'info');
+};
 
 // ── CFO action runners — budget + revenue goals, both one-tap undoable ──────
 function agentRunSetBudget(action, chatBody){
@@ -24647,6 +24697,8 @@ function slExportOrders() {
     if (!STATE.slPrefs || Array.isArray(STATE.slPrefs)) STATE.slPrefs = _obj(dbGet('slPrefs'));
     if (!STATE.brPrefs || Array.isArray(STATE.brPrefs)) STATE.brPrefs = _obj(dbGet('brPrefs'));
     if (!STATE.slOrders) STATE.slOrders = dbGet('slOrders') || [];
+    if (!STATE.finBank) STATE.finBank = {};
+    if (!STATE.finTxns) STATE.finTxns = [];
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _extendInit);
@@ -24856,7 +24908,31 @@ function veniaFinanceContext(){
         return '• ' + g.name + ' (' + (g.period||'goal') + (g.source ? ', auto: ' + (REV_SOURCE_LABELS[g.source]||g.source) : ', manual') + '): ' + money(cur) + ' of ' + money(g.target||0);
       }).join('\n'));
     } catch(e){}
-    parts.push('NOT tracked in VENIA OS yet (never guess these): rent, payroll/contractors, software, outbound shipping, taxes, bank balances. Total burn and runway need them — say so when they matter.');
+    // Bank feed (Stripe Financial Connections) — real expenses, burn, runway.
+    try {
+      const bk = (typeof finBankData === 'function') ? finBankData() : null;
+      if (bk && bk.connected) {
+        const rw = bk.runwayMo != null ? (bk.runwayMo >= 24 ? '24+ months' : bk.runwayMo.toFixed(1) + ' months')
+                 : (bk.monthlyNet <= 0 ? 'not burning — net positive over the last 90d' : 'n/a');
+        parts.push('BANK (live read-only feed; last sync ' + (bk.lastSync ? String(bk.lastSync).slice(0,10) : 'never') + '):\n'
+          + '• Accounts: ' + bk.accounts.map(a => {
+              const b = a.balance || {};
+              const v = b.available != null ? b.available : b.current;
+              return (a.institution || a.name) + ' …' + (a.last4||'') + ' ' + (v != null ? money(v) : 'balance pending') + (b.as_of ? ' (as of ' + b.as_of + ')' : '');
+            }).join('; ')
+          + '\n• Cash on hand ' + money(bk.bal)
+          + ' | last 30d: in ' + money(bk.in30) + ', out ' + money(bk.out30)
+          + ' | 90d avg monthly ' + (bk.monthlyNet > 0 ? 'net burn ' + money(bk.monthlyNet) : 'net surplus ' + money(-bk.monthlyNet))
+          + ' | runway est ' + rw + ' (transfers + voided excluded)'
+          + (Object.keys(bk.cat30).length ? '\n• Spend last 30d by category: ' + Object.entries(bk.cat30).sort((a,b) => b[1]-a[1]).slice(0,8).map(([c,v]) => c + ' ' + money(v)).join(', ') : ''));
+        const un = (STATE.finTxns||[]).filter(t => !t.category && t.status !== 'void').slice(0, 15);
+        if (un.length) parts.push('Uncategorized bank transactions (' + bk.uncat + ' total — categorize with set_txn_category):\n'
+          + un.map(t => '• ' + t.id + ' | ' + (t.date||'') + ' | ' + money(t.amount||0) + ' | ' + String(t.desc||'').slice(0,80)).join('\n'));
+        parts.push('The bank feed covers roughly the last 180 days on the linked accounts only. Burn/runway above use categorized reality — treat heavy uncategorized volume as a caveat.');
+      } else {
+        parts.push('BANK: not connected (Money → Bank). Rent, payroll/contractors, software, taxes, and bank balances are invisible until it is — total burn and runway need it; never guess those numbers.');
+      }
+    } catch(e){}
     return '\n\nFINANCE SNAPSHOT (live):\n' + parts.join('\n');
   } catch(e){ return '\n\nFINANCE SNAPSHOT: unavailable this turn (' + (e && e.message || 'error') + ') — say so rather than inventing figures.'; }
 }
@@ -24886,10 +24962,234 @@ window.cmdRenderCfo = function(){
     + wf('COLLECT', 'AR Chase List',         'Open invoices oldest-first, with a ready-to-send chase email per overdue account — polite at 7 days, firm at 30.')
     + wf('PRICE',   'Price a Style',         'Back-solve retail and wholesale from a landed cost and target margins — with the honest floor beneath which the style loses money.')
     + wf('DECIDE',  'Can We Afford It',      'Name a spend. The agent answers from cash reality: what it does to operating, and what has to be true for it to pay back.')
+    + wf('CASH',    'Burn & Runway',         'From the live bank feed: cash on hand, real monthly burn (transfers excluded), the runway estimate, and the spend category to challenge first.')
     + wf('REPORT',  'Monthly Money Summary', 'The founder-readable monthly summary — in, out, margins, AR, goal progress, and the three numbers that need a decision.')
     + `</div>`
     + `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Ask the CFO</h2></div>`
     + `<div class="ag-chat-suggest" style="display:flex;flex-wrap:wrap;gap:8px">` + (SUGGESTS.fin||[]).map(s => agChip('fin', s, 'ag-suggest')).join('') + `</div>`;
+};
+
+// ══════════════════════════════════════════════════════════
+//  BANK FEED — Stripe Financial Connections (read-only)
+//  The founder authorizes in Stripe's own modal; credentials never touch
+//  VENIA code. bank.js (Netlify) holds the secret key and is gated by the
+//  VENIA access code, fail-closed. Amounts arrive in dollars with Stripe's
+//  sign convention: negative = money out, positive = money in.
+// ══════════════════════════════════════════════════════════
+const FIN_CATEGORIES = ['income','fabric','production','contractors','rent','payroll','software','shipping','marketing','fees','taxes','transfer','other'];
+
+async function bankApi(action, params){
+  const r = await fetch('/api/bank', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({ action }, params||{})) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok || d.error) throw new Error(d.error || ('Bank HTTP ' + r.status));
+  return d;
+}
+// Load Stripe.js once, on demand — only the bank flow needs it.
+function bankStripeJs(pk){
+  return new Promise((resolve, reject) => {
+    if (window.Stripe) return resolve(window.Stripe(pk));
+    const s = document.createElement('script');
+    s.src = 'https://js.stripe.com/v3';
+    s.onload = () => window.Stripe ? resolve(window.Stripe(pk)) : reject(new Error('Stripe.js failed to load'));
+    s.onerror = () => reject(new Error('Stripe.js failed to load'));
+    document.head.appendChild(s);
+  });
+}
+// Conservative auto-categorization for the obvious lines; everything else
+// stays uncategorized for the CFO agent (set_txn_category) or a manual pick.
+function bankAutoCategory(desc, amount){
+  const d = String(desc||'').toLowerCase();
+  if (/transfer|xfer/.test(d)) return 'transfer';
+  if (/payroll|gusto|adp\b/.test(d)) return 'payroll';
+  if (/\brent\b|wework/.test(d)) return 'rent';
+  if (/usps|fedex|\bups\b|\bdhl\b|shippo|shipstation/.test(d)) return 'shipping';
+  if (/facebook|meta ?ads|google ?ads|tiktok ?ads|instagram ?ads/.test(d)) return 'marketing';
+  if (/\birs\b|franchise tax|\bedd\b|\bftb\b/.test(d)) return 'taxes';
+  if (/fabric|textile|\bmill\b|dye ?house/.test(d)) return 'fabric';
+  if (/shopify|stripe/.test(d) && (amount||0) > 0) return 'income';
+  return '';
+}
+// Cash math from the synced feed: balances, 90d in/out (transfers and voided
+// excluded), avg monthly net burn, runway estimate.
+function finBankData(){
+  const fb = STATE.finBank || {}; const txns = STATE.finTxns || [];
+  const accounts = fb.accounts || [];
+  const bal = accounts.reduce((s,a) => {
+    const b = a.balance || {};
+    return s + ((b.available != null ? b.available : b.current) || 0);
+  }, 0);
+  const now = Date.now(), d90 = now - 90*864e5, d30 = now - 30*864e5;
+  let in90=0, out90=0, in30=0, out30=0; const cat30 = {};
+  txns.forEach(t => {
+    if (t.status === 'void' || t.category === 'transfer' || !t.date) return;
+    const ts = new Date(t.date + 'T00:00:00').getTime();
+    if (!(ts >= d90)) return;
+    const amt = t.amount || 0;
+    if (amt >= 0) { in90 += amt; if (ts >= d30) in30 += amt; }
+    else {
+      out90 -= amt;
+      if (ts >= d30) { out30 -= amt; const c = t.category || 'uncategorized'; cat30[c] = (cat30[c]||0) - amt; }
+    }
+  });
+  const monthlyNet = (out90 - in90) / 3;                     // positive = burning
+  const runwayMo = (monthlyNet > 0 && bal > 0) ? bal / monthlyNet : null;
+  const uncat = txns.filter(t => !t.category && t.status !== 'void').length;
+  return { connected: accounts.length > 0, accounts, bal, in90, out90, in30, out30, cat30, monthlyNet, runwayMo, uncat, lastSync: fb.lastSync || '' };
+}
+
+window.bankConnect = async function(){
+  const code = window.veniaAC(true, 'Enter your VENIA access code to connect the bank:');
+  if (!code) return;
+  showToast('Opening the secure bank flow…', 'info');
+  try {
+    const link = await bankApi('link');
+    const stripe = await bankStripeJs(link.pk);
+    const res = await stripe.collectFinancialConnectionsAccounts({ clientSecret: link.client_secret });
+    if (res.error) { showToast(res.error.message || 'Bank link cancelled', 'warning'); return; }
+    const got = (res.financialConnectionsSession && res.financialConnectionsSession.accounts) || [];
+    if (!got.length) { showToast('No accounts were linked', 'warning'); return; }
+    showToast('Linked ' + got.length + ' account' + (got.length>1?'s':'') + ' — subscribing to transactions…', 'info');
+    for (const a of got) { try { await bankApi('subscribe', { account: a.id }); } catch(e){} }
+    await bankPullAccounts();
+    await bankSyncTxns(true);
+    try { logActivity('Bank connected — ' + got.length + ' account' + (got.length>1?'s':'') + ' linked (read-only)'); } catch(e){}
+    showToast('Bank connected', 'success');
+  } catch(e){ showToast(String(e && e.message || e), 'error'); }
+  try { cmdRenderBank(); } catch(e){}
+};
+window.bankPullAccounts = async function(){
+  const d = await bankApi('accounts');
+  if (!STATE.finBank) STATE.finBank = {};
+  STATE.finBank.accounts = d.accounts || [];
+  save();
+};
+// Kick a balance refresh on every active account (async on Stripe's side —
+// the as-of date on each tile is the truth of freshness), then re-pull.
+window.bankRefreshBalances = async function(){
+  const fb = STATE.finBank || {};
+  showToast('Refreshing balances…', 'info');
+  try {
+    for (const a of (fb.accounts||[])) { if (a.status === 'active') { try { await bankApi('refresh', { account: a.id }); } catch(e){} } }
+    await bankPullAccounts();
+    showToast('Balances refreshed', 'success');
+  } catch(e){ showToast(String(e && e.message || e), 'error'); }
+  try { cmdRenderBank(); } catch(e){}
+};
+// Merge new transactions into the synced feed (dedupe by id, statuses update
+// in place, auto-categorize the obvious, newest first, capped at 600).
+window.bankSyncTxns = async function(silent){
+  const fb = STATE.finBank || {}; const accounts = fb.accounts || [];
+  if (!accounts.length) return;
+  if (!STATE.finTxns) STATE.finTxns = [];
+  const byId = {}; STATE.finTxns.forEach(t => { byId[t.id] = t; });
+  let added = 0;
+  for (const a of accounts) {
+    let cursor = null;
+    for (let page = 0; page < 5; page++) {
+      let d;
+      try { d = await bankApi('transactions', Object.assign({ account: a.id }, cursor ? { starting_after: cursor } : {})); }
+      catch(e){ if (!silent) showToast(String(e && e.message || e), 'error'); break; }
+      (d.transactions||[]).forEach(t => {
+        const ex = byId[t.id];
+        if (ex) { ex.status = t.status; ex.amount = t.amount; if (t.date) ex.date = t.date; }
+        else {
+          const rec = { id: t.id, acct: t.account, date: t.date, amount: t.amount, desc: t.description, status: t.status, category: bankAutoCategory(t.description, t.amount) };
+          byId[t.id] = rec; STATE.finTxns.push(rec); added++;
+        }
+      });
+      if (!d.has_more || !d.next) break;
+      cursor = d.next;
+    }
+  }
+  STATE.finTxns.sort((x,y) => String(y.date||'').localeCompare(String(x.date||'')));
+  if (STATE.finTxns.length > 600) STATE.finTxns = STATE.finTxns.slice(0, 600);
+  if (!STATE.finBank) STATE.finBank = {};
+  STATE.finBank.lastSync = new Date().toISOString();
+  save();
+  if (!silent) showToast(added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date', added ? 'success' : 'info');
+  try { cmdRenderBank(); } catch(e){}
+};
+window.bankSetCategory = function(id, cat){
+  const t = (STATE.finTxns||[]).find(x => x.id === id);
+  if (!t) return;
+  t.category = FIN_CATEGORIES.indexOf(cat) >= 0 ? cat : '';
+  save();
+};
+window.bankDisconnect = async function(id){
+  const fb = STATE.finBank || {};
+  const a = (fb.accounts||[]).find(x => x.id === id);
+  if (!a) return;
+  if (!confirm('Disconnect ' + (a.institution || a.name) + ' …' + (a.last4||'') + '? Stripe stops all data access to it. Synced transactions stay in VENIA.')) return;
+  try {
+    await bankApi('disconnect', { account: id });
+    fb.accounts = (fb.accounts||[]).filter(x => x.id !== id);
+    save();
+    showToast('Account disconnected', 'success');
+  } catch(e){ showToast(String(e && e.message || e), 'error'); }
+  try { cmdRenderBank(); } catch(e){}
+};
+
+window.cmdRenderBank = function(){
+  const el = document.getElementById('cmd-bank-body');
+  if (!el) return;
+  const bk = finBankData();
+  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
+  if (!bk.connected) {
+    el.innerHTML = `
+      <div style="max-width:560px">
+        <div class="ag-sec-head"><h2 class="ag-sec-title">Connect your bank</h2></div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.8;margin-bottom:16px">
+          Link VENIA's bank account through Stripe Financial Connections — the same Stripe account that already sends your invoices.
+          You sign in on <b>Stripe's own secure screen</b>; VENIA never sees your bank credentials. The connection is <b>read-only</b>
+          (balances + transactions) and gives the CFO agent real expenses, burn, and runway.
+        </div>
+        <button class="ag-btn ag-btn-primary" onclick="bankConnect()">Connect bank →</button>
+        <div style="margin-top:20px;padding:14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);line-height:1.8">
+          <b>One-time setup (Netlify + Stripe dashboard):</b><br>
+          1. Netlify env var <span style="font-family:'DM Mono',monospace">STRIPE_PUBLISHABLE_KEY</span> (pk_…) — the secret key is already set.<br>
+          2. Netlify env var <span style="font-family:'DM Mono',monospace">VENIA_GATE_HASH</span> (or STRIPE_GATE_HASH) — bank access refuses to run without the access-code gate.<br>
+          3. Stripe Dashboard → Settings → Financial Connections: complete the registration (live-mode transactions need it; test mode works right away).
+        </div>
+      </div>`;
+    return;
+  }
+  const asOf = bk.accounts.map(a => a.balance && a.balance.as_of).filter(Boolean).sort().pop() || '';
+  const stats = `<div class="ag-stats">
+    <div class="ag-stat"><div class="ag-stat-l">Cash on hand</div><div class="ag-stat-v">${money(bk.bal)}</div><div class="ag-stat-s">${bk.accounts.length} account${bk.accounts.length>1?'s':''}${asOf ? ' · as of ' + asOf : ''}</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">${bk.monthlyNet > 0 ? 'Monthly burn' : 'Monthly surplus'}</div><div class="ag-stat-v" style="color:${bk.monthlyNet > 0 ? 'var(--amber)' : 'var(--green)'}">${money(Math.abs(bk.monthlyNet))}</div><div class="ag-stat-s">90d avg, transfers excluded</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Runway</div><div class="ag-stat-v">${bk.runwayMo != null ? (bk.runwayMo >= 24 ? '24+ mo' : bk.runwayMo.toFixed(1) + ' mo') : '—'}</div><div class="ag-stat-s">${bk.runwayMo != null ? 'cash ÷ net burn' : 'not burning'}</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Uncategorized</div><div class="ag-stat-v"${bk.uncat ? ' style="color:var(--amber)"' : ''}>${bk.uncat}</div><div class="ag-stat-s">${bk.uncat ? 'ask the CFO to sort them' : 'all sorted'}</div></div>
+  </div>`;
+  const acctRows = bk.accounts.map(a => `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);font-size:11.5px">
+      <span>${slEsc(a.institution || a.name)} <span style="color:var(--muted)">…${slEsc(a.last4||'')}${a.status !== 'active' ? ' · ' + slEsc(a.status) : ''}${(a.subscriptions||[]).indexOf('transactions') < 0 ? ' · no txn subscription' : ''}</span></span>
+      <span style="display:flex;align-items:center;gap:10px;white-space:nowrap">
+        <span style="font-family:'DM Mono',monospace">${a.balance && (a.balance.available != null || a.balance.current != null) ? money(a.balance.available != null ? a.balance.available : a.balance.current) : '—'}</span>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankDisconnect('${slEsc(a.id)}')">✕</button>
+      </span>
+    </div>`).join('');
+  const catOpts = (sel) => '<option value=""' + (!sel ? ' selected' : '') + '>—</option>'
+    + FIN_CATEGORIES.map(c => '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' + c + '</option>').join('');
+  const txRows = (STATE.finTxns||[]).slice(0, 30).map(t => `
+    <div style="display:grid;grid-template-columns:74px 1fr 90px 110px;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px${t.status==='pending' ? ';opacity:.6' : ''}">
+      <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${slEsc(t.date||'')}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${slEsc(t.desc||'')}${t.status==='pending' ? ' <span style="color:var(--muted);font-size:9px">(pending)</span>' : ''}</span>
+      <span style="font-family:'DM Mono',monospace;text-align:right;color:${(t.amount||0) < 0 ? 'var(--ink)' : 'var(--green)'}">${money(t.amount||0)}</span>
+      <select class="fs" style="min-height:auto;padding:4px 6px;font-size:10px" onchange="bankSetCategory('${slEsc(t.id)}', this.value)">${catOpts(t.category||'')}</select>
+    </div>`).join('');
+  el.innerHTML = stats
+    + `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:16px 0">
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankRefreshBalances()">↻ Refresh balances</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSyncTxns()">⟳ Sync transactions</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankConnect()">+ Add account</button>
+        ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · read-only — nothing here can move money</div>
+      <div class="ag-sec-head"><h2 class="ag-sec-title">Accounts</h2></div>
+      <div style="max-width:560px;margin-bottom:20px">${acctRows}</div>
+      <div class="ag-sec-head"><h2 class="ag-sec-title">Recent transactions</h2></div>
+      ${(STATE.finTxns||[]).length ? txRows : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No transactions synced yet — tap “Sync transactions”. A first pull can take Stripe a minute to prepare; try again shortly after connecting.</div>'}`;
 };
 
 // Goals can bind to a LIVE source — bound goals track actuals by themselves.
