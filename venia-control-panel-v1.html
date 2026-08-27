@@ -913,6 +913,12 @@ img.mat-swatch{height:104px}   /* a real swatch photo needs room to read */
 
 /* BOM row — desktop grid, mobile card */
 .bom-row-view{display:grid;grid-template-columns:2fr 1fr 1fr 1fr 1.5fr 1fr 1fr auto;align-items:center;cursor:pointer}
+/* Column headings — the row was a wall of unlabelled numbers on desktop. */
+.bom-col-head{cursor:default;background:var(--bg-off);border:1px solid var(--border);border-bottom:none}
+.bom-col-head>div{padding:8px 14px;font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700}
+.bom-head{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.bom-head .bom-acts{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.bom-back{display:none}   /* desktop has the sidebar; a phone has nothing */
 
 /* ── MOBILE RESPONSIVE ── */
 @media(max-width:768px) {
@@ -1721,7 +1727,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '294';
+  const BUILD = '295';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7709,7 +7715,103 @@ function filterArt(filter, el) {
 // ═══════════════════════════════════════════════
 //  BOM
 // ═══════════════════════════════════════════════
+// ── BOM ↔ Materials ──────────────────────────────────────────────────────
+// A style already says what it is made of; the BOM should not make you type it
+// again. These pull the style's fabric (and lining) out of the Materials
+// library as real BOM lines, carrying cost, unit and supplier with them, and
+// keep those lines in step when the material record changes.
+let BOM_FILTER = 'all';
+function bomMatFor(nameOrId){
+  const mats = (window.STATE && STATE.materials) || [];
+  return mats.find(m => m.id === nameOrId)
+      || mats.find(m => String(m.name||'').trim().toLowerCase() === String(nameOrId||'').trim().toLowerCase())
+      || null;
+}
+function bomHasMaterial(items, name, matId){
+  const key = String(name||'').trim().toLowerCase();
+  return (items||[]).some(i =>
+    (matId && i.matId === matId) || String(i.matName||'').trim().toLowerCase() === key);
+}
+// The lines a style implies but its BOM is missing.
+function bomMissingFromStyle(styleId){
+  const st = (STATE.styles||[]).find(x => x.id === styleId);
+  if (!st) return [];
+  const items = STATE.bom[styleId] || [];
+  const want = [
+    { name: String(st.fabric||'').trim(),  role: 'Shell',  type: 'Fabric', matId: st.fabricMatId || null },
+    { name: String(st.fabric2||'').trim(), role: 'Lining', type: 'Fabric', matId: null },
+  ].filter(w => w.name);
+  return want.filter(w => !bomHasMaterial(items, w.name, w.matId));
+}
+function bomAddFromStyle(styleId, silent){
+  const st = (STATE.styles||[]).find(x => x.id === styleId);
+  if (!st) return 0;
+  if (!STATE.bom[styleId]) STATE.bom[styleId] = [];
+  const missing = bomMissingFromStyle(styleId);
+  missing.forEach(w => {
+    const m = bomMatFor(w.matId || w.name);
+    STATE.bom[styleId].push({
+      matName: m ? m.name : w.name,
+      matId: m ? m.id : '',
+      lineType: w.type,
+      matType: m ? m.type : w.type,
+      // Qty stays 0 — a yield is a real measurement, and inventing one would
+      // put a fictional number straight into the cost sheet.
+      qty: 0,
+      unit: m ? (m.unit || 'yd') : 'yd',
+      costPerUnit: m ? (parseFloat(m.costPerUnit) || 0) : 0,
+      supplier: m ? (m.supplier || '') : '',
+      placement: w.role,
+      waste: '',
+      _fromStyle: true,
+    });
+  });
+  if (missing.length) {
+    save();
+    try { logActivity(st.name + ': ' + missing.length + ' material line' + (missing.length>1?'s':'') + ' added to BOM from the style'); } catch(e){}
+    if (!silent) { try { showToast('Added ' + missing.map(w=>w.name).join(', ') + ' to the BOM'); } catch(e){} }
+  }
+  return missing.length;
+}
+// Re-read cost / unit / supplier for every line linked to a material record.
+function bomRefreshLinked(styleId){
+  const items = STATE.bom[styleId] || [];
+  let n = 0;
+  items.forEach(i => {
+    const m = i.matId ? bomMatFor(i.matId) : null;
+    if (!m) return;
+    const cost = parseFloat(m.costPerUnit) || 0;
+    if (i.matName !== m.name || i.costPerUnit !== cost || i.unit !== (m.unit||i.unit) || (i.supplier||'') !== (m.supplier||'')) {
+      i.matName = m.name; i.costPerUnit = cost;
+      if (m.unit) i.unit = m.unit;
+      i.supplier = m.supplier || '';
+      n++;
+    }
+  });
+  if (n) { save(); try { logActivity('BOM: ' + n + ' line(s) refreshed from Materials'); } catch(e){} }
+  return n;
+}
+function bomSyncAll(styleId){
+  const added = bomAddFromStyle(styleId, true);
+  const refreshed = bomRefreshLinked(styleId);
+  bomSelectStyle(styleId);
+  const bits = [];
+  if (added) bits.push(added + ' line' + (added>1?'s':'') + ' added');
+  if (refreshed) bits.push(refreshed + ' updated from Materials');
+  try { showToast(bits.length ? bits.join(' · ') : 'Already in step with Materials'); } catch(e){}
+}
+// Mobile has no sidebar and no obvious way out of a sub-page.
+function bomBackToStyle(styleId){
+  try { if (styleId && typeof openDp === 'function') { goTo('styles'); openDp(styleId); return; } } catch(e){}
+  try { goTo('styles'); } catch(e){}
+}
+
 function renderBomPage() {
+  // Keep the style you were looking at. This is the page-level render, so it
+  // also runs on a sync repaint — blanking back to "select a style" would wipe
+  // the BOM out from under you every time a partner's edit landed.
+  const sel = document.getElementById('bom-style-select');
+  if (sel && sel.value && (STATE.styles||[]).some(x => x.id === sel.value)) { bomSelectStyle(sel.value); return; }
   document.getElementById('bom-content').innerHTML = `<div class="empty"><div class="empty-icon">⊞</div><div class="empty-text">Select a style to view its Bill of Materials</div></div>`;
 }
 
@@ -7721,8 +7823,21 @@ function bomExt(item) {
 }
 
 function bomFilter(f, el) {
+  // These pills used to only paint themselves — clicking Fabric filtered
+  // nothing, which is worse than having no filter at all.
   document.querySelectorAll('#page-bom .pill').forEach(b=>b.classList.remove('active'));
   if (el) el.classList.add('active');
+  BOM_FILTER = f || 'all';
+  const sel = document.getElementById('bom-style-select');
+  if (sel && sel.value) bomSelectStyle(sel.value);
+}
+function bomMatchesFilter(item){
+  if (BOM_FILTER === 'all') return true;
+  const t = String(item.lineType || item.matType || '').toLowerCase();
+  if (BOM_FILTER === 'fabric') return t === 'fabric' || t === 'lining';
+  if (BOM_FILTER === 'trim')   return t === 'trim' || t === 'hardware' || t === 'thread';
+  if (BOM_FILTER === 'label')  return t === 'label' || t === 'packaging';
+  return true;
 }
 
 function bomSelectStyle(styleId) {
@@ -7734,16 +7849,37 @@ function bomSelectStyle(styleId) {
 
   const typeColors = { Fabric:'var(--blue)', Trim:'var(--purple)', Label:'var(--green)', Packaging:'var(--amber)', Hardware:'var(--red)', Thread:'var(--teal)', Wash:'var(--teal)', Dye:'var(--purple)', Custom:'var(--muted)' };
 
+  // Seed an EMPTY bom straight from the style — there is nothing to conflict
+  // with, and making someone re-type the fabric they already chose is the
+  // clunkiness this page was accused of. A bom with lines gets an offer, not
+  // a silent write.
+  if (!items.length && bomMissingFromStyle(styleId).length) {
+    bomAddFromStyle(styleId, true);
+    return bomSelectStyle(styleId);
+  }
+  const missing = bomMissingFromStyle(styleId);
+  const shown = items.map((item, idx) => ({ item, idx })).filter(x => bomMatchesFilter(x.item));
+
   document.getElementById('bom-content').innerHTML = `
-    <div class="sec-head" style="margin-bottom:14px;flex-wrap:wrap;gap:8px">
-      <div class="sec-title">${style.name} <span style="color:var(--muted);font-size:14px;letter-spacing:1px">— ${style.styleId}</span></div>
-      <div class="sec-actions" style="flex-wrap:wrap;gap:6px">
-        <button class="btn btn-ghost btn-sm" onclick="syncPatternToBOM('${styleId}');bomSelectStyle('${styleId}');toast('BOM synced from Pattern Card')" title="Sync fabric lines from Pattern Card">↻ Sync Pattern</button>
+    <div class="bom-head">
+      <button class="btn btn-ghost btn-sm bom-back" onclick="bomBackToStyle('${styleId}')" title="Back to the style">◂ Style</button>
+      <div style="min-width:0;flex:1">
+        <div class="sec-title" style="margin:0">${esc(style.name)}</div>
+        <div style="font-size:10px;color:var(--muted);letter-spacing:1px;font-family:'DM Mono',monospace">${esc(style.styleId)}${style.fabric?' · '+esc(style.fabric):''}</div>
+      </div>
+      <div class="bom-acts">
+        <button class="btn btn-ghost btn-sm" onclick="bomSyncAll('${styleId}')" title="Pull the style's fabric in and re-read costs from the Materials library">↻ Sync Materials</button>
+        <button class="btn btn-ghost btn-sm" onclick="syncPatternToBOM('${styleId}');bomSelectStyle('${styleId}');toast('BOM synced from Pattern Card')" title="Sync fabric yield from the Pattern Card">↻ Pattern</button>
         <button class="btn btn-ghost btn-sm" onclick="addBomLine('${styleId}')">+ Fabric / Trim</button>
         <button class="btn btn-ghost btn-sm" onclick="addLabelBomLine('${styleId}')">+ Label / Tag</button>
         <button class="btn btn-ghost btn-sm" onclick="addCustomBomLine('${styleId}')">+ Wash / Dye</button>
       </div>
     </div>
+    ${missing.length ? `
+    <div style="padding:10px 12px;background:var(--bg-off);border:1px solid var(--amber);margin-bottom:12px;font-size:11px;color:var(--ink);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>This style is made of <strong>${missing.map(w=>esc(w.name)).join('</strong> and <strong>')}</strong>, which ${missing.length>1?'are':'is'} not on the BOM yet.</span>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="bomAddFromStyle('${styleId}');bomSelectStyle('${styleId}')">＋ Add from Materials</button>
+    </div>` : ''}
     ${(items.filter(i=>i._fromPattern).length) ? `
     <div style="padding:8px 12px;background:var(--bg-off);border:1px solid var(--border-mid);margin-bottom:12px;font-size:10px;color:var(--muted);letter-spacing:.5px;display:flex;align-items:center;gap:8px">
       <span style="font-size:11px">↔</span>
@@ -7751,16 +7887,19 @@ function bomSelectStyle(styleId) {
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="syncPatternToBOM('${styleId}');bomSelectStyle('${styleId}');toast('Synced')">↻ Refresh</button>
     </div>` : ''}
     <div style="margin-bottom:14px" id="bom-inline-wrap"></div>
+    ${shown.length ? `<div class="bom-row-view bom-col-head">
+      <div>Material</div><div>Qty</div><div>Unit</div><div>Placement</div><div>Supplier</div><div>Cost / unit</div><div>Extended</div><div></div>
+    </div>` : ''}
     <div id="bom-rows-wrap">
-      ${items.length ? items.map((item,idx) => bomRowHtml(styleId, item, idx, typeColors)).join('') : `
+      ${shown.length ? shown.map(x => bomRowHtml(styleId, x.item, x.idx, typeColors)).join('') : `
         <div style="padding:32px;text-align:center;border:1px solid var(--border);background:var(--bg)">
-          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">No materials added yet</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:6px">Use the buttons above to add materials or custom lines</div>
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">${items.length ? 'Nothing of that type on this BOM' : 'No materials added yet'}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:6px">${items.length ? 'Clear the filter to see all ' + items.length + ' lines.' : 'Use the buttons above to add materials or custom lines'}</div>
         </div>`}
     </div>
     ${items.length ? `
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--bg-off);border:1px solid var(--border);border-top:1px solid var(--border-mid);margin-top:1px">
-      <div class="micro-label">Total Material Cost</div>
+    <div class="bom-total-row" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;background:var(--bg-off);border:1px solid var(--border);border-top:1px solid var(--border-mid);margin-top:1px;flex-wrap:wrap;gap:10px">
+      <div class="micro-label">Total Material Cost${BOM_FILTER!=='all'?' <span style="text-transform:none;letter-spacing:0;color:var(--muted)">(all lines, not just the filter)</span>':''}</div>
       <div style="display:flex;align-items:center;gap:20px">
         <span style="font-family:'DM Mono',monospace;font-size:18px;font-weight:700;color:var(--ink)">$${total.toFixed(2)}</span>
         <span style="font-size:10px;color:var(--muted)">vs COGS <strong style="color:var(--ink)">$${style.cogs||'—'}</strong></span>
@@ -7774,7 +7913,9 @@ function bomRowHtml(styleId, item, idx, typeColors) {
   const lineColor = typeColors[item.lineType||item.matType||'Custom'] || 'var(--muted)';
   const syncBadge = item._fromPattern
     ? `<span style="font-size:7px;letter-spacing:1px;text-transform:uppercase;background:var(--ink);color:#fff;padding:1px 5px;margin-left:6px">↔ Pattern</span>`
-    : '';
+    : (item.matId
+      ? `<span title="Linked to the Materials library — cost follows that record" style="font-size:7px;letter-spacing:1px;text-transform:uppercase;border:1px solid var(--border-mid);color:var(--muted);padding:1px 5px;margin-left:6px">↔ Material</span>`
+      : '');
   return `
     <div style="border:1px solid var(--border);border-bottom:none;background:var(--bg)" id="bom-row-${idx}">
       <!-- VIEW MODE -->
@@ -7785,13 +7926,13 @@ function bomRowHtml(styleId, item, idx, typeColors) {
           ${item.lineType ? `<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:${lineColor};border:1px solid ${lineColor};padding:1px 5px">${item.lineType}</span>` : ''}
           ${syncBadge}
         </div>
-        <div style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--silver)">${item.qty}${parseFloat(item.waste)>0?`<span style="color:var(--muted);font-size:10px"> +${item.waste}%</span>`:''}</div>
-        <div style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.unit}</div>
-        <div style="padding:11px 14px"><span class="b-tag">${item.placement||'—'}</span></div>
-        <div style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.supplier||'—'}</div>
-        <div style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--silver)">$${item.costPerUnit.toFixed(2)}</div>
-        <div style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);font-weight:700">$${bomExt(item).toFixed(2)}</div>
-        <div style="padding:11px 14px;font-size:10px;color:var(--muted)">✎</div>
+        <div data-l="Qty" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:${item.qty>0?'var(--silver)':'var(--red)'}">${item.qty}${parseFloat(item.waste)>0?`<span style="color:var(--muted);font-size:10px"> +${item.waste}%</span>`:''}${item.qty>0?'':'<span style="font-size:9px;letter-spacing:.5px"> set yield</span>'}</div>
+        <div data-l="Unit" style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.unit}</div>
+        <div data-l="Placement" style="padding:11px 14px"><span class="b-tag">${item.placement||'—'}</span></div>
+        <div data-l="Supplier" style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.supplier||'—'}</div>
+        <div data-l="Cost / unit" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--silver)">$${item.costPerUnit.toFixed(2)}</div>
+        <div data-l="Extended" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);font-weight:700">$${bomExt(item).toFixed(2)}</div>
+        <div class="bom-pencil" style="padding:11px 14px;font-size:10px;color:var(--muted)">✎</div>
       </div>
       <!-- EDIT MODE -->
       <div class="bom-edit-${idx}" style="display:none;padding:14px;background:var(--bg-off);border-top:1px solid var(--border)">
@@ -8015,6 +8156,9 @@ function removeBomLine(styleId, idx) {
 let currentPomStyleId = null;
 
 function renderPomPage() {
+  // Same reason as renderBomPage: a repaint must not lose the open style.
+  const sel = document.getElementById('pom-style-select');
+  if (sel && sel.value && (STATE.styles||[]).some(x => x.id === sel.value)) { pomSelectStyle(sel.value); return; }
   document.getElementById('pom-content').innerHTML = `<div class="empty"><div class="empty-icon">◑</div><div class="empty-text">Select a style to view its Point of Measure sheet</div></div>`;
 }
 
@@ -32546,7 +32690,24 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
 
   /* Grid-based "tables" (not real <table>): scroll instead of crushing to 390px */
   #bom-rows-wrap, .tp-bom-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  .bom-row, .bom-row-view, .bom-total{ min-width:600px; }
+  /* Was min-width:600px — that is what pushed the BOM off the side of a
+     phone. Rows become stacked cards instead, each cell captioned by the
+     column it came from. */
+  .bom-row, .bom-total{ min-width:600px; }
+  .bom-col-head{ display:none; }
+  .bom-back{ display:inline-flex; }
+  .bom-head{ position:sticky; top:0; z-index:5; background:var(--bg); padding:10px 0; margin:0 0 12px; gap:10px; }
+  .bom-head .bom-acts{ width:100%; margin-left:0; }
+  .bom-head .bom-acts .btn{ flex:1 1 auto; min-height:38px; }
+  .bom-row-view{ min-width:0; grid-template-columns:1fr 1fr; padding:4px 0 8px; row-gap:2px; }
+  .bom-row-view>div{ padding:5px 12px !important; min-width:0; overflow-wrap:anywhere; }
+  .bom-row-view>div:first-child{ grid-column:1 / -1; font-size:13px !important; padding-top:10px !important; }
+  .bom-row-view>div[data-l]::before{
+    content:attr(data-l); display:block; font-size:8px; letter-spacing:1.1px;
+    text-transform:uppercase; color:var(--muted); margin-bottom:1px; font-weight:700;
+  }
+  .bom-row-view .bom-pencil{ grid-column:1 / -1; text-align:right; padding-top:0 !important; }
+  .bom-total-row{ flex-direction:column; align-items:flex-start !important; }
   .tpbr{ min-width:640px; }
 
   /* Buyers filter bar: search + one "Filters" chip; the rest folds away.
