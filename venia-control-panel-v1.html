@@ -1721,7 +1721,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '293';
+  const BUILD = '294';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26512,8 +26512,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         updated_at: new Date().toISOString(), rev: rev
       }, { onConflict:'id' });
       if (!res || !res.error) {
-        localStorage.setItem('venia-sync-rev', String(rev)); setBase(localSnap);
-        window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length };
+        localStorage.setItem('venia-sync-rev', String(rev));
+        // Read-modify-WRITE was only doing read-modify: the merged blob (which
+        // carries the partner's records) went to the cloud, and this device
+        // kept its own thinner copy. That is how a browser ends up permanently
+        // missing data the merge just preserved — on the next boot the cloud is
+        // stamped updated_by = us, so initialSync skips the apply ("we wrote
+        // it, we must have it"), and the gap survives every refresh forever.
+        // Adopt what we just published.
+        var adopted = false;
+        try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
+        if (adopted) { applySnapshot(toPush); setBase(snapshot()); }
+        else { setBase(localSnap); }
+        window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length, via: adopted ? 'adopted cloud records' : 'local only' };
       } else {
         syncFail('push', res.error.message || res.error.code);
       }
@@ -26658,7 +26669,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           else applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
           setBase(snapshot());
           rerender();
-        } else { setBase(snapshot()); }
+        } else {
+          // Last cloud write was ours — but that is not proof our copy matches
+          // it, so merge rather than assume. Cheap, and it closes the loop that
+          // left this device permanently short of records.
+          var mine = snapshot(), merged = mergeSnapshots(getBase(), mine, row.data);
+          var differs = false;
+          try { differs = _mStr(merged) !== _mStr(mine); } catch (e) { differs = false; }
+          if (differs) { applySnapshot(merged); rerender(); }
+          setBase(snapshot());
+        }
       } else {
         pushNow();                    // our local is newer → push it (pushNow sets base)
       }
