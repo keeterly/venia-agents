@@ -1734,7 +1734,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '297';
+  const BUILD = '298';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1766,7 +1766,7 @@ body{padding-top:44px;box-sizing:border-box;}
     // and nothing a previous user of this browser left in localStorage — can
     // render behind the portal. The portal builds its own DOM from scratch.
     document.addEventListener('DOMContentLoaded', function(){
-      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff"></div>';
+      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff;flex:1 1 auto;width:100%"></div>';
     });
   }
   // Stripe returns the STYLIST here after paying (?pay=success|cancelled) —
@@ -2566,10 +2566,10 @@ body{padding-top:44px;box-sizing:border-box;}
           </div>
           <div style="margin-top:20px;padding:16px;background:var(--bg-off);border:1px solid var(--border)">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-              <div style="font-size:11px;font-weight:700;color:var(--ink)">Sales agent portals</div>
-              <button class="btn btn-ghost btn-sm" onclick="agNewAgent()">+ New agent link</button>
+              <div style="font-size:11px;font-weight:700;color:var(--ink)">People &amp; access</div>
+              <button class="btn btn-ghost btn-sm" onclick="agNewAgent()">+ Add a person</button>
             </div>
-            <div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:12px">A freelance agent gets one link — no login. She can add and track <strong>only her own leads</strong>; nothing else in VENIA is sent to her browser, and nothing enters the buyer CRM until you validate it. Revoke any time.</div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.7;margin-bottom:12px">Everyone outside the two of you gets one link — no login, and <strong>never the workspace itself</strong>. What they can reach is decided here and enforced on the server, so a link can only ever return what its group allows: cost, margin, factory and production data are not sendable to a portal at all. New leads still wait for your validation before entering the CRM. Revoke any time.</div>
             <div id="set-agents" style="font-size:11px;color:var(--muted)">Loading…</div>
           </div>
           <div style="margin-top:20px;padding:16px;background:var(--bg-off);border:1px solid var(--border)">
@@ -27192,7 +27192,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     const token = window.VENIA_AGENT; if (!token) return;
     if (window.__agBooted) return; window.__agBooted = true;
     if (!document.getElementById('ag-root')) {
-      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff"></div>';
+      document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff;flex:1 1 auto;width:100%"></div>';
     }
     document.getElementById('ag-root').innerHTML =
       '<div style="min-height:60vh;display:flex;align-items:center;justify-content:center;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#888">Loading your leads…</div>';
@@ -27215,19 +27215,62 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (++tries > 60) { clearInterval(t); shareFail('Connection unavailable', 'Could not reach VENIA. Check your connection and reload.'); }
     }, 250);
   }
+  // ── Portal sections ─────────────────────────────────────────────────────
+  // Tabs are the server's scopes made visible: a person only sees sections the
+  // edge function would actually answer for. Hiding a tab is a courtesy, not
+  // the guard — every call re-checks the scope server-side, and the workspace
+  // blob is never fetched into this browser at all.
+  const AG_TABS = [
+    { k:'leads',    label:'My leads',  scope:'leads.write' },
+    { k:'accounts', label:'Accounts',  scope:'crm.read' },
+    { k:'line',     label:'Linesheet', scope:'line.read' },
+  ];
+  function agCan(s){ return (((window.__agMe||{}).scopes)||[]).includes(s); }
+  function agTabsOn(){ return AG_TABS.filter(t => agCan(t.scope)); }
+  let AG_TAB = '';
+  window.agTab = function(k){
+    AG_TAB = k; agRender();
+    if (k === 'accounts' && !window.__agCrm) agLoadCrm();
+    if (k === 'line' && !window.__agLine) agLoadLine();
+  };
+  const AGI = "padding:10px 11px;border:1px solid #ccc;font-size:14px;background:#fff;color:#000;outline:none;font-family:inherit";
+  const AG_MUTED = 'font-size:12px;color:#888;font-style:italic;padding:16px 0';
+  function agSpin(msg){ return '<div style="'+AG_MUTED+'">'+agEsc(msg)+'</div>'; }
+  // The CRM's own stage vocabulary, so a stage set here reads identically in
+  // Sales → Buyers. Do not invent a parallel set.
+  const AG_CRM_STAGES = [['new','To Reach'],['warm','Talking'],['quoted','Quoted'],['active','Stockist'],['closed','Ordered'],['inactive','Dormant']];
+  function agCrmStageLabel(k){ const r = AG_CRM_STAGES.find(x => x[0] === (k||'new')); return r ? r[1] : 'To Reach'; }
+
   function agRender(){
-    const me = window.__agMe || {}; const leads = me.leads || [];
-    const counts = AG_STAGES.map(([k]) => leads.filter(l => (l.stage||'new') === k).length);
-    const approved = leads.filter(l => l.status === 'approved' || l.status === 'merged').length;
+    const me = window.__agMe || {};
+    const tabs = agTabsOn();
+    if (!AG_TAB || !tabs.some(t => t.k === AG_TAB)) AG_TAB = tabs.length ? tabs[0].k : '';
     const root = document.getElementById('ag-root'); if (!root) return;
     root.innerHTML = `
-      <div style="max-width:720px;margin:0 auto;padding:calc(18px + var(--sat,0px)) 16px calc(28px + var(--sab,0px));font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#000">
-        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:16px">
+      <div style="max-width:860px;margin:0 auto;padding:calc(18px + var(--sat,0px)) 16px calc(28px + var(--sab,0px));font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#000">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border-bottom:2px solid #000;padding-bottom:12px">
           <div style="font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:19px;letter-spacing:6px;text-transform:uppercase">VENIA</div>
           <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#c9a96e">Sales agent portal</div>
           <div style="margin-left:auto;font-size:11px;color:#666">${agEsc(me.agent?.name||'')}${me.agent?.note?' · '+agEsc(me.agent.note):''}</div>
         </div>
+        ${tabs.length > 1 ? `<div style="display:flex;gap:0;border-bottom:1px solid #e0e0e0;margin-bottom:18px;overflow-x:auto">
+          ${tabs.map(t => `<button onclick="agTab('${t.k}')" style="padding:12px 16px;border:none;border-bottom:2px solid ${AG_TAB===t.k?'#000':'transparent'};background:none;font-size:11px;letter-spacing:2px;text-transform:uppercase;font-weight:${AG_TAB===t.k?'700':'400'};color:${AG_TAB===t.k?'#000':'#888'};cursor:pointer;white-space:nowrap">${t.label}</button>`).join('')}
+        </div>` : '<div style="height:16px"></div>'}
+        <div id="ag-body">${
+          AG_TAB === 'leads' ? agLeadsView() :
+          AG_TAB === 'accounts' ? agAccountsView() :
+          AG_TAB === 'line' ? agLineView() :
+          '<div style="'+AG_MUTED+'">This link has no sections enabled yet. Ask VENIA to grant access.</div>'
+        }</div>
+      </div>`;
+  }
 
+  // ── My leads ────────────────────────────────────────────────────────────
+  function agLeadsView(){
+    const leads = (window.__agMe||{}).leads || [];
+    const counts = AG_STAGES.map(([k]) => leads.filter(l => (l.stage||'new') === k).length);
+    const approved = leads.filter(l => l.status === 'approved' || l.status === 'merged').length;
+    return `
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(84px,1fr));gap:1px;background:#e0e0e0;border:1px solid #e0e0e0;margin-bottom:18px">
           ${AG_STAGES.map(([k,label],i)=>`<div style="background:#fff;padding:10px 8px;text-align:center">
             <div style="font-family:'DM Mono',monospace;font-size:22px;font-weight:300">${counts[i]}</div>
@@ -27258,13 +27301,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
         <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-bottom:8px">My leads (${leads.length})</div>
         ${leads.length ? leads.map(l => agLeadRow(l)).join('') :
-          '<div style="font-size:12px;color:#888;font-style:italic;padding:14px 0">No leads yet — add the first one above.</div>'}
+          '<div style="'+AG_MUTED+'">No leads yet — add the first one above.</div>'}
         <div style="margin-top:22px;font-size:10px;color:#999;line-height:1.6;border-top:1px solid #e0e0e0;padding-top:12px">
           Leads you add are reviewed by VENIA before they enter the buyer CRM. You'll see the outcome on each card.
-        </div>
-      </div>`;
+        </div>`;
   }
-  const AGI = "padding:10px 11px;border:1px solid #ccc;font-size:14px;background:#fff;color:#000;outline:none;font-family:inherit";
   function agLeadRow(l){
     const badge = l.status === 'approved' ? ['✓ In CRM','#27ae60']
       : l.status === 'merged' ? ['✓ Merged with existing account','#27ae60']
@@ -27313,6 +27354,169 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){}
   };
 
+  // ── Accounts (buyer CRM) ────────────────────────────────────────────────
+  // The whole account list, so she never cold-approaches a store we already
+  // sell. Editing is limited to accounts she brought in — and that limit is
+  // the server's, enforced on every save, not this button's.
+  async function agLoadCrm(){
+    try { window.__agCrm = await agCall({ token: window.__agToken, action:'crm' }); }
+    catch(e){ window.__agCrm = { error: e.message || String(e) }; }
+    if (AG_TAB === 'accounts') agRender();
+  }
+  let AG_Q = '';
+  let AG_EDIT = null;
+  window.agAcctSearch = function(v){
+    AG_Q = String(v||'').toLowerCase();
+    const box = document.getElementById('ag-acct-list');
+    if (box) box.innerHTML = agAcctRows();
+  };
+  function agAcctMatch(b){
+    if (!AG_Q) return true;
+    return [b.name,b.location,b.country,b.contactName,b.email,b.type]
+      .filter(Boolean).some(x => String(x).toLowerCase().includes(AG_Q));
+  }
+  function agAcctRows(){
+    const d = window.__agCrm || {};
+    const owned = new Set(d.owned || []);
+    const rows = (d.buyers||[]).filter(agAcctMatch);
+    if (!rows.length) return '<div style="'+AG_MUTED+'">No accounts match that search.</div>';
+    rows.sort((a,b) => (owned.has(b.id)?1:0) - (owned.has(a.id)?1:0) || String(a.name).localeCompare(String(b.name)));
+    return rows.map(b => owned.has(b.id) && AG_EDIT === b.id ? agAcctEditor(b) : agAcctCard(b, owned.has(b.id))).join('');
+  }
+  function agAcctCard(b, mine){
+    return `<div style="border:1px solid ${mine?'#000':'#e8e8e8'};padding:12px;margin-bottom:8px;background:#fff">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <div style="font-size:14px;font-weight:700;flex:1;min-width:0">${agEsc(b.name)}</div>
+        <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;color:#666">${agEsc(agCrmStageLabel(b.stage))}</span>
+      </div>
+      <div style="font-size:11px;color:#666;margin-top:3px">${[b.type,b.location,b.country].filter(Boolean).map(agEsc).join(' · ')||'—'}</div>
+      ${b.contactName||b.email||b.phone ? `<div style="font-size:11px;color:#666;margin-top:2px">${[b.contactName,b.email,b.phone].filter(Boolean).map(agEsc).join(' · ')}</div>` : ''}
+      ${b.notes ? `<div style="font-size:11px;color:#333;margin-top:6px;white-space:pre-wrap">${agEsc(b.notes)}</div>` : ''}
+      <div style="display:flex;align-items:center;gap:10px;margin-top:9px">
+        ${mine
+          ? `<button onclick="agAcctEdit('${b.id}')" style="padding:6px 12px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:1px solid #000;background:#fff;color:#000;cursor:pointer">Edit</button>
+             <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#c9a96e">Yours</span>`
+          : '<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#aaa">VENIA account · view only</span>'}
+        ${b.nextDate ? `<span style="margin-left:auto;font-size:10px;color:#888">Next: ${agEsc(b.nextDate)}</span>` : ''}
+      </div>
+    </div>`;
+  }
+  const AG_EDIT_FIELDS = [
+    ['contactName','Buyer / contact name'], ['email','Email'], ['phone','Phone'],
+    ['location','City'], ['country','Country'], ['website','Website'],
+    ['lastContact','Last contact (YYYY-MM-DD)'], ['nextDate','Next follow-up (YYYY-MM-DD)'],
+  ];
+  function agAcctEditor(b){
+    return `<div style="border:2px solid #000;padding:14px;margin-bottom:8px;background:#fff">
+      <div style="font-size:14px;font-weight:700;margin-bottom:10px">${agEsc(b.name)}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px">
+        <select id="ag-e-stage" style="${AGI}">${AG_CRM_STAGES.map(([k,l])=>`<option value="${k}" ${((b.stage||'new')===k)?'selected':''}>${l}</option>`).join('')}</select>
+        ${AG_EDIT_FIELDS.map(([k,ph])=>`<input id="ag-e-${k}" placeholder="${ph}" value="${agEsc(b[k]||'')}" style="${AGI}">`).join('')}
+      </div>
+      <textarea id="ag-e-notes" rows="3" placeholder="Notes — what was said, buying window, reaction to price…" style="${AGI};width:100%;box-sizing:border-box;margin-top:8px;resize:vertical;font-family:inherit">${agEsc(b.notes||'')}</textarea>
+      <div id="ag-e-warn" style="display:none;font-size:11px;color:#b26a00;background:#fff8ee;border:1px solid #f0d6a8;padding:8px 10px;margin-top:8px"></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button onclick="agAcctSave('${b.id}')" style="flex:1;padding:11px;background:#000;color:#fff;border:none;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer">Save</button>
+        <button onclick="agAcctEdit('')" style="padding:11px 16px;background:#fff;color:#666;border:1px solid #ddd;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer">Cancel</button>
+      </div>
+    </div>`;
+  }
+  window.agAcctEdit = function(id){
+    AG_EDIT = id || null;
+    const box = document.getElementById('ag-acct-list');
+    if (box) box.innerHTML = agAcctRows();
+  };
+  window.agAcctSave = async function(id){
+    const g = k => { const el = document.getElementById('ag-e-' + k); return el ? el.value : undefined; };
+    const patch = { stage: g('stage'), notes: g('notes') };
+    AG_EDIT_FIELDS.forEach(([k]) => { patch[k] = g(k); });
+    const warn = document.getElementById('ag-e-warn');
+    try {
+      const r = await agCall({ token: window.__agToken, action:'crm.save', buyerId: id, patch });
+      // Trust the server's copy of the record, not the form: it decides what
+      // was actually writable.
+      const d = window.__agCrm || {};
+      const ix = (d.buyers||[]).findIndex(x => x.id === id);
+      if (ix >= 0 && r.buyer) d.buyers[ix] = r.buyer;
+      AG_EDIT = null;
+      const box = document.getElementById('ag-acct-list');
+      if (box) box.innerHTML = agAcctRows();
+    } catch(e){
+      if (warn){ warn.textContent = 'Could not save — ' + (e.message||e); warn.style.display = 'block'; }
+    }
+  };
+  function agAccountsView(){
+    const d = window.__agCrm;
+    if (!d) { agLoadCrm(); return agSpin('Loading accounts…'); }
+    if (d.error) return '<div style="'+AG_MUTED+'">Could not load accounts — ' + agEsc(d.error) + '</div>';
+    const owned = (d.owned||[]).length;
+    return `
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px">
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700">Accounts (${(d.buyers||[]).length})</div>
+        <div style="font-size:11px;color:#888">${owned} yours${d.canEdit ? '' : ' · view only'}</div>
+      </div>
+      <input id="ag-acct-q" placeholder="Search name, city, country, buyer…" oninput="agAcctSearch(this.value)" value="${agEsc(AG_Q)}" style="${AGI};width:100%;box-sizing:border-box;margin-bottom:12px">
+      <div id="ag-acct-list">${agAcctRows()}</div>
+      <div style="margin-top:22px;font-size:10px;color:#999;line-height:1.6;border-top:1px solid #e0e0e0;padding-top:12px">
+        You can see every account so you never approach a store VENIA is already selling. Accounts you brought in are marked <strong>Yours</strong> and are the ones you can edit. To add a new account, use <strong>My leads</strong> — VENIA validates it, then it appears here as yours.
+      </div>`;
+  }
+
+  // ── Linesheet ───────────────────────────────────────────────────────────
+  // Prices, delivery and what's on hand. No cost, no margin, no factory —
+  // those fields never leave the edge function.
+  async function agLoadLine(){
+    try { window.__agLine = await agCall({ token: window.__agToken, action:'line' }); }
+    catch(e){ window.__agLine = { error: e.message || String(e) }; }
+    if (AG_TAB === 'line') agRender();
+  }
+  let AG_LQ = '';
+  window.agLineSearch = function(v){
+    AG_LQ = String(v||'').toLowerCase();
+    const box = document.getElementById('ag-line-list');
+    if (box) box.innerHTML = agLineRows();
+  };
+  function agMoney(n){ const v = Number(n||0); return v > 0 ? '$' + Math.round(v).toLocaleString('en-US') : '—'; }
+  function agLineRows(){
+    const rows = ((window.__agLine||{}).styles||[]).filter(s => !AG_LQ ||
+      [s.name,s.styleId,s.category,s.season,s.fabric,s.colors].filter(Boolean)
+        .some(x => String(x).toLowerCase().includes(AG_LQ)));
+    if (!rows.length) return '<div style="'+AG_MUTED+'">Nothing matches that search.</div>';
+    rows.sort((a,b) => String(a.season||'').localeCompare(String(b.season||'')) || String(a.name).localeCompare(String(b.name)));
+    return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px">' +
+      rows.map(s => `<div style="border:1px solid #e8e8e8;background:#fff">
+        ${s.photoUrl
+          ? `<img src="${agEsc(s.photoUrl)}" alt="${agEsc(s.name)}" loading="lazy" style="width:100%;aspect-ratio:3/4;object-fit:cover;display:block;border-bottom:1px solid #eee">`
+          : `<div style="width:100%;padding:7px 0;background:#f6f6f6;border-bottom:1px solid #eee;text-align:center;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#c4c4c4">No photo yet</div>`}
+        <div style="padding:10px 11px">
+          <div style="font-size:13px;font-weight:700;line-height:1.3">${agEsc(s.name)}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:10px;color:#888;margin-top:2px">${agEsc(s.styleId||'')}${s.season?' · '+agEsc(s.season):''}</div>
+          ${s.fabric ? `<div style="font-size:11px;color:#666;margin-top:5px">${agEsc(s.fabric)}</div>` : ''}
+          ${s.colors ? `<div style="font-size:11px;color:#666;margin-top:2px">${agEsc(s.colors)}</div>` : ''}
+          ${s.sizes ? `<div style="font-family:'DM Mono',monospace;font-size:10px;color:#888;margin-top:2px">${agEsc(s.sizes)}</div>` : ''}
+          <div style="display:flex;gap:12px;margin-top:8px;padding-top:8px;border-top:1px solid #f0f0f0">
+            <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#aaa">Wholesale</div><div style="font-family:'DM Mono',monospace;font-size:14px">${agMoney(s.wholesale)}</div></div>
+            <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:#aaa">Retail</div><div style="font-family:'DM Mono',monospace;font-size:14px;color:#666">${agMoney(s.retail)}</div></div>
+          </div>
+          <div style="display:flex;gap:12px;margin-top:6px;font-size:10px;color:#888">
+            <span>${s.drop ? 'Delivery ' + agEsc(s.drop) : (s.lead ? agEsc(String(s.lead)) + ' wks lead' : 'Delivery TBC')}</span>
+            <span style="margin-left:auto">${Number(s.stock||0) > 0 ? Number(s.stock) + ' on hand' : 'Made to order'}</span>
+          </div>
+        </div>
+      </div>`).join('') + '</div>';
+  }
+  function agLineView(){
+    const d = window.__agLine;
+    if (!d) { agLoadLine(); return agSpin('Loading the line…'); }
+    if (d.error) return '<div style="'+AG_MUTED+'">Could not load the linesheet — ' + agEsc(d.error) + '</div>';
+    return `
+      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;font-weight:700;margin-bottom:10px">Linesheet (${(d.styles||[]).length})</div>
+      <input id="ag-line-q" placeholder="Search style, code, category, fabric, colour…" oninput="agLineSearch(this.value)" value="${agEsc(AG_LQ)}" style="${AGI};width:100%;box-sizing:border-box;margin-bottom:12px">
+      <div id="ag-line-list">${agLineRows()}</div>
+      <div style="margin-top:22px;font-size:10px;color:#999;line-height:1.6;border-top:1px solid #e0e0e0;padding-top:12px">
+        Wholesale is the price you sell at; retail is what the boutique is expected to charge. Delivery dates are the current plan — confirm with VENIA before committing a date to a buyer.
+      </div>`;
+  }
   // ── FOUNDER SIDE: agent-lead inbox, overlap detection, validation ────────
   // Nothing an agent submits enters the buyer CRM until it's validated here.
   // Overlap is checked against the LIVE CRM using the same normalization the
@@ -27445,15 +27649,33 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try { buildTodayFocus(); } catch(e){}
     agPendingRefresh();
   };
-  // ── Settings: create / copy / revoke agent portal links ─────────────────
+  // ── Settings: people & access ───────────────────────────────────────────
+  // A role is a named bundle of scopes — the founder picks "Sales agent"
+  // instead of ticking boxes. The boxes are still there for one-off cases,
+  // and the SERVER reads them: these controls only write the row that the
+  // agent-portal edge function consults on every single request. Nothing
+  // here is a client-side hide, because a client-side hide would not be a
+  // permission — the workspace blob is never sent to a portal browser.
+  const AG_ROLE_META = [
+    ['agent',    'Sales agent',   'Her own lead desk, the whole account list, edits limited to accounts she brought in, and the linesheet.'],
+    ['showroom', 'Showroom',      'Same visibility, but she changes nothing in the CRM. For an assistant or a showroom running appointments.'],
+    ['scout',    'Lead scout',    'Submits store names only. No account list, no prices.'],
+    ['none',     'No access',     'Keeps the person and their history, grants nothing. The link stops returning data.'],
+  ];
+  const AG_SCOPE_META = [
+    ['leads.write', 'Add & track her own leads'],
+    ['crm.read',    'See the whole buyer CRM'],
+    ['crm.own',     'Edit accounts she brought in'],
+    ['line.read',   'See the linesheet (wholesale, retail, delivery)'],
+  ];
   window.agNewAgent = async function(){
-    const name = prompt('Agent name (as it should appear on her portal):', '');
+    const name = prompt('Name (as it should appear on her portal):', '');
     if (name === null) return;
     const note = prompt('What is this link for? (e.g. "Paris Fashion Week SS27")', 'Paris Fashion Week') || '';
     const c = sb(); if (!c){ showToast('Cloud connection needed','warning'); return; }
     const token = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join('');
     try {
-      const ins = await c.from('venia_agents').insert({ token, name: String(name||'').trim().slice(0,80), note: note.trim().slice(0,120) });
+      const ins = await c.from('venia_agents').insert({ token, name: String(name||'').trim().slice(0,80), note: note.trim().slice(0,120), role: 'agent' });
       if (ins.error) throw ins.error;
       logActivity('Sales agent portal created: ' + name);
       agRenderAgents();
@@ -27464,28 +27686,75 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   };
   window.agRenderAgents = async function(){
     const box = document.getElementById('set-agents'); if (!box) return;
-    const c = sb(); if (!c){ box.textContent = 'Connect to the cloud to manage agent links.'; return; }
-    try {
-      const q = await c.from('venia_agents').select('token, name, note, revoked, created_at').order('created_at', { ascending: false });
-      const rows = (q.data)||[];
-      if (!rows.length){ box.innerHTML = '<span style="font-style:italic">No agent links yet.</span>'; return; }
-      const counts = {};
-      (( (window.__agInbox||{}).leads )||[]).forEach(l => { counts[l.token] = (counts[l.token]||0)+1; });
-      box.innerHTML = rows.map(a => {
-        const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?agent=' + a.token;
-        return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border)">
-          <span style="font-weight:700;color:${a.revoked?'var(--muted)':'var(--ink)'};${a.revoked?'text-decoration:line-through':''}">${agEsc(a.name||'Agent')}</span>
+    let d;
+    // Read through the edge function, not the table: it is the same code that
+    // enforces the scopes, so what's shown here is what's actually in force.
+    try { d = await agCall({ action:'inbox' }); }
+    catch(e){ box.textContent = 'Could not load people — ' + (e.message||e); return; }
+    window.__agInbox = d;
+    const rows = d.agents || [];
+    const roles = d.roles || {};
+    if (!rows.length){ box.innerHTML = '<span style="font-style:italic">No one has a portal link yet.</span>'; return; }
+    const counts = {};
+    (d.leads||[]).forEach(l => { counts[l.token] = (counts[l.token]||0)+1; });
+    rows.sort((a,b) => (a.revoked?1:0)-(b.revoked?1:0) || String(a.name||'').localeCompare(String(b.name||'')));
+    box.innerHTML = rows.map(a => {
+      const url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?agent=' + a.token;
+      const custom = Array.isArray(a.scopes);
+      const eff = custom ? a.scopes : (roles[a.role||'agent'] || roles.agent || []);
+      const meta = AG_ROLE_META.find(r => r[0] === (a.role||'agent')) || AG_ROLE_META[0];
+      const n = counts[a.token] || 0;
+      return `<div style="padding:12px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">
+          <span style="font-weight:700;font-size:12px;color:${a.revoked?'var(--muted)':'var(--ink)'};${a.revoked?'text-decoration:line-through':''}">${agEsc(a.name||'Agent')}</span>
           ${a.note?`<span style="color:var(--muted)">${agEsc(a.note)}</span>`:''}
           ${a.revoked?'<span style="color:var(--red);font-size:10px;letter-spacing:1px;text-transform:uppercase">Revoked</span>':''}
           <span style="flex:1"></span>
-          ${a.revoked?'' : `<button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${url}').then(function(){showToast('Link copied','success')})">Copy link</button>
-          <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="agRevokeAgent('${a.token}')">Revoke</button>`}
-        </div>`;
-      }).join('');
-    } catch(e){ box.textContent = 'Could not load agent links.'; }
+          <span style="font-size:10px;color:var(--muted)">${n} lead${n===1?'':'s'}${a.last_seen?' · seen '+agEsc(String(a.last_seen).slice(0,10)):' · never opened'}</span>
+        </div>
+        ${a.revoked ? '' : `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Group</span>
+          <select onchange="agSetRole('${a.token}',this.value)" style="font-size:11px;padding:5px 7px;border:1px solid var(--border);background:var(--bg);color:var(--ink)">
+            ${AG_ROLE_META.map(([k,label]) => `<option value="${k}" ${((a.role||'agent')===k)?'selected':''}>${label}</option>`).join('')}
+          </select>
+          ${custom ? `<span style="font-size:10px;color:var(--amber)">Custom access</span>
+            <button class="btn btn-ghost btn-sm" onclick="agResetScopes('${a.token}')">Use group default</button>` : ''}
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${url}').then(function(){showToast('Link copied','success')})">Copy link</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="agRevokeAgent('${a.token}')">Revoke</button>
+        </div>
+        <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:4px">${agEsc(meta[2])}</div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:7px">
+          ${AG_SCOPE_META.map(([k,label]) => `<label style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);cursor:pointer">
+            <input type="checkbox" ${eff.includes(k)?'checked':''} onchange="agToggleScope('${a.token}','${k}',this.checked)" style="cursor:pointer">${label}</label>`).join('')}
+        </div>`}
+      </div>`;
+    }).join('');
+  };
+  window.agSetRole = async function(token, role){
+    // Changing the group means the group's list applies again — a leftover
+    // per-person override would silently win over the group just chosen.
+    try { await agCall({ action:'access', token, role, scopes: null }); showToast('Access updated','success'); }
+    catch(e){ showToast('Could not change access — ' + (e.message||e), 'error'); }
+    agRenderAgents();
+  };
+  window.agToggleScope = async function(token, scope, on){
+    const d = window.__agInbox || {};
+    const a = (d.agents||[]).find(x => x.token === token); if (!a) return;
+    const base = Array.isArray(a.scopes) ? a.scopes.slice() : ((d.roles||{})[a.role||'agent'] || []).slice();
+    const next = on ? (base.includes(scope) ? base : base.concat([scope])) : base.filter(s => s !== scope);
+    try { await agCall({ action:'access', token, scopes: next }); }
+    catch(e){ showToast('Could not change access — ' + (e.message||e), 'error'); }
+    agRenderAgents();
+  };
+  window.agResetScopes = async function(token){
+    try { await agCall({ action:'access', token, scopes: null }); showToast('Back to the group default','success'); }
+    catch(e){ showToast('Could not reset — ' + (e.message||e), 'error'); }
+    agRenderAgents();
   };
   window.agRevokeAgent = async function(token){
-    if (!confirm('Revoke this agent portal? Her link stops working immediately. Leads she already submitted are kept.')) return;
+    if (!confirm('Revoke this portal? Her link stops working immediately. Leads she already submitted, and accounts already in the CRM, are kept.')) return;
     const c = sb(); if (!c) return;
     try {
       await c.from('venia_agents').update({ revoked: true }).eq('token', token);
@@ -27806,7 +28075,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // up. The workspace reads/writes need an authenticated session, so we block
   // on sign-in rather than letting the app run against a locked database.
   window.veniaEnsureSignIn = function(){
-    if (window.VENIA_SHARE || window.VENIA_PAY) return;
+    // Outside parties never see the founder sign-in. A sales agent's token IS
+    // her credential; showing her this overlay would both block her portal and
+    // invite her to guess at a VENIA account she must never have.
+    if (window.VENIA_SHARE || window.VENIA_PAY || window.VENIA_AGENT) return;
     var tries = 0;
     (function wait(){
       var c = sb();
