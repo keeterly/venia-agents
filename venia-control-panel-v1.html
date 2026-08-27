@@ -1720,7 +1720,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '288';
+  const BUILD = '289';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6299,6 +6299,29 @@ const ST_CELL = {
   priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
 };
 
+// Re-rendering a popover replaces its inputs, which throws away focus and the
+// caret — you type, the field rebuilds, and the cursor is gone. Every popover
+// re-render goes through this: it remembers which field was focused (by a
+// stable data-fkey, not by DOM position) and where the caret sat, then puts
+// both back on the new element.
+function popKeepFocus(popId, render){
+  const act = document.activeElement;
+  const pop = document.getElementById(popId);
+  let key = null, selS = null, selE = null;
+  if (pop && act && pop.contains(act) && act.dataset && act.dataset.fkey) {
+    key = act.dataset.fkey;
+    try { selS = act.selectionStart; selE = act.selectionEnd; } catch (e) {}
+  }
+  render();
+  if (!key) return;
+  const el = (document.getElementById(popId) || document).querySelector('[data-fkey="' + key + '"]');
+  if (!el) return;
+  try {
+    el.focus({ preventScroll: true });
+    if (selS != null && typeof el.setSelectionRange === 'function') el.setSelectionRange(selS, selE);
+  } catch (e) {}
+}
+
 // ── Pricing: retail ↔ wholesale, held together by one margin ───────────────
 // The margin here is the RETAIL margin — what the boutique keeps — because
 // that is the number that ties the two prices together:
@@ -6372,9 +6395,9 @@ function pxRender(){
     </div>${hint?`<div style="padding:0 12px 4px;font-size:9px;color:var(--muted);text-align:right">${hint}</div>`:''}`;
   pop.innerHTML = `
     <div style="padding:2px 12px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Pricing · ${esc(st.name)}</div>
-    ${row('Retail', `<input class="fi" type="number" min="0" value="${st.retail||''}" placeholder="0" onchange="pxSet('retail',this.value)" style="${fld}">`)}
-    ${row('Wholesale', `<input class="fi" type="number" min="0" value="${st.wholesale||''}" placeholder="0" onchange="pxSet('wholesale',this.value)" style="${fld}">`)}
-    ${row('Retail margin %', `<input class="fi" type="number" min="1" max="95" value="${m}" onchange="pxSet('margin',this.value)" style="${fld}">`,
+    ${row('Retail', `<input class="fi" data-fkey="px-retail" type="number" min="0" value="${st.retail||''}" placeholder="0" onchange="pxSet('retail',this.value)" style="${fld}">`)}
+    ${row('Wholesale', `<input class="fi" data-fkey="px-ws" type="number" min="0" value="${st.wholesale||''}" placeholder="0" onchange="pxSet('wholesale',this.value)" style="${fld}">`)}
+    ${row('Retail margin %', `<input class="fi" data-fkey="px-margin" type="number" min="1" max="95" value="${m}" onchange="pxSet('margin',this.value)" style="${fld}">`,
         `${pxMarkup(m).toFixed(2)}× markup — what the boutique keeps`)}
     <div style="border-top:1px solid var(--border);margin-top:4px;padding:7px 12px 2px;font-size:9px;color:var(--muted);line-height:1.6">
       ${landed ? `Landed cost <b style="color:var(--soft)">$${landed.toFixed(2)}</b>` : 'No cost entered yet'}
@@ -6406,7 +6429,7 @@ function pxSet(field, val){
   try { renderStyles(); } catch(e){}
   try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
   try { logActivity(st.name + ': ' + what + ' (retail $' + (st.retail||0) + ' / ws $' + (st.wholesale||0) + ' @ ' + pxMargin(st) + '%)'); } catch(e){}
-  pxRender();
+  popKeepFocus('px-pop', pxRender);
 }
 // Set one margin across a selection and let every wholesale follow. Retail is
 // the anchor here — a season's prices are already agreed, the margin is what
@@ -6494,7 +6517,7 @@ function flagRender(){
       return `<div style="display:flex;align-items:center;gap:8px;padding:4px 12px;${on?'background:var(--bg-off)':''}">
         <button onclick="flagSet('${f.id}')" title="${on?'Remove this flag':'Flag as '+esc(flagLabel(f.id))}"
           style="background:none;border:none;cursor:pointer;padding:2px;flex:none;color:${f.hex};font-size:14px;line-height:1;${on?'':'opacity:.45'}">⚑</button>
-        <input class="fi" value="${esc(flagLabel(f.id))}" onchange="flagRelabel('${f.id}',this.value)" title="Rename this flag — it renames everywhere"
+        <input class="fi" data-fkey="flag-${f.id}" value="${esc(flagLabel(f.id))}" onchange="flagRelabel('${f.id}',this.value)" title="Rename this flag — it renames everywhere"
           style="min-height:auto;padding:3px 6px;font-size:11px;flex:1;min-width:0;${on?'font-weight:700':''}">
         <span style="font-size:9px;color:var(--muted);font-family:'DM Mono',monospace;flex:none;width:20px;text-align:right">${n||''}</span>
       </div>`;
@@ -6513,7 +6536,7 @@ function flagSet(id){
   try { renderStyles(); } catch(e){}
   try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
   try { logActivity(st.name + (st.flag ? ': flagged ' + flagLabel(st.flag) : ': flag cleared')); } catch(e){}
-  flagRender();
+  popKeepFocus('flag-pop', flagRender);
 }
 function flagRelabel(id, val){
   const v = String(val||'').trim();
@@ -6522,7 +6545,7 @@ function flagRelabel(id, val){
   if (!v || (def && v === def.label)) delete STATE.flagLabels[id]; else STATE.flagLabels[id] = v;
   save();
   try { renderStyles(); } catch(e){}
-  flagRender();
+  popKeepFocus('flag-pop', flagRender);
 }
 // The cell: a flag you can read down the left edge at a glance.
 function flagCell(st){
@@ -6620,7 +6643,7 @@ function cwRender(){
           <span style="position:absolute;inset:0;border-radius:50%;${d?`background:${css};border:1px solid rgba(0,0,0,.25)`:'background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px);border:1px solid var(--border)'}"></span>
           <input type="color" value="${(d&&d.c)||'#cccccc'}" oninput="cwSetHex(${i},this.value)" style="opacity:0;width:20px;height:20px;border:none;padding:0;cursor:pointer">
         </label>
-        <input class="fi" value="${esc(c)}" onchange="cwRename(${i},this.value)" placeholder="Colour name"
+        <input class="fi" data-fkey="cw-name-${i}" value="${esc(c)}" onchange="cwRename(${i},this.value)" placeholder="Colour name"
           style="min-height:auto;padding:4px 6px;font-size:11px;flex:1;min-width:0">
         <button onclick="cwTogglePat(${i})" title="Stripe, check, melange — a colourway isn't always flat" style="background:none;border:none;color:${patterned?'var(--ink)':'var(--muted)'};font-size:12px;cursor:pointer;padding:0 2px;flex:none">◫</button>
         <button onclick="cwRemove(${i})" title="Remove this colourway" style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:0 2px;flex:none">✕</button>
@@ -6649,7 +6672,7 @@ function cwCommit(st, list, what){
   try { buildSkus(); } catch(e){}
   try { renderStyles(); } catch(e){}
   try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
-  cwRender();
+  popKeepFocus('cw-pop', cwRender);
   if (what) { try { logActivity(st.name + ': ' + what); } catch(e){} }
 }
 // Every writer goes through here so a pattern is never clobbered by a colour
@@ -6781,7 +6804,7 @@ function fabRender(q){
   pop.innerHTML = `
     <div style="padding:2px 12px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Fabric · ${esc(st.name)}</div>
     <div style="padding:0 12px 8px">
-      <input class="fi" id="fab-q" value="${esc(q||'')}" placeholder="Search or type a new fabric…" oninput="fabRender(this.value)"
+      <input class="fi" id="fab-q" data-fkey="fab-q" value="${esc(q||'')}" placeholder="Search or type a new fabric…" oninput="fabSearch(this.value)"
         onkeydown="if(event.key==='Enter'){event.preventDefault();fabEnter();}" style="min-height:auto;padding:5px 7px;font-size:11px;width:100%">
     </div>
     <div style="max-height:220px;overflow-y:auto;border-top:1px solid var(--border)">
@@ -6811,6 +6834,9 @@ function fabRender(q){
     </div>`;
 }
 
+// The search re-renders the whole list on every keystroke, so it has to hand
+// focus and the caret back or you can only ever type one character.
+function fabSearch(v){ popKeepFocus('fab-pop', function(){ fabRender(v); }); }
 function fabApply(st, name, matId, what){
   st.fabric = String(name||'').trim();
   if (matId) st.fabricMatId = matId; else delete st.fabricMatId;
@@ -6975,8 +7001,8 @@ function szRender(){
       </div>
     </div>
     <div style="padding:8px 12px 2px">
-      <input class="fi" id="sz-txt" value="${esc(list.join(', '))}" placeholder="XS, S, M, L, XL"
-        onchange="szSetSizes(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
+      <input class="fi" id="sz-txt" data-fkey="sz-txt" value="${esc(list.join(', '))}" placeholder="XS, S, M, L, XL"
+        onchange="szSetSizes(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();szSetSizes(this.value);}"
         style="min-height:auto;padding:5px 7px;font-size:11px;width:100%;font-family:'DM Mono',monospace">
       <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
         <span style="font-size:9px;color:var(--muted);letter-spacing:.4px;flex:1">Base size grades every POM measurement.</span>
@@ -6991,7 +7017,7 @@ function szCommit(st, what){
   try { renderStyles(); } catch(e){}
   try { if (STATE.currentStyleId === st.id) openDp(st.id); } catch(e){}
   try { logActivity(st.name + ': ' + what); } catch(e){}
-  szRender();
+  popKeepFocus('sz-pop', szRender);
 }
 function szSetSizes(csv){
   const st = (STATE.styles||[]).find(x => x.id === SZ_STYLE); if (!st) return;
