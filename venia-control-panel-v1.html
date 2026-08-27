@@ -722,6 +722,7 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .mat-card{background:var(--bg);padding:18px;cursor:pointer;transition:background .1s}
 .mat-card:hover{background:var(--bg-hover)}
 .mat-swatch{width:100%;height:40px;margin-bottom:12px;border:1px solid var(--border)}
+img.mat-swatch{height:104px}   /* a real swatch photo needs room to read */
 .mat-name{font-size:12px;color:var(--ink);margin-bottom:2px;font-weight:500;text-transform:uppercase;letter-spacing:.5px}
 .mat-type{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;font-weight:400}
 .mat-detail{font-size:11px;color:var(--soft);margin-bottom:3px}
@@ -1720,7 +1721,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '291';
+  const BUILD = '293';
   const BUILD_DATE = '2026.07.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4300,6 +4301,18 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="fg"><label class="fl" for="mm-weight">Weight</label><input class="fi" id="mm-weight" placeholder="e.g. 180 gsm, 7 oz"></div>
           <div class="fg"><label class="fl" for="mm-sample-price">Sample Price / Unit</label><input class="fi fi-mono" id="mm-sample-price" type="number" step="0.01" placeholder="If ≠ production cost"></div>
           <div class="fg"><label class="fl" for="mm-moq">MOQ</label><input class="fi" id="mm-moq" placeholder="e.g. 50yd per colorway"></div>
+          <div class="fg full">
+            <label class="fl">Swatch photo</label>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div id="mm-photo-box" style="width:72px;height:72px;flex:none;border:1px dashed var(--border-mid);background:var(--bg-off);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:10px;letter-spacing:1px;overflow:hidden">NONE</div>
+              <input type="hidden" id="mm-photo">
+              <div style="display:flex;flex-direction:column;gap:6px">
+                <button type="button" class="btn btn-ghost btn-sm" onclick="mmUploadPhoto()">📷 Upload swatch</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="mm-photo-clear" onclick="mmClearPhoto()" style="display:none;color:var(--muted)">Remove</button>
+              </div>
+              <span style="font-size:10px;color:var(--muted);line-height:1.6;max-width:34ch">A real photo of the cloth beats a colour chip — it shows weave, hand and print scale.</span>
+            </div>
+          </div>
           <div class="fg full"><label class="fl" for="mm-notes">Notes</label><textarea class="ft" id="mm-notes" placeholder="Mill notes, certifications, alternative suppliers, repeat ordering instructions…" style="min-height:60px"></textarea></div>
         </div>
       </div>
@@ -6348,6 +6361,37 @@ function popKeepFocus(popId, render){
 //   edit wholesale → retail follows      (same)
 //   edit margin    → retail follows if there is a wholesale to hold,
 //                    otherwise wholesale follows from retail
+// A cloud pull updates STATE but the screen was drawn BEFORE it landed, so
+// whatever you are looking at keeps showing the pre-pull data. On the PLM side
+// that mostly self-corrects because edits re-render; on the agent screens
+// (Sales, PR, Marketing, Brand) nothing repaints, so a founder opening Sales
+// during boot saw an empty CRM and had no way to know it was stale.
+//
+// Repaint whatever is actually visible. Never while someone is typing into it —
+// a repaint replaces the content and would eat the keystroke.
+window.veniaRepaint = function(){
+  var act = document.activeElement;
+  var typing = act && /^(INPUT|TEXTAREA|SELECT)$/.test(act.tagName || '');
+  try {
+    if (!typing && window.STATE && STATE.currentPage && typeof renderPage === 'function') renderPage(STATE.currentPage);
+  } catch (e) {}
+  try {
+    var screens = document.querySelectorAll('[id^="cp-screen-"]');
+    for (var i = 0; i < screens.length; i++) {
+      var scr = screens[i];
+      // offsetParent is null for anything inside a position:fixed ancestor, so
+      // it is not a visibility test. Measure the box instead.
+      var r = scr.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) continue;          // not the visible screen
+      if (typing && scr.contains(act)) continue;             // don't yank a field being edited
+      var key = scr.id.replace('cp-screen-', '');
+      var item = scr.querySelector('.ag-nav-item.active');
+      var m = item && (item.getAttribute('onclick') || '').match(/agNav\(\s*'[^']+'\s*,\s*'([^']+)'/);
+      if (m && typeof agNav === 'function') agNav(key, m[1], item);
+    }
+  } catch (e) {}
+};
+
 // ── Image lightbox ───────────────────────────────────────────────────────
 // A thumbnail in a table row is too small to judge a garment by. Clicking one
 // opens it at full size over the page: click anywhere, press Escape, or use
@@ -6391,6 +6435,19 @@ function lbPaint(){
         <button onclick="lbClose()" title="Close (Esc)" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:13px;padding:4px 10px;cursor:pointer">✕</button>
       </div>
     </div>`;
+}
+// One image, no neighbours — for a material swatch photo.
+function lbOpenOne(url, name, sub, ev){
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  if (!url) return;
+  LB_LIST = [{ url: url, name: name || '', sub: sub || '' }];
+  LB_I = 0;
+  const el = document.createElement('div');
+  el.id = 'venia-lightbox';
+  el.style.cssText = 'position:fixed;inset:0;z-index:9800;background:rgba(10,10,10,.92);display:flex;align-items:center;justify-content:center;padding:24px';
+  document.body.appendChild(el);
+  lbPaint();
+  setTimeout(() => document.addEventListener('keydown', lbKey), 0);
 }
 // Open on one style, with every other photographed style in the CURRENT view
 // as the neighbours — so ← → walks what you can see, not the whole archive.
@@ -6448,6 +6505,16 @@ function pxMarkup(m){ const d = 1 - pxClamp(m)/100; return d > 0 ? (1/d) : 0; }
 function pxMarginOf(price, cost){
   const p = Number(price||0), c = Number(cost||0);
   return p > 0 ? pxClamp(Math.round(((p - c) / p) * 100)) : 0;
+}
+// Backwards up the chain: the price a market will bear, minus the margins you
+// need, is the most you can afford to spend making it. This is how a line is
+// costed in practice — the retail is a given, the cost is the question.
+function pxWsFromRetail(retail, rM){ return Math.round(Number(retail||0) * (1 - pxClamp(rM)/100)); }
+function pxCogsFromWs(ws, wsM){ return Math.round(Number(ws||0) * (1 - pxClamp(wsM)/100)); }
+function pxTargetCogs(st){
+  const r = Number(st && st.retail || 0);
+  if (r <= 0) return null;
+  return pxCogsFromWs(pxWsFromRetail(r, pxMargin(st)), pxWsMargin(st));
 }
 
 let PX_STYLE = null;
@@ -6507,11 +6574,23 @@ function pxRender(){
     ${money('Wholesale', 'wholesale', ws)}
     ${step('↓ boutique margin', 'margin', rM, pxMarkup(rM).toFixed(2) + '× markup')}
     ${money('Retail', 'retail', retail)}
+    ${retail > 0 ? (()=>{
+      const tgt = pxTargetCogs(st);
+      const fits = cogs > 0 ? cogs <= tgt : null;
+      return `<div style="border-top:1px solid var(--border);margin-top:6px;padding:7px 12px 3px;display:flex;align-items:center;gap:8px">
+        <span style="flex:1;font-size:9px;color:var(--muted);line-height:1.5">
+          To hit <b style="color:var(--soft)">$${retail}</b> at these margins,<br>COGS needs to be
+          <b style="color:${fits === null ? 'var(--soft)' : (fits ? 'var(--green)' : 'var(--red)')}">$${tgt}</b>${cogs > 0 ? ` — you're at <b style="color:${fits?'var(--green)':'var(--red)'}">$${cogs}</b>` : ''}
+        </span>
+        <button onclick="pxSet('backsolve',0)" title="Set wholesale and COGS from this retail price"
+          style="background:none;border:1px solid var(--border);color:var(--ink);font-size:9px;letter-spacing:.6px;text-transform:uppercase;padding:4px 7px;cursor:pointer;flex:none">◂ Work back</button>
+      </div>`;
+    })() : ''}
     <div style="border-top:1px solid var(--border);margin-top:6px;padding:7px 12px 2px;font-size:9px;color:var(--muted);line-height:1.7">
       ${landed > cogs ? `Landed <b style="color:var(--soft)">$${landed.toFixed(2)}</b> (COGS + duty/freight/dye)` : (landed ? `Landed <b style="color:var(--soft)">$${landed.toFixed(2)}</b>` : 'No cost entered')}
       ${realWs !== null ? ` · real margin at wholesale <b style="color:${realWs>=40?'var(--green)':realWs>=25?'var(--amber)':'var(--red)'}">${realWs}%</b>` : ''}
       ${planTgt && planAct !== null ? `<br>Season plan wants <b style="color:var(--soft)">${planTgt}%</b> retail-vs-landed; this is <b style="color:${planAct>=planTgt?'var(--green)':'var(--amber)'}">${planAct}%</b>` : ''}
-      <br>Editing a <b>margin</b> moves the price below it. Editing a <b>price</b> re-reads the margin above it.
+      <br>Editing a <b>margin</b> moves the price below it. Editing a <b>price</b> moves what sits below it; a COGS you have entered is never overwritten unless you press <b>Work back</b>.
     </div>`;
 }
 function pxSet(field, val){
@@ -6543,14 +6622,28 @@ function pxSet(field, val){
     what = 'boutique margin → ' + st.marginTarget + '%';
   } else if (field === 'retail') {
     st.retail = n;
-    if (Number(st.wholesale) > 0 && n > 0) {
-      // Wholesale is anchored by cost, so a retail you type sets the boutique
-      // margin rather than yanking the wholesale price out from under it.
-      st.marginTarget = pxMarginOf(n, st.wholesale);
+    if (Number(st.cogs) > 0 && n > 0) {
+      // A real COGS is a fact about the garment, so a retail you type must not
+      // rewrite it. The boutique margin becomes the outcome instead, and the
+      // target-cost line shows whether the actual cost still fits.
+      st.wholesale = pxWsFromRetail(n, pxMargin(st));
+      st.marginTarget = pxMargin(st);
+    } else if (n > 0) {
+      // Nothing to protect — solve the whole chain backwards from the price.
+      st.wholesale = pxWsFromRetail(n, pxMargin(st));
+      st.cogs = pxCogsFromWs(st.wholesale, pxWsMargin(st));
     } else {
-      st.wholesale = n > 0 ? pxWsFrom(n, pxMargin(st)) : 0;
+      st.wholesale = 0;
     }
     what = 'retail → $' + n;
+  } else if (field === 'backsolve') {
+    // Explicit: work the whole chain back from the retail price, cost included.
+    const r = Number(st.retail || 0);
+    if (r > 0) {
+      st.wholesale = pxWsFromRetail(r, pxMargin(st));
+      st.cogs = pxCogsFromWs(st.wholesale, pxWsMargin(st));
+    }
+    what = 'worked back from $' + r + ' retail';
   } else return;
   st.updatedAt = new Date().toISOString();
   save();
@@ -8164,17 +8257,23 @@ function renderMaterials(filter) {
   const colors = { Fabric:'#4a7fb5', Lining:'#6a9fb5', Trim:'#8b6bb5', Label:'#4a9b6f', Packaging:'#c08b3a', Hardware:'#b94040', Thread:'#4a9b9b' };
   document.getElementById('mat-grid').innerHTML = list.map(m => {
     const lots = m.lots||[];
+    // A cost of 0 is "not costed yet", not "free" — and a unit-less "/ " reads
+    // as broken. Both showed as "$0 / yd" on every uncosted material.
+    const cost = parseFloat(m.costPerUnit)||0;
+    const unit = String(m.unit||'').trim();
     const activeLot = lots.find(l=>l.active) || lots[lots.length-1];
     const hasShrink = activeLot && (activeLot.shrinkL || activeLot.shrinkW);
     return `
     <div class="mat-card" onclick="openMatModal('${m.id}')">
-      <div class="mat-swatch" style="background:${swatchColor(m.color,colors[m.type]||'#555')}"></div>
+      ${m.photoUrl
+        ? `<img class="mat-swatch" src="${esc(m.photoUrl)}" alt="" loading="lazy" title="Click to enlarge" onclick="lbOpenOne('${esc(m.photoUrl)}','${esc(m.name)}','${esc([m.content,m.supplier].filter(Boolean).join(' · '))}',event)" style="object-fit:cover;cursor:zoom-in;display:block">`
+        : `<div class="mat-swatch" style="background:${swatchColor(m.color,colors[m.type]||'#555')}"></div>`}
       <div class="mat-name">${m.name}</div>
       <div class="mat-type">${m.type}</div>
       <div class="mat-detail">Supplier: <span>${m.supplier||'—'}</span></div>
-      <div class="mat-detail">Cost: <span style="color:var(--gold)">$${m.costPerUnit} / ${m.unit}</span></div>
-      <div class="mat-detail">Lead: <span>${m.leadDays||'—'} days</span></div>
-      ${m.moq ? `<div class="mat-detail">MOQ: <span>${m.moq}${/\d$/.test(String(m.moq).trim())?' '+m.unit:''}</span></div>` : ''}
+      <div class="mat-detail">Cost: <span style="color:${cost>0?'var(--gold)':'var(--muted)'}">${cost>0 ? '$'+cost.toFixed(2)+(unit?' / '+unit:'') : '—'}</span></div>
+      <div class="mat-detail">Lead: <span>${m.leadDays>0 ? m.leadDays+' days' : '—'}</span></div>
+      ${m.moq ? `<div class="mat-detail">MOQ: <span>${m.moq}${/\d$/.test(String(m.moq).trim())&&unit?' '+unit:''}</span></div>` : ''}
       ${m.width ? `<div class="mat-detail">Width: <span>${m.width}</span></div>` : ''}
       ${m.content?`<div class="mat-detail" style="margin-top:4px;font-size:10px;color:var(--muted)">${m.content}</div>`:''}
       ${(function(){
@@ -8187,7 +8286,7 @@ function renderMaterials(filter) {
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:var(--muted)">
             <span>On hand</span>
             <input class="pom-input" style="width:56px" value="${m.qtyOnHand!=null?m.qtyOnHand:''}" placeholder="—" onchange="matSetOnHand('${m.id}',this.value)" title="Optional — update when fabric arrives or gets cut">
-            <span>${m.unit||''}</span>
+            ${unit?`<span>${esc(unit)}</span>`:''}
             ${onOrder?`<span>· on order <b style="color:var(--ink)">${onOrder}</b></span>`:''}
             ${req?`<span>· open POs need <b style="color:var(--ink)">${req}</b></span>`:''}
           </div>
@@ -9608,6 +9707,7 @@ function openMatModal(id=null) {
   document.getElementById('mm-id').value = id||'';
   const fields = ['name','supplier','cost','unit','lead','content','color','notes','width','moq','article','weight','sample-price'];
   fields.forEach(f => { const el=document.getElementById(`mm-${f}`); if(el) el.value=''; });
+  mmSetPhoto('');
 
   if (id) {
     const m = STATE.materials.find(x=>x.id===id);
@@ -9626,6 +9726,7 @@ function openMatModal(id=null) {
       document.getElementById('mm-notes').value = m.notes||'';
       document.getElementById('mm-width').value = m.width||'';
       document.getElementById('mm-moq').value = m.moq||'';
+      mmSetPhoto(m.photoUrl||'');
       mmRenderLots(m.lots||[]);
     }
   } else {
@@ -9793,6 +9894,25 @@ function mmRemoveLot(idx) {
   }
 }
 
+// Material swatch photo — same upload path as style photos.
+function mmSetPhoto(url){
+  const box = document.getElementById('mm-photo-box');
+  const hid = document.getElementById('mm-photo');
+  const clr = document.getElementById('mm-photo-clear');
+  if (hid) hid.value = url || '';
+  if (clr) clr.style.display = url ? '' : 'none';
+  if (!box) return;
+  box.innerHTML = url
+    ? `<img src="${esc(url)}" alt="" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in" onclick="lbOpenOne('${esc(url)}',(document.getElementById('mm-name')||{}).value||'Material','',event)">`
+    : 'NONE';
+  box.style.borderStyle = url ? 'solid' : 'dashed';
+}
+function mmUploadPhoto(){
+  if (typeof window.veniaUploadImage !== 'function'){ showToast('Connect Supabase in Settings to upload photos','warning'); return; }
+  window.veniaUploadImage('material', function(url){ mmSetPhoto(url); showToast('Swatch photo added','success'); });
+}
+function mmClearPhoto(){ mmSetPhoto(''); }
+
 function saveMaterial() {
   const name = document.getElementById('mm-name').value.trim();
   if (!name) { toast('Material name required'); return; }
@@ -9811,6 +9931,7 @@ function saveMaterial() {
     samplePrice: parseFloat(document.getElementById('mm-sample-price').value)||0,
     moq: document.getElementById('mm-moq').value,
     notes: document.getElementById('mm-notes').value,
+    photoUrl: (document.getElementById('mm-photo')||{}).value || '',
   };
   if (id) {
     const idx = STATE.materials.findIndex(x=>x.id===id);
@@ -26355,6 +26476,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
       if (typeof window.dumpBadge === 'function') window.dumpBadge();
     } finally { applyingRemote = false; window.__vApplyingRemote = false; }
+    // Paint the freshly merged data onto whatever screen is open. Without this
+    // the pull is invisible until you navigate, which reads as missing data.
+    try { if (typeof window.veniaRepaint === 'function') window.veniaRepaint(); } catch (e) {}
   }
 
   // Every leg records into __syncStat so the Sync Status panel (and the
