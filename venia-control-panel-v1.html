@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '324';
+  const BUILD = '325';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -25068,7 +25068,55 @@ function cmdMoneyData() {
       }
     });
   } catch(e){}
-  return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous,
+  // SEASON ECONOMICS. A fashion house does not run on a calendar year — it
+  // runs on collections. "Did AW26 pay for itself" is the question that
+  // decides what SS27 is allowed to cost, and nothing here could answer it:
+  // every style carries a season and nothing rolled up to one.
+  //
+  // Wholesale is dated by the ORDER, DTC by units sold to date, and both are
+  // charged the landed cost of the styles they moved. Sell-through compares
+  // units sold against units actually ordered from the factory, which is what
+  // says whether a season was bought too deep.
+  const seasons = {};
+  const seasonOf = {};
+  (STATE.styles || []).forEach(st => { if (st && st.season) seasonOf[st.id] = st.season; });
+  const seasonRow = (k) => (seasons[k] = seasons[k] || { season: k, wsRev: 0, wsUnits: 0, dtcRev: 0, dtcUnits: 0, cogs: 0, made: 0, styles: 0, accounts: {} });
+  (STATE.styles || []).forEach(st => { if (st && st.season) seasonRow(st.season).styles++; });
+  orders.filter(o => o.status !== 'cancelled').forEach(o => (o.items||[]).forEach(it => {
+    const k = seasonOf[it.styleId]; if (!k) return;
+    const st = (STATE.styles||[]).find(x => x.id === it.styleId);
+    const r = seasonRow(k);
+    const q = it.qty || 0;
+    r.wsRev += (it.ws || 0) * q;
+    r.wsUnits += q;
+    r.cogs += (st && typeof landedCost === 'function' ? (landedCost(st) || 0) : 0) * q;
+    if (o.account) r.accounts[o.account] = 1;
+  }));
+  // DTC lands on the season of the styles that sold. Grouped by name for the
+  // same reason COGS is: two fabrications share a name and Shopify sees one.
+  Object.keys(byName).forEach(k2 => {
+    const m = map[k2]; if (!m || !m.u) return;
+    const group = byName[k2];
+    const k = group[0].season; if (!k) return;
+    const costs = group.map(st => (typeof landedCost === 'function' ? landedCost(st) : 0) || 0).filter(c => c > 0);
+    const lc = costs.length ? costs.reduce((a,b)=>a+b,0) / costs.length : 0;
+    const r = seasonRow(k);
+    r.dtcRev += m.r || 0; r.dtcUnits += m.u || 0; r.cogs += lc * (m.u || 0);
+  });
+  // Units actually ordered from the factory, for sell-through.
+  (STATE.pos || []).forEach(po => {
+    if (po.status === 'cancelled') return;
+    (po.items||[]).forEach(it => { const k = seasonOf[it.styleId]; if (k) seasonRow(k).made += (it.qty || 0); });
+  });
+  const seasonRows = Object.values(seasons).map(r => {
+    const rev = r.wsRev + r.dtcRev, units = r.wsUnits + r.dtcUnits;
+    return Object.assign(r, { rev, units, gp: rev - r.cogs,
+      gpPct: rev > 0 ? Math.round(((rev - r.cogs) / rev) * 100) : null,
+      sellThru: r.made > 0 ? Math.round((units / r.made) * 100) : null,
+      accountsN: Object.keys(r.accounts).length });
+  }).filter(r => r.rev > 0 || r.units > 0 || r.made > 0)
+    .sort((a,b) => String(b.season).localeCompare(String(a.season)));
+  return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous, seasonRows,
            opexYtd, opexUncat, opexBy, bankOpex, opexTotal,
            revYtd, cogsYtd, operating: revYtd - cogsYtd - opexTotal, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
@@ -25130,6 +25178,15 @@ window.cmdRenderMoney = function() {
       ${line('Paid to factories YTD', d.poPaidYtd, 'deposits + balances')}
       ${line('Committed, not yet paid', d.poCommitted, 'open POs')}
     </div>` : ''}
+    ${d.seasonRows.length ? `<div class="ag-sec-head"><h2 class="ag-sec-title">By season</h2><div class="ag-sec-actions" style="font-size:10px;color:var(--muted)">a collection is the unit that pays for itself</div></div>
+    <div class="ag-list"><div class="ag-list-row ag-list-row-h"><div>Season</div><div>Revenue</div><div>Gross margin</div><div>Sell-through</div></div>
+    ${d.seasonRows.map(r => `<div class="ag-list-row">
+      <div><b>${slEsc(r.season)}</b><div style="font-size:10px;color:var(--muted)">${r.styles} style${r.styles===1?'':'s'}${r.accountsN ? ' · ' + r.accountsN + ' account' + (r.accountsN===1?'':'s') : ''}${r.units ? ' · ' + r.units.toLocaleString() + ' units' : ''}</div></div>
+      <div style="font-family:'DM Mono',monospace">${money(r.rev)}<div style="font-size:10px;color:var(--muted)">${r.wsRev ? 'ws ' + money(r.wsRev) : ''}${r.wsRev && r.dtcRev ? ' · ' : ''}${r.dtcRev ? 'dtc ' + money(r.dtcRev) : ''}</div></div>
+      <div style="font-family:'DM Mono',monospace;color:${r.gpPct == null ? 'var(--muted)' : r.gpPct < 45 ? 'var(--amber)' : 'var(--ink)'}">${r.gpPct == null ? '—' : r.gpPct + '%'}<div style="font-size:10px;color:var(--muted)">${money(r.gp)}</div></div>
+      <div style="font-family:'DM Mono',monospace;color:${r.sellThru == null ? 'var(--muted)' : r.sellThru < 60 ? 'var(--amber)' : 'var(--ink)'}">${r.sellThru == null ? '—' : r.sellThru + '%'}<div style="font-size:10px;color:var(--muted)">${r.made ? r.units.toLocaleString() + ' of ' + r.made.toLocaleString() + ' made' : 'no PO units'}</div></div>
+    </div>`).join('')}</div>
+    <div style="font-size:10px;color:var(--muted);margin:6px 0 24px">Wholesale is counted on the order, DTC on units sold to date; both carry the landed cost of what moved. Sell-through compares units sold against units ordered from the factory — a season below 60% was bought too deep.</div>` : ''}
     <div class="ag-sec-head"><h2 class="ag-sec-title">Style profitability${d.hasSales ? '' : ' — needs Shopify'}</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cmdShowSection('cmd-budget',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=budget]'))">Budget →</button></div></div>
     ${d.rows.length ? `<div class="ag-list"><div class="ag-list-row ag-list-row-h"><div>Style</div><div>Units</div><div>Revenue</div><div>Gross profit</div></div>${styleRows}</div>`
       : `<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No per-style sales yet — this fills from live Shopify data.</div>`}`;
@@ -25154,6 +25211,13 @@ function veniaFinanceContext(){
       + ' | operating ' + money(d.operating));
     if (d.bankOpex && d.opexUncat) parts.push('CAVEAT: ' + money(d.opexUncat) + ' of outflow this year is still uncategorized and is NOT in operating expense above, so operating is overstated by up to that much. Say so whenever you quote profitability, and offer to file it.');
     if (d.bankOpex) parts.push('Operating expense EXCLUDES fabric and production payments on purpose — landed cost already carries those into COGS. Never add them back.');
+    if (d.seasonRows.length) parts.push('BY SEASON (a collection is the unit that pays for itself — reason in seasons, not calendar years):\n'
+      + d.seasonRows.map(r => '• ' + r.season + ' — revenue ' + money(r.rev)
+          + (r.wsRev ? ' (wholesale ' + money(r.wsRev) + (r.dtcRev ? ', DTC ' + money(r.dtcRev) : '') + ')' : '')
+          + ' | gross margin ' + (r.gpPct == null ? 'n/a' : r.gpPct + '%') + ' (' + money(r.gp) + ')'
+          + ' | sell-through ' + (r.sellThru == null ? 'unknown — no PO units' : r.sellThru + '% (' + r.units + ' of ' + r.made + ' made)')
+          + ' | ' + r.styles + ' styles, ' + r.accountsN + ' accounts').join('\n')
+      + '\nSell-through under 60% means the season was bought deeper than it sold — say so, and tie the next buy to it. Gross margin under 45% at wholesale does not carry the overhead above.');
     if (p.at) parts.push('DTC pulse: last 30d ' + money(p.r30||0) + ' across ' + (p.n30||0) + ' orders (prior 30d ' + money(p.rPrev||0) + ')');
     else parts.push('DTC pulse: Shopify has not reported this session — DTC lines read $0 until it loads. Say so instead of treating DTC as zero.');
     if (d.arOpen.length) parts.push('AR — open invoices (oldest first):\n' + d.arOpen.slice(0,12).map(a =>
@@ -25470,6 +25534,7 @@ window.cmdRenderCfo = function(){
     + `<div class="ag-sec-head"><h2 class="ag-sec-title">Workflows</h2></div>`
     + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`
     + wf('READ',    'Cash Position',         'Where the money stands today — revenue, collected vs booked, what’s owed to us, what we owe factories, and the one number to watch.')
+    + wf('SEASON',  'Season Review',         'Each collection judged as its own business — margin, sell-through, account concentration, and what it means for the next buy.')
     + wf('MARGIN',  'Margin Review',         'Every style against its landed cost. Which styles are underwater, which carry the line, and what to reprice or retire.')
     + wf('COLLECT', 'AR Chase List',         'Open invoices oldest-first, with a ready-to-send chase email per overdue account — polite at 7 days, firm at 30.')
     + wf('PRICE',   'Price a Style',         'Back-solve retail and wholesale from a landed cost and target margins — with the honest floor beneath which the style loses money.')
