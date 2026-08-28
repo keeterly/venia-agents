@@ -50,13 +50,25 @@ export default async (req) => {
   if (req.method !== 'POST') return json({ error: 'Method Not Allowed — expected POST' }, 405, cors);
   if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403, cors);
 
-  // Trim — keys pasted on a phone arrive with stray whitespace. Format checks
-  // catch look-alike keyboard substitutions (e.g. Cyrillic З for 3): a key with
-  // a non-ASCII char crashes fetch with a cryptic "ByteString" error the moment
-  // it is put in an Authorization header, so refuse it here with a clear
-  // message instead.
-  const key = (process.env.STRIPE_SECRET_KEY || '').trim();
-  const pk  = (process.env.STRIPE_PUBLISHABLE_KEY || '').trim();
+  // Heal keys entered on a phone: strip ALL whitespace (a paste from a wrapped
+  // display smuggles in line breaks mid-key) and map common look-alike
+  // characters (e.g. Cyrillic З for 3, О for O) back to ASCII — real Stripe
+  // keys are strictly alphanumeric, so any such character is a transcription
+  // artifact. A key with a non-ASCII char crashes fetch with a cryptic
+  // "ByteString" error the moment it hits an Authorization header. Healing is
+  // conservative: if the underlying character was genuinely different, the
+  // live Stripe check on ping still reports the key invalid.
+  const healKey = (v) => String(v || '')
+    .replace(/\s+/g, '')
+    .replace(/З/g,'3').replace(/з/g,'3').replace(/О/g,'O').replace(/о/g,'o')
+    .replace(/А/g,'A').replace(/а/g,'a').replace(/В/g,'B').replace(/Е/g,'E')
+    .replace(/е/g,'e').replace(/С/g,'C').replace(/с/g,'c').replace(/Р/g,'P')
+    .replace(/р/g,'p').replace(/Х/g,'X').replace(/х/g,'x').replace(/у/g,'y')
+    .replace(/К/g,'K').replace(/к/g,'k').replace(/М/g,'M').replace(/Н/g,'H')
+    .replace(/Т/g,'T').replace(/В/g,'B').replace(/І/g,'I').replace(/і/g,'i')
+    .replace(/Ѕ/g,'S').replace(/ѕ/g,'s');
+  const key = healKey(process.env.STRIPE_SECRET_KEY);
+  const pk  = healKey(process.env.STRIPE_PUBLISHABLE_KEY);
   const skFormatOk = /^[sr]k_(live|test)_[A-Za-z0-9]+$/.test(key);
   const pkFormatOk = /^pk_(live|test)_[A-Za-z0-9]+$/.test(pk);
 
@@ -77,12 +89,17 @@ export default async (req) => {
         if (!r.ok) key_error = (j && j.error && j.error.message ? String(j.error.message) : ('Stripe HTTP ' + r.status)).slice(0, 160);
       } catch (e) { key_error = String(e && e.message || e).slice(0, 160); }
     } else if (key) {
-      key_error = 'STRIPE_SECRET_KEY contains an invalid character — re-paste it in Netlify (copy/paste, never type it).';
+      // Name the exact position and code point (never the key itself) so a
+      // stubborn bad character can be identified without guessing.
+      const bad = key.match(/[^A-Za-z0-9_]/);
+      key_error = bad
+        ? 'STRIPE_SECRET_KEY still has an invalid character at position ' + key.indexOf(bad[0]) + ' (code ' + bad[0].codePointAt(0) + ') even after auto-healing — delete the variable in Netlify and re-add it with a fresh copy/paste.'
+        : 'STRIPE_SECRET_KEY has an unexpected format — it should start with sk_live_ or sk_test_.';
     }
     // Build marker forces a fresh function bundle so env-var changes are
     // captured (same pattern as the Shopify proxy).
     return json({ configured: !!key, sk_format_ok: skFormatOk, key_ok, key_error,
-                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28c' }, 200, cors);
+                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28d' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
   if (!skFormatOk) return json({ error: 'STRIPE_SECRET_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
