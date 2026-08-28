@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '307';
+  const BUILD = '308';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -19979,7 +19979,7 @@ async function agentSend(key, message) {
       : [ agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
           plmContext() + agentContextHints() ];
     const reply = key === 'fin'
-      ? await cfoCallWithCloudFallback(sysPrompt, SK.history.eni, message)
+      ? await cfoCallCloudFirst(sysPrompt, SK.history.eni, message)
       : await callClaude(sysPrompt, null, SK.history.eni);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
@@ -20001,7 +20001,7 @@ async function agentSend(key, message) {
     agentEndWork(workKey, false);
     const t = think.querySelector('.sk-work');
     if (err && err.__cfoQueued) {
-      if (t) t.outerHTML = `<div class="sk-msg-body">☁ The connection couldn’t hold this one, so it moved to the cloud — the server is working on it now (up to 15 minutes for big asks). You can close the app; you’ll get a push and the answer will be here when you return.</div>`;
+      if (t) t.outerHTML = `<div class="sk-msg-body">☁ Working on it in the cloud — you can close the app any time. You’ll get a push when it’s ready, and the answer will be here when you return.</div>`;
     } else if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
   }
   body.scrollTop = body.scrollHeight;
@@ -25343,13 +25343,15 @@ function cfoPlanVariance(){
 // carries) applies on this device when it's next open. The job record is
 // deliberately per-device (localStorage, not synced STATE) so two phones
 // never both apply the same reply.
-async function cfoCallWithCloudFallback(sysPrompt, history, userMsg){
-  try { return await _callClaudeOnce(sysPrompt, null, history); }
-  catch (e) {
-    const queued = await cfoChatQueue(sysPrompt, history, userMsg);
-    if (!queued) throw e;
-    const q = new Error('queued'); q.__cfoQueued = true; throw q;
-  }
+async function cfoCallCloudFirst(sysPrompt, history, userMsg){
+  // Cloud FIRST, by design: the phone's only job is one small POST, so the
+  // founder can close the app the moment the turn is sent. The direct
+  // streaming path is the backup for when the cloud can't be reached (not
+  // signed in, worker unreachable) — reversed from the usual order because
+  // for the CFO, survivability beats a few seconds of latency.
+  const queued = await cfoChatQueue(sysPrompt, history, userMsg);
+  if (queued) { const q = new Error('queued'); q.__cfoQueued = true; throw q; }
+  return await _callClaudeOnce(sysPrompt, null, history);
 }
 async function cfoChatQueue(system, history, userMsg){
   try {
@@ -25371,30 +25373,45 @@ async function cfoChatQueue(system, history, userMsg){
       if (window.veniaAC(true, 'Enter your VENIA access code so the cloud can answer:')) { try { r = await post(); } catch(e){} }
     }
     if (!r || (r.status !== 202 && !r.ok)) { try { await c.from('venia_agent_jobs').delete().eq('id', id); } catch(e){} return false; }
-    try { localStorage.setItem('venia_cfochat_job', JSON.stringify({ id, at: new Date().toISOString() })); } catch(e){}
-    cfoChatPoll();
+    cfoChatSetJobs(cfoChatJobs().concat([{ id, at: new Date().toISOString() }]));
+    clearTimeout(__cfoChatT); __cfoChatT = setTimeout(cfoChatPoll, 3000);
     return true;
   } catch(e){ return false; }
 }
+// In-flight cloud turns, per-device. An array so two quick asks both land;
+// migrates the old single-job key from Build 307 if one is pending.
+function cfoChatJobs(){
+  let jobs = [];
+  try { const j = JSON.parse(localStorage.getItem('venia_cfochat_jobs') || '[]'); if (Array.isArray(j)) jobs = j; } catch(e){}
+  try {
+    const legacy = JSON.parse(localStorage.getItem('venia_cfochat_job') || 'null');
+    if (legacy && legacy.id) { jobs = jobs.concat([legacy]); localStorage.removeItem('venia_cfochat_job'); cfoChatSetJobs(jobs); }
+  } catch(e){}
+  return jobs;
+}
+function cfoChatSetJobs(jobs){ try { localStorage.setItem('venia_cfochat_jobs', JSON.stringify(jobs.slice(-5))); } catch(e){} }
 let __cfoChatT = null;
 window.cfoChatPoll = async function(){
   clearTimeout(__cfoChatT);
-  let job = null; try { job = JSON.parse(localStorage.getItem('venia_cfochat_job') || 'null'); } catch(e){}
-  if (!job || !job.id) return;
-  if (Date.now() - new Date(job.at).getTime() > 17 * 60 * 1000) { try { localStorage.removeItem('venia_cfochat_job'); } catch(e){} return; }
+  let jobs = cfoChatJobs().filter(j => j && j.id && (Date.now() - new Date(j.at).getTime()) <= 17 * 60 * 1000);
+  cfoChatSetJobs(jobs);
+  if (!jobs.length) return;
   const c = window.__sbClient;
-  if (!c) { __cfoChatT = setTimeout(cfoChatPoll, 8000); return; }
-  try {
-    const r = await c.from('venia_agent_jobs').select('*').eq('id', job.id);
-    const row = r && r.data && r.data[0];
-    if (row && (row.status === 'done' || row.status === 'error')) {
-      try { localStorage.removeItem('venia_cfochat_job'); } catch(e){}
-      try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
-      cfoChatApply(row.status, String(row.result || ''));
-      return;
+  if (c) {
+    for (const job of jobs.slice()) {
+      try {
+        const r = await c.from('venia_agent_jobs').select('*').eq('id', job.id);
+        const row = r && r.data && r.data[0];
+        if (row && (row.status === 'done' || row.status === 'error')) {
+          jobs = jobs.filter(j => j.id !== job.id);
+          cfoChatSetJobs(jobs);
+          try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
+          cfoChatApply(row.status, String(row.result || ''));
+        }
+      } catch(e){}
     }
-  } catch(e){}
-  __cfoChatT = setTimeout(cfoChatPoll, 8000);
+  }
+  if (cfoChatJobs().length) __cfoChatT = setTimeout(cfoChatPoll, 5000);
 };
 function cfoChatApply(status, result){
   const body = document.getElementById('sk-body');
