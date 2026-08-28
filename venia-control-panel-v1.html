@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '320';
+  const BUILD = '321';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26204,6 +26204,82 @@ window.bankSyncTxns = async function(silent){
   if (!silent) showToast(added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date', added ? 'success' : 'info');
   try { cmdRenderBank(); } catch(e){}
 };
+// Ledger view state (per device — a filter is not workspace data).
+const FIN_TX_FILTER = { q: '', mode: 'all', limit: 40 };
+let FIN_TX_SEL = {};
+window.bankTxSearch = function(v){
+  FIN_TX_FILTER.q = v; FIN_TX_FILTER.limit = 40;
+  clearTimeout(window.__finTxT);
+  window.__finTxT = setTimeout(() => {
+    cmdRenderBank();
+    const el = document.getElementById('fin-tx-q');
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }, 220);
+};
+window.bankTxMode = function(m){ FIN_TX_FILTER.mode = m; FIN_TX_FILTER.limit = 40; cmdRenderBank(); };
+// Ticking another row re-renders the bulk bar, so the category already chosen
+// has to survive that — otherwise picking a category then selecting one more
+// row silently resets it to "—".
+window.bankBulkCat = function(v){ FIN_TX_FILTER.bulk = v; };
+// Fix transactions by typing. The founder's sentence goes to the CFO with the
+// rows it is about attached — the ticked ones, else whatever the filter is
+// currently showing — so the agent works from real ids and never has to guess
+// at a description it was not shown.
+window.bankAskCfo = function(){
+  const el = document.getElementById('fin-tx-ask');
+  const ask = el ? String(el.value || '').trim() : '';
+  if (!ask) return;
+  const ids = Object.keys(FIN_TX_SEL).filter(k => FIN_TX_SEL[k]);
+  const all = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
+  const rows = ids.length ? all.filter(t => FIN_TX_SEL[t.id]) : finTxFiltered(all).slice(0, 60);
+  const scope = ids.length
+    ? 'The ' + rows.length + ' transaction' + (rows.length > 1 ? 's' : '') + ' I ticked:'
+    : 'The transactions currently on screen' + (FIN_TX_FILTER.q ? ' (search "' + FIN_TX_FILTER.q + '")' : '')
+      + (FIN_TX_FILTER.mode !== 'all' ? ' (filter: ' + FIN_TX_FILTER.mode + ')' : '') + ':';
+  const lines = rows.map(t => '- id ' + t.id + ' | ' + (t.date || '') + ' | ' + String(t.desc || '').slice(0, 60)
+    + ' | ' + (t.amount || 0) + ' | ' + (t.category ? t.category : 'uncategorized')).join('\n');
+  if (el) el.value = '';
+  FIN_TX_SEL = {};
+  const prompt = ask + '\n\n' + scope + '\n' + (lines || '(none)')
+    + '\n\nUse set_txn_category with these ids. Anything you are unsure about, leave alone and tell me why.';
+  if (typeof agentSend === 'function') agentSend('fin', prompt);
+};
+// One filter definition, used by both the ledger render and the ask box, so
+// "what's on screen" and "what I sent the CFO" can never drift apart.
+function finTxFiltered(all){
+  const q = String(FIN_TX_FILTER.q || '').toLowerCase();
+  return all.filter(t => {
+    if (FIN_TX_FILTER.mode === 'uncat' && finTxnCat(t)) return false;
+    if (FIN_TX_FILTER.mode === 'in'  && (t.amount||0) < 0) return false;
+    if (FIN_TX_FILTER.mode === 'out' && (t.amount||0) >= 0) return false;
+    if (q && !((t.desc||'').toLowerCase().includes(q) || (t.date||'').includes(q))) return false;
+    return true;
+  });
+}
+window.bankTxMore = function(){ FIN_TX_FILTER.limit = (FIN_TX_FILTER.limit || 40) + 60; cmdRenderBank(); };
+window.bankSelectTxn = function(id, on){ if (on) FIN_TX_SEL[id] = 1; else delete FIN_TX_SEL[id]; cmdRenderBank(); };
+window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
+// Bulk set — one undo restores every row it touched.
+window.bankBulkCategorize = function(){
+  const sel = document.getElementById('fin-bulk-cat');
+  const cat = sel ? sel.value : (FIN_TX_FILTER.bulk || '');
+  const ids = Object.keys(FIN_TX_SEL).filter(k => FIN_TX_SEL[k]);
+  if (!ids.length) return;
+  if (cat && FIN_CATEGORIES.indexOf(cat) < 0) return;
+  const prev = {};
+  let n = 0;
+  (STATE.finTxns||[]).forEach(t => {
+    if (!FIN_TX_SEL[t.id]) return;
+    prev[t.id] = t.category || '';
+    t.category = cat; n++;
+  });
+  if (!n) return;
+  window.__agPrevTxnCats = prev;
+  FIN_TX_SEL = {}; FIN_TX_FILTER.bulk = '';
+  save();
+  cmdRenderBank();
+  showToast(n + ' transaction' + (n>1?'s':'') + ' set to ' + (cat ? finCatLabel(cat) : 'uncategorized') + ' — Undo above the list', 'success');
+};
 window.bankSetCategory = function(id, cat){
   const t = (STATE.finTxns||[]).find(x => x.id === id);
   if (!t) return;
@@ -26292,8 +26368,21 @@ window.cmdRenderBank = function(){
     + group('Not counted', mirrorList.concat(ignoredList), mirrorList.length ? 'Extra cards reporting the same credit line’s balance — counted once above.' : '');
   const catOpts = (sel) => '<option value=""' + (!sel ? ' selected' : '') + '>—</option>'
     + FIN_CATEGORIES.map(c => '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' + finCatLabel(c) + '</option>').join('');
-  const txRows = (STATE.finTxns||[]).slice(0, 30).map(t => `
-    <div style="display:grid;grid-template-columns:74px 1fr 90px 110px;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px${t.status==='pending' ? ';opacity:.6' : ''}">
+  // The ledger is searchable and filterable rather than a fixed "recent 30" —
+  // fixing a category you spotted last month should not require scrolling past
+  // everything since. Selection enables a bulk set, because these arrive in
+  // runs (six Zelle payments, a month of one subscription).
+  const all = (STATE.finTxns||[]).filter(t => t && t.status !== 'void');
+  const shown = finTxFiltered(all);
+  const cap = FIN_TX_FILTER.limit || 40;
+  const page = shown.slice(0, cap);
+  const selN = Object.keys(FIN_TX_SEL).filter(k => FIN_TX_SEL[k]).length;
+  // The same undo the chat action card offers — a bulk set made here should be
+  // reversible here, not only from the conversation that did not make it.
+  const undoN = window.__agPrevTxnCats ? Object.keys(window.__agPrevTxnCats).length : 0;
+  const txRows = page.map(t => `
+    <div style="display:grid;grid-template-columns:22px 68px 1fr 90px 110px;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px${t.status==='pending' ? ';opacity:.6' : ''}">
+      <input type="checkbox" ${FIN_TX_SEL[t.id]?'checked':''} onchange="bankSelectTxn('${slEsc(t.id)}', this.checked)" aria-label="Select transaction">
       <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${slEsc(t.date||'')}</span>
       <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${slEsc(t.desc||'')}${t.status==='pending' ? ' <span style="color:var(--muted);font-size:9px">(pending)</span>' : ''}</span>
       <span style="font-family:'DM Mono',monospace;text-align:right;color:${(t.amount||0) < 0 ? 'var(--ink)' : 'var(--green)'}">${money(t.amount||0)}</span>
@@ -26309,8 +26398,30 @@ window.cmdRenderBank = function(){
       <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · read-only — nothing here can move money</div>
       <div class="ag-sec-head"><h2 class="ag-sec-title">Accounts</h2></div>
       <div style="max-width:560px;margin-bottom:20px">${acctRows}</div>
-      <div class="ag-sec-head"><h2 class="ag-sec-title">Recent transactions</h2></div>
-      ${(STATE.finTxns||[]).length ? txRows : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No transactions synced yet — tap “Sync transactions”. A first pull can take Stripe a minute to prepare; try again shortly after connecting.</div>'}`
+      <div class="ag-sec-head"><h2 class="ag-sec-title">Transactions</h2><div class="ag-sec-actions" style="font-size:10px;color:var(--muted)">${shown.length} of ${all.length}</div></div>
+      ${all.length ? `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+        <input class="fi" id="fin-tx-q" value="${slEsc(FIN_TX_FILTER.q||'')}" placeholder="Search description or date…" style="flex:1;min-width:150px;padding:7px 10px;font-size:11px" oninput="bankTxSearch(this.value)">
+        ${[['all','All'],['uncat','Uncategorized'],['out','Money out'],['in','Money in']].map(([m,l]) =>
+          `<button class="ag-pill${FIN_TX_FILTER.mode===m?' ag-pill-active':''}" onclick="bankTxMode('${m}')">${l}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+        <input class="fi" id="fin-tx-ask" placeholder="${selN ? 'Tell the CFO what these ' + selN + ' are…' : 'Fix these in plain English — “every Zelle from Marie is income”…'}" style="flex:1;min-width:150px;padding:7px 10px;font-size:11px" onkeydown="if(event.key==='Enter'){event.preventDefault();bankAskCfo();}">
+        <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankAskCfo()">Ask CFO</button>
+      </div>
+      ${selN ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:9px 12px;border:1px solid var(--ink);margin-bottom:10px">
+        <span style="font-size:11px;font-weight:600">${selN} selected</span>
+        <select class="fs" id="fin-bulk-cat" style="min-height:auto;padding:6px 8px;font-size:11px" onchange="bankBulkCat(this.value)">${catOpts(FIN_TX_FILTER.bulk||'')}</select>
+        <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankBulkCategorize()">Set category</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectClear()">Clear</button>
+      </div>` : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
+      ${undoN ? `<div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--border);margin-bottom:10px;font-size:10.5px;color:var(--muted)">
+        <span style="flex:1">Last change: ${undoN} row${undoN>1?'s':''} recategorized.</span>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agentUndoTxnCats()">Undo</button>
+      </div>` : ''}
+      ${page.length ? txRows : '<div style="padding:20px;text-align:center;color:var(--muted);font-size:11px">Nothing matches that filter.</div>'}
+      ${shown.length > page.length ? `<div style="text-align:center;padding:12px"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankTxMore()">Show ${Math.min(60, shown.length - page.length)} more (${shown.length - page.length} left)</button></div>` : ''}
+      ` : '<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">No transactions synced yet — tap “Sync transactions”. A first pull can take Stripe a minute to prepare; try again shortly after connecting.</div>'}`
     + cfoCalPanelHtml(money);
 };
 
