@@ -64,7 +64,10 @@ export default async (req) => {
     'х':'x','У':'Y','у':'y','К':'K','к':'k','М':'M','м':'m','Н':'H','н':'H',
     'Т':'T','т':'t','І':'I','і':'i','Ѕ':'S','ѕ':'s','Ј':'J','ј':'j','Ь':'b',
     'ь':'b','Ѡ':'w','Ԛ':'Q','ԛ':'q','Ԝ':'W','ԝ':'w','ѵ':'v','Ѵ':'V','ԁ':'d',
-    'ԍ':'g','ѡ':'w','Ғ':'F','ғ':'f','ԝ':'w',
+    'ԍ':'g','ѡ':'w','Ғ':'F','ғ':'f',
+    // Seen in the wild in this workspace's key: a dagger where an f belongs
+    // (stylized-text artifact), and the common smart-punct swaps.
+    '†':'f','‘':"'",'’':"'",'—':'-','–':'-',
   };
   const healKey = (v) => String(v || '')
     .replace(/\s+/g, '')
@@ -102,7 +105,7 @@ export default async (req) => {
     // Build marker forces a fresh function bundle so env-var changes are
     // captured (same pattern as the Shopify proxy).
     return json({ configured: !!key, sk_format_ok: skFormatOk, key_ok, key_error,
-                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28e' }, 200, cors);
+                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28f' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
   if (!skFormatOk) return json({ error: 'STRIPE_SECRET_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
