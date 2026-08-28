@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '315';
+  const BUILD = '316';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17517,11 +17517,13 @@ async function plmSalesRefresh() {
     const now = Date.now(), d30 = now - 30 * 864e5, d60 = now - 60 * 864e5;
     const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
     const pJan1 = new Date(new Date().getFullYear() - 1, 0, 1).getTime(), pCut = pJan1 + (now - jan1);
-    const pulse = { at: new Date().toISOString(), r30: 0, n30: 0, rPrev: 0, nPrev: 0, ytd: 0, ytdN: 0, prevYtd: 0 };
+    const m0 = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
+    const pulse = { at: new Date().toISOString(), r30: 0, n30: 0, rPrev: 0, nPrev: 0, ytd: 0, ytdN: 0, prevYtd: 0, mtd: 0, mtdN: 0 };
     live.forEach(o => {
       const v = parseFloat(o.total_price || 0) || 0, ts = new Date(o.created_at).getTime();
       if (ts >= d30) { pulse.r30 += v; pulse.n30++; }
       else if (ts >= d60) { pulse.rPrev += v; pulse.nPrev++; }
+      if (ts >= m0)   { pulse.mtd += v; pulse.mtdN++; }
       if (ts >= jan1) { pulse.ytd += v; pulse.ytdN++; }
       else if (ts >= pJan1 && ts < pCut) { pulse.prevYtd += v; }
     });
@@ -24045,6 +24047,10 @@ window.slCreateOrderFromQuote = function(quoteId) {
     deliveryDate: q.shipStart || '',
     notes: 'From quote ' + q.id + (q.season ? ' · ' + q.season : ''),
     quoteId: q.id,
+    // When the order was BOOKED. updatedAt moves on every later edit, so it
+    // cannot date revenue — an order edited this year would otherwise count
+    // as this year's sales.
+    createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
   STATE.slOrders.unshift(rec);
@@ -24836,11 +24842,16 @@ function revGetGoals() {
 // Everything the business earns and spends, combined: live DTC (Shopify),
 // wholesale booked (orders), the pipeline (quotes out), REAL COGS from cost
 // sheets × units actually sold, and marketing spend. No hand-typed totals.
+// WHEN a wholesale order counts as revenue. updatedAt changes on every edit,
+// so using it as the booking date credited old orders to whatever period they
+// were last touched in. createdAt is authoritative; updatedAt is the fallback
+// for records written before it was stamped.
+function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 function cmdMoneyData() {
   const p = STATE.bizPulse || {};
   const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
   const orders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled');
-  const wsYtd = orders.filter(o => (o.updatedAt || '') >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
+  const wsYtd = orders.filter(o => slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
   const wsAll = orders.reduce((s,o) => s + (o.total||0), 0);
   const quotes = STATE.slQuotes || [];
   const pipeSent = quotes.filter(q => q.status === 'sent').reduce((s,q) => s + (q.total||0), 0);
@@ -24853,7 +24864,7 @@ function cmdMoneyData() {
   const arNow = new Date();
   orders.forEach(o => {
     const pay = o.payment; if (!pay || !pay.status) return;
-    const inYtd = (o.updatedAt||'') >= jan1iso;
+    const inYtd = slOrderBookedAt(o) >= jan1iso;
     if (pay.status === 'paid') { if (inYtd) wsCollectedYtd += ((pay.amountPaid != null ? pay.amountPaid : o.total) || 0) - (pay.deduction || 0); return; }
     if (pay.status === 'void' || pay.status === 'uncollectible') return;
     if (inYtd && pay.amountPaid) wsCollectedYtd += pay.amountPaid - (pay.deduction || 0);
@@ -24879,7 +24890,7 @@ function cmdMoneyData() {
   rows.sort((a,b) => b.gp - a.gp);
   // Wholesale COGS from order line items (styles carry their landed cost).
   let wsCogsYtd = 0;
-  orders.filter(o => (o.updatedAt || '') >= jan1iso).forEach(o => (o.items||[]).forEach(it => {
+  orders.filter(o => slOrderBookedAt(o) >= jan1iso).forEach(o => (o.items||[]).forEach(it => {
     const st = (STATE.styles||[]).find(x => x.id === it.styleId);
     const lc = st && typeof landedCost === 'function' ? (landedCost(st) || 0) : 0;
     wsCogsYtd += lc * (it.qty || 0);
@@ -25178,7 +25189,7 @@ function cfoPlanPanelHtml(money){
       ${Array.isArray(p.actions) && p.actions.length ? `<div class="micro-label" style="margin:14px 0 6px">First actions</div>${p.actions.slice(0,6).map((a,i)=>`<div style="font-size:11px;line-height:1.6;padding:4px 0;border-bottom:1px solid var(--border)">${i+1}. ${slEsc(a.action||'')}${a.when?` <span style="color:var(--muted)">· ${slEsc(a.when)}</span>`:''}</div>`).join('')}` : ''}
       ${Array.isArray(p.gaps) && p.gaps.length ? `<div class="micro-label" style="margin:14px 0 6px">What the data couldn't tell us</div><div style="font-size:10.5px;color:var(--muted);line-height:1.7">${p.gaps.slice(0,6).map(g=>'• '+slEsc(String(g))).join('<br>')}</div>` : ''}
       ${p.verification && (Array.isArray(p.verification.issues_fixed) && p.verification.issues_fixed.filter(Boolean).length) ? `<div class="micro-label" style="margin:14px 0 6px">Fixed in self-review</div><div style="font-size:10.5px;color:var(--muted);line-height:1.7">${p.verification.issues_fixed.filter(Boolean).slice(0,6).map(x=>'• '+slEsc(String(x))).join('<br>')}</div>` : ''}
-      ${v ? `<div class="micro-label" style="margin:14px 0 6px">This month vs plan</div><div style="font-size:11px;line-height:1.7">Planned ${money(v.planned)} · tracking ${money(v.actual)} <span style="color:${(v.delta||0)<0?'var(--red)':'var(--green)'}">(${v.delta>=0?'+':''}${money(v.delta)}${v.pct!=null?', '+(v.pct>=0?'+':'')+v.pct+'%':''})</span><div style="color:var(--muted);font-size:10px">DTC figure is the trailing-30-day pulse, not calendar month-to-date — directional, not exact.</div></div>` : ''}
+      ${v ? `<div class="micro-label" style="margin:14px 0 6px">This month vs plan</div><div style="font-size:11px;line-height:1.7">Planned ${money(v.planned)} · tracking ${money(v.actual)} <span style="color:${(v.delta||0)<0?'var(--red)':'var(--green)'}">(${v.delta>=0?'+':''}${money(v.delta)}${v.pct!=null?', '+(v.pct>=0?'+':'')+v.pct+'%':''})</span>${v.exact ? '' : '<div style="color:var(--muted);font-size:10px">DTC figure is the trailing-30-day pulse, not calendar month-to-date — directional, not exact.</div>'}</div>` : ''}
       <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
         ${p.targets && !fp.rolledOutAt ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="cfoPlanRollout()">Roll out targets →</button>` : ''}
         ${fp.rolledOutAt ? `<span style="font-size:10.5px;color:var(--muted);align-self:center">Targets applied ${slEsc(String(fp.rolledOutAt).slice(0,10))}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cfoPlanRolloutUndo()">Undo rollout</button>` : ''}
@@ -25677,13 +25688,14 @@ function cfoPlanVariance(){
     const pulse = STATE.bizPulse || {};
     const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
     const mStart = key + '-01T00:00:00.000Z';
-    const ws = (STATE.slOrders || []).filter(o => o.status !== 'cancelled' && (o.updatedAt||'') >= mStart)
+    const ws = (STATE.slOrders || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= mStart)
       .reduce((s,o) => s + (o.total||0), 0);
-    // DTC month-to-date isn't stored directly; the 30-day pulse is the closest
-    // honest proxy, and it is labelled as such wherever this is shown.
-    const dtc = pulse.r30 || 0;
+    // Exact calendar month-to-date when the pulse has it; the trailing-30-day
+    // figure only as a fallback, and flagged so nothing presents it as exact.
+    const exact = pulse.mtd != null && pulse.at;
+    const dtc = exact ? (pulse.mtd || 0) : (pulse.r30 || 0);
     const actual = dtc + ws, planned = row.revenue || 0;
-    return { month: key, planned, actual, dtc, ws, delta: actual - planned,
+    return { month: key, planned, actual, dtc, ws, exact: !!exact, delta: actual - planned,
              pct: planned ? Math.round(((actual - planned) / planned) * 100) : null };
   } catch(e){ return null; }
 }
@@ -26271,7 +26283,7 @@ function revSourceValue(src) {
   if (src === 'dtc-ytd') return p.ytd || 0;
   if (src === 'wholesale-ytd' || src === 'total-ytd') {
     const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
-    const ws = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && (o.updatedAt||'') >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
+    const ws = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
     return src === 'wholesale-ytd' ? ws : ws + (p.ytd || 0);
   }
   return null;
