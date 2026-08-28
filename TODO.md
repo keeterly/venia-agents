@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 322._
+_Last reviewed at Build 323._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -73,6 +73,12 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- **Operating expense comes from the bank feed**, not the Budget Tracker.
+  Overhead categories are charged; `fabric` and `production` are excluded
+  because landed cost already carries them into COGS; `transfer` and `income`
+  are not spend. Uncategorized outflow is reported as the margin of error,
+  never guessed into the total. With a feed the Budget Tracker is a plan and
+  is not subtracted as well — that would charge marketing twice.
 - Expense categories are **built-ins plus whatever the founders added**. Every
   validation site goes through `finAllCats()`, and the CFO's action spec is
   built at call time so a new category is immediately filable by the agent.
@@ -82,4 +88,7 @@ direct streaming path as the fallback. The financial plan is
 
 **Tests:** `node check.js` (inline script syntax) plus 16 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
-categories, cloud-run conversation shape, and instruction drift.
+categories, operating expense, cloud-run conversation shape, and instruction
+drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
+390px and 1440px against a seeded workspace — use it before claiming a UI or
+a number is right; several apparent bugs turned out to be malformed fixtures.

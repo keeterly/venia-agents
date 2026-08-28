@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '322';
+  const BUILD = '323';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18808,7 +18808,7 @@ const WORKFLOWS = {
     'Margin Review': `Run a margin review across the line from the unit economics in the FINANCE SNAPSHOT. For each style with cost data: landed cost, retail margin, wholesale margin. Call out: (1) styles underwater or below a healthy wholesale margin (~50%); (2) styles with NO cost data — name them so we can fill in cost sheets; (3) the 3 strongest styles we should lean on. End with the repricing moves you would make — and if I confirm, apply them with update_styles.`,
     'AR Chase List': `Build the AR chase list from the FINANCE SNAPSHOT. List open invoices oldest first with amount and days overdue. For each overdue account, draft a short chase email in VENIA's voice — warm and matter-of-fact up to 14 days over, firmer with a requested payment date past 30. I'll review and send them myself.`,
     'Price a Style': `Help me price a style. Ask which style (or take the landed cost I give you), then back-solve: wholesale at our target wholesale margin, retail at target retail margin, and the keystone check between them. Show the honest floor — the price below which the style loses money on landed cost — and sanity-check against VENIA's $280–$1,400 retail range and where comparable styles in the line sit.`,
-    'Can We Afford It': `I'm going to name a spend. Answer from the FINANCE SNAPSHOT, not vibes: (1) what it does to operating YTD; (2) what cash is actually collected vs merely booked; (3) what would have to be true for the spend to pay back — units, orders, or placements — against our current run rate; (4) a clear yes / no / yes-if. The snapshot does not include rent, payroll, or non-marketing overhead — say so where it changes the answer.`,
+    'Can We Afford It': `I'm going to name a spend. Answer from the FINANCE SNAPSHOT, not vibes: (1) what it does to operating YTD; (2) what cash is actually collected vs merely booked; (3) what would have to be true for the spend to pay back — units, orders, or placements — against our current run rate; (4) a clear yes / no / yes-if. Operating expense in the snapshot comes from the categorized bank feed (rent, payroll, software, shipping, contractors, marketing); name whatever is still uncategorized as the margin of error rather than ignoring it.`,
     'Monthly Money Summary': `Write the monthly money summary for the founders from the FINANCE SNAPSHOT: what came in (DTC and wholesale, vs the prior period where the snapshot shows it), what went out (COGS, marketing spend, factory payments, and bank-feed expenses by category if connected), margins, AR status, revenue-goal progress, and the three numbers that need a decision this month. Under a page, plain language. Save it to the Brand Library with save_brand_doc (kind "note", titled "Money Summary — <month year>").`,
     'Build a Financial Plan': `Before anything else, tell me whether you have enough real data to build a defensible plan — and if not, exactly what is missing. Then walk me through what you would plan toward given our actual position, and what the biggest single lever is. When I'm ready I'll run the full four-pass planner from the Financial plan panel.`,
     'Cash Calendar': `Walk me through the CASH CALENDAR in the FINANCE SNAPSHOT. What is committed and unavoidable in the next 90 days, what is merely expected, and what is only an estimate? Name the tightest week and exactly what causes it. If cash dips below my floor, tell me the two or three specific levers that fix it — pulling an invoice forward, moving a factory payment, holding a spend — with the dollar impact of each.`,
@@ -24935,6 +24935,35 @@ function cmdMoneyData() {
   }));
   let spend = 0;
   try { const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null'); if (bdg) Object.values(bdg).forEach(r => { spend += parseFloat(r.spent) || 0; }); } catch(e){}
+  // OPERATING EXPENSE, from the bank feed.
+  //
+  // Until now "spend" was only the marketing Budget Tracker — a planning tool
+  // the founders fill in by hand — so rent, payroll, software, shipping, fees
+  // and contractors never reached the P&L at all. Operating YTD was therefore
+  // revenue minus COGS minus almost nothing, and reported as profit in green.
+  // The bank feed already carries every one of those, categorized.
+  //
+  // fabric and production are EXCLUDED on purpose: landed cost already carries
+  // them into COGS above, so counting the wires too would double-charge them.
+  // This is the same split finCashCalendar makes for recurring detection.
+  // transfer is money moving between our own accounts, and income is inflow.
+  const OPEX_EXCLUDE = ['fabric','production','transfer','income'];
+  let opexYtd = 0, opexUncat = 0; const opexBy = {};
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void' || t.status === 'pending') return;
+    const amt = t.amount || 0;
+    if (amt >= 0) return;                               // outflow only
+    if (!t.date || t.date < jan1iso.slice(0,10)) return;
+    const c = (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category||'')) || '';
+    if (!c) { opexUncat += -amt; return; }              // can't classify it yet — reported, never guessed
+    if (OPEX_EXCLUDE.indexOf(c) >= 0) return;
+    opexYtd += -amt; opexBy[c] = (opexBy[c] || 0) + -amt;
+  });
+  const bankOpex = !!(STATE.finBank && (STATE.finBank.accounts||[]).length);
+  // With a bank feed the ledger is the truth and the Budget Tracker is a plan,
+  // so its "spent" column is NOT subtracted as well — that would charge
+  // marketing twice. Without a feed it stays the only expense signal there is.
+  const opexTotal = bankOpex ? opexYtd : spend;
   const revYtd = (p.ytd || 0) + wsYtd;
   const cogsYtd = dtcCogsYtd + wsCogsYtd;
   // Production cash (POs): what's been paid to factories this year and what's
@@ -24954,7 +24983,8 @@ function cmdMoneyData() {
     });
   } catch(e){}
   return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous,
-           revYtd, cogsYtd, operating: revYtd - cogsYtd - spend, rows, poPaidYtd, poCommitted,
+           opexYtd, opexUncat, opexBy, bankOpex, opexTotal,
+           revYtd, cogsYtd, operating: revYtd - cogsYtd - opexTotal, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
 }
 window.cmdRenderMoney = function() {
@@ -24977,8 +25007,8 @@ window.cmdRenderMoney = function() {
     <div class="ag-stats">
       <div class="ag-stat"><div class="ag-stat-l">Revenue YTD</div><div class="ag-stat-v">${money(d.revYtd)}</div><div class="ag-stat-s">DTC ${money(d.p.ytd||0)} · wholesale ${money(d.wsYtd)}</div></div>
       <div class="ag-stat"><div class="ag-stat-l">Real COGS YTD</div><div class="ag-stat-v">${money(d.cogsYtd)}</div><div class="ag-stat-s">landed cost × units sold</div></div>
-      <div class="ag-stat"><div class="ag-stat-l">Marketing spend</div><div class="ag-stat-v">${money(d.spend)}</div><div class="ag-stat-s">from the budget tracker</div></div>
-      <div class="ag-stat"><div class="ag-stat-l">Operating YTD</div><div class="ag-stat-v" style="color:${d.operating<0?'var(--red)':'var(--green)'}">${money(d.operating)}</div><div class="ag-stat-s">revenue − COGS − spend</div></div>
+      <div class="ag-stat"><div class="ag-stat-l">Operating expense YTD</div><div class="ag-stat-v">${money(d.opexTotal)}</div><div class="ag-stat-s">${d.bankOpex ? 'rent, payroll, software, marketing — from the bank feed' : 'budget tracker — connect the bank for the real number'}</div></div>
+      <div class="ag-stat"><div class="ag-stat-l">Operating YTD</div><div class="ag-stat-v" style="color:${d.operating<0?'var(--red)':'var(--green)'}">${money(d.operating)}</div><div class="ag-stat-s">revenue − COGS − operating expense</div></div>
     </div>
     ${!d.hasDtc ? `<div style="padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);margin-bottom:16px">Shopify hasn't reported yet this session — DTC lines show $0 until the pulse loads (it refreshes automatically).</div>` : ''}
     <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2></div>
@@ -24988,9 +25018,14 @@ window.cmdRenderMoney = function() {
       ${line('Wholesale collected', d.wsCollectedYtd, d.arOpen.length ? (d.arOpen.length + ' invoice' + (d.arOpen.length>1?'s':'') + ' still open — see AR below') : 'Stripe-confirmed, net of deductions')}
       ${line('Cost of goods — DTC', -d.dtcCogsYtd, 'landed × units sold')}
       ${line('Cost of goods — wholesale', -d.wsCogsYtd, 'landed × order units')}
-      ${line('Marketing spend', -d.spend, 'budget tracker')}
+      ${d.bankOpex
+        ? Object.entries(d.opexBy).sort((a,b) => b[1]-a[1]).map(([c,v]) =>
+            line('Operating expense — ' + finCatLabel(c), -v, 'bank feed')).join('')
+          + (d.opexUncat ? line('Uncategorized outflow', 0, 'not counted — ' + money(d.opexUncat) + ' still to classify') : '')
+        : line('Marketing spend', -d.spend, 'budget tracker')}
       ${line('Operating', d.operating, '', true)}
     </div>
+    ${d.bankOpex && d.opexUncat > d.revYtd * 0.01 ? `<div style="max-width:560px;padding:10px 12px;border:1px solid var(--amber);font-size:11px;line-height:1.6;margin:-12px 0 24px;cursor:pointer" onclick="cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-bank',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-bank]'))},140)">⚠ ${money(d.opexUncat)} of spending is still uncategorized, so operating is flattered by up to that much. File it in Cash →</div>` : ''}
     ${d.arOpen.length ? `<div class="ag-sec-head"><h2 class="ag-sec-title">Accounts receivable — open invoices</h2></div>
     <div style="max-width:560px;margin-bottom:24px">
       ${d.arOpen.map(a => `<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11.5px;cursor:pointer" onclick="slOpenOrderDetail('${a.id}')">
@@ -25028,8 +25063,11 @@ function veniaFinanceContext(){
     parts.push('P&L this year: revenue ' + money(d.revYtd)
       + ' (DTC ' + money(p.ytd||0) + (p.prevYtd ? ', same period last year ' + money(p.prevYtd) : '')
       + ' · wholesale booked ' + money(d.wsYtd) + ', collected ' + money(d.wsCollectedYtd) + ')'
-      + ' | COGS ' + money(d.cogsYtd) + ' | marketing spend ' + money(d.spend)
+      + ' | COGS ' + money(d.cogsYtd)
+      + ' | operating expense ' + money(d.opexTotal) + (d.bankOpex ? ' (bank feed: ' + (Object.entries(d.opexBy).sort((a,b)=>b[1]-a[1]).map(([c,v]) => finCatLabel(c) + ' ' + money(v)).join(', ') || 'none') + ')' : ' (budget tracker only — no bank feed)')
       + ' | operating ' + money(d.operating));
+    if (d.bankOpex && d.opexUncat) parts.push('CAVEAT: ' + money(d.opexUncat) + ' of outflow this year is still uncategorized and is NOT in operating expense above, so operating is overstated by up to that much. Say so whenever you quote profitability, and offer to file it.');
+    if (d.bankOpex) parts.push('Operating expense EXCLUDES fabric and production payments on purpose — landed cost already carries those into COGS. Never add them back.');
     if (p.at) parts.push('DTC pulse: last 30d ' + money(p.r30||0) + ' across ' + (p.n30||0) + ' orders (prior 30d ' + money(p.rPrev||0) + ')');
     else parts.push('DTC pulse: Shopify has not reported this session — DTC lines read $0 until it loads. Say so instead of treating DTC as zero.');
     if (d.arOpen.length) parts.push('AR — open invoices (oldest first):\n' + d.arOpen.slice(0,12).map(a =>
