@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '302';
+  const BUILD = '303';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15639,14 +15639,25 @@ window.prDepositChip = function(pullId, pct){
 // One place to get the VENIA access code for serverless-function auth.
 // Memory first, then this device's stored copy (saved at gate entry), then —
 // only when the caller says so — a one-time prompt (stored for next time).
+// iOS smart punctuation and look-alike keyboard substitutions poison a typed
+// code: a curly quote for ', a Cyrillic З for 3. Normalize the obvious swaps
+// and trim — a non-Latin1 char in the auth header hard-crashes fetch. Applied
+// on every read so a previously-stored poisoned copy is healed too.
+function veniaACClean(c){
+  return String(c || '').trim()
+    .replace(/[‘’‛]/g, "'").replace(/[“”]/g, '"')
+    .replace(/[–—]/g, '-')
+    .replace(/З/g, '3').replace(/О/g, 'O').replace(/о/g, 'o');
+}
 window.veniaAC = function(promptIfMissing, reason){
   let c = window.__ac || '';
   if (!c) { try { c = localStorage.getItem('venia_ac') || ''; } catch (e) {} if (c) window.__ac = c; }
   if (!c && promptIfMissing) {
     c = prompt(reason || 'Enter your VENIA access code:') || '';
+    c = veniaACClean(c);
     if (c) { window.__ac = c; try { localStorage.setItem('venia_ac', c); } catch (e) {} }
   }
-  return c;
+  return veniaACClean(c);
 };
 // Attach the code to every call to our own serverless functions — they verify
 // it server-side now (Origin headers are forgeable; the code is the real wall).
@@ -15657,7 +15668,11 @@ window.veniaAC = function(promptIfMissing, reason){
     try {
       const url = (typeof input === 'string') ? input : ((input && input.url) || '');
       if (/^(\/api\/|\/\.netlify\/functions\/)/.test(url) || /veniacollection\.com\/(api|\.netlify)\//.test(url) || /venia-creator\.netlify\.app\/(api|\.netlify)\//.test(url)) {
-        const ac = window.veniaAC(false);
+        // Header values must be Latin-1: a stored code carrying a look-alike
+        // character (e.g. Cyrillic З for 3) makes fetch THROW before sending.
+        // Strip anything unsendable — the server then 401s cleanly and the
+        // bank flow's re-prompt path takes over, instead of a hard crash.
+        const ac = String(window.veniaAC(false) || '').replace(/[^\x20-\xFF]/g, '');
         if (ac) {
           init = init || {};
           const h = init.headers || {};
@@ -24985,7 +25000,17 @@ async function bankApi(action, params){
     const d = await r.json().catch(() => ({}));
     return { r, d };
   };
-  let { r, d } = await call();
+  // An unsendable header (non-Latin1 char in a stored code) makes fetch THROW
+  // before the request leaves the browser — fold that into the 401 path so it
+  // clears and re-prompts instead of surfacing a cryptic ByteString error.
+  const attempt = async () => {
+    try { return await call(); }
+    catch(e){
+      if (/ByteString/i.test(String(e && e.message || ''))) return { r: { status: 401, ok: false }, d: { error: 'Not authorized — VENIA access code required.' } };
+      throw e;
+    }
+  };
+  let { r, d } = await attempt();
   // A wrong or stale stored access code would otherwise 401 forever — veniaAC
   // only prompts when EMPTY (a mistyped code gets stored and silently reused).
   // On a 401, clear the stored copy, ask once fresh, and retry.
@@ -24993,7 +25018,7 @@ async function bankApi(action, params){
     window.__ac = '';
     try { localStorage.removeItem('venia_ac'); } catch(e){}
     const c = window.veniaAC(true, 'That code didn’t match. Enter your VENIA access code — the same one that unlocks VENIA OS at the login screen (it’s case-sensitive; watch for auto-capitalization):');
-    if (c) ({ r, d } = await call());
+    if (c) ({ r, d } = await attempt());
   }
   if (!r.ok || d.error) throw new Error(d.error || ('Bank HTTP ' + r.status));
   return d;
