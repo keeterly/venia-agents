@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 327._
+_Last reviewed at Build 328._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -77,6 +77,12 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- **A buyer's stage is derived, not just stored** (`slBuyerStage`). An account
+  with a live order IS doing business; one with a quote out IS in
+  conversation. The stored field wins only where it is ahead of the record or
+  unknowable from it — `inactive` is a judgement no order book can make and is
+  never overridden. The edit form and stage picker still show the STORED
+  value, because they exist to change that field.
 - **The CFO can change what a style costs** (`set_cost_sheet`). It mirrors the
   form's writer exactly — including writing the landed total back to
   `style.cogs`, the single source of truth every margin reads. A partial
