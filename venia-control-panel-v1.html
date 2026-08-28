@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '323';
+  const BUILD = '324';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18745,7 +18745,7 @@ WHAT YOU CAN DO:
 - Read the LEDGER: every uncategorized bank transaction and the most recent filed ones, each with its real id. You are not blind to what is already filed and you do not need the founders to paste ids — if a transaction is in the snapshot, you can act on it.
 - Read the CASH CALENDAR: the next 90 days of money in and out, week by week, rolled forward from actual bank cash, with the first week (if any) that drops below their cash floor.
 - Read OPERATIONS: the wholesale order book with delivery and invoice state, top-account concentration, open POs with deposit and balance state, vendor lead times and MOQs, and what is mid-sampling. Cash timing has operational causes — name them.
-- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), reprice styles (update_styles with retail/wholesale/cogs).
+- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), record a wholesale payment that arrived (record_payment), reprice styles (update_styles with retail/wholesale/cogs).
 - Plan: a full month-by-month financial plan (Money → Plan) built by a four-pass server run — baseline analysis, the plan, an adversarial self-review that hunts your own bad arithmetic and unsupported assumptions, then a revision. When a plan exists you can see it in FINANCE SNAPSHOT; discuss it, defend it, or say where it is now wrong.
 - Draft: AR chase emails, pricing proposals, a monthly money summary.
 - You NEVER move money. Invoices, card captures, and refunds are sent by a human with the access code — you prepare, they pull the trigger.
@@ -20153,6 +20153,11 @@ function agentOpsActionSpec() {
     + '{"type":"log_sample_round","style":"Exact style name or code from the PLM list","round":"Proto","eta":"YYYY-MM-DD","result":"","note":"What changed / was requested"}\n'
     + '```\n'
     + '"round" ∈ Proto | SMS1 | SMS2 | TOP. "result" ∈ "" (still out) | approved | revise | rejected — set it only when the user states an outcome. "eta" = when the sample is expected back; omit if unknown. One style per block.\n'
+    + '\nACTION — record_payment: record that a wholesale customer PAID (Money → P&L). Wholesale here settles mostly by bank wire against a proforma, and only Stripe-issued invoices update themselves — so without this an order that was paid stays in AR forever and never reaches "wholesale collected".\n'
+    + '```venia:action\n'
+    + '{"type":"record_payment","items":[{"order":"ORD-XYZ","amount":71200,"date":"2026-08-20","method":"wire","note":"Antonioli AW26 balance"}]}\n'
+    + '```\n'
+    + 'Identify the order by "order" (its id, from the ORDER BOOK in context) or by "account" (the buyer name); with several open orders for one account, amount must match one exactly or you must give the id. "amount" is what ARRIVED, in dollars — a partial payment is fine and leaves the balance open, ageing against the order terms. "date" is when the money landed (defaults to today). This RECORDS a payment that already happened; it never moves money and never sends anything. Only record what the founder tells you arrived, or what you can see landed in the bank ledger — never infer a payment from an order simply being old.\n'
     + '\nACTION — set_forecast: commit forecast units per style into the demand plan (Production → Demand Plan).\n'
     + '```venia:action\n'
     + '{"type":"set_forecast","forecasts":[{"style":"Exact style name or code","units":120}]}\n'
@@ -20473,7 +20478,88 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_budget') return agentRunSetBudget(action, chatBody);
   if (action.type === 'set_revenue_goal') return agentRunSetRevenueGoal(action, chatBody);
   if (action.type === 'set_txn_category') return agentRunSetTxnCategory(action, chatBody);
+  if (action.type === 'record_payment') return agentRunRecordPayment(action, chatBody);
 }
+
+// RECORD a wholesale payment. Until this existed, o.payment was written ONLY
+// by the Stripe invoice path — so an order settled by bank wire, which is how
+// most wholesale in this segment actually pays, could never enter AR or
+// "wholesale collected". The books simply never learned the money arrived.
+//
+// This RECORDS that a payment happened; it never moves money. It writes the
+// same shape slRefreshInvoices maintains, so every downstream reader — AR
+// aging, collected YTD, the cash calendar — works unchanged.
+function agentRunRecordPayment(action, chatBody){
+  const items = Array.isArray(action.items) ? action.items : [];
+  if (!STATE.slOrders) STATE.slOrders = dbGet('slOrders') || [];
+  const orders = STATE.slOrders || [];
+  const norm = (x) => String(x||'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
+  const prev = {}; const filed = [], missed = [];
+  items.forEach(it => {
+    if (!it) return;
+    const amt = Math.round(parseFloat(it.amount) || 0);
+    if (!(amt > 0)) { missed.push('a payment needs a positive amount'); return; }
+    // id first; then the account name, narrowed by amount when several are open
+    let o = it.order ? orders.find(x => x.id === it.order) : null;
+    if (!o && it.account) {
+      const cands = orders.filter(x => x.status !== 'cancelled' && norm(x.account) === norm(it.account)
+        && !(x.payment && x.payment.status === 'paid'));
+      if (cands.length > 1) {
+        const exact = cands.filter(x => Math.round(x.total||0) === amt);
+        o = exact.length === 1 ? exact[0] : null;
+        if (!o) { missed.push(cands.length + ' open orders for "' + it.account + '" — name the order id'); return; }
+      } else o = cands[0];
+    }
+    if (!o) { missed.push('no open order matched ' + (it.order || it.account || '(nothing given)')); return; }
+    if (!(o.id in prev)) prev[o.id] = o.payment ? JSON.parse(JSON.stringify(o.payment)) : null;
+    const pay = o.payment || (o.payment = {});
+    const paidBefore = pay.amountPaid || 0;
+    const paid = paidBefore + amt;
+    const total = o.total || 0;
+    const when = /^\d{4}-\d{2}-\d{2}/.test(String(it.date||'')) ? new Date(it.date + 'T12:00:00').toISOString() : new Date().toISOString();
+    pay.amountPaid = paid;
+    pay.amountRemaining = Math.max(0, total - paid);
+    pay.method = it.method || pay.method || 'manual';
+    pay.at = pay.at || o.createdAt || when;
+    // Terms set the due date when no invoice supplied one — without it every
+    // open row ages as "current" however old it is.
+    if (!pay.dueDate) {
+      const net = /net\s*(\d+)/i.exec(String(o.terms||''));
+      if (net) pay.dueDate = new Date(new Date(pay.at).getTime() + parseInt(net[1],10)*86400000).toISOString().slice(0,10);
+    }
+    if (pay.amountRemaining <= 0) { pay.status = 'paid'; pay.paidAt = when; }
+    else { pay.status = 'open'; pay.paidAt = pay.paidAt || null; }
+    if (it.note) pay.note = String(it.note).slice(0, 200);
+    filed.push({ id: o.id, account: o.account || '', amt, left: pay.amountRemaining, status: pay.status });
+  });
+  if (!filed.length) {
+    appendAgentNote(chatBody, 'Nothing was recorded — ' + (missed.length ? missed.slice(0,4).join('; ') : 'no order matched') + '.');
+    return;
+  }
+  window.__agPrevPayments = prev;
+  save();
+  try { cmdRenderMoney(); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  const lines = filed.map(f => escHtml('#' + f.id + ' ' + f.account + ' — $' + f.amt.toLocaleString()
+    + (f.status === 'paid' ? ' · settled in full' : ' · $' + Math.round(f.left).toLocaleString() + ' still open'))).join('<br>');
+  agentActionCard(chatBody, filed.length + ' payment' + (filed.length>1?'s':'') + ' recorded',
+    '<div style="font-size:10.5px;line-height:1.7;font-family:\'DM Mono\',monospace">' + lines + '</div>'
+    + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:6px">Skipped: ' + escHtml(missed.slice(0,3).join('; ')) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Money → P&amp;L · recorded, not moved</div>',
+    'agentUndoPayments()');
+}
+window.agentUndoPayments = function(){
+  const prev = window.__agPrevPayments; if (!prev) return;
+  (STATE.slOrders||[]).forEach(o => {
+    if (!(o.id in prev)) return;
+    if (prev[o.id] === null) delete o.payment; else o.payment = prev[o.id];
+  });
+  window.__agPrevPayments = null;
+  save();
+  try { cmdRenderMoney(); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  showToast('Payment records undone', 'info');
+};
 
 // Resolve one categorize instruction to real transactions. An exact id wins;
 // otherwise a description (optionally narrowed by amount and/or date) is
@@ -25332,12 +25418,24 @@ window.cmdRenderCfo = function(){
   const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
   const arOut = d.arOpen.reduce((s,a) => s + (a.open||0), 0);
   const overdue = d.arOpen.filter(a => a.days > 0).length;
+  // CASH LEADS. A page headed "what needs you now" that opened on YTD revenue
+  // and a green profit number, with no cash figure anywhere, buried the only
+  // question that can end a season: what is actually in the account, and what
+  // is already spoken for. Profit is a scoreboard; cash is the constraint.
+  const bkc = (typeof finBankData === 'function') ? finBankData() : null;
+  const claims = arOut - (bkc ? bkc.debt : 0) - d.poCommitted;   // owed to us, less what we owe
+  const cashTile = bkc && bkc.connected
+    ? `<div class="ag-stat"><div class="ag-stat-l">Cash on hand</div><div class="ag-stat-v"${bkc.bal < 0 ? ' style="color:var(--red)"' : ''}>${money(bkc.bal)}</div><div class="ag-stat-s">${bkc.debt ? money(bkc.debt) + ' owed on cards and loans' : 'no card or loan balances'}</div></div>`
+    : `<div class="ag-stat"><div class="ag-stat-l">Cash on hand</div><div class="ag-stat-v" style="color:var(--muted)">—</div><div class="ag-stat-s">connect the bank in Cash</div></div>`;
   const stats = `<div class="ag-stats">
-    <div class="ag-stat"><div class="ag-stat-l">Revenue YTD</div><div class="ag-stat-v">${money(d.revYtd)}</div><div class="ag-stat-s">DTC ${money(d.p.ytd||0)} · wholesale ${money(d.wsYtd)}</div></div>
-    <div class="ag-stat"><div class="ag-stat-l">Operating YTD</div><div class="ag-stat-v" style="color:${d.operating<0?'var(--red)':'var(--green)'}">${money(d.operating)}</div><div class="ag-stat-s">revenue − COGS − spend</div></div>
+    ${cashTile}
     <div class="ag-stat"><div class="ag-stat-l">AR outstanding</div><div class="ag-stat-v"${overdue?' style="color:var(--amber)"':''}>${money(arOut)}</div><div class="ag-stat-s">${d.arOpen.length ? d.arOpen.length + ' open' + (overdue ? ' · ' + overdue + ' overdue' : '') : 'no open invoices'}</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Committed to factories</div><div class="ag-stat-v">${money(d.poCommitted)}</div><div class="ag-stat-s">open POs, not yet paid</div></div>
-  </div>`;
+    <div class="ag-stat"><div class="ag-stat-l">Operating YTD</div><div class="ag-stat-v" style="color:${d.operating<0?'var(--red)':'var(--green)'}">${money(d.operating)}</div><div class="ag-stat-s">on ${money(d.revYtd)} revenue${d.opexUncat ? ' · ' + money(d.opexUncat) + ' unfiled' : ''}</div></div>
+  </div>
+  ${bkc && bkc.connected ? `<div style="padding:10px 12px;border:1px solid ${claims < 0 ? 'var(--amber)' : 'var(--border)'};font-size:11.5px;line-height:1.6;margin-bottom:16px">
+    <b>${money(bkc.bal)}</b> in the bank · <b>${money(arOut)}</b> owed to us · <b>${money(bkc.debt + d.poCommitted)}</b> we owe (cards, loans, open POs)${claims < 0 ? ' — <span style="color:var(--amber)">more is committed than is coming in; the cash calendar is the thing to read next.</span>' : ' — <span style="color:var(--muted)">claims net positive by ' + money(claims) + '.</span>'}
+  </div>` : ''}`;
   const wf = (tag, title, desc) => '<div class="ag-wf" style="cursor:pointer" data-agp="' + agRegister('fin', (WORKFLOWS.fin||{})[title] || title) + '"><div class="ag-wf-tag">' + tag + '</div><div class="ag-wf-title">' + title + '</div><div class="ag-wf-desc">' + desc + '</div></div>';
   // The weekly brief, when the CFO has written one this week.
   const wb = STATE.finWatchBrief;
@@ -25421,10 +25519,14 @@ function veniaFinOpsContext(){
       parts.push('WHOLESALE ORDER BOOK (' + ords.length + ' live orders, ' + money(ords.reduce((s,o)=>s+(o.total||0),0)) + ' booked):\n'
         + ords.slice(0, 15).map(o => {
             const p = o.payment || {};
-            const pay = p.invoiceId
-              ? (['paid','void','uncollectible'].indexOf(p.status) >= 0 ? p.status
-                 : 'invoiced' + (p.dueDate ? ' due ' + p.dueDate : '') + (p.amountRemaining != null ? ', ' + money(p.amountRemaining) + ' outstanding' : ''))
-              : 'NOT INVOICED';
+            const how = p.invoiceId ? 'invoiced' : (p.method ? 'recorded (' + p.method + ')' : '');
+            const pay = p.status
+              ? (['paid','void','uncollectible'].indexOf(p.status) >= 0
+                 ? p.status + (p.paidAt ? ' ' + String(p.paidAt).slice(0,10) : '')
+                 : how + (p.dueDate ? ' due ' + p.dueDate : '')
+                   + (p.amountPaid ? ', ' + money(p.amountPaid) + ' received' : '')
+                   + (p.amountRemaining != null ? ', ' + money(p.amountRemaining) + ' outstanding' : ''))
+              : 'NOT INVOICED — nothing recorded against it';
             return '• #' + o.id + ' ' + (o.account||'?') + ' — ' + money(o.total||0) + ' | ' + (o.status||'')
               + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
           }).join('\n') + more(ords, 15)
