@@ -1,44 +1,76 @@
-# VENIA Control Center — Open Decisions & Setup Notes
+# VENIA OS — Open Items & Architecture Notes
 
-## ⚠️ TODO: Bank feed setup (Money → Bank, Build 301) — one-time
-The CFO agent's expenses/burn/runway come from a live read-only bank feed via
-Stripe Financial Connections (`netlify/functions/bank.js`, same Stripe account
-that sends invoices). To activate:
-1. Netlify env var `STRIPE_PUBLISHABLE_KEY` (pk_…) — the browser needs it for
-   Stripe's bank-auth modal. (`STRIPE_SECRET_KEY` is already set.)
-2. Netlify env var `VENIA_GATE_HASH` (or reuse `STRIPE_GATE_HASH`) — every bank
-   action fails closed without the access-code gate.
-3. Stripe Dashboard → Settings → Financial Connections: complete the
-   registration. Live-mode **transactions** require it; test mode works now.
-Then Money → Bank → "Connect bank" on either phone. Accounts subscribe to
-daily transaction refreshes; data syncs to the shared workspace like all other
-records (`finBank` / `finTxns` in SYNC_KEYS).
+_Last reviewed at Build 319._
 
-## ⚠️ TODO: Connect Supabase (database) — NOT YET DONE
-The app talks to Supabase directly from the browser (anon key). A separate
-Supabase project (kept apart from the QWST app) still needs to be created and wired in.
+## ✅ Settled (kept here so they are not re-litigated)
 
-When ready:
-- Create a new Supabase project (suggested name `venia-plm`).
-- Put its **Project URL** + **anon public key** into the app (Settings → Integrations →
-  Supabase), or update the pre-configured default in `venia-control-panel-v1.html`
-  (search `Pre-configure VENIA CC project on first load`).
-- Run the in-app setup SQL once (Settings → Supabase → "run the setup SQL") to create
-  `venia_styles / venia_materials / venia_vendors / venia_bom / venia_pom`.
-- **Security:** tighten the RLS policies — the default setup SQL uses
-  `USING (true)` (anyone with the URL + anon key can read/write all PLM data).
-  Prefer Supabase Auth, and if hosting on Netlify, proxy writes through a function
-  so the anon key isn't public in page source.
+- **Hosting: Netlify.** Live at `creator.veniacollection.com` (site `venia-creator`).
+  Chosen over GitHub Pages for the serverless functions — every secret
+  (Anthropic, Shopify, Stripe) lives in a Netlify env var and is reached through
+  a function, never from the browser.
+- **Supabase: connected and locked.** Project `VENIA CC`
+  (`unxfaeqjskzzmhyrekqx`). RLS is enabled on every `venia_*` table; the ones
+  carrying real data are restricted to the two founder emails, and tables with
+  no policy deny all by default. Verified at Build 319 — including
+  `venia_daily_digest`, which now carries the finance blob the Monday brief
+  reads.
+- **Bank feed: connected.** Chase via Stripe Financial Connections, read-only.
+  `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` and `VENIA_GATE_HASH` are set;
+  the Financial Connections registration was approved.
 
-## ⚠️ DECISION PENDING: Host on GitHub Pages vs Netlify
-Both are static hosts; the Supabase browser connection is identical on either.
-- **GitHub Pages** — simplest, free, auto-deploys on push. Pure static (no secrets/functions).
-- **Netlify** — adds serverless/edge functions, env vars, previews. Lets us hide the
-  Anthropic/Shopify keys behind a function (currently those live in the browser).
-- Current state: Netlify site `venia-creator` created; repo is Netlify-ready (`netlify.toml`).
-  GitHub `CNAME` was removed. Custom domain target: `creator.veniacollection.com`.
-- Recommendation leaning Netlify for the server-side headroom — confirm before finalizing DNS.
+## Open
 
-## In progress
-- PWA enablement (manifest, service worker, iOS meta, safe-area) for iPhone home-screen use.
-- Desktop + mobile UI refinement pass.
+- **Delete the old Stripe secret keys.** Several were created while getting the
+  bank connected, including one that passed through a chat transcript. The live
+  key in Netlify is the only one needed — remove the rest in Stripe →
+  Developers → API keys. Rolling the live one is fine too; paste the
+  replacement into Netlify and `/api/bank` `{"action":"ping"}` reports whether
+  it authenticates.
+- **Run the financial plan.** Money → Plan → Build the plan. Nothing grades a
+  plan until one exists, so plan-vs-actual reporting stays unbuilt until then.
+- **Tune Money Watch.** The thresholds (cash floor, runway, burn spike, margin
+  floor) ship with placeholder defaults, not opinions about this business.
+
+---
+
+# CFO Agent — how it fits together
+
+**Money pages** (grouped by the question each answers):
+`Overview` what needs you now · `Cash` accounts, ledger, 90-day calendar ·
+`P&L` · `Orders` · `Plan` financial plan + Money Watch · `Goals` · `Budget`.
+
+**Where the numbers come from**
+| Source | Via | Feeds |
+|---|---|---|
+| Shopify | `functions/shopify.js` (read-only allowlist) | DTC revenue, per-style sales |
+| Stripe invoices | `functions/stripe.js` (money actions gated) | wholesale AR, collections |
+| Chase | `functions/bank.js` (read-only, fails closed) | cash, debt, transactions |
+| PLM | in-app cost sheets + BOM | landed cost, margins |
+
+**The three things that run without being asked**
+1. Money Watch alerts → the Today brief → the existing 7 AM push.
+2. `functions/cfo-weekly.js` — Mondays 15:00 UTC, reads the finance blob a
+   device published with the daily digest and pushes a short brief. Needs no
+   app to be open; goes silent if that data is more than 3 days old.
+3. The weekly written brief, generated on first app open of a new week.
+
+**Agent runs are server-side.** CFO chat queues to
+`cfo-chat-background.js` first (15-min window, push on completion) with the
+direct streaming path as the fallback. The financial plan is
+`cfo-plan-background.js`: analyst → planner → **adversarial critic** → reviser.
+
+**Invariants worth protecting** (each was a real bug; each has a test)
+- Cash accounts are money held; card and loan balances are money **owed**.
+  Never summed. Mirror cards on one credit line count once.
+- Wholesale revenue is dated by `createdAt` (booking), collections by
+  `payment.paidAt` — never by `updatedAt`, which moves on every edit.
+- Two fabrications of one silhouette share a name by design, so DTC sales are
+  matched to a **group** of styles, not each one, or COGS doubles.
+- Cash-calendar events carry `committed` / `expected` / `estimated` and the
+  agent must never flatten them. Recurring detection covers overhead only —
+  fabric and production are already counted as dated PO obligations.
+- The agent drafts and files; **it never moves money.** Invoices and card
+  captures stay behind the human access-code gate.
+
+**Tests:** `node check.js` (inline script syntax) plus 14 suites in the session
+scratchpad covering the money math, agent actions, and instruction drift.
