@@ -58,15 +58,17 @@ export default async (req) => {
   // "ByteString" error the moment it hits an Authorization header. Healing is
   // conservative: if the underlying character was genuinely different, the
   // live Stripe check on ping still reports the key invalid.
+  const HOMOGLYPHS = {
+    'З':'3','з':'3','б':'6','Ч':'4','ч':'4','О':'O','о':'o','А':'A','а':'a',
+    'В':'B','в':'B','Е':'E','е':'e','С':'C','с':'c','Р':'P','р':'p','Х':'X',
+    'х':'x','У':'Y','у':'y','К':'K','к':'k','М':'M','м':'m','Н':'H','н':'H',
+    'Т':'T','т':'t','І':'I','і':'i','Ѕ':'S','ѕ':'s','Ј':'J','ј':'j','Ь':'b',
+    'ь':'b','Ѡ':'w','Ԛ':'Q','ԛ':'q','Ԝ':'W','ԝ':'w','ѵ':'v','Ѵ':'V','ԁ':'d',
+    'ԍ':'g','ѡ':'w','Ғ':'F','ғ':'f','ԝ':'w',
+  };
   const healKey = (v) => String(v || '')
     .replace(/\s+/g, '')
-    .replace(/З/g,'3').replace(/з/g,'3').replace(/О/g,'O').replace(/о/g,'o')
-    .replace(/А/g,'A').replace(/а/g,'a').replace(/В/g,'B').replace(/Е/g,'E')
-    .replace(/е/g,'e').replace(/С/g,'C').replace(/с/g,'c').replace(/Р/g,'P')
-    .replace(/р/g,'p').replace(/Х/g,'X').replace(/х/g,'x').replace(/у/g,'y')
-    .replace(/К/g,'K').replace(/к/g,'k').replace(/М/g,'M').replace(/Н/g,'H')
-    .replace(/Т/g,'T').replace(/В/g,'B').replace(/І/g,'I').replace(/і/g,'i')
-    .replace(/Ѕ/g,'S').replace(/ѕ/g,'s');
+    .replace(/[^\x00-\x7F]/g, (ch) => HOMOGLYPHS[ch] != null ? HOMOGLYPHS[ch] : ch);
   const key = healKey(process.env.STRIPE_SECRET_KEY);
   const pk  = healKey(process.env.STRIPE_PUBLISHABLE_KEY);
   const skFormatOk = /^[sr]k_(live|test)_[A-Za-z0-9]+$/.test(key);
@@ -89,17 +91,18 @@ export default async (req) => {
         if (!r.ok) key_error = (j && j.error && j.error.message ? String(j.error.message) : ('Stripe HTTP ' + r.status)).slice(0, 160);
       } catch (e) { key_error = String(e && e.message || e).slice(0, 160); }
     } else if (key) {
-      // Name the exact position and code point (never the key itself) so a
-      // stubborn bad character can be identified without guessing.
-      const bad = key.match(/[^A-Za-z0-9_]/);
-      key_error = bad
-        ? 'STRIPE_SECRET_KEY still has an invalid character at position ' + key.indexOf(bad[0]) + ' (code ' + bad[0].codePointAt(0) + ') even after auto-healing — delete the variable in Netlify and re-add it with a fresh copy/paste.'
+      // Name every offending position and code point (never the key itself)
+      // so stubborn bad characters can be identified without guessing.
+      const bads = [];
+      for (let i = 0; i < key.length; i++) if (/[^A-Za-z0-9_]/.test(key[i])) bads.push(i + '(code ' + key.codePointAt(i) + ')');
+      key_error = bads.length
+        ? 'STRIPE_SECRET_KEY still has invalid character' + (bads.length > 1 ? 's' : '') + ' at position' + (bads.length > 1 ? 's ' : ' ') + bads.join(', ') + ' even after auto-healing — delete the variable in Netlify and re-add it with a fresh copy/paste of a NEW key.'
         : 'STRIPE_SECRET_KEY has an unexpected format — it should start with sk_live_ or sk_test_.';
     }
     // Build marker forces a fresh function bundle so env-var changes are
     // captured (same pattern as the Shopify proxy).
     return json({ configured: !!key, sk_format_ok: skFormatOk, key_ok, key_error,
-                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28d' }, 200, cors);
+                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28e' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
   if (!skFormatOk) return json({ error: 'STRIPE_SECRET_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
