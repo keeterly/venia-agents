@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '309';
+  const BUILD = '310';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20088,9 +20088,9 @@ function agentFinActionSpec() {
     + '"period" ∈ monthly | quarterly | annual | seasonal. "source" binds the goal to live actuals — "" (manual) | dtc-30 | dtc-ytd | wholesale-ytd | total-ytd; prefer a live source when one fits so the goal tracks itself. "target" is required; "current" only matters for manual goals.\n'
     + '\nACTION — set_txn_category: categorize bank-feed transactions (Money → Bank) so burn and runway read true.\n'
     + '```venia:action\n'
-    + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"}]}\n'
+    + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"},{"match":{"desc":"Karol Jimenez","amount":-500},"category":"contractors"}]}\n'
     + '```\n'
-    + 'Use ONLY transaction ids that appear in the FINANCE SNAPSHOT. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | rnd (R&D — experiments, prototypes, research subscriptions) | fees | taxes | transfer | other. Movements between VENIA\'s own accounts are "transfer" (excluded from burn). Up to 40 per block; when a line is genuinely ambiguous, leave it out and ask instead of guessing.';
+    + 'Prefer the real transaction id from the ledger in the FINANCE SNAPSHOT — every row there carries one, so you almost never need anything else. When you genuinely lack an id, use "match" with the description exactly as it appears (optionally narrowed by "amount" and/or "date") and it will be resolved against the ledger; a match hitting more than 8 rows is refused rather than mis-filed. NEVER invent an id. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | rnd (R&D — experiments, prototypes, research subscriptions) | fees | taxes | transfer | other. Movements between VENIA\'s own accounts are "transfer" (excluded from burn). Up to 40 per block; when a line is genuinely ambiguous, leave it out and ask instead of guessing.';
 }
 
 // Ops writes (Backbone E3): the production/press verbs the founders kept
@@ -20424,26 +20424,58 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_txn_category') return agentRunSetTxnCategory(action, chatBody);
 }
 
+// Resolve one categorize instruction to real transactions. An exact id wins;
+// otherwise a description (optionally narrowed by amount and/or date) is
+// matched against the ledger — so the CFO can file what it can NAME, instead
+// of stalling because it lacks an id. Deliberately refuses a match that is too
+// broad rather than mis-filing a pile of rows.
+function finResolveTxns(it, txns){
+  const live = txns.filter(t => t && t.status !== 'void');
+  const id = String((it && it.id) || '').trim();
+  if (id) { const t = live.find(x => x.id === id); return t ? { hits: [t] } : { hits: [], why: 'id not found: ' + id }; }
+  const m = it && it.match ? it.match : null;
+  const q = String((m && m.desc) || (it && it.desc) || '').trim().toLowerCase();
+  if (!q) return { hits: [], why: 'no id and no description given' };
+  let hits = live.filter(t => String(t.desc||'').toLowerCase().includes(q));
+  const amt = m && m.amount != null ? parseFloat(m.amount) : null;
+  if (amt != null && isFinite(amt)) hits = hits.filter(t => Math.abs((t.amount||0) - amt) < 0.01);
+  const date = m && m.date ? String(m.date).slice(0,10) : '';
+  if (date) hits = hits.filter(t => String(t.date||'').slice(0,10) === date);
+  if (!hits.length) return { hits: [], why: 'nothing matched "' + q + '"' };
+  if (hits.length > 8) return { hits: [], why: '"' + q + '" matched ' + hits.length + ' transactions — too broad to file safely' };
+  return { hits };
+}
 function agentRunSetTxnCategory(action, chatBody){
   const items = Array.isArray(action.items) ? action.items.slice(0, 40) : [];
   const txns = STATE.finTxns || [];
   const prev = {};
-  let n = 0; const missed = [];
+  const filed = [], missed = [];
   items.forEach(it => {
     if (!it) return;
     const cat = String(it.category||'').toLowerCase().trim();
-    if (FIN_CATEGORIES.indexOf(cat) < 0) return;
-    const t = txns.find(x => x.id === String(it.id||''));
-    if (!t) { missed.push(String(it.id||'')); return; }
-    if (!(t.id in prev)) prev[t.id] = t.category || '';
-    t.category = cat; n++;
+    if (FIN_CATEGORIES.indexOf(cat) < 0) { missed.push('unknown category "' + String(it.category||'') + '"'); return; }
+    const { hits, why } = finResolveTxns(it, txns);
+    if (!hits.length) { missed.push(why || 'no match'); return; }
+    hits.forEach(t => {
+      if (!(t.id in prev)) prev[t.id] = t.category || '';
+      t.category = cat;
+      filed.push({ desc: String(t.desc||'').slice(0,42), date: t.date || '', cat });
+    });
   });
-  if (!n) { appendAgentNote(chatBody, 'None of those matched transactions in the bank feed — nothing was changed.'); return; }
+  if (!filed.length) {
+    appendAgentNote(chatBody, 'Nothing was changed — ' + (missed.length ? missed.slice(0,4).join('; ') : 'no transactions matched') + '.');
+    return;
+  }
   window.__agPrevTxnCats = prev;
   save();
   try { cmdRenderBank(); } catch(e){}
-  agentActionCard(chatBody, n + ' transaction' + (n>1?'s':'') + ' categorized',
-    '<div style="font-size:11px">' + n + ' categorized' + (missed.length ? ' · ' + missed.length + ' id' + (missed.length>1?'s':'') + ' not found (skipped)' : '') + '</div>'
+  // Show exactly WHAT was filed, so a description-matched write is auditable
+  // at a glance rather than a count the founder has to trust.
+  const lines = filed.slice(0, 12).map(f => escHtml(f.date + '  ' + f.desc + ' → ' + finCatLabel(f.cat))).join('<br>')
+    + (filed.length > 12 ? '<br>…+' + (filed.length - 12) + ' more' : '');
+  agentActionCard(chatBody, filed.length + ' transaction' + (filed.length>1?'s':'') + ' categorized',
+    '<div style="font-size:10.5px;line-height:1.7;font-family:\'DM Mono\',monospace">' + lines + '</div>'
+    + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:6px">Skipped: ' + escHtml(missed.slice(0,3).join('; ')) + '</div>' : '')
     + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Money → Bank</div>',
     'agentUndoTxnCats()');
 }
@@ -24970,9 +25002,21 @@ function veniaFinanceContext(){
           + ' | 90d avg monthly ' + (bk.monthlyNet > 0 ? 'net burn ' + money(bk.monthlyNet) : 'net surplus ' + money(-bk.monthlyNet))
           + ' | runway est ' + rw + ' (transfers + voided excluded)'
           + (Object.keys(bk.cat30).length ? '\n• Spend last 30d by category: ' + Object.entries(bk.cat30).sort((a,b) => b[1]-a[1]).slice(0,8).map(([c,v]) => finCatLabel(c) + ' ' + money(v)).join(', ') : ''));
-        const un = (STATE.finTxns||[]).filter(t => !finTxnCat(t) && t.status !== 'void').slice(0, 15);
-        if (un.length) parts.push('Uncategorized bank transactions (' + bk.uncat + ' total — categorize with set_txn_category):\n'
-          + un.map(t => '• ' + t.id + ' | ' + (t.date||'') + ' | ' + money(t.amount||0) + ' | ' + String(t.desc||'').slice(0,80)).join('\n'));
+        // THE LEDGER. Showing only uncategorized rows left the CFO blind to
+        // anything already filed — including things auto-filed WRONGLY, which
+        // it then could not correct because it never saw the id. It now sees
+        // the working ledger: every uncategorized row, plus recent filed rows,
+        // each with its id.
+        const live = (STATE.finTxns||[]).filter(t => t.status !== 'void');
+        const row = (t) => '• ' + t.id + ' | ' + (t.date||'') + ' | ' + money(t.amount||0)
+          + ' | ' + String(t.desc||'').slice(0,70) + ' | ' + (finTxnCat(t) ? finCatLabel(finTxnCat(t)) : 'UNCATEGORIZED');
+        const un = live.filter(t => !finTxnCat(t));
+        const filed = live.filter(t => finTxnCat(t)).slice(0, 30);
+        if (un.length) parts.push('UNCATEGORIZED bank transactions (' + un.length + ' — file with set_txn_category):\n'
+          + un.slice(0, 40).map(row).join('\n') + (un.length > 40 ? '\n…+' + (un.length-40) + ' more; ask the founder to run the categorize action again for the rest' : ''));
+        if (filed.length) parts.push('RECENT FILED transactions (newest first — re-file any of these with set_txn_category if the category is wrong):\n'
+          + filed.map(row).join('\n') + (live.length > filed.length + un.length ? '\n…older rows exist; ask if you need them' : ''));
+        parts.push('Every transaction above carries its real id. Use those ids in set_txn_category — never invent one. If you want to file something you can see here, you already have what you need; do not ask the founder to paste ids.');
         // What Money Watch is flagging right now — so a chat answer and the
     // morning push never tell the founders different stories.
     try {
