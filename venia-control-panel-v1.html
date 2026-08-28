@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '312';
+  const BUILD = '313';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -19984,7 +19984,8 @@ async function agentSend(key, message) {
     // — and buried the finance signal in noise it can never act on.
     const sysPrompt = key === 'fin'
       ? [ agent.system + '\n\n' + agentFinActionSpec() + agentBrandDocSpec() + agentBrainstormActionSpec() + agentPrefsText(key),
-          plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '') ]
+          plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '')
+                       + (typeof veniaFinOpsContext === 'function' ? veniaFinOpsContext() : '') ]
       : [ agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
           plmContext() + agentContextHints() ];
     const reply = key === 'fin'
@@ -25278,6 +25279,68 @@ window.cmdRenderPlan = function(){
   try { if (STATE.finPlanJob && STATE.finPlanJob.status === 'running') cfoPlanPoll(); } catch(e){}
 };
 
+// ── OPERATIONS, THROUGH A CFO'S EYES ───────────────────────────────────────
+// Cash timing is caused by operations: a factory balance falls due because a
+// PO was placed, an invoice lands because an order ships. Build 306 stripped
+// the full ops snapshot from CFO turns to stop the 504s — correct, but it left
+// the agent able to see a cash crunch without seeing what CAUSES it. This is
+// the finance-relevant slice only: the order book, factory obligations, vendor
+// terms and what is physically in production. No press contacts, no content
+// calendar, no brand docs — none of it moves money.
+function veniaFinOpsContext(){
+  const S = window.STATE; if (!S) return '';
+  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n||0)).toLocaleString();
+  const parts = [];
+  const more = (arr, n) => arr.length > n ? '\n…+' + (arr.length - n) + ' more' : '';
+  try {
+    // The wholesale order book — where booked revenue actually comes from.
+    const ords = (S.slOrders || []).filter(o => o && o.status !== 'cancelled');
+    if (ords.length) {
+      const byAcct = {};
+      ords.forEach(o => { const k = o.account || 'unknown'; byAcct[k] = (byAcct[k] || 0) + (o.total || 0); });
+      const top = Object.entries(byAcct).sort((a,b) => b[1]-a[1]);
+      const conc = top.length && ords.length ? Math.round((top[0][1] / top.reduce((s,x)=>s+x[1],0)) * 100) : 0;
+      parts.push('WHOLESALE ORDER BOOK (' + ords.length + ' live orders, ' + money(ords.reduce((s,o)=>s+(o.total||0),0)) + ' booked):\n'
+        + ords.slice(0, 15).map(o => {
+            const p = o.payment || {};
+            const pay = p.invoiceId
+              ? (['paid','void','uncollectible'].indexOf(p.status) >= 0 ? p.status
+                 : 'invoiced' + (p.dueDate ? ' due ' + p.dueDate : '') + (p.amountRemaining != null ? ', ' + money(p.amountRemaining) + ' outstanding' : ''))
+              : 'NOT INVOICED';
+            return '• #' + o.id + ' ' + (o.account||'?') + ' — ' + money(o.total||0) + ' | ' + (o.status||'')
+              + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
+          }).join('\n') + more(ords, 15)
+        + '\n• Top account is ' + top[0][0] + ' at ' + conc + '% of the book'
+        + (conc >= 40 ? ' — concentration risk worth naming.' : '.'));
+    }
+    // Factory obligations, in operational terms (the calendar has the dates).
+    const pos = (S.pos || []).filter(po => po && ['received','cancelled'].indexOf(po.status) < 0);
+    if (pos.length) parts.push('OPEN PRODUCTION POs (' + pos.length + '):\n' + pos.slice(0, 12).map(po => {
+      const dep = Math.round((po.total||0) * ((po.depositPct != null ? po.depositPct : 30) / 100));
+      return '• ' + po.id + ' — ' + (po.vendor||'?') + ' | ' + (po.units||0) + 'u | ' + money(po.total||0)
+        + ' | ' + (po.status||'draft') + (po.exFactory ? ' | ex-factory ' + po.exFactory : '')
+        + ' | deposit ' + money(dep) + (po.depositPaidAt ? ' PAID' : ' unpaid')
+        + (po.balancePaidAt ? ', balance paid' : ', balance ' + money((po.total||0) - dep) + ' outstanding');
+    }).join('\n') + more(pos, 12));
+    // Vendor terms — lead time and MOQ decide when cash must move.
+    const vs = (S.vendors || []).filter(v => v && v.name);
+    if (vs.length) parts.push('VENDOR TERMS: ' + vs.slice(0, 12).map(v =>
+      v.name + (v.type ? ' (' + v.type + ')' : '') + (v.lead ? ' lead ' + v.lead + 'd' : '') + (v.moq ? ' MOQ ' + v.moq : '')
+    ).join('; ') + more(vs, 12));
+    // What is physically in flight — sampling and production commit money.
+    const live = (S.styles || []).filter(s => s && s.status !== 'archived');
+    if (live.length) {
+      const byStatus = {};
+      live.forEach(s => { const k = s.status || 'unset'; byStatus[k] = (byStatus[k]||0) + 1; });
+      const inSample = live.filter(s => s.sample && s.sample !== 'Approved');
+      parts.push('PRODUCTION PIPELINE: ' + Object.entries(byStatus).map(([k,v]) => v + ' ' + k).join(', ')
+        + (inSample.length ? ' | ' + inSample.length + ' style' + (inSample.length>1?'s':'') + ' mid-sampling: '
+            + inSample.slice(0,8).map(s => (s.name||s.styleId) + ' (' + s.sample + ')').join(', ') : ''));
+    }
+  } catch(e){}
+  return parts.length ? '\n\nOPERATIONS (what drives the money):\n' + parts.join('\n') : '';
+}
+
 // ══════════════════════════════════════════════════════════
 //  CASH CALENDAR — what money moves, and WHEN.
 //  Balances tell you where you stand; a calendar tells you what's coming.
@@ -25418,6 +25481,7 @@ function cfoPlanSnapshot(){
   let out = '';
   try { out += (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''); } catch(e){}
   try { out += '\n\n' + (typeof plmContext === 'function' ? plmContext() : ''); } catch(e){}
+  try { out += (typeof veniaFinOpsContext === 'function' ? veniaFinOpsContext() : ''); } catch(e){}
   try {
     const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
     if (bdg) out += '\n\nMarketing budget lines: ' + Object.entries(bdg)
