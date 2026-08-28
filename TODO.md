@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 323._
+_Last reviewed at Build 324._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -73,6 +73,14 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- **The Money overview leads with cash**, then AR, then what we owe, then
+  profit. Profit is a scoreboard; cash is the constraint. The claims line
+  (bank − what we owe + what is owed to us) is the number that ends seasons.
+- **A wholesale payment can be recorded without Stripe** (`record_payment`).
+  Wholesale in this segment settles by wire; before this only a Stripe invoice
+  could move an order out of AR, so paid orders sat there forever. It records
+  a payment that already happened — it never moves money, and it must never
+  infer one from an order merely being old.
 - **Operating expense comes from the bank feed**, not the Budget Tracker.
   Overhead categories are charged; `fabric` and `production` are excluded
   because landed cost already carries them into COGS; `transfer` and `income`
