@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 326._
+_Last reviewed at Build 327._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -31,11 +31,9 @@ _Last reviewed at Build 326._
 - **Tune Money Watch.** The thresholds ship as placeholder defaults. The CFO
   can now set them itself (`set_money_watch`) — ask it to calibrate them once
   it has enough of the cash rhythm to justify each number.
-- **Cost sheets are still read-only to the agent.** It can reprice a style
-  (`update_styles`) but cannot update a landed cost when a mill raises prices,
-  so margin work stalls on a human edit. Next capability worth adding.
-- **Desktop wastes the right half of the viewport** at 1440px — content sits
-  in a ~560px column. Mobile is fine.
+- **The floating agent dock overlaps a section-action button** at the bottom
+  right on desktop (the Production block's "POs →"). Pre-existing; more
+  visible now that content reaches the right edge.
 
 ---
 
@@ -79,6 +77,10 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- **The CFO can change what a style costs** (`set_cost_sheet`). It mirrors the
+  form's writer exactly — including writing the landed total back to
+  `style.cogs`, the single source of truth every margin reads. A partial
+  update keeps what it does not mention. It must never invent a cost.
 - **The CFO maintains the PO payment schedule** (`set_po_terms`), not the PO
   itself — placing a factory order is production's call. The 90-day cash
   calendar is built from `depositPct`, `depositDue`, `balanceDue` and
