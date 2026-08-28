@@ -1748,7 +1748,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '331';
+  const BUILD = '332';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20366,6 +20366,11 @@ function agentImageActionSpec() {
     + 'Emit ONE fenced json block:\n'
     + '{"type":"add_styles","season":"SS27","styles":[{"name":"ISOLDE TOP","category":"Tops","gender":"womens","retail":240,"wholesale":96,"colors":"Ivory, Black","sizes":"XS,S,M,L,XL","fabric":"Silk crepe de chine","drop":"","status":"concept","desc":"One line of design intent"}]}\n'
     + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple COLOURWAYS of one garment are ONE style with the colors listed in "colors" — never one style per colorway. But multiple FABRICATIONS (the same silhouette in a different material — leather vs a printed cloth) are SEPARATE styles: emit one entry per fabrication with its own "fabric", price and vendor, because they carry different BOMs, costs and often different factories. Both records keep the plain silhouette name — never append the material to "name", the app shows it in its own Fabric column. CRITICAL: if the user asks for a silhouette that is ALREADY in the PLM Context but in another material ("add AVELINE BLOUSE in a viscose"), that is a valid NEW style and you MUST include "fabric" on it — an entry whose name already exists and that carries no "fabric" is refused, because nothing distinguishes it from the record already there. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
+    + '\n\nACTION — price_from_retail: fill in WHOLESALE and COGS by working BACKWARDS from each style\'s retail price. This is how a line is costed in practice — the retail is the given, the affordable cost is the question — and it is the only action that computes a DIFFERENT value per style, so use it whenever the request is "set wholesale/COGS for the whole season from retail". update_styles cannot do this: it applies one value to many styles.\n'
+    + '```venia:action\n'
+    + '{"type":"price_from_retail","match":{"season":"SS27"},"retailMargin":60,"wsMargin":60}\n'
+    + '```\n'
+    + 'Select with "match" (season / status / category / gender) or "names" for specific styles. wholesale = retail − retailMargin%; COGS = wholesale − wsMargin%. So $750 retail at 60% and 60% gives $300 wholesale and $120 COGS. A style\'s OWN Rtl % and Your % targets win over the margins you pass, so a style already tuned keeps its economics — pass the margins as the fallback for everything else, and omit them to use the 60/60 defaults. Styles with no retail price are skipped (there is nothing to work back from), as are styles already priced and styles carrying a real cost sheet — pass "overwrite":true only when the user asks you to redo them. The COGS this produces is an ESTIMATE from margin targets, never a costed sheet: say so, and use set_cost_sheet when a real cost is known.\n'
     + '\n\nACTION — update_styles: CHANGE fields on styles that ALREADY exist (status/stage, season, prices, vendor, drop, fabric, sizes, baseSize, priority, flag, marginTarget…). Use this for "move everything back to SMS", "set the FW26 drop date", "put these three into production", "set the base size to S for every SS27 mens style". It updates MANY styles at once: pass "match" with any of season/status/category/gender to select them, or "names" for specific ones. Prefer it over apply_style_specs whenever the request covers more than one style — apply_style_specs takes a single exact style and is only for the deep tech-pack fields update_styles does not carry. A baseSize is only accepted when it exists in that style\'s own size run; styles whose run lacks it are reported back, not silently skipped. Never use add_styles for an existing style.\n'
     + 'Emit ONE fenced json block:\n'
     + '{"type":"update_styles","match":{"season":"SS27","status":"development"},"set":{"status":"sms"}}\n'
@@ -20521,7 +20526,93 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_po_terms') return agentRunSetPoTerms(action, chatBody);
   if (action.type === 'set_money_watch') return agentRunSetMoneyWatch(action, chatBody);
   if (action.type === 'set_cost_sheet') return agentRunSetCostSheet(action, chatBody);
+  if (action.type === 'price_from_retail') return agentRunPriceFromRetail(action, chatBody);
 }
+
+// BACK-SOLVE a line from its retail prices. This is how a collection is
+// actually costed: the retail is the given — what the market will bear and
+// what the boutique needs to see — and the question is what you can afford to
+// spend making it.
+//
+// The agent could already reprice styles, but only by setting ONE value across
+// MANY styles (update_styles), so "fill in wholesale and COGS for all 58 SS27
+// styles from their retail" had no action behind it: each style needs its own
+// arithmetic. It would stall, or emit 58 hand-computed rows.
+//
+// Margins come from each style's OWN targets first (Rtl % and Your % in the
+// styles table), then whatever the request names, then the app defaults —
+// so a style someone has already tuned keeps its own economics.
+function agentRunPriceFromRetail(action, chatBody){
+  const all = (window.STATE && STATE.styles) || [];
+  const m = (action && action.match) || {};
+  const names = Array.isArray(action && action.names) ? action.names.map(x => String(x).toLowerCase().trim()) : null;
+  const fields = ['season','status','category','gender'].filter(k => String(m[k]||'').trim() !== '');
+  let targets = all.filter(x => x && x.status !== 'archived');
+  if (names) targets = targets.filter(x => names.includes(String(x.name||'').toLowerCase().trim())
+                                        || names.includes(String(x.styleId||'').toLowerCase().trim()));
+  else if (fields.length) targets = targets.filter(x => fields.every(k => String(x[k]||'').toLowerCase().trim() === String(m[k]).toLowerCase().trim()));
+  else { appendAgentNote(chatBody, 'Tell me which styles — a season, a status, a category, or a list of names.'); return; }
+  if (!targets.length) { appendAgentNote(chatBody, 'No styles matched that.'); return; }
+
+  const askedR  = Number(action && action.retailMargin);
+  const askedWs = Number(action && action.wsMargin);
+  const overwrite = !!(action && action.overwrite);
+  const prev = {}; const done = []; const skipped = [];
+  targets.forEach(st => {
+    const retail = Number(st.retail) || 0;
+    if (!(retail > 0)) { skipped.push((st.styleId || st.name) + ': no retail price to work back from'); return; }
+    // A hand-built cost sheet is a real landed cost. An estimate must never
+    // silently replace one — that is the number the P&L is built on.
+    if (typeof hasCostSheet === 'function' && hasCostSheet(st) && !overwrite) {
+      skipped.push((st.styleId || st.name) + ': has a real cost sheet, left alone'); return;
+    }
+    const rM  = (Number(st.marginTarget)   > 0 ? Number(st.marginTarget)   : (askedR  > 0 ? askedR  : PX_DEFAULT_MARGIN));
+    const wsM = (Number(st.wsMarginTarget) > 0 ? Number(st.wsMarginTarget) : (askedWs > 0 ? askedWs : PX_DEFAULT_WS_MARGIN));
+    const ws   = pxWsFromRetail(retail, rM);
+    const cogs = pxCogsFromWs(ws, wsM);
+    if (!(ws > 0 && cogs > 0)) { skipped.push((st.styleId || st.name) + ': those margins leave nothing'); return; }
+    const hadWs = Number(st.wholesale) > 0, hadCogs = Number(st.cogs) > 0;
+    if (hadWs && hadCogs && !overwrite) { skipped.push((st.styleId || st.name) + ': already priced'); return; }
+    prev[st.id] = { wholesale: st.wholesale, cogs: st.cogs };
+    if (!hadWs || overwrite) st.wholesale = ws;
+    if (!hadCogs || overwrite) st.cogs = cogs;
+    done.push({ code: st.styleId || '', name: st.name || '', retail, ws: st.wholesale, cogs: st.cogs, rM, wsM });
+  });
+  if (!done.length) {
+    appendAgentNote(chatBody, 'Nothing was priced — ' + (skipped.length ? skipped.slice(0,4).join('; ') : 'no style had a retail price') + '.');
+    return;
+  }
+  window.__agPrevPricing = prev;
+  save();
+  try { buildSkus(); } catch(e){}
+  try { renderPage(STATE.currentPage || 'styles'); } catch(e){}
+  try { cmdRenderMoney(); } catch(e){}
+  const lines = done.slice(0, 14).map(d => escHtml((d.code ? d.code + ' ' : '') + d.name
+    + ' — retail $' + d.retail.toLocaleString() + ' → wholesale $' + d.ws.toLocaleString() + ' → COGS $' + d.cogs.toLocaleString()
+    + '  [' + d.rM + '% / ' + d.wsM + '%]')).join('<br>');
+  agentActionCard(chatBody, done.length + ' style' + (done.length>1?'s':'') + ' priced back from retail',
+    '<div style="font-size:10.5px;line-height:1.7;font-family:\'DM Mono\',monospace">' + lines
+    + (done.length > 14 ? '<br>…+' + (done.length-14) + ' more' : '') + '</div>'
+    + '<div style="font-size:10px;color:var(--amber);margin-top:6px">These COGS are ESTIMATES from your margin targets, not costed sheets — the app shows them as “est.” until a real cost sheet exists.</div>'
+    + (skipped.length ? '<div style="font-size:10px;color:var(--muted);margin-top:4px">Skipped ' + skipped.length + ': ' + escHtml(skipped.slice(0,3).join('; ')) + (skipped.length>3?' …':'') + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Product → Styles</div>',
+    'agentUndoPricing()');
+}
+window.agentUndoPricing = function(){
+  const prev = window.__agPrevPricing; if (!prev) return;
+  ((window.STATE && STATE.styles) || []).forEach(st => {
+    if (!(st.id in prev)) return;
+    const p = prev[st.id];
+    if (p.wholesale === undefined) delete st.wholesale; else st.wholesale = p.wholesale;
+    if (p.cogs === undefined) delete st.cogs; else st.cogs = p.cogs;
+  });
+  window.__agPrevPricing = null;
+  save();
+  try { buildSkus(); } catch(e){}
+  try { renderPage(STATE.currentPage || 'styles'); } catch(e){}
+  try { cmdRenderMoney(); } catch(e){}
+  showToast('Pricing restored', 'info');
+};
 
 // LANDED COST. Margin work stalled here: the agent could reprice a style but
 // could not change what the style COSTS, so "the mill raised coating 12%"
