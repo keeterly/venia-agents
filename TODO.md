@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 330._
+_Last reviewed at Build 331._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -19,6 +19,13 @@ _Last reviewed at Build 330._
   the Financial Connections registration was approved.
 
 ## Open
+
+- **Non-CFO agents carry every action spec in the app** (~6,400 tokens; the
+  CFO gets ~570). It is byte-identical per turn so prompt caching absorbs most
+  of the cost, and the "any action from any screen" design is deliberate — so
+  this was left alone rather than narrowed unilaterally. Worth a decision: it
+  is why the Sales agent is told how to set cost sheets and money-watch
+  thresholds.
 
 - **Delete the old Stripe secret keys.** Several were created while getting the
   bank connected, including one that passed through a chat transcript. The live
