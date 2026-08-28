@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 321._
+_Last reviewed at Build 322._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -73,10 +73,13 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- Expense categories are **built-ins plus whatever the founders added**. Every
+  validation site goes through `finAllCats()`, and the CFO's action spec is
+  built at call time so a new category is immediately filable by the agent.
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
 
 **Tests:** `node check.js` (inline script syntax) plus 16 suites in the session
-scratchpad covering the money math, agent actions, ledger editing, cloud-run
-conversation shape, and instruction drift.
+scratchpad covering the money math, agent actions, ledger editing, custom
+categories, cloud-run conversation shape, and instruction drift.
