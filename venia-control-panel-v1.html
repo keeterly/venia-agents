@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '314';
+  const BUILD = '315';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -25436,16 +25436,24 @@ function finCashCalendar(days){
       }
     });
 
-    // ── OUT: recurring costs the bank history actually shows ─────────────
-    // Two or more of the same payee in 90 days is treated as monthly at the
-    // average amount. Clearly ESTIMATED — never presented as an obligation.
+    // ── OUT: recurring OVERHEAD the bank history actually shows ──────────
+    // Two or more of the same payee is treated as monthly at the average
+    // amount. Clearly ESTIMATED — never presented as an obligation.
+    //
+    // Only overhead categories qualify. Fabric and production payments are
+    // lumpy project costs already represented above as dated PO obligations:
+    // projecting them here as "recurring" would count the same money TWICE —
+    // a mill paid for two past POs would show a phantom monthly bill on top
+    // of its real open deposit. Income and transfers are not costs at all.
+    const RECURRING_CATS = ['rent','payroll','software','shipping','marketing','fees','taxes','rnd','contractors','other',''];
     try {
       const since = today.getTime() - 95*864e5;
       const groups = {};
       (STATE.finTxns||[]).forEach(t => {
         if (!t || t.status === 'void' || !t.date) return;
         if ((t.amount||0) >= 0) return;
-        const cat = finTxnCat(t); if (cat === 'transfer') return;
+        const cat = finTxnCat(t);
+        if (RECURRING_CATS.indexOf(cat) < 0) return;
         if (new Date(t.date + 'T00:00:00').getTime() < since) return;
         const k = finCashNorm(t.desc); if (!k) return;
         (groups[k] = groups[k] || { hits: [], cat, desc: t.desc }).hits.push(t);
@@ -25455,6 +25463,9 @@ function finCashCalendar(days){
         const avg = g.hits.reduce((s,t) => s + Math.abs(t.amount||0), 0) / g.hits.length;
         if (avg < 40) return;                                  // ignore noise
         const last = g.hits.map(t => t.date).sort().pop();
+        // A payee last seen more than ~45 days ago has probably stopped;
+        // projecting it forward inflates burn with a bill that never comes.
+        if ((today.getTime() - new Date(last + 'T00:00:00').getTime()) > 45*864e5) return;
         let next = new Date(last + 'T00:00:00');
         for (let i = 0; i < 4; i++) {
           next = new Date(next.getTime() + 30*864e5);
