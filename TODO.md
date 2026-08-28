@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 328._
+_Last reviewed at Build 329._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -119,6 +119,13 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+
+**The autonomous chain is verified live.** A signed-in device publishes the
+finance blob with the daily digest; `venia_daily_digest.items.fin` carried all
+23 keys `cfo-weekly.js` reads when checked at Build 329. A test now asserts
+that contract, so a key renamed in the app cannot silently break the Monday
+brief — the function would just go quiet, which is the one failure mode
+nobody would notice.
 
 **Tests:** `node check.js` (inline script syntax) plus 16 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom

@@ -48,7 +48,10 @@ export default async () => {
     fin.connected ? `Cash on hand ${money(fin.cash)} (floor ${money(fin.floor)}). Owed on cards/loans ${money(fin.debt)}. Net position ${money(fin.net)}.`
                   : 'Bank not connected — no cash, burn or runway figures exist.',
     fin.connected ? `Last 30 days: in ${money(fin.in30)}, out ${money(fin.out30)}. Monthly ${fin.burn > 0 ? 'net burn ' + money(fin.burn) : 'net surplus ' + money(-fin.burn)}. Runway ${fin.runway == null ? 'n/a' : fin.runway + ' months'}.` : '',
-    `Revenue YTD ${money(fin.revYtd)} (DTC ${money(fin.dtcYtd)}, wholesale booked ${money(fin.wsBooked)}, collected ${money(fin.wsCollected)}). Operating ${money(fin.operating)}.`,
+    `Revenue YTD ${money(fin.revYtd)} (DTC ${money(fin.dtcYtd)}, wholesale booked ${money(fin.wsBooked)}, collected ${money(fin.wsCollected)}). Operating ${money(fin.operating)}${fin.opexYtd != null ? `, after ${money(fin.opexYtd)} of operating expense from the bank feed` : ''}.`,
+    // Operating excludes outflow nobody has classified. Quoting the figure
+    // without that is stating profit more confidently than the app does.
+    fin.opexUncat ? `CAVEAT: ${money(fin.opexUncat)} of spending this year is still uncategorized and is NOT in operating expense, so operating is overstated by up to that much. Do not quote profit as settled without naming this.` : '',
     fin.ar ? `Receivables outstanding ${money(fin.ar)}${fin.arOldest ? `; oldest ${fin.arOldest.acct} ${money(fin.arOldest.amt)}${fin.arOldest.days > 0 ? ` (${fin.arOldest.days}d overdue)` : ''}` : ''}.` : 'No open receivables.',
     (fin.cat30 && fin.cat30.length) ? `Spend last 30d: ${fin.cat30.map((c) => c[0] + ' ' + money(c[1])).join(', ')}.` : '',
     fin.tight ? `Projected cash dips to ${money(fin.tight.cash)} the week of ${fin.tight.week} — below their floor.` : 'No projected dip below the cash floor in the next 90 days.',
