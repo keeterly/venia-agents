@@ -401,6 +401,22 @@ thead th:hover{color:var(--ink)}
 /* Resizable / hideable columns (Styles list). table-layout:fixed is what makes
    a <col> width authoritative; without it the browser treats width as a hint. */
 .col-tbl{table-layout:fixed}
+/* STICKY HEADER. overflow-x:auto on .tbl-wrap forces overflow-y to auto too
+   (one axis cannot stay visible while the other scrolls), which makes the
+   wrapper the scrollport — so a sticky header anchors to the whole table and
+   scrolls away with it. Giving the wrapper a real height makes it the thing
+   that scrolls, and then the header can hold at its top. Only where there is
+   room: on a phone a scroll region inside a scrolling page is worse than a
+   header that leaves. */
+@media (min-width:900px){
+  .tbl-sticky{max-height:calc(100vh - 240px);overflow:auto}
+  /* .col-tbl thead th sets position:relative at the same specificity and later
+     in the file, so this has to out-specify it rather than merely follow it. */
+  .tbl-wrap.tbl-sticky thead th{position:sticky;top:0;z-index:6}
+  /* the header sits over rows that scroll under it, so it needs a solid
+     ground and an edge of its own — the table's border-bottom scrolls away */
+  .tbl-wrap.tbl-sticky thead th{background:var(--bg-off);box-shadow:inset 0 -1px 0 var(--border)}
+}
 .col-tbl thead th{position:relative;overflow:hidden;text-overflow:ellipsis;padding-left:11px;padding-right:11px}
 .col-tbl td{overflow:hidden;padding-left:11px;padding-right:11px}
 .col-clip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1749,7 +1765,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '335';
+  const BUILD = '336';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3624,13 +3640,14 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button onclick="bulkDuplicate()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⊕ Duplicate</button>
         <button onclick="bulkSetSeason()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">◇ Move to Season</button>
         <button onclick="bulkSetEnum('category')" title="Set the category on every selected style" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">▢ Category</button>
+        <button onclick="bulkSetEnum('vendor')" title="Assign one factory to every selected style" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⌂ Factory</button>
         <button onclick="bulkSetEnum('gender')" title="Set womens / mens / unisex on every selected style" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⚥ Gender</button>
         <button id="bulk-archive-btn" onclick="bulkArchive()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⌸ Archive</button>
         <button id="bulk-restore-btn" onclick="bulkRestore()" style="display:none;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↩ Restore</button>
         <button onclick="bulkExport()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↓ Export</button>
         <button onclick="clearBulkSelection()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:14px;cursor:pointer;margin-left:auto">✕</button>
       </div>
-      <div class="tbl-wrap">
+      <div class="tbl-wrap tbl-sticky">
         <!-- Header + widths are rendered from STYLE_COLS (see stRenderHead) so
              the Columns menu and the drag-to-resize grips have one source of
              truth. Don't hand-write <th> here — it would drift. -->
@@ -6127,13 +6144,13 @@ function llReconcile(parsed, season){
   // Exact matches first, so an already-correct record is never re-used as the
   // repair target for a different material.
   parsed.styles.forEach(g => {
-    const sibs = existing.filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === g.family);
+    const sibs = existing.filter(x => styleFamilyKey(x) === g.family);
     const exact = sibs.find(x => g.material && styleNameKey(x.fabric) === styleNameKey(g.material));
     if (exact) { claimed.add(exact); plan.ok.push({ g, style: exact }); g._done = true; }
   });
   parsed.styles.forEach(g => {
     if (g._done) { delete g._done; return; }
-    const sibs = existing.filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === g.family);
+    const sibs = existing.filter(x => styleFamilyKey(x) === g.family);
     if (!g.material) { plan.ambiguous.push({ g, sibs }); return; }
     const free = sibs.filter(x => !claimed.has(x) && !String(x.fabric||'').trim());
     // Prefer the record whose colourways actually name this material.
@@ -6315,6 +6332,8 @@ const STYLE_COLS = [
   // most lines leave empty until the season calendar is set. One click brings
   // it back.
   { key: 'drop',     label: 'Drop',                        w: 84, def: false },
+  { key: 'vendor',   label: 'Manufacturer', sort: 'vendor',  w: 116, def: false, title: 'The factory making this style — from your Vendors library' },
+  { key: 'origin',   label: 'Origin',                        w: 92,  def: false, title: 'Country of origin — follows the factory unless this style overrides it' },
   // The chain reads left to right: COGS → your margin → wholesale → boutique
   // margin → retail.
   { key: 'cogs',     label: 'COGS',      sort: 'cogs',     w: 74, title: 'Cost of goods — the number the whole price chain is built from' },
@@ -6370,10 +6389,12 @@ const ST_CELL = {
         // Same silhouette, different fabrication: say how many siblings share
         // the pattern so two ADA CORSETs never read as a duplicate row. The
         // material itself lives in the Fabric column now.
-        const fam = s.family; if (!fam) return '';
-        const sibs = (STATE.styles||[]).filter(x => x.status!=='archived' && x.family === fam);
+        const fam = styleFamilyKey(s); if (!fam) return '';
+        const sibs = (STATE.styles||[]).filter(x => x.status!=='archived' && styleFamilyKey(x) === fam)
+          .sort((a,b) => String(a.styleId||'').localeCompare(String(b.styleId||'')));
         if (sibs.length < 2) return '';
-        return `<div style="font-size:10px;color:var(--muted);letter-spacing:.5px">1 of ${sibs.length} fabrications</div>`;
+        const i = sibs.findIndex(x => x.id === s.id);
+        return `<div style="font-size:10px;color:var(--muted);letter-spacing:.5px">${i<0?1:i+1} of ${sibs.length} fabrications</div>`;
       })()}</div></div></td>`,
   flag:     (s) => `<td class="cell-edit" style="text-align:center" title="${s.flag?esc(flagLabel(s.flag))+' — click to change':'Flag this style'}" onclick="flagOpen('${s.id}',this,event)">${flagCell(s)}</td>`,
   styleId:  (s) => `<td><span class="t-mono">${s.styleId}</span></td>`,
@@ -6392,6 +6413,11 @@ const ST_CELL = {
   colors:   (s) => `<td class="cell-edit" title="Click to edit colourways and set swatches" onclick="cwOpen('${s.id}',this,event)">${String(s.colors||'').trim() ? colorSwatches(s.colors, 6) : '<span style="color:var(--muted);font-size:10px">＋ colourways</span>'}</td>`,
   sizes:    (s) => `<td class="cell-edit" style="font-size:10px;font-family:'DM Mono',monospace" title="Click to set the size run and base size" onclick="szOpen('${s.id}',this,event)"><div class="col-clip">${szCell(s)}</div></td>`,
   baseSize: (s) => `<td class="cell-edit" style="font-size:10px;font-family:'DM Mono',monospace" title="Base / sample size — click to change" onclick="szOpen('${s.id}',this,event)">${s.baseSize?`<b>${esc(s.baseSize)}</b>`:'<span style="color:var(--muted)">＋</span>'}</td>`,
+  vendor:   (s) => `<td class="cell-edit" style="font-size:10px" title="${styleVendor(s) ? esc(styleVendor(s)) + ' — click to change' : 'Assign a factory'}" onclick="stEnumOpen('vendor','${s.id}',this,event)"><div class="col-clip">${styleVendor(s) ? esc(styleVendor(s)) : '<span style="color:var(--muted)">＋ factory</span>'}</div></td>`,
+  origin:   (s) => {
+    const o = styleOrigin(s), own = !!(s.origin && String(s.origin).trim());
+    return `<td class="cell-edit" style="font-size:10px" title="${o ? (own ? 'Set on this style' : 'From the assigned factory') + ' — click to change' : 'Assign a factory, or set it here'}" onclick="stEnumOpen('origin','${s.id}',this,event)"><span style="color:${own ? 'var(--ink)' : 'var(--muted)'}">${o ? esc(o) : '＋'}</span></td>`;
+  },
   season:   (s) => `<td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
@@ -6816,10 +6842,19 @@ function flagKey(e){ if (e.key === 'Escape') { e.stopPropagation(); flagClose();
 // than each growing their own copy of the positioning and dismissal code.
 const ST_ENUM = {
   category: { label: 'Category', values: RP_CATS, get: (s) => styleCategory(s),
-              note: 'The style code keeps its original letter — it is printed on tech packs and referenced by POs and orders, so changing it here would break those.' },
+              note: 'The style code is renumbered to match, taking the next free number in its new class. Orders, POs and sample pulls follow the style itself, not its code, so nothing is orphaned.' },
   gender:   { label: 'Gender', values: ['womens','mens','unisex'], get: (s) => styleGender(s),
               show: (v) => v.charAt(0).toUpperCase() + v.slice(1),
-              note: 'Rows with no gender set read it from the style code (…-W… womens, …-M… mens, …-U… unisex). Setting it here overrides that.' },
+              note: 'Rows with no gender set read it from the style code (…-W… womens, …-M… mens, …-U… unisex). Changing it here renumbers the code to match, so the two can never disagree.' },
+  vendor:   { label: 'Manufacturer', get: (s) => styleVendor(s), free: true,
+              values: () => ['', ...new Set(((STATE.vendors||[]).filter(v => v && v.type === 'factory').map(v => v.name).filter(Boolean)))],
+              show: (v) => v || '— none —',
+              note: 'Factories from your Vendors library. Assigning one also sets the country of origin, unless the style overrides it.' },
+  origin:   { label: 'Country of origin', get: (s) => styleOrigin(s), free: true,
+              values: (s) => ['', ...new Set([...(STATE.vendors||[]).map(v => v && v.country).filter(Boolean),
+                                              String((s && s.origin) || '').trim()].filter(Boolean))],
+              show: (v) => v || '— from the factory —',
+              note: 'Blank means it follows whatever factory is assigned — one fact, kept in one place. Set it only when this garment is cut somewhere else.' },
 };
 let ST_ENUM_FIELD = null, ST_ENUM_STYLE = null;
 function stEnumOpen(field, styleId, anchor, ev){
@@ -6838,18 +6873,35 @@ function stEnumOpen(field, styleId, anchor, ev){
   pop.style.left = Math.max(8, Math.min(r.left + window.scrollX, window.innerWidth - 250)) + 'px';
   const cur = spec.get(st);
   const shown = (v) => spec.show ? spec.show(v) : v;
+  const values = typeof spec.values === 'function' ? spec.values(st) : spec.values;
   pop.innerHTML = '<div style="padding:2px 12px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">'
       + spec.label + ' · ' + esc(st.name) + '</div>'
-    + spec.values.map((v) => {
+    + values.map((v) => {
         const on = String(cur).toLowerCase() === String(v).toLowerCase();
         return '<div style="padding:0"><button onclick="stEnumSet(\'' + esc(String(v)) + '\')" '
           + 'style="display:block;width:100%;text-align:left;background:' + (on ? 'var(--bg-off)' : 'none') + ';border:none;cursor:pointer;'
           + 'padding:7px 12px;font-size:11px;font-weight:' + (on ? '700' : '400') + '">'
           + (on ? '✓ ' : '<span style="opacity:0">✓ </span>') + esc(shown(v)) + '</button></div>';
       }).join('')
+    + (spec.free ? '<div style="padding:0"><button onclick="stEnumFree()" style="display:block;width:100%;text-align:left;background:none;border:none;cursor:pointer;padding:7px 12px;font-size:11px;color:var(--muted)"><span style="opacity:0">✓ </span>Something else…</button></div>' : '')
     + (spec.note ? '<div style="padding:8px 12px 2px;font-size:9.5px;line-height:1.5;color:var(--muted);border-top:1px solid var(--border);margin-top:6px">' + spec.note + '</div>' : '');
   setTimeout(() => { document.addEventListener('click', stEnumAway); document.addEventListener('keydown', stEnumKey); }, 0);
 }
+// "Something else…" — for a field whose list is drawn from what already exists
+// rather than a fixed vocabulary, so a new country or factory is not a dead end.
+// Keep the id link in step with the name, so renaming a vendor still relinks
+// (vendorRename walks vendorId) and the origin can be resolved either way.
+function stEnumLinkVendor(st, name){
+  const v = (STATE.vendors||[]).find(x => x && String(x.name||'').trim().toLowerCase() === String(name||'').trim().toLowerCase());
+  if (v) st.vendorId = v.id; else delete st.vendorId;
+}
+window.stEnumFree = function(){
+  const spec = ST_ENUM[ST_ENUM_FIELD]; if (!spec) return;
+  const st = (STATE.styles||[]).find(x => x.id === ST_ENUM_STYLE);
+  const v = prompt(spec.label + (st ? ' for ' + st.name : '') + ':', (spec.get(st) || ''));
+  if (v === null) return;
+  stEnumSet(String(v).trim());
+};
 function stEnumClose(){
   const p = document.getElementById('stenum-pop'); if (p) p.remove();
   ST_ENUM_FIELD = null; ST_ENUM_STYLE = null;
@@ -6860,11 +6912,17 @@ function stEnumKey(e){ if (e.key === 'Escape') stEnumClose(); }
 window.stEnumSet = function(val){
   const st = (STATE.styles||[]).find(x => x.id === ST_ENUM_STYLE);
   const field = ST_ENUM_FIELD;
-  if (st && field && ST_ENUM[field] && ST_ENUM[field].values.some(v => String(v) === String(val))) {
+  const spec = field ? ST_ENUM[field] : null;
+  const allowed = spec ? (typeof spec.values === 'function' ? spec.values(st) : spec.values) : [];
+  if (st && spec && (spec.free || allowed.some(v => String(v) === String(val)))) {
     st[field] = val;
+    if (field === 'vendor') stEnumLinkVendor(st, val);
     st.updatedAt = new Date().toISOString();
+    const moved = styleResyncCode(st);
     save();
+    try { buildSkus(); } catch(e){}
     try { populateStyleSelects(); } catch(e){}
+    if (moved) toast(moved.from + ' → ' + moved.to);
   }
   stEnumClose();
   renderStyles();
@@ -7728,25 +7786,34 @@ window.bulkSetEnum = function(field) {
   if (!BULK_SELECTED.size) return;
   const spec = ST_ENUM[field]; if (!spec) return;
   const shown = (v) => spec.show ? spec.show(v) : v;
-  const menu = spec.values.map((v, i) => (i + 1) + ') ' + shown(v)).join('\n');
+  const vals = (typeof spec.values === 'function' ? spec.values(null) : spec.values).filter(Boolean);
+  const menu = vals.map((v, i) => (i + 1) + ') ' + shown(v)).join('\n')
+    + (spec.free ? '\n\n…or type any other value.' : '');
   const pick = prompt('Set ' + spec.label.toLowerCase() + ' on ' + BULK_SELECTED.size + ' style'
     + (BULK_SELECTED.size > 1 ? 's' : '') + ':\n\n' + menu + '\n\nType the number or the name:');
   if (!pick) return;
   const raw = String(pick).trim();
-  const byNum = /^\d+$/.test(raw) ? spec.values[parseInt(raw, 10) - 1] : null;
-  const val = byNum || spec.values.find(v => String(v).toLowerCase() === raw.toLowerCase()
-                                          || String(shown(v)).toLowerCase() === raw.toLowerCase());
+  const byNum = /^\d+$/.test(raw) ? vals[parseInt(raw, 10) - 1] : null;
+  const val = byNum || vals.find(v => String(v).toLowerCase() === raw.toLowerCase()
+                                   || String(shown(v)).toLowerCase() === raw.toLowerCase())
+            || (spec.free ? raw : null);
   if (!val) { toast('“' + raw + '” is not a ' + spec.label.toLowerCase()); return; }
   let n = 0;
+  let renum = 0;
   BULK_SELECTED.forEach(id => {
     const st = STATE.styles.find(x => x.id === id);
-    if (st) { st[field] = val; st.updatedAt = new Date().toISOString(); n++; }
+    if (!st) return;
+    st[field] = val; st.updatedAt = new Date().toISOString(); n++;
+    if (field === 'vendor') stEnumLinkVendor(st, val);
+    if (styleResyncCode(st)) renum++;
   });
   save();
+  try { buildSkus(); } catch(e){}
   try { populateStyleSelects(); } catch(e){}
   BULK_SELECTED.clear();
   renderStyles();
-  toast(n + ' style' + (n > 1 ? 's' : '') + ' set to ' + shown(val));
+  toast(n + ' style' + (n > 1 ? 's' : '') + ' set to ' + shown(val)
+    + (renum ? ' · ' + renum + ' renumbered' : ''));
 };
 
 function bulkSetSeason() {
@@ -9666,7 +9733,7 @@ function dpAddFabrication(){
   try { smColorPreview(); } catch(e){}
   const fab = document.getElementById('sm-fabric');
   if (fab) { fab.focus(); }
-  const have = (STATE.styles||[]).filter(x => x.status!=='archived' && (x.family||styleNameKey(x.name)) === (src.family||styleNameKey(src.name)))
+  const have = (STATE.styles||[]).filter(x => x.status!=='archived' && styleFamilyKey(x) === styleFamilyKey(src))
     .map(x => String(x.fabric||'').trim()).filter(Boolean);
   toast(src.name + (have.length ? ' exists in ' + have.join(', ') + ' — name the new fabric' : ' — name the new fabric'));
 }
@@ -9801,17 +9868,49 @@ function styleGender(s){
   const p = styleCodeParts(s);
   return (p && p.gender) || 'womens';
 }
+// The factory a style is made in, and where that is. Country of origin lives
+// on the VENDOR, not the style — it is a fact about the factory, and typing it
+// twice is how the care label and the vendor record end up disagreeing. A
+// style may still override it, because a factory can cut in more than one
+// country and the label has to say the truth for this garment.
+function styleVendor(s){ return String((s && s.vendor) || '').trim(); }
+function styleOrigin(s){
+  const own = String((s && s.origin) || '').trim();
+  if (own) return own;
+  const name = styleVendor(s); if (!name) return '';
+  const v = ((typeof STATE !== 'undefined' && STATE.vendors) || [])
+    .find(x => x && (x.id === s.vendorId || String(x.name||'').trim().toLowerCase() === name.toLowerCase()));
+  return (v && String(v.country||'').trim()) || '';
+}
 function styleCategory(s){
   const own = String((s && s.category) || '').trim();
   if (own) return own;
   const p = styleCodeParts(s);
   return (p && p.category) || '';
 }
-function genStyleId(season, category, gender){
+function styleCodePrefix(season, category, gender){
   const seasonCode = String(season||'').replace(/\s+/g,'').toUpperCase() || 'TBD';
   const g = STYLE_GENDER_CODES[String(gender||'').toLowerCase()] || 'W';
   const cat = STYLE_CAT_CODES[category] || 'X';
-  const prefix = `VN-${seasonCode}-${g}${cat}`;
+  return `VN-${seasonCode}-${g}${cat}`;
+}
+// A style code states the gender and class it belongs to, so a garment moved to
+// unisex must not keep reading ...-M... The new number is the next free one in
+// its new prefix, which is what stops it colliding with a style already there.
+// Codes not in the house format are left alone — they were typed by hand for a
+// reason and this cannot know what it would be breaking.
+const STYLE_CODE_RE = /^VN-[A-Z0-9]+-[WMU][TBODA]\d+$/i;
+function styleResyncCode(st){
+  if (!st || !STYLE_CODE_RE.test(String(st.styleId||''))) return null;
+  const want = styleCodePrefix(st.season, styleCategory(st), styleGender(st));
+  if (String(st.styleId||'').toUpperCase().startsWith(want.toUpperCase())) return null;
+  const from = st.styleId;
+  st.styleId = genStyleId(st.season, styleCategory(st), styleGender(st));
+  st.prevStyleId = from;               // the old number, kept so nothing is lost
+  return { from, to: st.styleId };
+}
+function genStyleId(season, category, gender){
+  const prefix = styleCodePrefix(season, category, gender);
   // Next sequence = highest existing in this season+gender+class + 1
   // (collision-safe even after deletes, unlike counting).
   let maxSeq = 0;
@@ -20542,7 +20641,10 @@ function agentImageActionSpec() {
     + '• A FABRIC SWATCH / material → estimate what you can SEE (fiber/content, colour, weave, approx. width) and file it with the add_material action below; if you can identify the mill, also propose it as a "Fabric Supplier" via add_vendors. Never invent a supplier, price, or content you cannot determine — leave those "".\n'
     + '• A PATTERN CARD / SPEC SHEET / tech drawing → read the fields and fill a style with the apply_style_specs action below. Ask which style if it is not obvious.\n'
     + '• A SKETCH / design → describe it, and offer to capture it to Brainstorm or start a style; do not fabricate measurements.\n'
-    + 'Only report what is legibly in the image.\n'
+    + '• A FACTORY / MILL / SUPPLIER — their website, a directory listing, a business card, an email signature → read the name, type, city, country, contact name, email, phone and website, and file it with add_vendors. This is the fastest way a vendor gets onboarded: the founder pastes what they are looking at and you write the record.\n'
+    + '• A STORE / STOCKIST — a shop\'s site, an Instagram profile, a press mention → read what is there and file it with add_buyers as a prospect.\n'
+    + '• A LIST or TABLE in the image (a line sheet, a vendor list, a spreadsheet screenshot) → read every row you can make out and file them in ONE action block, saying how many you read and naming any row you could not.\n'
+    + 'Only report what is legibly in the image. Leave a field "" rather than guessing it — a plausible invented email is worse than a blank one, because nobody will check it.\n'
     + '\nACTION — add_material: save a fabric/material into the Materials library.\n'
     + '```venia:action\n'
     + '{"type":"add_material","materials":[{"name":"Fabric name","content":"e.g. 100% wool","color":"","width":"e.g. 150cm","supplier":"","moq":"","costPerUnit":"","unit":"yd","notes":"what you can see: hand, weave, weight"}]}\n'
@@ -21622,6 +21724,14 @@ window.agentUndoMaterial = function(idsStr, btn){
 // ── Bulk style creation: turn a line list into real PLM style records ───────
 // Same shape saveStyle() writes, same genStyleId() codes, plus a hard dedupe
 // so re-running a line list (or Eni re-proposing it) can never create twins.
+// Which silhouette a style belongs to. The stored family wins; otherwise the
+// NAME is the family, because VENIA's own rule is that two fabrications of one
+// silhouette are separate styles that keep the same name. Any trailing
+// "— variant" suffix is dropped so it groups with its siblings.
+function styleFamilyKey(s) {
+  if (s && s.family) return s.family;
+  return styleNameKey(String((s && s.name) || '').split(/\s+[—–-]\s+/)[0]);
+}
 function styleNameKey(name) {
   return String(name || '').toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -21655,7 +21765,7 @@ function agentRunAddStyles(action, chatBody) {
     const fabric = String(r.fabric || r.material || r.fabrication || r.fabricA || '').trim();
     const fabKey = styleNameKey(fabric);
     const family = baseKey;
-    const sibs = (STATE.styles || []).filter(x => (x.family || styleNameKey(String(x.name||'').split(/\s+[—–-]\s+/)[0])) === family);
+    const sibs = (STATE.styles || []).filter(x => styleFamilyKey(x) === family);
     if (sibs.length) {
       // No fabric named → we cannot tell "the one that already exists" from "a
       // new fabrication of it", so we refuse rather than guess. Say which
@@ -36096,7 +36206,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
     <button class="sk-cam" onclick="document.getElementById('sk-file-input').click()" aria-label="Attach a spreadsheet or CSV" title="Attach a spreadsheet (Excel / CSV) — Eni reads it">▤</button>
     <button class="sk-cam" onclick="skDrivePick()" aria-label="Attach from Google Drive" title="Pick a file from Google Drive — Eni reads its contents">▲</button>
-    <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" oninput="skAutoGrow(this)"
+    <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" onpaste="skPasteImage(event)" oninput="skAutoGrow(this)"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();skSend();}"></textarea>
     <button class="sk-send" onclick="skSend()" aria-label="Send">↑</button>
   </div>
@@ -36253,19 +36363,39 @@ async function skPhotoToBlock(file){
     return { dataUrl, block: { type:'image', source:{ type:'base64', media_type:'image/jpeg', data:b64 } } };
   } catch(e){ return null; }
 }
-async function skPhotoPick(input){
-  const file = input && input.files && input.files[0];
-  input.value = '';   // allow re-picking the same file
-  if (!file) return;
+// One attach path, whether the image came from the picker, a paste, or a drop.
+async function skPhotoAttach(file, how){
+  if (!file) return false;
   const got = await skPhotoToBlock(file);
-  if (!got){ if (typeof showToast==='function') showToast('Could not read that image','error'); return; }
+  if (!got){ if (typeof showToast==='function') showToast('Could not read that image','error'); return false; }
   SK.pendingPhoto = got;
   const chip = document.getElementById('sk-photo-chip');
   if (chip){
     chip.style.display = 'flex';
-    chip.innerHTML = `<img src="${got.dataUrl}" alt="photo to send"><span class="sk-photo-label">Photo attached</span><button class="sk-photo-x" onclick="skPhotoClear()" aria-label="Remove photo">✕</button>`;
+    chip.innerHTML = `<img src="${got.dataUrl}" alt="photo to send"><span class="sk-photo-label">${how || 'Photo attached'}</span><button class="sk-photo-x" onclick="skPhotoClear()" aria-label="Remove photo">✕</button>`;
   }
   const f = document.getElementById('sk-field'); if (f) f.focus();
+  return true;
+}
+async function skPhotoPick(input){
+  const file = input && input.files && input.files[0];
+  input.value = '';   // allow re-picking the same file
+  await skPhotoAttach(file);
+}
+// PASTE A SCREENSHOT. Cropping something on screen and hitting Ctrl+V is the
+// fastest way to hand the agent context — a vendor's page, a line sheet, an
+// email — and the dock only had a file picker, so a clipboard image went
+// nowhere. Text pastes are left completely alone.
+async function skPasteImage(e){
+  const items = (e && e.clipboardData && e.clipboardData.items) || [];
+  let file = null;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it && it.kind === 'file' && String(it.type||'').startsWith('image/')) { file = it.getAsFile(); break; }
+  }
+  if (!file) return;                       // a normal text paste — not ours
+  e.preventDefault();                      // don't drop a filename into the box
+  await skPhotoAttach(file, 'Screenshot pasted');
 }
 function skPhotoClear(){
   SK.pendingPhoto = null;
