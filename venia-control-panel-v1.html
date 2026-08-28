@@ -1748,7 +1748,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '333';
+  const BUILD = '334';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3589,6 +3589,12 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <option value="SS25">SS25</option><option value="FW25">FW25</option>
             <option value="SS26">SS26</option><option value="FW26">FW26</option>
           </select>
+          <select id="styles-gender-f" class="fs" style="min-height:auto;padding:5px 8px;font-size:10px;letter-spacing:1px" onchange="applyStyleFilters()" aria-label="Filter styles by gender">
+            <option value="">All Genders</option>
+            <option value="womens">Womens</option>
+            <option value="mens">Mens</option>
+            <option value="unisex">Unisex</option>
+          </select>
           <!-- Stage dropdown removed — it duplicated the stage pills to its right,
                two controls fighting over the same filter. Pills win: one tap, visible state. -->
         </div>
@@ -4832,6 +4838,7 @@ let STATE = {
   styleSortKey: 'name',
   styleSortDir: 1,
   seasonFilter: '',
+  genderFilter: '',
   stageDropFilter: '',
 };
 // Expose the live state object on window. STATE is a bare top-level `let`, which
@@ -7452,6 +7459,13 @@ function stColMenuRender() {
 }
 
 function renderStyles() {
+  // The filter controls must show the filter that is actually applied. A season
+  // set from elsewhere (the dashboard's season alerts do exactly this) left the
+  // dropdown reading "All Seasons" over a filtered list — the control lying
+  // about the state it controls.
+  const syncFilter = (id, val) => { const el = document.getElementById(id); if (el && el.value !== (val||'')) el.value = val || ''; };
+  syncFilter('styles-season-f', STATE.seasonFilter);
+  syncFilter('styles-gender-f', STATE.genderFilter);
   // Update filter pill counts
   const all = STATE.styles.filter(s=>s.status!=='archived');
   const stageCounts = {};
@@ -7482,6 +7496,7 @@ function renderStyles() {
   // Archived styles live only in the Archived view — everywhere else they're gone.
   if (STATE.styleFilter !== 'archived') list = list.filter(s => s.status !== 'archived');
   if (STATE.seasonFilter) list = list.filter(s => s.season === STATE.seasonFilter);
+  if (STATE.genderFilter) list = list.filter(s => (String(s.gender||'').toLowerCase() || 'womens') === STATE.genderFilter);
   if (STATE.stageDropFilter) list = list.filter(s => s.status === STATE.stageDropFilter);
   if (STATE.flagFilter) list = list.filter(s => !!s.flag);
   if (STATE.styleSearch) list = list.filter(s =>
@@ -18760,7 +18775,7 @@ WHAT YOU CAN DO:
 - Read the LEDGER: every uncategorized bank transaction and the most recent filed ones, each with its real id. You are not blind to what is already filed and you do not need the founders to paste ids — if a transaction is in the snapshot, you can act on it.
 - Read the CASH CALENDAR: the next 90 days of money in and out, week by week, rolled forward from actual bank cash, with the first week (if any) that drops below their cash floor.
 - Read OPERATIONS: the wholesale order book with delivery and invoice state, top-account concentration, open POs with deposit and balance state, vendor lead times and MOQs, and what is mid-sampling. Cash timing has operational causes — name them.
-- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), record a wholesale payment that arrived (record_payment), set PO payment schedules and factory units (set_po_terms), tune your own alert thresholds (set_money_watch), change what a style costs to make (set_cost_sheet), price a whole season backwards from retail (price_from_retail), reprice styles (update_styles with retail/wholesale/cogs).
+- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), record a wholesale payment that arrived (record_payment), set PO payment schedules and factory units (set_po_terms), tune your own alert thresholds (set_money_watch), change what a style costs to make (set_cost_sheet), price a whole season backwards from retail (price_from_retail). A one-off price or margin edit on a single style belongs to Product — hand it over rather than guessing.
 - Plan: a full month-by-month financial plan (Money → Plan) built by a four-pass server run — baseline analysis, the plan, an adversarial self-review that hunts your own bad arithmetic and unsupported assumptions, then a revision. When a plan exists you can see it in FINANCE SNAPSHOT; discuss it, defend it, or say where it is now wrong.
 - Draft: AR chase emails, pricing proposals, a monthly money summary.
 - You NEVER move money. Invoices, card captures, and refunds are sent by a human with the access code — you prepare, they pull the trigger.
@@ -20037,10 +20052,10 @@ async function agentSend(key, message) {
     // snapshot pushed time-to-first-token past the function window — the 504s
     // — and buried the finance signal in noise it can never act on.
     const sysPrompt = key === 'fin'
-      ? [ agent.system + '\n\n' + agentFinActionSpec() + agentPricingActionSpec() + agentBrandDocSpec() + agentBrainstormActionSpec() + agentPrefsText(key),
+      ? [ agent.system + '\n\n' + agentScopedSpec('fin') + agentPrefsText(key),
           plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '')
                        + (typeof veniaFinOpsContext === 'function' ? veniaFinOpsContext() : '') ]
-      : [ agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
+      : [ agent.system + '\n\n' + agentScopedSpec(key) + agentPrefsText(key),
           plmContext() + agentContextHints() ];
     const reply = key === 'fin'
       ? await cfoCallCloudFirst(sysPrompt, SK.history.eni, message)
@@ -20137,19 +20152,64 @@ function agentPricingActionSpec() {
     + '```venia:action\n'
     + '{"type":"price_from_retail","match":{"season":"SS27"},"retailMargin":60,"wsMargin":60}\n'
     + '```\n'
-    + 'Select with "match" (season / status / category / gender) or "names" for specific styles. wholesale = retail − retailMargin%; COGS = wholesale − wsMargin%. So $750 retail at 60% and 60% gives $300 wholesale and $120 COGS. A style\'s OWN Rtl % and Your % targets win over the margins you pass, so a style already tuned keeps its economics — pass the margins as the fallback for everything else, and omit them to use the 60/60 defaults. Styles with no retail price are skipped (there is nothing to work back from), as are styles already priced and styles carrying a real cost sheet — pass "overwrite":true only when the user asks you to redo them. The COGS this produces is an ESTIMATE from margin targets, never a costed sheet: say so, and use set_cost_sheet when a real cost is known.\n'
-    + '\nACTION — update_styles: CHANGE fields on styles that ALREADY exist. For pricing use "set" with retail / wholesale / cogs / marginTarget / wsMarginTarget; select the styles with "match" (season/status/category/gender) or "names". It applies the SAME value to every style it matches — when each style needs its own figure, use price_from_retail instead.\n'
-    + '```venia:action\n'
-    + '{"type":"update_styles","match":{"season":"SS27"},"set":{"wsMarginTarget":60}}\n'
-    + '```\n'
-    + 'Never invent a price the user has not given you or that you cannot derive from one they did.\n';
-}
+    + 'Select with "match" (season / status / category / gender) or "names" for specific styles. wholesale = retail − retailMargin%; COGS = wholesale − wsMargin%. So $750 retail at 60% and 60% gives $300 wholesale and $120 COGS. A style\'s OWN Rtl % and Your % targets win over the margins you pass, so a style already tuned keeps its economics — pass the margins as the fallback for everything else, and omit them to use the 60/60 defaults. Styles with no retail price are skipped (there is nothing to work back from), as are styles already priced and styles carrying a real cost sheet — pass "overwrite":true only when the user asks you to redo them. The COGS this produces is an ESTIMATE from margin targets, never a costed sheet: say so, and use set_cost_sheet when a real cost is known.\n';}
 
+// ── JOB DESCRIPTIONS ───────────────────────────────────────────────────────
+// An agent handed every action in the app is worse at its own work: the CFO
+// timed out and buried its own signal until Build 306 cut its prompt down.
+// So each named agent gets the actions it OWNS, an index of who owns the rest,
+// and one way to pass work along.
+//
+// Eni is deliberately exempt. It follows whatever screen you are on and keeps
+// everything — the universal escape hatch is what makes scoping the named
+// agents safe rather than obstructive.
+const AGENT_REMIT = {
+  fin: { label: 'CFO',       owns: 'money — cash, P&L, margins, AR, factory payment schedules, budgets, pricing' },
+  sl:  { label: 'Sales',     owns: 'wholesale — the buyers CRM, stockist outreach, quotes, orders, account health' },
+  pr:  { label: 'PR',        owns: 'press — sample pulls, pitches, coverage, the editor radar' },
+  mk:  { label: 'Marketing', owns: 'campaigns, launches, captions and the marketing calendar' },
+  br:  { label: 'Brand',     owns: 'brand voice, guidelines, references and the competitor watch' },
+};
+// What each agent is actually handed. Everyone gets brainstorm capture — a
+// thought worth keeping arrives in whatever conversation you are already in.
+function agentScopedSpec(key) {
+  const B = () => agentBrainstormActionSpec();
+  const I = () => agentImageActionSpec();
+  // agentImageActionSpec() is the PRODUCT block — photo reading plus the style
+  // and material actions those photos feed. It goes only to agents whose work
+  // is product work, which is none of these; the handoff carries the rest.
+  const map = {
+    fin: () => agentFinActionSpec() + agentPricingActionSpec() + B(),
+    sl:  () => agentActionSpec('sl') + B(),
+    // add_pitch is core PR and lives in the ops grab-bag alongside three
+    // production actions. Taking the bundle keeps the capability; losing it
+    // to tidiness would be the wrong trade.
+    pr:  () => agentActionSpec('pr') + agentPRRadarSpec() + agentOpsActionSpec() + B(),
+    mk:  () => agentBrandDocSpec() + B(),
+    br:  () => agentBrandDocSpec() + B(),
+  };
+  if (!map[key]) return agentAllActionSpec();      // unknown key: lose nothing
+  return map[key]() + agentHandoffSpec(key);
+}
+// Passing work along. Without this, scoping an agent would just make it say no.
+function agentHandoffSpec(key) {
+  const others = Object.keys(AGENT_REMIT).filter((k) => k !== key)
+    .map((k) => '• ' + k + ' — the ' + AGENT_REMIT[k].label + ': ' + AGENT_REMIT[k].owns).join('\n');
+  return '\n\nYOUR REMIT: you are VENIA\'s ' + (AGENT_REMIT[key] ? AGENT_REMIT[key].label : 'assistant')
+    + ' and you own ' + (AGENT_REMIT[key] ? AGENT_REMIT[key].owns : 'this area') + '. The actions above are yours.\n'
+    + 'Your colleagues:\n' + others + '\n'
+    + 'Eni, the assistant in the dock, follows whatever screen the founder is on and can do ANY of it from anywhere.\n'
+    + '\nACTION — handoff: pass a request to the colleague who owns it.\n'
+    + '```venia:action\n'
+    + '{"type":"handoff","to":"fin","request":"Update the landed cost on VN-101 to $460 — the mill raised coating 12%","why":"Landed costs and margins are the CFO\'s"}\n'
+    + '```\n'
+    + 'Use it when the request needs an action that is NOT in your list above. Say in one sentence who it belongs to and why, emit the block, and let the founder tap to move — never pretend you did the work, and never tell them to go somewhere and retype it. "request" is the whole task in your words, with any specifics you already worked out, so the colleague does not start from nothing. Do NOT hand off something you can answer or do yourself: reading, analysis, drafting and advice are always yours, whatever the subject. If the founder would rather not switch, tell them Eni in the dock can do it from where they are.\n';
+}
 function agentAllActionSpec() {
   return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm, Press coverage).'
     + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
     + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec()
-    + agentBrandDocSpec() + agentOpsActionSpec() + agentFinActionSpec();
+    + agentBrandDocSpec() + agentOpsActionSpec() + agentFinActionSpec() + agentPricingActionSpec();
 }
 
 // Money writes: the Budget Tracker and Revenue Goals were the last hand-only
@@ -20380,11 +20440,6 @@ function agentImageActionSpec() {
     + 'Emit ONE fenced json block:\n'
     + '{"type":"add_styles","season":"SS27","styles":[{"name":"ISOLDE TOP","category":"Tops","gender":"womens","retail":240,"wholesale":96,"colors":"Ivory, Black","sizes":"XS,S,M,L,XL","fabric":"Silk crepe de chine","drop":"","status":"concept","desc":"One line of design intent"}]}\n'
     + 'Rules for add_styles: "name" is required; everything else is optional — omit what the list does not say rather than guessing prices or fabrics. "category" ∈ Tops/Bottoms/Outerwear/Dresses/Accessories (pick the closest; a shirt is Tops, a coat or jacket is Outerwear). "gender" ∈ womens/mens/unisex (default womens). "status" ∈ concept/design/sms/development/production/active (default concept). Season may be set once at the top level and/or per style. Multiple COLOURWAYS of one garment are ONE style with the colors listed in "colors" — never one style per colorway. But multiple FABRICATIONS (the same silhouette in a different material — leather vs a printed cloth) are SEPARATE styles: emit one entry per fabrication with its own "fabric", price and vendor, because they carry different BOMs, costs and often different factories. Both records keep the plain silhouette name — never append the material to "name", the app shows it in its own Fabric column. CRITICAL: if the user asks for a silhouette that is ALREADY in the PLM Context but in another material ("add AVELINE BLOUSE in a viscose"), that is a valid NEW style and you MUST include "fabric" on it — an entry whose name already exists and that carries no "fabric" is refused, because nothing distinguishes it from the record already there. AT MOST 25 styles per block; if there are more, emit the first 25, say how many remain, and continue in the next reply when the user says go. Styles already in the PLM Context are skipped automatically — do not re-propose them.'
-    + '\n\nACTION — price_from_retail: fill in WHOLESALE and COGS by working BACKWARDS from each style\'s retail price. This is how a line is costed in practice — the retail is the given, the affordable cost is the question — and it is the only action that computes a DIFFERENT value per style, so use it whenever the request is "set wholesale/COGS for the whole season from retail". update_styles cannot do this: it applies one value to many styles.\n'
-    + '```venia:action\n'
-    + '{"type":"price_from_retail","match":{"season":"SS27"},"retailMargin":60,"wsMargin":60}\n'
-    + '```\n'
-    + 'Select with "match" (season / status / category / gender) or "names" for specific styles. wholesale = retail − retailMargin%; COGS = wholesale − wsMargin%. So $750 retail at 60% and 60% gives $300 wholesale and $120 COGS. A style\'s OWN Rtl % and Your % targets win over the margins you pass, so a style already tuned keeps its economics — pass the margins as the fallback for everything else, and omit them to use the 60/60 defaults. Styles with no retail price are skipped (there is nothing to work back from), as are styles already priced and styles carrying a real cost sheet — pass "overwrite":true only when the user asks you to redo them. The COGS this produces is an ESTIMATE from margin targets, never a costed sheet: say so, and use set_cost_sheet when a real cost is known.\n'
     + '\n\nACTION — update_styles: CHANGE fields on styles that ALREADY exist (status/stage, season, prices, vendor, drop, fabric, sizes, baseSize, priority, flag, marginTarget…). Use this for "move everything back to SMS", "set the FW26 drop date", "put these three into production", "set the base size to S for every SS27 mens style". It updates MANY styles at once: pass "match" with any of season/status/category/gender to select them, or "names" for specific ones. Prefer it over apply_style_specs whenever the request covers more than one style — apply_style_specs takes a single exact style and is only for the deep tech-pack fields update_styles does not carry. A baseSize is only accepted when it exists in that style\'s own size run; styles whose run lacks it are reported back, not silently skipped. Never use add_styles for an existing style.\n'
     + 'Emit ONE fenced json block:\n'
     + '{"type":"update_styles","match":{"season":"SS27","status":"development"},"set":{"status":"sms"}}\n'
@@ -20541,7 +20596,38 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_money_watch') return agentRunSetMoneyWatch(action, chatBody);
   if (action.type === 'set_cost_sheet') return agentRunSetCostSheet(action, chatBody);
   if (action.type === 'price_from_retail') return agentRunPriceFromRetail(action, chatBody);
+  if (action.type === 'handoff') return agentRunHandoff(action, chatBody);
 }
+
+// Passing work to the colleague who owns it. Nothing moves without a tap: the
+// screen changing under you mid-thought is worse than the extra tap, and a
+// handoff you did not ask for looks like the agent dodging the question.
+const AGENT_HOME = { fin: 'cmd-cfo', sl: null, pr: null, mk: null, br: null };
+function agentRunHandoff(action, chatBody){
+  const to = String((action && action.to) || '').toLowerCase().trim();
+  const remit = AGENT_REMIT[to];
+  if (!remit) { appendAgentNote(chatBody, 'I meant to pass that on but named the wrong colleague — say it again and I will route it properly.'); return; }
+  const req = String((action && action.request) || '').trim().slice(0, 4000);
+  if (!req) { appendAgentNote(chatBody, 'I could not summarise that cleanly enough to pass on — tell me again in one line?'); return; }
+  const why = String((action && action.why) || '').trim().slice(0, 300);
+  window.__agHandoff = { to, request: req };
+  agentActionCard(chatBody, 'Passing this to the ' + remit.label,
+    '<div style="font-size:11.5px;line-height:1.6">' + escHtml(why || (remit.label + ' owns ' + remit.owns)) + '</div>'
+    + '<div style="font-size:10.5px;line-height:1.6;margin-top:8px;padding:8px 10px;border:1px solid var(--border);font-family:\'DM Mono\',monospace">' + escHtml(req) + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:6px">Nothing has happened yet — this opens the ' + remit.label + ' and asks it for you. Or ask Eni in the dock to do it without leaving this screen.</div>',
+    'agentDoHandoff()', 'Open the ' + remit.label + ' →');
+}
+window.agentDoHandoff = function(){
+  const h = window.__agHandoff; if (!h) return;
+  window.__agHandoff = null;
+  const sec = AGENT_HOME[h.to];
+  try {
+    if (sec) { cpGoto('cmd'); setTimeout(() => { try { cmdShowSection(sec, document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*="' + sec + '"]')); } catch(e){} }, 140); }
+    else cpGoto(h.to);
+  } catch(e){}
+  // Let the destination mount before it is asked anything.
+  setTimeout(() => { try { agentSend(h.to, h.request); } catch(e){} }, sec ? 420 : 320);
+};
 
 // BACK-SOLVE a line from its retail prices. This is how a collection is
 // actually costed: the retail is the given — what the market will bear and
@@ -21048,15 +21134,18 @@ function agentFindStyle(ref){
       || ss.find(s => { const n = String(s.name||'').toLowerCase(); return n && (n.includes(q) || q.includes(n)); })
       || null;
 }
-function agentActionCard(chatBody, headline, lines, undoCall){
+// btnLabel/mark are optional: a handoff has not happened yet, so it must not
+// wear a ✓ or offer to undo something nobody did.
+function agentActionCard(chatBody, headline, lines, undoCall, btnLabel, mark){
+  const pending = !!btnLabel;
   const card = document.createElement('div');
   card.className = 'ag-msg from-agent';
   card.innerHTML = '<div class="ag-msg-meta">Action</div>'
     + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
-    + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ ' + headline + '</div>'
+    + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:' + (pending ? 'var(--muted)' : 'var(--live,#3f7d55)') + ';font-weight:700;margin-bottom:3px">' + (mark || (pending ? '→' : '✓')) + ' ' + headline + '</div>'
     + lines
     + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
-    + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="' + undoCall + '">Undo</button>'
+    + '<button class="ag-btn ag-btn-sm ' + (pending ? 'ag-btn-primary' : 'ag-btn-ghost') + '" onclick="' + undoCall + '">' + (btnLabel || 'Undo') + '</button>'
     + '</div></div>';
   chatBody.appendChild(card);
   chatBody.scrollTop = chatBody.scrollHeight;
@@ -28158,6 +28247,7 @@ setTimeout(updateSidebarBadges, 600);
 function applyStyleFilters() {
   STATE.seasonFilter    = (document.getElementById('styles-season-f')||{}).value || '';
   STATE.stageDropFilter = (document.getElementById('styles-status-f')||{}).value || '';
+  STATE.genderFilter    = (document.getElementById('styles-gender-f')||{}).value || '';
   renderStyles();
 }
 

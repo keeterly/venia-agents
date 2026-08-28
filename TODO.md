@@ -20,12 +20,9 @@ _Last reviewed at Build 331._
 
 ## Open
 
-- **Non-CFO agents carry every action spec in the app** (~6,400 tokens; the
-  CFO gets ~570). It is byte-identical per turn so prompt caching absorbs most
-  of the cost, and the "any action from any screen" design is deliberate — so
-  this was left alone rather than narrowed unilaterally. Worth a decision: it
-  is why the Sales agent is told how to set cost sheets and money-watch
-  thresholds.
+- **Marketing and Brand own no actions of their own** — their work is
+  drafting, which needs none. If campaign or calendar records ever become
+  real objects, they get actions and the remit map is where to add them.
 
 - **Delete the old Stripe secret keys.** Several were created while getting the
   bank connected, including one that passed through a chat transcript. The live
@@ -43,6 +40,30 @@ _Last reviewed at Build 331._
   visible now that content reaches the right edge.
 
 ---
+
+# Agents — who owns what
+
+Each named agent gets the actions it OWNS, an index of who owns the rest, and
+one way to pass work along (`handoff`, which asks before it moves you). An
+agent handed every action in the app is worse at its own work — that is why
+the CFO timed out until Build 306.
+
+| Agent | Owns | Prompt |
+|---|---|---|
+| CFO (`fin`) | money — cash, P&L, margins, AR, PO schedules, budgets, pricing | ~2.6k |
+| Sales (`sl`) | wholesale — buyers CRM, outreach, quotes, orders | ~1.4k |
+| PR (`pr`) | press — pulls, pitches, coverage, editor radar | ~2.0k |
+| Marketing (`mk`) | campaigns, launches, captions, calendar | ~0.8k |
+| Brand (`br`) | voice, guidelines, references, competitor watch | ~0.8k |
+
+**Eni is deliberately exempt** and keeps every action. It follows whatever
+screen you are on, and being able to ask it anything from anywhere is what
+makes scoping the named agents safe rather than obstructive. Nothing is ever
+unreachable: a scoped agent hands off, or you ask Eni where you already are.
+
+**Presence is not delivery.** Builds 324–332 wrote four money specs into a
+function the CFO is never handed, so its persona promised capabilities it
+could not invoke. A suite now asserts what each agent RECEIVES.
 
 # CFO Agent — how it fits together
 
