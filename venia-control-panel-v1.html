@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '305';
+  const BUILD = '306';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4886,7 +4886,7 @@ const SYNC_KEYS = [
   'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
   // Finance — the bank feed (linked-account metadata + categorized
   // transactions) and Money Watch (thresholds + the weekly brief)
-  'finBank', 'finTxns', 'finWatch', 'finWatchBrief',
+  'finBank', 'finTxns', 'finWatch', 'finWatchBrief', 'finPlan', 'finPlanJob',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -18688,14 +18688,19 @@ YOUR JOB:
 Carry the numbers so the founders don't have to. Every answer starts from the live figures in the FINANCE SNAPSHOT — revenue, COGS, margins, AR, budget, goals — never from memory or invention. When a number you need is not in the snapshot, name exactly which number is missing and where it would come from, then answer with what you have, clearly labeled as partial.
 
 HOW YOU THINK:
-- Cash first. Booked is not collected; an invoice is not money. Keep DTC (paid at order) and wholesale (paid on terms, via Stripe invoice) separate.
+- Cash first. Booked is not collected; an invoice is not money. Keep DTC (paid at order) and wholesale (paid on terms, via Stripe invoice) separate. Cash accounts are money held; card and loan balances are money owed — never add them together.
 - Margin discipline: landed cost is the real cost. A style below its margin floor gets flagged, not excused.
 - Two-person realism: no finance team. Recommend the move that takes an hour, not the process that takes a quarter.
 - Honest partials: real expenses, burn, and runway come from the live bank feed (Money → Bank). When the snapshot's BANK section says "not connected", those numbers do not exist — say so and never present partial burn as total burn. When it is connected, treat heavy uncategorized volume as a caveat on burn.
+- Own the number, don't just report it. A CFO says what it means and what to do, not "here is the data". Every answer ends somewhere concrete.
+- Check yourself before you answer. Reconcile the arithmetic, and ask whether a figure is doing the work you think it is (is that cash or credit? booked or collected? one card or three?). If you notice the data itself is wrong or double-counted, say so first — that is the highest-value thing you can tell a founder.
+- Say the hard thing plainly. Thin runway, a style sold below cost, a debt growing faster than revenue: name it in the first sentence, with the number. Never soften a fact that changes a decision, and never manufacture reassurance.
+- Know the limits of your seat. You are not their accountant, tax advisor, or lawyer: for filings, entity structure, or anything with legal exposure, give them your read and tell them plainly to confirm it with a professional before acting.
 
 WHAT YOU CAN DO:
 - Read: live DTC revenue (Shopify), wholesale orders with AR aging (Stripe-confirmed), the quotes pipeline, per-style unit economics, factory PO commitments, the marketing budget, revenue goals, and — once connected — live bank balances and transactions (Stripe Financial Connections, read-only).
 - Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), reprice styles (update_styles with retail/wholesale/cogs).
+- Plan: a full month-by-month financial plan (Money → CFO Agent → Financial plan) built by a four-pass server run — baseline analysis, the plan, an adversarial self-review that hunts your own bad arithmetic and unsupported assumptions, then a revision. When a plan exists you can see it in FINANCE SNAPSHOT; discuss it, defend it, or say where it is now wrong.
 - Draft: AR chase emails, pricing proposals, a monthly money summary.
 - You NEVER move money. Invoices, card captures, and refunds are sent by a human with the access code — you prepare, they pull the trigger.
 
@@ -18756,6 +18761,7 @@ const WORKFLOWS = {
     'Price a Style': `Help me price a style. Ask which style (or take the landed cost I give you), then back-solve: wholesale at our target wholesale margin, retail at target retail margin, and the keystone check between them. Show the honest floor — the price below which the style loses money on landed cost — and sanity-check against VENIA's $280–$1,400 retail range and where comparable styles in the line sit.`,
     'Can We Afford It': `I'm going to name a spend. Answer from the FINANCE SNAPSHOT, not vibes: (1) what it does to operating YTD; (2) what cash is actually collected vs merely booked; (3) what would have to be true for the spend to pay back — units, orders, or placements — against our current run rate; (4) a clear yes / no / yes-if. The snapshot does not include rent, payroll, or non-marketing overhead — say so where it changes the answer.`,
     'Monthly Money Summary': `Write the monthly money summary for the founders from the FINANCE SNAPSHOT: what came in (DTC and wholesale, vs the prior period where the snapshot shows it), what went out (COGS, marketing spend, factory payments, and bank-feed expenses by category if connected), margins, AR status, revenue-goal progress, and the three numbers that need a decision this month. Under a page, plain language. Save it to the Brand Library with save_brand_doc (kind "note", titled "Money Summary — <month year>").`,
+    'Build a Financial Plan': `Before anything else, tell me whether you have enough real data to build a defensible plan — and if not, exactly what is missing. Then walk me through what you would plan toward given our actual position, and what the biggest single lever is. When I'm ready I'll run the full four-pass planner from the Financial plan panel.`,
     'Burn & Runway': `From the BANK section of the FINANCE SNAPSHOT: (1) cash on hand across accounts, with the as-of dates; (2) average monthly net burn or surplus over the last 90 days (transfers excluded) and how the last 30 days compare; (3) the runway estimate, what it assumes, and the one change that would add 2+ months; (4) the biggest spend categories and the one to challenge first. If the bank is not connected, or uncategorized transactions are distorting the picture, say exactly what to do first (Money → Bank) instead of estimating.`,
   },
 };
@@ -19961,10 +19967,15 @@ async function agentSend(key, message) {
     // specs + saved prefs) is byte-identical across turns and gets cached; the
     // volatile block (live PLM digest + CRM/pulls hints, plus the finance
     // snapshot on CFO turns) changes with the data.
-    const sysPrompt = [
-      agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
-      plmContext() + agentContextHints() + (key === 'fin' && typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''),
-    ];
+    // The CFO gets a FOCUSED prompt. Handing it every action spec in the app
+    // (styles, care labels, PR radar, image parsing…) plus the whole ops
+    // snapshot pushed time-to-first-token past the function window — the 504s
+    // — and buried the finance signal in noise it can never act on.
+    const sysPrompt = key === 'fin'
+      ? [ agent.system + '\n\n' + agentFinActionSpec() + agentBrandDocSpec() + agentBrainstormActionSpec() + agentPrefsText(key),
+          plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '') ]
+      : [ agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
+          plmContext() + agentContextHints() ];
     const reply = await callClaude(sysPrompt, null, SK.history.eni);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
@@ -24965,6 +24976,19 @@ function veniaFinanceContext(){
         + (al.length ? '\nCurrently flagged (already on their Today brief — reference these, do not re-discover them):\n' + al.map(a => '• [' + a.pri + '] ' + a.text).join('\n')
                      : '\nNothing is currently flagged against those thresholds.'));
     } catch(e){}
+    // The active plan — so the CFO can defend, revise or contradict its own work.
+    try {
+      const fp = STATE.finPlan;
+      if (fp && fp.plan) {
+        const pl = fp.plan;
+        const ms = Array.isArray(pl.months) ? pl.months.slice(0,12) : [];
+        parts.push('ACTIVE FINANCIAL PLAN (built ' + String(fp.at||'').slice(0,10) + (fp.rolledOutAt ? ', targets rolled out' : ', targets not yet applied') + '):\n'
+          + (pl.headline ? '• ' + pl.headline + '\n' : '')
+          + (ms.length ? '• Months: ' + ms.map(m => m.month + ' rev ' + money(m.revenue||0) + ' net ' + money(m.net||0) + ' cash ' + money(m.cash_end||0)).join(' | ') + '\n' : '')
+          + (pl.verification && pl.verification.confidence ? '• Self-review confidence: ' + pl.verification.confidence + (pl.verification.confidence_reason ? ' — ' + pl.verification.confidence_reason : '') + '\n' : '')
+          + (Array.isArray(pl.gaps) && pl.gaps.length ? '• Known gaps: ' + pl.gaps.slice(0,5).join('; ') : ''));
+      }
+    } catch(e){}
     parts.push('Rules for the bank figures: "cash on hand" is CASH accounts only; card and loan balances are money OWED and must never be added to or netted against cash unless the user asks for net position. Runway = cash ÷ burn. The feed covers roughly the last 180 days on linked accounts only, and burn/runway reflect categorized reality — treat heavy uncategorized volume as a caveat.');
       } else {
         parts.push('BANK: not connected (Money → Bank). Rent, payroll/contractors, software, taxes, and bank balances are invisible until it is — total burn and runway need it; never guess those numbers.');
@@ -25020,6 +25044,70 @@ window.cmdRenderCfo = function(){
       </div>
       <div style="font-size:9.5px;color:var(--muted);margin-top:3px">${sub}</div>
     </div>`;
+  // ── Financial plan: run it, read it, roll it out ────────────────────────
+  const job = STATE.finPlanJob, fp = STATE.finPlan;
+  const running = job && job.status === 'running';
+  let planHtml = `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Financial plan</h2>${fp && fp.plan ? `<div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cfoPlanRun()">Rebuild</button></div>` : ''}</div>`;
+  if (running) {
+    planHtml += `<div style="border:1px solid var(--border);padding:16px;font-size:11.5px;line-height:1.8">
+      <div class="micro-label" style="margin-bottom:6px">Building…</div>
+      Four passes: baseline analysis → the plan → an adversarial self-review → revision.
+      This takes a few minutes and runs on the server — you can close the app; it'll notify you.
+      <div style="margin-top:10px"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cfoPlanPoll()">Check now</button></div>
+    </div>`;
+  } else if (fp && (fp.brief || fp.plan)) {
+    const p = fp.plan || {};
+    const v = (typeof cfoPlanVariance === 'function') ? cfoPlanVariance() : null;
+    const conf = (p.verification && p.verification.confidence) || '';
+    const mRows = Array.isArray(p.months) ? p.months.slice(0, 12).map(m => `<tr>
+        <td style="padding:5px 8px;font-family:'DM Mono',monospace;font-size:10.5px">${slEsc(String(m.month||''))}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px">${money(m.revenue||0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px">${money(m.cogs||0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px">${money(m.opex||0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px;color:${(m.net||0)<0?'var(--red)':'var(--green)'}">${money(m.net||0)}</td>
+        <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px;color:${(m.cash_end||0)<0?'var(--red)':'var(--ink)'}">${money(m.cash_end||0)}</td>
+      </tr>`).join('') : '';
+    planHtml += `<div style="border:1px solid var(--border);padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <div class="micro-label">${slEsc(String(fp.at||'').slice(0,10))}${p.horizon_months ? ' · ' + p.horizon_months + ' months' : ''}</div>
+        ${conf ? `<div style="font-size:10px;color:${conf==='high'?'var(--green)':conf==='medium'?'var(--amber)':'var(--red)'}">self-reviewed · ${slEsc(conf)} confidence</div>` : ''}
+      </div>
+      ${p.headline ? `<div style="font-size:13px;line-height:1.6;margin-bottom:12px">${slEsc(p.headline)}</div>` : ''}
+      <div style="font-size:12px;line-height:1.75;white-space:pre-wrap;color:var(--ink)">${slEsc(String(fp.brief||''))}</div>
+      ${fp.parseError ? `<div style="margin-top:10px;font-size:10.5px;color:var(--amber)">The structured plan didn't parse — the brief above is complete, but targets can't be rolled out. Rebuild to retry.</div>` : ''}
+      ${mRows ? `<div class="tbl-wrap" style="margin-top:14px;overflow-x:auto"><table style="min-width:520px;width:100%;border-collapse:collapse">
+        <thead><tr style="border-bottom:1px solid var(--ink)">
+          ${['Month','Revenue','COGS','Opex','Net','Cash'].map((h,i)=>`<th style="padding:5px 8px;text-align:${i?'right':'left'};font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)">${h}</th>`).join('')}
+        </tr></thead><tbody>${mRows}</tbody></table></div>` : ''}
+      ${Array.isArray(p.assumptions) && p.assumptions.length ? `<div class="micro-label" style="margin:14px 0 6px">Assumptions</div>${p.assumptions.slice(0,8).map(a=>`<div style="font-size:11px;line-height:1.6;padding:4px 0;border-bottom:1px solid var(--border)"><b>${slEsc(a.label||'')}</b>${a.value?' — '+slEsc(String(a.value)):''}${a.basis?`<div style="color:var(--muted);font-size:10px">${slEsc(a.basis)}</div>`:''}</div>`).join('')}` : ''}
+      ${Array.isArray(p.risks) && p.risks.length ? `<div class="micro-label" style="margin:14px 0 6px">Risks</div>${p.risks.slice(0,6).map(r=>`<div style="font-size:11px;line-height:1.6;padding:4px 0;border-bottom:1px solid var(--border)">${slEsc(r.risk||'')}${r.likelihood?` <span style="color:var(--muted)">(${slEsc(r.likelihood)})</span>`:''}${r.mitigation?`<div style="color:var(--muted);font-size:10px">→ ${slEsc(r.mitigation)}</div>`:''}</div>`).join('')}` : ''}
+      ${Array.isArray(p.actions) && p.actions.length ? `<div class="micro-label" style="margin:14px 0 6px">First actions</div>${p.actions.slice(0,6).map((a,i)=>`<div style="font-size:11px;line-height:1.6;padding:4px 0;border-bottom:1px solid var(--border)">${i+1}. ${slEsc(a.action||'')}${a.when?` <span style="color:var(--muted)">· ${slEsc(a.when)}</span>`:''}</div>`).join('')}` : ''}
+      ${Array.isArray(p.gaps) && p.gaps.length ? `<div class="micro-label" style="margin:14px 0 6px">What the data couldn't tell us</div><div style="font-size:10.5px;color:var(--muted);line-height:1.7">${p.gaps.slice(0,6).map(g=>'• '+slEsc(String(g))).join('<br>')}</div>` : ''}
+      ${p.verification && (Array.isArray(p.verification.issues_fixed) && p.verification.issues_fixed.filter(Boolean).length) ? `<div class="micro-label" style="margin:14px 0 6px">Fixed in self-review</div><div style="font-size:10.5px;color:var(--muted);line-height:1.7">${p.verification.issues_fixed.filter(Boolean).slice(0,6).map(x=>'• '+slEsc(String(x))).join('<br>')}</div>` : ''}
+      ${v ? `<div class="micro-label" style="margin:14px 0 6px">This month vs plan</div><div style="font-size:11px;line-height:1.7">Planned ${money(v.planned)} · tracking ${money(v.actual)} <span style="color:${(v.delta||0)<0?'var(--red)':'var(--green)'}">(${v.delta>=0?'+':''}${money(v.delta)}${v.pct!=null?', '+(v.pct>=0?'+':'')+v.pct+'%':''})</span><div style="color:var(--muted);font-size:10px">DTC figure is the trailing-30-day pulse, not calendar month-to-date — directional, not exact.</div></div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+        ${p.targets && !fp.rolledOutAt ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="cfoPlanRollout()">Roll out targets →</button>` : ''}
+        ${fp.rolledOutAt ? `<span style="font-size:10.5px;color:var(--muted);align-self:center">Targets applied ${slEsc(String(fp.rolledOutAt).slice(0,10))}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cfoPlanRolloutUndo()">Undo rollout</button>` : ''}
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" ${agAttr('fin','Walk me through the financial plan you built — what drives the numbers, where you are least confident, and what you would change first if reality comes in under plan.')}>Discuss it</button>
+      </div>
+    </div>`;
+  } else {
+    planHtml += `<div style="border:1px solid var(--border);padding:16px">
+      <div style="font-size:10.5px;color:var(--muted);line-height:1.7;margin-bottom:12px">
+        The CFO builds a month-by-month plan from your live data — revenue by channel, COGS from real landed costs, operating spend from the bank feed, and the resulting cash line.
+        It runs four passes: a baseline analysis, the plan, an <b>adversarial self-review</b> that hunts for bad arithmetic and unsupported assumptions, then a revision. Runs on the server; close the app if you like.
+      </div>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end">
+        <div class="fg"><label class="fl" for="cfo-plan-goal">Anything it should plan toward (optional)</label>
+          <input class="fi" id="cfo-plan-goal" placeholder="e.g. fund FW26 production without new debt"></div>
+        <div class="fg"><label class="fl" for="cfo-plan-horizon">Horizon</label>
+          <select class="fs" id="cfo-plan-horizon" style="min-height:auto;padding:8px;font-size:11px">
+            <option value="6">6 months</option><option value="12" selected>12 months</option><option value="18">18 months</option></select></div>
+      </div>
+      <button class="ag-btn ag-btn-primary ag-btn-sm" style="margin-top:12px" onclick="cfoPlanRun()">Build the plan →</button>
+      ${job && job.status === 'error' ? `<div style="margin-top:10px;font-size:10.5px;color:var(--red)">Last run failed — ${slEsc(String(job.error||''))}</div>` : ''}
+    </div>`;
+  }
   const watchHtml = `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Money Watch</h2></div>
     <div style="border:1px solid var(--border);padding:16px">
       <div style="font-size:10.5px;color:var(--muted);line-height:1.7;margin-bottom:14px">Alerts join your Today brief and the 7 AM push, so you hear about money without going looking. Set the lines that matter to you — nothing here is a default opinion about your business.</div>
@@ -25048,13 +25136,198 @@ window.cmdRenderCfo = function(){
     + wf('COLLECT', 'AR Chase List',         'Open invoices oldest-first, with a ready-to-send chase email per overdue account — polite at 7 days, firm at 30.')
     + wf('PRICE',   'Price a Style',         'Back-solve retail and wholesale from a landed cost and target margins — with the honest floor beneath which the style loses money.')
     + wf('DECIDE',  'Can We Afford It',      'Name a spend. The agent answers from cash reality: what it does to operating, and what has to be true for it to pay back.')
+    + wf('PLAN',    'Build a Financial Plan', 'Pressure-test whether the data supports a real plan, what to plan toward, and the biggest lever — then run the full planner.')
     + wf('CASH',    'Burn & Runway',         'From the live bank feed: cash on hand, real monthly burn (transfers excluded), the runway estimate, and the spend category to challenge first.')
     + wf('REPORT',  'Monthly Money Summary', 'The founder-readable monthly summary — in, out, margins, AR, goal progress, and the three numbers that need a decision.')
     + `</div>`
     + `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Ask the CFO</h2></div>`
     + `<div class="ag-chat-suggest" style="display:flex;flex-wrap:wrap;gap:8px">` + (SUGGESTS.fin||[]).map(s => agChip('fin', s, 'ag-suggest')).join('') + `</div>`
+    + planHtml
     + watchHtml;
+  // A run queued before the app was closed keeps being watched.
+  try { if (running) cfoPlanPoll(); } catch(e){}
 };
+
+// ══════════════════════════════════════════════════════════
+//  CFO PLANNER (client half) — queue the multi-pass planning run, watch for
+//  it, and roll the result out into the app's real targets.
+//  The work happens in cfo-plan-background (analyst → planner → critic →
+//  reviser), so the founders can close the app while it thinks.
+// ══════════════════════════════════════════════════════════
+function cfoPlanSb(){ return window.__sbClient || null; }
+function cfoPlanUid(){ return 'cp' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+
+// Everything the planner reasons from: the finance snapshot plus the line's
+// unit economics. One string — the server never touches the workspace.
+function cfoPlanSnapshot(){
+  let out = '';
+  try { out += (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''); } catch(e){}
+  try { out += '\n\n' + (typeof plmContext === 'function' ? plmContext() : ''); } catch(e){}
+  try {
+    const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
+    if (bdg) out += '\n\nMarketing budget lines: ' + Object.entries(bdg)
+      .map(([k,r]) => k + ' $' + (parseFloat(r.spent)||0) + ' spent of $' + (parseFloat(r.budget)||0)).join(', ');
+  } catch(e){}
+  try {
+    const cfg = finWatchCfg();
+    out += '\n\nFounders\' own thresholds: cash floor $' + cfg.cashFloor + ', runway floor ' + cfg.runwayMo
+        + ' months, margin floor ' + cfg.marginFloor + '% wholesale.';
+  } catch(e){}
+  return out;
+}
+
+window.cfoPlanRun = async function(){
+  const c = cfoPlanSb();
+  if (!c) { showToast('Sign in under Settings → Team first — the planner runs on the server', 'warn'); return; }
+  if (STATE.finPlanJob && STATE.finPlanJob.status === 'running') { showToast('A plan is already being built', 'info'); return; }
+  const goal = (document.getElementById('cfo-plan-goal') || {}).value || '';
+  const horizon = parseInt((document.getElementById('cfo-plan-horizon') || {}).value, 10) || 12;
+  const code = window.veniaAC(true, 'Enter your VENIA access code to run the planner:');
+  if (!code) return;
+  const id = cfoPlanUid(), secret = cfoPlanUid() + cfoPlanUid();
+  try {
+    const ins = await c.from('venia_agent_jobs').insert({ id, secret, item_id: 'cfo-plan', kind: 'cfoplan', q: 'financial plan', status: 'queued' });
+    if (ins && ins.error) throw new Error(ins.error.message || 'could not queue');
+    let subs = [];
+    try { const sr = await c.from('venia_push_subs').select('sub'); subs = ((sr && sr.data) || []).slice(0, 12).map(x => x.sub); } catch(e){}
+    const r = await fetch('/.netlify/functions/cfo-plan-background', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, secret, horizon, goal: String(goal).slice(0, 600), snapshot: cfoPlanSnapshot(), push: subs }),
+    });
+    if (!r || (r.status !== 202 && !r.ok)) {
+      try { await c.from('venia_agent_jobs').delete().eq('id', id); } catch(e){}
+      throw new Error('the planner did not start (HTTP ' + ((r && r.status) || '?') + ')');
+    }
+    STATE.finPlanJob = { id, at: new Date().toISOString(), status: 'running', horizon };
+    save();
+    showToast('Planning started — four passes including a self-review. You can close the app.', 'success');
+    cmdRenderCfo();
+    cfoPlanPoll();
+  } catch(e){ showToast(String((e && e.message) || e), 'error'); }
+};
+
+let __cfoPollT = null;
+window.cfoPlanPoll = async function(){
+  clearTimeout(__cfoPollT);
+  const job = STATE.finPlanJob;
+  if (!job || job.status !== 'running') return;
+  const c = cfoPlanSb(); if (!c) return;
+  // A run that outlives the function's own ceiling is gone — stop waiting.
+  if (Date.now() - new Date(job.at).getTime() > 17 * 60 * 1000) {
+    STATE.finPlanJob = { ...job, status: 'error', error: 'timed out' }; save(); cmdRenderCfo(); return;
+  }
+  try {
+    const r = await c.from('venia_agent_jobs').select('*').eq('id', job.id);
+    const row = r && r.data && r.data[0];
+    if (row && row.status === 'done') {
+      cfoPlanApplyResult(String(row.result || ''));
+      try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
+      return;
+    }
+    if (row && row.status === 'error') {
+      STATE.finPlanJob = { ...job, status: 'error', error: String(row.result || 'failed').slice(0, 300) };
+      save(); cmdRenderCfo();
+      try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
+      return;
+    }
+  } catch(e){}
+  __cfoPollT = setTimeout(cfoPlanPoll, 8000);
+};
+
+// Split the reviser's output into the readable brief and the machine-readable
+// plan. A malformed block never loses the brief — the words still land.
+function cfoPlanParse(text){
+  const m = String(text || '').match(/```venia:plan\s*([\s\S]*?)```/);
+  let plan = null, parseError = false;
+  if (m) { try { plan = JSON.parse(m[1].trim()); } catch(e){ parseError = true; } }
+  const brief = m ? String(text).replace(m[0], '').trim() : String(text || '').trim();
+  return { brief, plan, parseError };
+}
+function cfoPlanApplyResult(text){
+  const { brief, plan, parseError } = cfoPlanParse(text);
+  STATE.finPlan = { at: new Date().toISOString(), brief, plan: plan || null, parseError,
+                    horizon: (STATE.finPlanJob && STATE.finPlanJob.horizon) || 12 };
+  STATE.finPlanJob = { ...(STATE.finPlanJob || {}), status: 'done' };
+  if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
+  STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: 'Financial plan — ' + new Date().toISOString().slice(0,10),
+    kind: 'brief', body: String(text).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  save();
+  try { logActivity('CFO built a ' + (STATE.finPlan.horizon) + '-month financial plan (self-reviewed)'); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  showToast('Financial plan ready', 'success');
+}
+
+// Roll the plan out: its targets become the app's real revenue goals and
+// budget lines. Never silent — the founder sees exactly what will be set and
+// confirms, and one Undo puts everything back.
+window.cfoPlanRollout = function(){
+  const p = STATE.finPlan && STATE.finPlan.plan;
+  if (!p || !p.targets) { showToast('No plan targets to roll out', 'warn'); return; }
+  const goals = Array.isArray(p.targets.revenue_goals) ? p.targets.revenue_goals.filter(g => g && g.name && g.target > 0) : [];
+  const budget = Array.isArray(p.targets.budget) ? p.targets.budget.filter(b => b && b.item && b.budget > 0) : [];
+  if (!goals.length && !budget.length) { showToast('The plan set no targets to apply', 'warn'); return; }
+  const lines = goals.map(g => '• Goal: ' + g.name + ' — $' + Math.round(g.target).toLocaleString() + ' (' + (g.period||'monthly') + ')')
+    .concat(budget.map(b => '• Budget: ' + b.item + ' — $' + Math.round(b.budget).toLocaleString()));
+  if (!confirm('Apply the plan\'s targets?\n\n' + lines.join('\n') + '\n\nRevenue goals and budget amounts will be set. Spend figures are untouched. One Undo reverses it.')) return;
+  window.__agPrevGoals = JSON.stringify(revGetGoals());
+  try { window.__agPrevBudget = localStorage.getItem('venia_budget') || '{}'; } catch(e){}
+  const KEYS = ['photoshoots','influencer','adspend','events','misc'];
+  const gs = revGetGoals();
+  goals.forEach(g => {
+    const period = ['monthly','quarterly','annual','seasonal'].indexOf(String(g.period||'')) >= 0 ? g.period : 'monthly';
+    const source = ['dtc-30','dtc-ytd','wholesale-ytd','total-ytd'].indexOf(String(g.source||'')) >= 0 ? g.source : '';
+    const ex = gs.find(x => String(x.name||'').toLowerCase() === String(g.name).toLowerCase());
+    if (ex) { ex.target = Math.round(g.target); ex.period = period; ex.source = source; }
+    else gs.push({ id: 'rg' + Date.now() + Math.random().toString(36).slice(2,6), name: String(g.name).slice(0,80), target: Math.round(g.target), current: 0, period, source });
+  });
+  revSetGoals(gs);
+  if (budget.length) {
+    let data; try { data = JSON.parse(localStorage.getItem('venia_budget') || '{}') || {}; } catch(e){ data = {}; }
+    budget.forEach(b => {
+      const k = String(b.item||'').toLowerCase().trim();
+      if (KEYS.indexOf(k) < 0) return;
+      data[k] = Object.assign({ budget:'', spent:'' }, data[k], { budget: String(Math.round(b.budget)) });
+    });
+    try { localStorage.setItem('venia_budget', JSON.stringify(data)); } catch(e){}
+    try { loadBudgetData(); } catch(e){}
+  }
+  STATE.finPlan.rolledOutAt = new Date().toISOString();
+  save();
+  try { revRender(); } catch(e){}
+  try { logActivity('Financial plan rolled out — ' + goals.length + ' goal(s), ' + budget.length + ' budget line(s)'); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  showToast('Plan targets applied — Undo in Money → CFO Agent', 'success');
+};
+window.cfoPlanRolloutUndo = function(){
+  try { if (window.__agPrevGoals) revSetGoals(JSON.parse(window.__agPrevGoals)); } catch(e){}
+  try { if (window.__agPrevBudget != null) localStorage.setItem('venia_budget', window.__agPrevBudget); } catch(e){}
+  window.__agPrevGoals = null; window.__agPrevBudget = null;
+  if (STATE.finPlan) delete STATE.finPlan.rolledOutAt;
+  save();
+  try { revRender(); loadBudgetData(); cmdRenderCfo(); } catch(e){}
+  showToast('Rollout undone', 'info');
+};
+
+// Plan vs actual: the plan is only worth having if reality is checked against
+// it. Compares this month's planned revenue to what actually landed.
+function cfoPlanVariance(){
+  try {
+    const p = STATE.finPlan && STATE.finPlan.plan; if (!p || !Array.isArray(p.months)) return null;
+    const key = new Date().toISOString().slice(0,7);
+    const row = p.months.find(m => String(m.month||'').slice(0,7) === key); if (!row) return null;
+    const pulse = STATE.bizPulse || {};
+    const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
+    const mStart = key + '-01T00:00:00.000Z';
+    const ws = (STATE.slOrders || []).filter(o => o.status !== 'cancelled' && (o.updatedAt||'') >= mStart)
+      .reduce((s,o) => s + (o.total||0), 0);
+    // DTC month-to-date isn't stored directly; the 30-day pulse is the closest
+    // honest proxy, and it is labelled as such wherever this is shown.
+    const dtc = pulse.r30 || 0;
+    const actual = dtc + ws, planned = row.revenue || 0;
+    return { month: key, planned, actual, dtc, ws, delta: actual - planned,
+             pct: planned ? Math.round(((actual - planned) / planned) * 100) : null };
+  } catch(e){ return null; }
+}
 
 // ══════════════════════════════════════════════════════════
 //  MONEY WATCH (Phase 3) — the CFO agent stops waiting to be asked.
