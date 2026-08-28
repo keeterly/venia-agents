@@ -60,10 +60,26 @@ export default async (req) => {
   const sysBlocks = (Array.isArray(system) ? system : [system])
     .filter((s) => s && String(s).trim())
     .map((s) => ({ type: 'text', text: String(s).slice(0, 100000) }));
-  const msgs = messages.slice(-40).map((m) => ({
+  // NORMALIZE the conversation before it reaches the API. A history that
+  // begins with an assistant turn, carries two of the same role in a row, or
+  // ends on an assistant turn is rejected outright ("does not support
+  // assistant message prefill"), losing the founder's question. The client can
+  // legitimately produce any of those — a failed turn that never got its
+  // reply, two questions sent before the first came back, a reply applied on
+  // the other phone — so the worker repairs the shape rather than trusting it.
+  const raw = messages.slice(-40).map((m) => ({
     role: m && m.role === 'assistant' ? 'assistant' : 'user',
-    content: String((m && m.content) || '').slice(0, 40000),
-  }));
+    content: String((m && m.content) || '').trim().slice(0, 40000),
+  })).filter((m) => m.content);
+  const msgs = [];
+  raw.forEach((m) => {
+    if (!msgs.length && m.role !== 'user') return;              // must open on a user turn
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === m.role) { last.content += '\n\n' + m.content; return; }  // no doubles
+    msgs.push(m);
+  });
+  while (msgs.length && msgs[msgs.length - 1].role !== 'user') msgs.pop();   // must close on a user turn
+  if (!msgs.length) { await complete(id, secret, 'error', 'no usable conversation to send'); return new Response('', { status: 200 }); }
 
   try {
     const r = await fetch('https://api.anthropic.com/v1/messages', {

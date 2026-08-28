@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 319._
+_Last reviewed at Build 321._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -71,6 +71,12 @@ direct streaming path as the fallback. The financial plan is
   fabric and production are already counted as dated PO obligations.
 - The agent drafts and files; **it never moves money.** Invoices and card
   captures stay behind the human access-code gate.
+- Every bulk write is one undo. The ledger's bulk set and the agent's
+  `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
+  ones if any, else exactly what the filter shows. It never asks the agent to
+  guess at a transaction it was not shown.
 
-**Tests:** `node check.js` (inline script syntax) plus 14 suites in the session
-scratchpad covering the money math, agent actions, and instruction drift.
+**Tests:** `node check.js` (inline script syntax) plus 16 suites in the session
+scratchpad covering the money math, agent actions, ledger editing, cloud-run
+conversation shape, and instruction drift.
