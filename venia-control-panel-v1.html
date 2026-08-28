@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '306';
+  const BUILD = '307';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16964,6 +16964,8 @@ document.addEventListener('DOMContentLoaded', function(){
   // after the cloud pull settles. Self-guards on week key, sync state and
   // concurrency, so extra opens cost nothing.
   setTimeout(function(){ try { finWeeklyBriefMaybe(); } catch(e){} }, 6000);
+  // A CFO cloud reply queued before the app was closed gets picked up here.
+  setTimeout(function(){ try { cfoChatPoll(); } catch(e){} }, 4000);
   // Resolve Shopify connection state from the server (the token lives there,
   // never in the browser), then refresh anything that depends on it.
   setTimeout(function(){
@@ -19976,7 +19978,9 @@ async function agentSend(key, message) {
           plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '') ]
       : [ agent.system + '\n\n' + agentAllActionSpec() + agentPrefsText(key),
           plmContext() + agentContextHints() ];
-    const reply = await callClaude(sysPrompt, null, SK.history.eni);
+    const reply = key === 'fin'
+      ? await cfoCallWithCloudFallback(sysPrompt, SK.history.eni, message)
+      : await callClaude(sysPrompt, null, SK.history.eni);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
     const { clean, action, parseError } = agentExtractAction(reply);
@@ -19996,7 +20000,9 @@ async function agentSend(key, message) {
     think.__done && think.__done();
     agentEndWork(workKey, false);
     const t = think.querySelector('.sk-work');
-    if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
+    if (err && err.__cfoQueued) {
+      if (t) t.outerHTML = `<div class="sk-msg-body">☁ The connection couldn’t hold this one, so it moved to the cloud — the server is working on it now (up to 15 minutes for big asks). You can close the app; you’ll get a push and the answer will be here when you return.</div>`;
+    } else if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
   }
   body.scrollTop = body.scrollHeight;
 }
@@ -25327,6 +25333,91 @@ function cfoPlanVariance(){
     return { month: key, planned, actual, dtc, ws, delta: actual - planned,
              pct: planned ? Math.round(((actual - planned) / planned) * 100) : null };
   } catch(e){ return null; }
+}
+
+// ── CFO CHAT CLOUD FALLBACK ────────────────────────────────────────────────
+// One direct (streaming) attempt; if the connection can't hold it, the SAME
+// turn is queued to cfo-chat-background, which has a 15-minute window. The
+// phone's only job becomes one small POST — the founder can close the app,
+// gets a push when the reply lands, and the answer (plus any action it
+// carries) applies on this device when it's next open. The job record is
+// deliberately per-device (localStorage, not synced STATE) so two phones
+// never both apply the same reply.
+async function cfoCallWithCloudFallback(sysPrompt, history, userMsg){
+  try { return await _callClaudeOnce(sysPrompt, null, history); }
+  catch (e) {
+    const queued = await cfoChatQueue(sysPrompt, history, userMsg);
+    if (!queued) throw e;
+    const q = new Error('queued'); q.__cfoQueued = true; throw q;
+  }
+}
+async function cfoChatQueue(system, history, userMsg){
+  try {
+    const c = window.__sbClient; if (!c) return false;
+    const id = cfoPlanUid(), secret = cfoPlanUid() + cfoPlanUid();
+    const ins = await c.from('venia_agent_jobs').insert({ id, secret, item_id: 'cfo-chat', kind: 'cfochat', q: String(userMsg||'').slice(0, 300), status: 'queued' });
+    if (ins && ins.error) return false;
+    let subs = [];
+    try { const sr = await c.from('venia_push_subs').select('sub'); subs = ((sr && sr.data) || []).slice(0, 12).map(x => x.sub); } catch(e){}
+    // History already carries the new user turn (agentSend pushes it first).
+    const msgs = (history || []).map(m => ({ role: m.role, content: m.content }));
+    const post = () => fetch('/.netlify/functions/cfo-chat-background', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, secret, system, messages: msgs, push: subs }),
+    });
+    let r = null; try { r = await post(); } catch(e){}
+    if (r && r.status === 401) {
+      window.__ac = ''; try { localStorage.removeItem('venia_ac'); } catch(e){}
+      if (window.veniaAC(true, 'Enter your VENIA access code so the cloud can answer:')) { try { r = await post(); } catch(e){} }
+    }
+    if (!r || (r.status !== 202 && !r.ok)) { try { await c.from('venia_agent_jobs').delete().eq('id', id); } catch(e){} return false; }
+    try { localStorage.setItem('venia_cfochat_job', JSON.stringify({ id, at: new Date().toISOString() })); } catch(e){}
+    cfoChatPoll();
+    return true;
+  } catch(e){ return false; }
+}
+let __cfoChatT = null;
+window.cfoChatPoll = async function(){
+  clearTimeout(__cfoChatT);
+  let job = null; try { job = JSON.parse(localStorage.getItem('venia_cfochat_job') || 'null'); } catch(e){}
+  if (!job || !job.id) return;
+  if (Date.now() - new Date(job.at).getTime() > 17 * 60 * 1000) { try { localStorage.removeItem('venia_cfochat_job'); } catch(e){} return; }
+  const c = window.__sbClient;
+  if (!c) { __cfoChatT = setTimeout(cfoChatPoll, 8000); return; }
+  try {
+    const r = await c.from('venia_agent_jobs').select('*').eq('id', job.id);
+    const row = r && r.data && r.data[0];
+    if (row && (row.status === 'done' || row.status === 'error')) {
+      try { localStorage.removeItem('venia_cfochat_job'); } catch(e){}
+      try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
+      cfoChatApply(row.status, String(row.result || ''));
+      return;
+    }
+  } catch(e){}
+  __cfoChatT = setTimeout(cfoChatPoll, 8000);
+};
+function cfoChatApply(status, result){
+  const body = document.getElementById('sk-body');
+  if (status !== 'done') {
+    if (body && SK.open) { try { appendAgentNote(body, '⚠ The cloud run failed — ' + String(result).slice(0, 200)); } catch(e){} }
+    else showToast('The CFO cloud run failed — open the dock and retry', 'error');
+    return;
+  }
+  const { clean, action, parseError } = agentExtractAction(result);
+  const shown = parseError
+    ? ((clean ? clean + '\n\n' : '') + '⚠ I couldn’t complete that change — nothing was saved. Please try once more.')
+    : (clean || (action ? 'Done — here’s what I set up:' : result));
+  SK.history.eni.push({ role: 'assistant', content: shown });
+  if (SK.history.eni.length > 40) SK.history.eni = SK.history.eni.slice(-40);
+  try { skSaveHistory(); } catch(e){}
+  if (body && SK.open) {
+    const el = document.createElement('div');
+    el.className = 'sk-msg agent';
+    el.innerHTML = '<div class="sk-msg-who">Eni · cloud</div><div class="sk-msg-body">' + skFormat(shown) + '</div>';
+    body.appendChild(el); body.scrollTop = body.scrollHeight;
+  }
+  if (action && !parseError) { try { agentRunAction('fin', action, body || document.createElement('div')); } catch(e){} }
+  showToast('CFO reply ready', 'success');
 }
 
 // ══════════════════════════════════════════════════════════
