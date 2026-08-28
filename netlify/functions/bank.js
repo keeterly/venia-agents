@@ -50,8 +50,15 @@ export default async (req) => {
   if (req.method !== 'POST') return json({ error: 'Method Not Allowed — expected POST' }, 405, cors);
   if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403, cors);
 
-  const key = process.env.STRIPE_SECRET_KEY;
-  const pk  = process.env.STRIPE_PUBLISHABLE_KEY || '';
+  // Trim — keys pasted on a phone arrive with stray whitespace. Format checks
+  // catch look-alike keyboard substitutions (e.g. Cyrillic З for 3): a key with
+  // a non-ASCII char crashes fetch with a cryptic "ByteString" error the moment
+  // it is put in an Authorization header, so refuse it here with a clear
+  // message instead.
+  const key = (process.env.STRIPE_SECRET_KEY || '').trim();
+  const pk  = (process.env.STRIPE_PUBLISHABLE_KEY || '').trim();
+  const skFormatOk = /^[sr]k_(live|test)_[A-Za-z0-9]+$/.test(key);
+  const pkFormatOk = /^pk_(live|test)_[A-Za-z0-9]+$/.test(pk);
 
   let body;
   try { body = JSON.parse(await req.text() || '{}'); } catch (e) { return json({ error: 'Bad JSON' }, 400, cors); }
@@ -59,11 +66,26 @@ export default async (req) => {
 
   if (action === 'ping') {
     const gate = !!(process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH);
+    // Live diagnosis: prove the secret key actually authenticates, so a
+    // mis-pasted key is caught here and not as a cryptic failure mid-flow.
+    let key_ok = false, key_error = '';
+    if (key && skFormatOk) {
+      try {
+        const r = await fetch('https://api.stripe.com/v1/balance', { headers: { Authorization: 'Bearer ' + key } });
+        const j = await r.json().catch(() => ({}));
+        key_ok = r.ok;
+        if (!r.ok) key_error = (j && j.error && j.error.message ? String(j.error.message) : ('Stripe HTTP ' + r.status)).slice(0, 160);
+      } catch (e) { key_error = String(e && e.message || e).slice(0, 160); }
+    } else if (key) {
+      key_error = 'STRIPE_SECRET_KEY contains an invalid character — re-paste it in Netlify (copy/paste, never type it).';
+    }
     // Build marker forces a fresh function bundle so env-var changes are
     // captured (same pattern as the Shopify proxy).
-    return json({ configured: !!key, pk_configured: !!pk, gate_configured: gate, build: '2026-08-28a' }, 200, cors);
+    return json({ configured: !!key, sk_format_ok: skFormatOk, key_ok, key_error,
+                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28b' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
+  if (!skFormatOk) return json({ error: 'STRIPE_SECRET_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
 
   // Fail CLOSED: every bank action requires the VENIA access code.
   const gateHash = (process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH || '').toLowerCase();
@@ -114,6 +136,7 @@ export default async (req) => {
     // returned client_secret; credentials never touch VENIA code.
     if (action === 'link') {
       if (!pk) return json({ error: 'Set STRIPE_PUBLISHABLE_KEY in Netlify environment variables — the browser needs it to open the bank-auth flow.' }, 400, cors);
+      if (!pkFormatOk) return json({ error: 'STRIPE_PUBLISHABLE_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
       const customer = await findOrCreateHolder();
       // form() keeps one value per key, and permissions/prefetch repeat — build
       // the body by hand for this one call.
