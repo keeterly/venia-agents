@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '325';
+  const BUILD = '326';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18745,7 +18745,7 @@ WHAT YOU CAN DO:
 - Read the LEDGER: every uncategorized bank transaction and the most recent filed ones, each with its real id. You are not blind to what is already filed and you do not need the founders to paste ids — if a transaction is in the snapshot, you can act on it.
 - Read the CASH CALENDAR: the next 90 days of money in and out, week by week, rolled forward from actual bank cash, with the first week (if any) that drops below their cash floor.
 - Read OPERATIONS: the wholesale order book with delivery and invoice state, top-account concentration, open POs with deposit and balance state, vendor lead times and MOQs, and what is mid-sampling. Cash timing has operational causes — name them.
-- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), record a wholesale payment that arrived (record_payment), reprice styles (update_styles with retail/wholesale/cogs).
+- Write (via the actions below): update the marketing Budget Tracker (set_budget), set or update revenue goals (set_revenue_goal), categorize bank transactions (set_txn_category), record a wholesale payment that arrived (record_payment), set PO payment schedules and factory units (set_po_terms), tune your own alert thresholds (set_money_watch), reprice styles (update_styles with retail/wholesale/cogs).
 - Plan: a full month-by-month financial plan (Money → Plan) built by a four-pass server run — baseline analysis, the plan, an adversarial self-review that hunts your own bad arithmetic and unsupported assumptions, then a revision. When a plan exists you can see it in FINANCE SNAPSHOT; discuss it, defend it, or say where it is now wrong.
 - Draft: AR chase emails, pricing proposals, a monthly money summary.
 - You NEVER move money. Invoices, card captures, and refunds are sent by a human with the access code — you prepare, they pull the trigger.
@@ -20158,6 +20158,16 @@ function agentOpsActionSpec() {
     + '{"type":"record_payment","items":[{"order":"ORD-XYZ","amount":71200,"date":"2026-08-20","method":"wire","note":"Antonioli AW26 balance"}]}\n'
     + '```\n'
     + 'Identify the order by "order" (its id, from the ORDER BOOK in context) or by "account" (the buyer name); with several open orders for one account, amount must match one exactly or you must give the id. "amount" is what ARRIVED, in dollars — a partial payment is fine and leaves the balance open, ageing against the order terms. "date" is when the money landed (defaults to today). This RECORDS a payment that already happened; it never moves money and never sends anything. Only record what the founder tells you arrived, or what you can see landed in the bank ledger — never infer a payment from an order simply being old.\n'
+    + '\nACTION — set_po_terms: set the PAYMENT SCHEDULE on a factory or fabric purchase order (Money → Plan drives the 90-day cash calendar from exactly these fields). Placing the order is production\'s call; the deposit split, the dates it falls due, and recording what has been paid are yours.\n'
+    + '```venia:action\n'
+    + '{"type":"set_po_terms","items":[{"po":"PO-ABC","depositPct":50,"depositDue":"2026-09-15","balanceDue":"2026-11-30","exFactory":"2026-11-15","depositPaid":"2026-09-14","units":[{"style":"VN-101","qty":60}]}]}\n'
+    + '```\n'
+    + 'The PO id comes from the FACTORY OBLIGATIONS block in context — never invent one. All dates are YYYY-MM-DD; pass "" to clear one. depositPaid / balancePaid RECORD that a payment already went out — they never send one. "units" sets how many of each style the factory is making, which is what sell-through is measured against; a season with no PO units can only report sell-through as unknown. Omit any field you are not changing.\n'
+    + '\nACTION — set_money_watch: tune your own alert thresholds (Money → Plan). They ship as generic placeholders, so calibrate them to this business once you understand its cash rhythm — and say why you chose each number.\n'
+    + '```venia:action\n'
+    + '{"type":"set_money_watch","cashFloor":15000,"runwayMo":4,"burnSpike":40,"marginFloor":45,"uncatMax":10}\n'
+    + '```\n'
+    + 'cashFloor is dollars of cash on hand below which it is urgent; runwayMo months of runway; burnSpike the % the last 30 days may exceed the 90-day average; marginFloor the wholesale margin % floor per style; uncatMax how many uncategorized bank rows before burn stops being trustworthy. "on" and "weekly" are booleans. Only change a threshold you can justify from the numbers — never quietly widen one to silence an alert that is telling the truth.\n'
     + '\nACTION — set_forecast: commit forecast units per style into the demand plan (Production → Demand Plan).\n'
     + '```venia:action\n'
     + '{"type":"set_forecast","forecasts":[{"style":"Exact style name or code","units":120}]}\n'
@@ -20479,7 +20489,129 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_revenue_goal') return agentRunSetRevenueGoal(action, chatBody);
   if (action.type === 'set_txn_category') return agentRunSetTxnCategory(action, chatBody);
   if (action.type === 'record_payment') return agentRunRecordPayment(action, chatBody);
+  if (action.type === 'set_po_terms') return agentRunSetPoTerms(action, chatBody);
+  if (action.type === 'set_money_watch') return agentRunSetMoneyWatch(action, chatBody);
 }
+
+// The PAYMENT SCHEDULE on a factory order. A CFO does not place the order —
+// that is production's call — but the deposit split and the dates it falls due
+// are entirely the CFO's, and the 90-day cash calendar is built from exactly
+// these fields. Without them a PO shows as one undated lump and the calendar
+// cannot tell you which week the money actually leaves.
+const PO_DATE_KEYS = { depositDue:'depositDue', balanceDue:'balanceDue', exFactory:'exFactory',
+                       depositPaid:'depositPaidAt', balancePaid:'balancePaidAt' };
+function agentRunSetPoTerms(action, chatBody){
+  const items = Array.isArray(action.items) ? action.items : [];
+  const pos = STATE.pos || (STATE.pos = dbGet('pos') || []);
+  const prev = {}; const done = [], missed = [];
+  const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v||''));
+  items.forEach(it => {
+    if (!it) return;
+    const po = pos.find(x => x.id === it.po);
+    if (!po) { missed.push('no PO ' + (it.po || '(none given)')); return; }
+    const before = JSON.parse(JSON.stringify(po));
+    const changed = [];
+    if (it.depositPct != null && it.depositPct !== '') {
+      const pct = parseFloat(it.depositPct);
+      if (!(pct >= 0 && pct <= 100)) { missed.push(po.id + ': deposit % must be 0–100'); return; }
+      po.depositPct = pct; changed.push('deposit ' + pct + '%');
+    }
+    Object.keys(PO_DATE_KEYS).forEach(k => {
+      if (!(k in it)) return;
+      const v = it[k];
+      if (v === '' || v === null) { delete po[PO_DATE_KEYS[k]]; changed.push(k + ' cleared'); return; }
+      if (!isDate(v)) { missed.push(po.id + ': ' + k + ' must be YYYY-MM-DD'); return; }
+      po[PO_DATE_KEYS[k]] = v; changed.push(k + ' ' + v);
+    });
+    // Units per style are what sell-through is measured against — a season
+    // with no PO units can only report sell-through as unknown.
+    if (Array.isArray(it.units) && it.units.length) {
+      const rows = [];
+      it.units.forEach(u => {
+        const key = String((u && (u.style || u.styleId)) || '').trim();
+        const st = (STATE.styles||[]).find(x => x.id === key || x.styleId === key || x.name === key);
+        const q = parseInt(u && u.qty, 10);
+        if (!st || !(q > 0)) { missed.push(po.id + ': could not place ' + JSON.stringify(u)); return; }
+        rows.push({ styleId: st.id, name: st.name, qty: q });
+      });
+      if (rows.length) {
+        po.items = rows;
+        po.units = rows.reduce((a,r) => a + r.qty, 0);
+        changed.push(po.units + ' units across ' + rows.length + ' style' + (rows.length>1?'s':''));
+      }
+    }
+    if (!changed.length) { missed.push(po.id + ': nothing to change'); return; }
+    prev[po.id] = before;
+    po.updatedAt = new Date().toISOString();
+    done.push({ id: po.id, vendor: po.vendor || '', what: changed.join(', ') });
+  });
+  if (!done.length) {
+    appendAgentNote(chatBody, 'No PO was changed — ' + (missed.length ? missed.slice(0,4).join('; ') : 'nothing matched') + '.');
+    return;
+  }
+  window.__agPrevPos = prev;
+  save();
+  try { cmdRenderCfo(); } catch(e){}
+  try { cmdRenderMoney(); } catch(e){}
+  agentActionCard(chatBody, done.length + ' purchase order' + (done.length>1?'s':'') + ' updated',
+    '<div style="font-size:10.5px;line-height:1.7;font-family:\'DM Mono\',monospace">'
+    + done.map(x => escHtml('#' + x.id + ' ' + x.vendor + ' — ' + x.what)).join('<br>') + '</div>'
+    + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:6px">Skipped: ' + escHtml(missed.slice(0,3).join('; ')) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Money → Plan · cash calendar</div>',
+    'agentUndoPoTerms()');
+}
+window.agentUndoPoTerms = function(){
+  const prev = window.__agPrevPos; if (!prev) return;
+  (STATE.pos||[]).forEach((po, i) => { if (prev[po.id]) STATE.pos[i] = prev[po.id]; });
+  window.__agPrevPos = null;
+  save();
+  try { cmdRenderCfo(); } catch(e){}
+  try { cmdRenderMoney(); } catch(e){}
+  showToast('PO terms restored', 'info');
+};
+
+// Money Watch thresholds. These shipped as placeholder defaults — opinions
+// about a generic business, not this one — and an agent that cannot calibrate
+// its own alerting either cries wolf or stays silent through the thing that
+// mattered.
+function agentRunSetMoneyWatch(action, chatBody){
+  const before = JSON.parse(JSON.stringify(STATE.finWatch || {}));
+  const NUM = { cashFloor:[0,1e9], runwayMo:[0,60], burnSpike:[5,500], marginFloor:[0,95], uncatMax:[0,1000] };
+  const changed = [], missed = [];
+  if (!STATE.finWatch) STATE.finWatch = {};
+  Object.keys(NUM).forEach(k => {
+    if (!(k in action)) return;
+    const v = parseFloat(action[k]);
+    if (!isFinite(v) || v < NUM[k][0] || v > NUM[k][1]) { missed.push(k + ' must be ' + NUM[k][0] + '–' + NUM[k][1]); return; }
+    STATE.finWatch[k] = v; changed.push(k + ' → ' + v);
+  });
+  ['on','weekly'].forEach(k => {
+    if (!(k in action)) return;
+    STATE.finWatch[k] = !!action[k]; changed.push(k + ' → ' + (action[k] ? 'on' : 'off'));
+  });
+  if (!changed.length) {
+    appendAgentNote(chatBody, 'Nothing changed — ' + (missed.length ? missed.join('; ') : 'no threshold given') + '.');
+    return;
+  }
+  window.__agPrevWatch = before;
+  save();
+  try { buildTodayFocus(); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  agentActionCard(chatBody, 'Money Watch updated',
+    '<div style="font-size:10.5px;line-height:1.7;font-family:\'DM Mono\',monospace">' + changed.map(escHtml).join('<br>') + '</div>'
+    + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:6px">Skipped: ' + escHtml(missed.join('; ')) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Money → Plan</div>',
+    'agentUndoMoneyWatch()');
+}
+window.agentUndoMoneyWatch = function(){
+  const prev = window.__agPrevWatch; if (prev === undefined || prev === null) return;
+  STATE.finWatch = prev;
+  window.__agPrevWatch = null;
+  save();
+  try { buildTodayFocus(); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+  showToast('Money Watch thresholds restored', 'info');
+};
 
 // RECORD a wholesale payment. Until this existed, o.payment was written ONLY
 // by the Stripe invoice path — so an order settled by bank wire, which is how

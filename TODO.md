@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 325._
+_Last reviewed at Build 326._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -28,8 +28,14 @@ _Last reviewed at Build 325._
   it authenticates.
 - **Run the financial plan.** Money → Plan → Build the plan. Nothing grades a
   plan until one exists, so plan-vs-actual reporting stays unbuilt until then.
-- **Tune Money Watch.** The thresholds (cash floor, runway, burn spike, margin
-  floor) ship with placeholder defaults, not opinions about this business.
+- **Tune Money Watch.** The thresholds ship as placeholder defaults. The CFO
+  can now set them itself (`set_money_watch`) — ask it to calibrate them once
+  it has enough of the cash rhythm to justify each number.
+- **Cost sheets are still read-only to the agent.** It can reprice a style
+  (`update_styles`) but cannot update a landed cost when a mill raises prices,
+  so margin work stalls on a human edit. Next capability worth adding.
+- **Desktop wastes the right half of the viewport** at 1440px — content sits
+  in a ~560px column. Mobile is fine.
 
 ---
 
@@ -73,6 +79,13 @@ direct streaming path as the fallback. The financial plan is
   captures stay behind the human access-code gate.
 - Every bulk write is one undo. The ledger's bulk set and the agent's
   `set_txn_category` share `__agPrevTxnCats`, and both surface the same Undo.
+- **The CFO maintains the PO payment schedule** (`set_po_terms`), not the PO
+  itself — placing a factory order is production's call. The 90-day cash
+  calendar is built from `depositPct`, `depositDue`, `balanceDue` and
+  `exFactory`; without them a PO is one undated lump. PO units per style are
+  what sell-through is measured against.
+- **The CFO tunes its own alert thresholds** (`set_money_watch`), and is told
+  never to widen one to silence an alert that is telling the truth.
 - **A collection is the unit that pays for itself.** The P&L rolls up BY
   SEASON — revenue by channel, gross margin, sell-through against units
   actually ordered from the factory, account concentration. A style with no
