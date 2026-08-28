@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '313';
+  const BUILD = '314';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17338,6 +17338,35 @@ async function veniaDigestPushSet(on, loud){
   } catch(e){ if (loud) toast('Could not update — ' + ((e&&e.message)||e),'warn'); }
 }
 let __digestPubAt = 0, __digestFlagSynced = false;
+// A compact money picture for the SERVER to reason from on Monday morning,
+// so the weekly brief happens whether or not anyone opens the app. Rides
+// inside the existing daily-digest row (its `items` JSON is free-form), which
+// means no new table and no new RPC — the same publish path the 7 AM brief
+// already uses. Numbers only, rounded; never raw transaction descriptions.
+function veniaFinDigestBlob(){
+  try {
+    const bk = (typeof finBankData === 'function') ? finBankData() : null;
+    const d  = (typeof cmdMoneyData === 'function') ? cmdMoneyData() : null;
+    if (!bk || !d) return null;
+    const cc = (typeof finCashCalendar === 'function') ? finCashCalendar(90) : { events: [], floorBreach: null };
+    const al = (typeof finWatchAlerts === 'function') ? finWatchAlerts() : [];
+    const R = n => Math.round(n || 0);
+    return {
+      connected: !!bk.connected,
+      cash: R(bk.bal), debt: R(bk.debt), net: R(bk.net), floor: R(finWatchCfg().cashFloor),
+      burn: R(bk.monthlyNet), runway: bk.runwayMo != null ? Number(bk.runwayMo.toFixed(1)) : null,
+      in30: R(bk.in30), out30: R(bk.out30), uncat: bk.uncat,
+      revYtd: R(d.revYtd), operating: R(d.operating), dtcYtd: R((d.p||{}).ytd), wsBooked: R(d.wsYtd), wsCollected: R(d.wsCollectedYtd),
+      ar: R(d.arOpen.reduce((s,a) => s + (a.open||0), 0)),
+      arOldest: d.arOpen[0] ? { acct: String(d.arOpen[0].account||'').slice(0,28), days: d.arOpen[0].days, amt: R(d.arOpen[0].open) } : null,
+      cat30: Object.entries(bk.cat30).sort((a,b) => b[1]-a[1]).slice(0,5).map(([c,v]) => [finCatLabel(c), R(v)]),
+      tight: cc.floorBreach ? { week: cc.floorBreach.start, cash: R(cc.floorBreach.endCash) } : null,
+      committed: cc.events.filter(e => e.certainty === 'committed').slice(0,5)
+        .map(e => [e.date, e.dir, R(e.amount), String(e.label||'').slice(0,40)]),
+      alerts: al.map(a => String(a.text||'').slice(0,120)).slice(0,6),
+    };
+  } catch(e){ return null; }
+}
 function veniaDigestPublish(items){
   try {
     const c = window.__sbClient; if (!c) return;
@@ -17360,7 +17389,7 @@ function veniaDigestPublish(items){
       .map(i => ({ pri: i.pri, text: String(i.text||'').slice(0, 140), key: i.key || '' }));
     __digestPubAt = Date.now();
     c.from('venia_daily_digest').upsert({ id: 'latest',
-      items: { at: new Date().toISOString(), list: slim },
+      items: { at: new Date().toISOString(), list: slim, fin: veniaFinDigestBlob() },
       updated_at: new Date().toISOString() }).then(function(){}, function(){});
   } catch(e){}
 }
