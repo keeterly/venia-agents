@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '304';
+  const BUILD = '305';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4884,8 +4884,9 @@ const SYNC_KEYS = [
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
   'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
-  // Finance — the bank feed (linked-account metadata + categorized transactions)
-  'finBank', 'finTxns',
+  // Finance — the bank feed (linked-account metadata + categorized
+  // transactions) and Money Watch (thresholds + the weekly brief)
+  'finBank', 'finTxns', 'finWatch', 'finWatchBrief',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -16959,6 +16960,10 @@ window.dismissNag = function(k){
 };
 document.addEventListener('DOMContentLoaded', function(){
   setTimeout(cpRenderToday, 200);
+  // Weekly money brief: written once per calendar week, on the first open
+  // after the cloud pull settles. Self-guards on week key, sync state and
+  // concurrency, so extra opens cost nothing.
+  setTimeout(function(){ try { finWeeklyBriefMaybe(); } catch(e){} }, 6000);
   // Resolve Shopify connection state from the server (the token lives there,
   // never in the browser), then refresh anything that depends on it.
   setTimeout(function(){
@@ -17204,6 +17209,10 @@ function buildTodayFocus() {
   // 9. Active styles
   const active = (STATE.styles||[]).filter(s => s.status === 'active');
   if (active.length) items.push({pri:'low', text:`${active.length} active style${active.length>1?'s':''} live in PLM`});
+  // 10. Money Watch — the CFO's own alerts (cash floor, runway, burn spike,
+  //     margin floor, budget overrun). They join the ONE brief, so they also
+  //     ride the 7 AM push digest without a second notification channel.
+  try { if (typeof finWatchAlerts === 'function') finWatchAlerts().forEach(i => items.push(i)); } catch(e){}
   const order = { high: 0, med: 1, low: 2 };
   items.sort((a,b) => (order[a.pri] ?? 2) - (order[b.pri] ?? 2));
   const colMap = {high:'var(--red)', med:'var(--amber)', low:'var(--muted)'};
@@ -24714,6 +24723,7 @@ function slExportOrders() {
     if (!STATE.slOrders) STATE.slOrders = dbGet('slOrders') || [];
     if (!STATE.finBank) STATE.finBank = {};
     if (!STATE.finTxns) STATE.finTxns = [];
+    if (!STATE.finWatch || Array.isArray(STATE.finWatch)) STATE.finWatch = _obj(STATE.finWatch);
   };
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _extendInit);
@@ -24946,7 +24956,16 @@ function veniaFinanceContext(){
         const un = (STATE.finTxns||[]).filter(t => !finTxnCat(t) && t.status !== 'void').slice(0, 15);
         if (un.length) parts.push('Uncategorized bank transactions (' + bk.uncat + ' total — categorize with set_txn_category):\n'
           + un.map(t => '• ' + t.id + ' | ' + (t.date||'') + ' | ' + money(t.amount||0) + ' | ' + String(t.desc||'').slice(0,80)).join('\n'));
-        parts.push('Rules for the bank figures: "cash on hand" is CASH accounts only; card and loan balances are money OWED and must never be added to or netted against cash unless the user asks for net position. Runway = cash ÷ burn. The feed covers roughly the last 180 days on linked accounts only, and burn/runway reflect categorized reality — treat heavy uncategorized volume as a caveat.');
+        // What Money Watch is flagging right now — so a chat answer and the
+    // morning push never tell the founders different stories.
+    try {
+      const wcfg = finWatchCfg();
+      const al = (typeof finWatchAlerts === 'function') ? finWatchAlerts() : [];
+      parts.push('MONEY WATCH thresholds: cash floor ' + money(wcfg.cashFloor) + ', runway floor ' + wcfg.runwayMo + ' months, burn-spike ' + wcfg.burnSpike + '%, margin floor ' + wcfg.marginFloor + '% wholesale.'
+        + (al.length ? '\nCurrently flagged (already on their Today brief — reference these, do not re-discover them):\n' + al.map(a => '• [' + a.pri + '] ' + a.text).join('\n')
+                     : '\nNothing is currently flagged against those thresholds.'));
+    } catch(e){}
+    parts.push('Rules for the bank figures: "cash on hand" is CASH accounts only; card and loan balances are money OWED and must never be added to or netted against cash unless the user asks for net position. Runway = cash ÷ burn. The feed covers roughly the last 180 days on linked accounts only, and burn/runway reflect categorized reality — treat heavy uncategorized volume as a caveat.');
       } else {
         parts.push('BANK: not connected (Money → Bank). Rent, payroll/contractors, software, taxes, and bank balances are invisible until it is — total burn and runway need it; never guess those numbers.');
       }
@@ -24971,8 +24990,57 @@ window.cmdRenderCfo = function(){
     <div class="ag-stat"><div class="ag-stat-l">Committed to factories</div><div class="ag-stat-v">${money(d.poCommitted)}</div><div class="ag-stat-s">open POs, not yet paid</div></div>
   </div>`;
   const wf = (tag, title, desc) => '<div class="ag-wf" style="cursor:pointer" data-agp="' + agRegister('fin', (WORKFLOWS.fin||{})[title] || title) + '"><div class="ag-wf-tag">' + tag + '</div><div class="ag-wf-title">' + title + '</div><div class="ag-wf-desc">' + desc + '</div></div>';
+  // The weekly brief, when the CFO has written one this week.
+  const wb = STATE.finWatchBrief;
+  const briefHtml = (wb && wb.body) ? `<div style="border:1px solid var(--ink);padding:16px;margin:16px 0">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <div class="micro-label">Money brief · week of ${slEsc(String(wb.week||''))}</div>
+        <div style="display:flex;gap:6px">
+          <button class="ag-btn ag-btn-ghost ag-btn-sm" ${agAttr('fin','Rewrite this week\'s money brief from the current FINANCE SNAPSHOT — same shape: where cash stands, what is owed both ways, the one number that matters this week, and one specific action.')}>Rewrite</button>
+          ${wb.seen ? '' : '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finBriefMarkSeen();cmdRenderCfo()">Mark read</button>'}
+        </div>
+      </div>
+      <div style="font-size:12px;line-height:1.75;white-space:pre-wrap;color:var(--ink)">${slEsc(String(wb.body))}</div>
+    </div>` : '';
+  // Live alerts, same rules that ride the morning push.
+  let alerts = [];
+  try { alerts = finWatchAlerts().filter(a => a.key !== 'fin|brief'); } catch(e){}
+  const alertHtml = alerts.length ? `<div class="ag-sec-head" style="margin-top:4px"><h2 class="ag-sec-title">Watching</h2></div>
+    <div style="margin-bottom:16px">${alerts.map(a => `<div style="display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-bottom:1px solid var(--border);font-size:11.5px${a.act?';cursor:pointer':''}"${a.act ? ` onclick="${a.act.replace(/"/g,'&quot;')}"` : ''}>
+        <span style="color:${a.pri==='high'?'var(--red)':'var(--amber)'};font-size:14px;line-height:1">•</span>
+        <span>${slEsc(a.text)}</span>
+      </div>`).join('')}</div>` : '';
+  const cfg = finWatchCfg();
+  const num = (k, label, sub, pre, post) => `<div class="fg">
+      <label class="fl" for="fw-${k}">${label}</label>
+      <div style="display:flex;align-items:center;gap:4px">
+        ${pre?`<span style="font-size:11px;color:var(--muted)">${pre}</span>`:''}
+        <input class="fi" id="fw-${k}" type="number" value="${cfg[k]}" style="width:90px" onchange="finWatchSet('${k}', this.value)">
+        ${post?`<span style="font-size:11px;color:var(--muted)">${post}</span>`:''}
+      </div>
+      <div style="font-size:9.5px;color:var(--muted);margin-top:3px">${sub}</div>
+    </div>`;
+  const watchHtml = `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Money Watch</h2></div>
+    <div style="border:1px solid var(--border);padding:16px">
+      <div style="font-size:10.5px;color:var(--muted);line-height:1.7;margin-bottom:14px">Alerts join your Today brief and the 7 AM push, so you hear about money without going looking. Set the lines that matter to you — nothing here is a default opinion about your business.</div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;margin-bottom:8px;cursor:pointer">
+        <input type="checkbox" ${cfg.on?'checked':''} onchange="finWatchSet('on', this.checked)"> Surface money alerts in Today + morning push
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:11.5px;margin-bottom:14px;cursor:pointer">
+        <input type="checkbox" ${cfg.weekly?'checked':''} onchange="finWatchSet('weekly', this.checked)"> Write a weekly money brief (once a week, automatically)
+      </label>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px">
+        ${num('cashFloor','Cash floor','Alert when cash drops below','$','')}
+        ${num('runwayMo','Runway floor','Alert under this many months','','mo')}
+        ${num('burnSpike','Burn spike','30d spend above the 90d average','','%')}
+        ${num('marginFloor','Margin floor','Flag styles under this wholesale margin','','%')}
+        ${num('uncatMax','Uncategorized limit','Warn that burn is an estimate past','','rows')}
+      </div>
+    </div>`;
   el.innerHTML = stats
-    + `<div style="padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);margin:16px 0;line-height:1.6">The CFO agent answers from the live numbers — Shopify revenue, wholesale AR, landed costs, the budget, revenue goals. It drafts and updates records; it never sends an invoice or moves money. That stays a human tap with the access code.</div>`
+    + `<div style="padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);margin:16px 0;line-height:1.6">The CFO agent answers from the live numbers — Shopify revenue, wholesale AR, landed costs, the bank feed, the budget, revenue goals. It drafts and updates records; it never sends an invoice or moves money. That stays a human tap with the access code.</div>`
+    + briefHtml
+    + alertHtml
     + `<div class="ag-sec-head"><h2 class="ag-sec-title">Workflows</h2></div>`
     + `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">`
     + wf('READ',    'Cash Position',         'Where the money stands today — revenue, collected vs booked, what’s owed to us, what we owe factories, and the one number to watch.')
@@ -24984,7 +25052,158 @@ window.cmdRenderCfo = function(){
     + wf('REPORT',  'Monthly Money Summary', 'The founder-readable monthly summary — in, out, margins, AR, goal progress, and the three numbers that need a decision.')
     + `</div>`
     + `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Ask the CFO</h2></div>`
-    + `<div class="ag-chat-suggest" style="display:flex;flex-wrap:wrap;gap:8px">` + (SUGGESTS.fin||[]).map(s => agChip('fin', s, 'ag-suggest')).join('') + `</div>`;
+    + `<div class="ag-chat-suggest" style="display:flex;flex-wrap:wrap;gap:8px">` + (SUGGESTS.fin||[]).map(s => agChip('fin', s, 'ag-suggest')).join('') + `</div>`
+    + watchHtml;
+};
+
+// ══════════════════════════════════════════════════════════
+//  MONEY WATCH (Phase 3) — the CFO agent stops waiting to be asked.
+//  Alerts are computed from the same live figures the CFO reads, then pushed
+//  into the ONE Today brief — so they ride the existing 7 AM digest to both
+//  phones with no separate notification channel to maintain. Thresholds are
+//  the founders' to set; nothing here is a hard-coded opinion about money.
+// ══════════════════════════════════════════════════════════
+const FIN_WATCH_DEFAULTS = {
+  on: true,             // surface money alerts in Today (and the morning push)
+  weekly: true,         // auto-write the weekly money brief, once per week
+  cashFloor: 5000,      // cash on hand below this is a high-priority alert
+  runwayMo: 3,          // runway under this many months is a high alert
+  burnSpike: 40,        // last 30d spend this % above the 90d average
+  marginFloor: 45,      // wholesale margin % floor per style
+  uncatMax: 15,         // uncategorized bank rows before burn is untrustworthy
+};
+function finWatchCfg(){
+  const c = Object.assign({}, FIN_WATCH_DEFAULTS, (window.STATE && STATE.finWatch) || {});
+  ['cashFloor','runwayMo','burnSpike','marginFloor','uncatMax'].forEach(k => { c[k] = Number(c[k]); if (!isFinite(c[k])) c[k] = FIN_WATCH_DEFAULTS[k]; });
+  return c;
+}
+window.finWatchSet = function(k, v){
+  if (!STATE.finWatch) STATE.finWatch = {};
+  STATE.finWatch[k] = (k === 'on' || k === 'weekly') ? !!v : (parseFloat(v) || 0);
+  save();
+  try { buildTodayFocus(); } catch(e){}
+  try { cmdRenderCfo(); } catch(e){}
+};
+
+// The alert rules. Returns Today-brief items ({key, pri, text, act}) so the
+// existing render, assignment, dismissal and push paths all work unchanged.
+// Every rule states the NUMBER that tripped it — never a vague warning.
+function finWatchAlerts(){
+  const cfg = finWatchCfg();
+  const out = [];
+  if (!cfg.on) return out;
+  const money = n => '$' + Math.round(Math.abs(n)).toLocaleString();
+  const goMoney = "cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-cfo',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-cfo]'))},140)";
+  const goBank  = "cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-bank',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-bank]'))},140)";
+  let bk = null;
+  try { bk = (typeof finBankData === 'function') ? finBankData() : null; } catch(e){}
+
+  // 1. Cash floor + runway — only meaningful once the bank is linked.
+  if (bk && bk.connected) {
+    if (cfg.cashFloor > 0 && bk.bal < cfg.cashFloor) {
+      out.push({ key:'fin|cash', pri:'high', act: goBank,
+        text:`Cash on hand ${money(bk.bal)} — below your ${money(cfg.cashFloor)} floor` });
+    }
+    if (cfg.runwayMo > 0 && bk.runwayMo != null && bk.runwayMo < cfg.runwayMo) {
+      out.push({ key:'fin|runway', pri:'high', act: goMoney,
+        text:`Runway ${bk.runwayMo.toFixed(1)} months at ${money(bk.monthlyNet)}/mo burn — under your ${cfg.runwayMo}-month line` });
+    }
+    // 2. Burn spike: last 30 days against the 90-day monthly average.
+    const avgMo = bk.out90 / 3;
+    if (avgMo > 500 && cfg.burnSpike > 0) {
+      const up = Math.round(((bk.out30 - avgMo) / avgMo) * 100);
+      if (up >= cfg.burnSpike) out.push({ key:'fin|burn', pri:'med', act: goBank,
+        text:`Spend up ${up}% this month — ${money(bk.out30)} vs ${money(avgMo)} typical` });
+    }
+    // 3. Uncategorized rows make burn/runway untrustworthy — say so plainly.
+    if (cfg.uncatMax > 0 && bk.uncat >= cfg.uncatMax) {
+      out.push({ key:'fin|uncat', pri:'med', act: goBank,
+        text:`${bk.uncat} bank transactions uncategorized — burn and runway are estimates until they're sorted` });
+    }
+  }
+  // 4. Styles under the margin floor (live styles that carry real cost data).
+  try {
+    if (cfg.marginFloor > 0) {
+      const under = (STATE.styles||[]).filter(s => s.status !== 'archived' && s.wholesale > 0).map(s => {
+        const lc = (typeof landedCost === 'function' ? landedCost(s) : 0) || 0;
+        if (lc <= 0) return null;
+        const m = Math.round((1 - lc / s.wholesale) * 100);
+        return m < cfg.marginFloor ? { s, m } : null;
+      }).filter(Boolean).sort((a,b) => a.m - b.m);
+      if (under.length) out.push({ key:'fin|margin', pri:'med', act: goMoney,
+        text:`${under.length} style${under.length>1?'s':''} under ${cfg.marginFloor}% wholesale margin — worst: ${under[0].s.name||under[0].s.styleId} at ${under[0].m}%` });
+    }
+  } catch(e){}
+  // 5. Budget lines spent past their budget.
+  try {
+    const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
+    if (bdg) {
+      const over = Object.entries(bdg).map(([k,r]) => {
+        const b = parseFloat(r.budget)||0, sp = parseFloat(r.spent)||0;
+        return (b > 0 && sp > b) ? { k, by: sp - b } : null;
+      }).filter(Boolean).sort((a,b) => b.by - a.by);
+      if (over.length) out.push({ key:'fin|budget', pri:'med',
+        act:"cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-budget',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-budget]'))},140)",
+        text:`${over[0].k} is ${money(over[0].by)} over budget${over.length>1 ? ' (+' + (over.length-1) + ' more line' + (over.length>2?'s':'') + ')' : ''}` });
+    }
+  } catch(e){}
+  // 6. Weekly money brief waiting to be read.
+  try {
+    if (cfg.weekly && STATE.finWatchBrief && STATE.finWatchBrief.week === finWeekKey() && !STATE.finWatchBrief.seen) {
+      out.push({ key:'fin|brief', pri:'med', act: goMoney, text:'Your weekly money brief is ready' });
+    }
+  } catch(e){}
+  return out;
+}
+// ISO-ish week key (Mon-anchored) — one brief per calendar week.
+function finWeekKey(d){
+  const t = d ? new Date(d) : new Date();
+  const day = (t.getDay() + 6) % 7;                    // Mon=0
+  t.setDate(t.getDate() - day); t.setHours(0,0,0,0);
+  return t.toISOString().slice(0,10);
+}
+
+// The weekly brief: the CFO writes it on the first app open of a new week and
+// files it in the Brand Library, so the founders find it waiting instead of
+// having to ask. Runs at most ONCE per week per workspace (the week key is
+// synced), never on a first boot before data has loaded, and never twice
+// concurrently.
+let __finBriefBusy = false;
+async function finWeeklyBriefMaybe(){
+  try {
+    const cfg = finWatchCfg();
+    if (!cfg.weekly || __finBriefBusy) return;
+    if (!window.__sbSyncDone) return;                    // wait for the cloud pull
+    const wk = finWeekKey();
+    if (STATE.finWatchBrief && STATE.finWatchBrief.week === wk) return;
+    if (!(STATE.styles||[]).length && !(STATE.finTxns||[]).length) return;   // nothing to report on
+    __finBriefBusy = true;
+    const sys = [
+      AGENTS.fin.system,
+      plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''),
+    ];
+    const q = 'Write this week\'s money brief for the two founders, from the FINANCE SNAPSHOT only. Under 250 words, plain language, no headers longer than three words. Cover: (1) where cash stands and what changed; (2) what is owed to us and what we owe; (3) the single most important number this week and why; (4) one specific action to take. If the bank is not connected or figures are missing, say so plainly instead of estimating. Do not emit any action block.';
+    const text = await callClaude(sys, q, []);
+    const clean = (typeof agentExtractAction === 'function' ? agentExtractAction(text).clean : text) || text;
+    STATE.finWatchBrief = { week: wk, at: new Date().toISOString(), body: String(clean).slice(0, 12000), seen: false };
+    if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
+    STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: 'Money brief — week of ' + wk, kind: 'note',
+      body: String(clean).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    save();
+    try { logActivity('CFO wrote the weekly money brief (week of ' + wk + ')'); } catch(e){}
+    try { buildTodayFocus(); } catch(e){}
+    try { cmdRenderCfo(); } catch(e){}
+    try {
+      if (window.Notification && Notification.permission === 'granted' && navigator.serviceWorker && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then(reg => reg.showNotification('Weekly money brief ready', {
+          body: String(clean).replace(/\s+/g,' ').slice(0, 140), icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'venia-cfo-brief' }));
+      }
+    } catch(e){}
+  } catch(e){ /* a failed brief retries next open — never blocks the app */ }
+  finally { __finBriefBusy = false; }
+}
+window.finBriefMarkSeen = function(){
+  if (STATE.finWatchBrief) { STATE.finWatchBrief.seen = true; save(); try { buildTodayFocus(); } catch(e){} }
 };
 
 // ══════════════════════════════════════════════════════════
