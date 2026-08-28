@@ -1,0 +1,95 @@
+import webpush from 'web-push';
+
+// CFO CHAT, CLOUD-SIDE. A streaming reply over a flaky phone connection dies
+// mid-generation and surfaces as 504s / "no connection" — so when the direct
+// path fails, the app queues the SAME turn here instead. This is a
+// "-background" function: Netlify answers 202 instantly and gives the work up
+// to 15 minutes, so the founder can pocket the phone or close the app; the
+// reply lands in the job row and a push says it's ready.
+// Write-back is the same secret-scoped RPC as the other workers — no
+// service-role key anywhere.
+const SB_URL = 'https://unxfaeqjskzzmhyrekqx.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVueGZhZXFqc2t6em1oeXJla3F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NDgxMTQsImV4cCI6MjA5MzQyNDExNH0.tqKiJJZE9iz29g9hIscLeMir4PhBMeTU8fbI04eC6xY';
+
+const ALLOWED_ORIGINS = new Set([
+  'https://creator.veniacollection.com',
+  'https://venia-creator.netlify.app',
+  'https://main--venia-creator.netlify.app',
+]);
+function originAllowed(req) {
+  const o = req.headers.get('origin');
+  if (o) return ALLOWED_ORIGINS.has(o);
+  const site = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+  return site === 'same-origin' || site === 'same-site';
+}
+async function complete(id, secret, status, result) {
+  try {
+    await fetch(SB_URL + '/rest/v1/rpc/venia_complete_agent_job', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON },
+      body: JSON.stringify({ p_id: id, p_secret: secret, p_status: status, p_result: result }),
+    });
+  } catch (_) { /* the client's stale sweep is the backstop */ }
+}
+
+export default async (req) => {
+  if (req.method !== 'POST') return new Response('', { status: 405 });
+  if (!originAllowed(req)) return new Response('', { status: 403 });
+
+  // Enforce-if-configured, like the Claude relay: the phone's fetch wrapper
+  // attaches the access code automatically.
+  const gateHash = (process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH || '').toLowerCase();
+  if (gateHash) {
+    const sent = req.headers.get('x-venia-code') || '';
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sent));
+    const hex = Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    if (!sent || hex !== gateHash) return new Response('', { status: 401 });
+  }
+
+  let p;
+  try { p = JSON.parse(await req.text()); } catch (_) { return new Response('', { status: 400 }); }
+  const { id, secret, system, messages } = p || {};
+  if (!id || !secret || !Array.isArray(messages) || !messages.length) return new Response('', { status: 400 });
+  const pushSubs = Array.isArray(p.push) ? p.push.slice(0, 12) : [];
+
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) { await complete(id, secret, 'error', 'ANTHROPIC_API_KEY is not set'); return new Response('', { status: 500 }); }
+
+  // System arrives as the same array of blocks the app sends its relay;
+  // messages carry the chat history including the new user turn.
+  const sysBlocks = (Array.isArray(system) ? system : [system])
+    .filter((s) => s && String(s).trim())
+    .map((s) => ({ type: 'text', text: String(s).slice(0, 100000) }));
+  const msgs = messages.slice(-40).map((m) => ({
+    role: m && m.role === 'assistant' ? 'assistant' : 'user',
+    content: String((m && m.content) || '').slice(0, 40000),
+  }));
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 16384, system: sysBlocks, messages: msgs }),
+    });
+    if (!r.ok) {
+      let d = 'HTTP ' + r.status;
+      try { const e = await r.json(); if (e && e.error && e.error.message) d = e.error.message; } catch (_) {}
+      throw new Error(d);
+    }
+    const data = await r.json();
+    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    if (!text) throw new Error('empty reply');
+    await complete(id, secret, 'done', text);
+    if (pushSubs.length && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PUBLIC_KEY) {
+      try {
+        webpush.setVapidDetails('mailto:keeter@veniacollection.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+        const note = JSON.stringify({ title: 'Your CFO replied', body: 'The answer is waiting in the Eni dock.', tag: 'venia-cfo-chat' });
+        await Promise.allSettled(pushSubs.map((s) => webpush.sendNotification(s, note)));
+      } catch (_) {}
+    }
+    return new Response('', { status: 200 });
+  } catch (e) {
+    await complete(id, secret, 'error', String((e && e.message) || 'cloud run failed'));
+    return new Response('', { status: 200 });
+  }
+};
