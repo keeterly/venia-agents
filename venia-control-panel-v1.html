@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '310';
+  const BUILD = '311';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18764,6 +18764,7 @@ const WORKFLOWS = {
     'Can We Afford It': `I'm going to name a spend. Answer from the FINANCE SNAPSHOT, not vibes: (1) what it does to operating YTD; (2) what cash is actually collected vs merely booked; (3) what would have to be true for the spend to pay back — units, orders, or placements — against our current run rate; (4) a clear yes / no / yes-if. The snapshot does not include rent, payroll, or non-marketing overhead — say so where it changes the answer.`,
     'Monthly Money Summary': `Write the monthly money summary for the founders from the FINANCE SNAPSHOT: what came in (DTC and wholesale, vs the prior period where the snapshot shows it), what went out (COGS, marketing spend, factory payments, and bank-feed expenses by category if connected), margins, AR status, revenue-goal progress, and the three numbers that need a decision this month. Under a page, plain language. Save it to the Brand Library with save_brand_doc (kind "note", titled "Money Summary — <month year>").`,
     'Build a Financial Plan': `Before anything else, tell me whether you have enough real data to build a defensible plan — and if not, exactly what is missing. Then walk me through what you would plan toward given our actual position, and what the biggest single lever is. When I'm ready I'll run the full four-pass planner from the Financial plan panel.`,
+    'Cash Calendar': `Walk me through the CASH CALENDAR in the FINANCE SNAPSHOT. What is committed and unavoidable in the next 90 days, what is merely expected, and what is only an estimate? Name the tightest week and exactly what causes it. If cash dips below my floor, tell me the two or three specific levers that fix it — pulling an invoice forward, moving a factory payment, holding a spend — with the dollar impact of each.`,
     'Burn & Runway': `From the BANK section of the FINANCE SNAPSHOT: (1) cash on hand across accounts, with the as-of dates; (2) average monthly net burn or surplus over the last 90 days (transfers excluded) and how the last 30 days compare; (3) the runway estimate, what it assumes, and the one change that would add 2+ months; (4) the biggest spend categories and the one to challenge first. If the bank is not connected, or uncategorized transactions are distorting the picture, say exactly what to do first (Money → Bank) instead of estimating.`,
   },
 };
@@ -25039,6 +25040,18 @@ function veniaFinanceContext(){
           + (Array.isArray(pl.gaps) && pl.gaps.length ? '• Known gaps: ' + pl.gaps.slice(0,5).join('; ') : ''));
       }
     } catch(e){}
+    // The forward cash calendar — timing, not just balances.
+    try {
+      const cc = (typeof finCashCalendar === 'function') ? finCashCalendar(90) : null;
+      if (cc && cc.events.length) {
+        const wk = cc.weeks.slice(0, 13).map(w => w.start + ': in ' + money(w.in) + ', out ' + money(w.out) + ' → ' + money(w.endCash)).join('\n  ');
+        const committed = cc.events.filter(e => e.certainty === 'committed');
+        parts.push('CASH CALENDAR (next 90 days, rolling from ' + money(cc.startCash) + ' cash):\n  ' + wk
+          + (committed.length ? '\n• Committed dated items: ' + committed.slice(0,10).map(e => e.date + ' ' + (e.dir === 'in' ? '+' : '−') + money(e.amount) + ' ' + e.label).join('; ') : '')
+          + (cc.floorBreach ? '\n• ⚠ Projected cash drops below the founders\' floor in the week of ' + cc.floorBreach.start + ' (to ' + money(cc.floorBreach.endCash) + ').' : '')
+          + '\n• Certainty tiers: "committed" = a real dated obligation; "expected" = very likely (an order will invoice); "estimated" = inferred from history (recurring costs, DTC run rate). NEVER present estimated as committed — say which tier you are relying on when the answer turns on it.');
+      }
+    } catch(e){}
     parts.push('Rules for the bank figures: "cash on hand" is CASH accounts only; card and loan balances are money OWED and must never be added to or netted against cash unless the user asks for net position. Runway = cash ÷ burn. The feed covers roughly the last 180 days on linked accounts only, and burn/runway reflect categorized reality — treat heavy uncategorized volume as a caveat.');
       } else {
         parts.push('BANK: not connected (Money → Bank). Rent, payroll/contractors, software, taxes, and bank balances are invisible until it is — total burn and runway need it; never guess those numbers.');
@@ -25094,6 +25107,38 @@ window.cmdRenderCfo = function(){
       </div>
       <div style="font-size:9.5px;color:var(--muted);margin-top:3px">${sub}</div>
     </div>`;
+  // ── Cash calendar: what moves, and when ─────────────────────────────────
+  let calHtml = '';
+  try {
+    const cc = finCashCalendar(90);
+    if (cc.events.length) {
+      const CERT = { committed:'var(--ink)', expected:'var(--muted)', estimated:'var(--border-mid)' };
+      const wkRows = cc.weeks.slice(0, 13).map(w => {
+        const low = w.endCash < (finWatchCfg().cashFloor || 0);
+        return `<tr${low?' style="background:rgba(200,60,60,.06)"':''}>
+          <td style="padding:5px 8px;font-family:'DM Mono',monospace;font-size:10px">${slEsc(w.start.slice(5))}</td>
+          <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10px;color:${w.in?'var(--green)':'var(--muted)'}">${w.in?money(w.in):'—'}</td>
+          <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10px;color:${w.out?'var(--ink)':'var(--muted)'}">${w.out?'−'+money(w.out):'—'}</td>
+          <td style="padding:5px 8px;text-align:right;font-family:'DM Mono',monospace;font-size:10.5px;font-weight:600;color:${w.endCash<0?'var(--red)':low?'var(--amber)':'var(--ink)'}">${money(w.endCash)}</td>
+        </tr>`;
+      }).join('');
+      const dated = cc.events.filter(e => e.certainty !== 'estimated').slice(0, 8).map(e => `<div style="display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px">
+          <span style="min-width:0"><span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${slEsc(e.date.slice(5))}</span> ${slEsc(e.label)}${e.certainty==='expected'?' <span style="color:var(--muted);font-size:9px">expected</span>':''}</span>
+          <span style="font-family:'DM Mono',monospace;white-space:nowrap;color:${e.dir==='in'?'var(--green)':'var(--ink)'}">${e.dir==='in'?'+':'−'}${money(e.amount)}</span>
+        </div>`).join('');
+      calHtml = `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Cash calendar · next 90 days</h2></div>
+        <div style="border:1px solid var(--border);padding:16px">
+          ${cc.floorBreach ? `<div style="padding:10px 12px;border:1px solid var(--amber);margin-bottom:12px;font-size:11.5px;line-height:1.6">⚠ On today's commitments and run rate, cash dips to <b>${money(cc.floorBreach.endCash)}</b> the week of ${slEsc(cc.floorBreach.start)} — below your ${money(finWatchCfg().cashFloor)} floor.</div>` : ''}
+          <div class="tbl-wrap" style="overflow-x:auto"><table style="min-width:340px;width:100%;border-collapse:collapse">
+            <thead><tr style="border-bottom:1px solid var(--ink)">
+              ${['Week','In','Out','Cash'].map((h,i)=>`<th style="padding:5px 8px;text-align:${i?'right':'left'};font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)">${h}</th>`).join('')}
+            </tr></thead><tbody>${wkRows}</tbody></table></div>
+          ${dated ? `<div class="micro-label" style="margin:14px 0 4px">Dated items</div>${dated}` : ''}
+          <div style="font-size:9.5px;color:var(--muted);margin-top:10px;line-height:1.6">Rolls forward from ${money(cc.startCash)} actual cash. Includes committed obligations (PO deposits, invoice due dates), expected items (orders that will invoice), and estimates (recurring costs, DTC run rate) — the agent is told never to present an estimate as a commitment.</div>
+        </div>`;
+    }
+  } catch(e){}
+
   // ── Financial plan: run it, read it, roll it out ────────────────────────
   const job = STATE.finPlanJob, fp = STATE.finPlan;
   const running = job && job.status === 'running';
@@ -25186,17 +25231,144 @@ window.cmdRenderCfo = function(){
     + wf('COLLECT', 'AR Chase List',         'Open invoices oldest-first, with a ready-to-send chase email per overdue account — polite at 7 days, firm at 30.')
     + wf('PRICE',   'Price a Style',         'Back-solve retail and wholesale from a landed cost and target margins — with the honest floor beneath which the style loses money.')
     + wf('DECIDE',  'Can We Afford It',      'Name a spend. The agent answers from cash reality: what it does to operating, and what has to be true for it to pay back.')
+    + wf('TIMING',  'Cash Calendar', 'The next 90 days of money in and out, by week — what is committed, what is expected, and the tightest week with the levers that fix it.')
     + wf('PLAN',    'Build a Financial Plan', 'Pressure-test whether the data supports a real plan, what to plan toward, and the biggest lever — then run the full planner.')
     + wf('CASH',    'Burn & Runway',         'From the live bank feed: cash on hand, real monthly burn (transfers excluded), the runway estimate, and the spend category to challenge first.')
     + wf('REPORT',  'Monthly Money Summary', 'The founder-readable monthly summary — in, out, margins, AR, goal progress, and the three numbers that need a decision.')
     + `</div>`
     + `<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">Ask the CFO</h2></div>`
     + `<div class="ag-chat-suggest" style="display:flex;flex-wrap:wrap;gap:8px">` + (SUGGESTS.fin||[]).map(s => agChip('fin', s, 'ag-suggest')).join('') + `</div>`
+    + calHtml
     + planHtml
     + watchHtml;
   // A run queued before the app was closed keeps being watched.
   try { if (running) cfoPlanPoll(); } catch(e){}
 };
+
+// ══════════════════════════════════════════════════════════
+//  CASH CALENDAR — what money moves, and WHEN.
+//  Balances tell you where you stand; a calendar tells you what's coming.
+//  Every obligation and inflow already lives in VENIA OS but was scattered
+//  across POs, wholesale orders, invoices and the bank feed. This assembles
+//  them onto one timeline and rolls cash forward week by week.
+//
+//  Certainty is carried on every event and never flattened, because a CFO
+//  that presents a guess as a commitment is worse than no CFO:
+//    committed — a real dated obligation (PO deposit due, invoice due date)
+//    expected  — very likely but not yet fixed (order ships, invoice follows)
+//    estimated — inferred from history (recurring rent/payroll, DTC run rate)
+// ══════════════════════════════════════════════════════════
+// Group a payee across months. Bank descriptions carry moving parts — a
+// reference number, a month, a statement date — so "GUSTO PAYROLL AUG" and
+// "GUSTO PAYROLL JUL" must resolve to one payee or recurring costs are never
+// detected. Strip digits and month names, then key on the leading words.
+const FIN_MONTHS = /^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)$/;
+function finCashNorm(d){
+  const toks = String(d||'').toLowerCase()
+    .replace(/\d+/g,' ').replace(/[^a-z ]+/g,' ').replace(/\s+/g,' ').trim()
+    .split(' ').filter(t => t && t.length > 1 && !FIN_MONTHS.test(t));
+  return toks.slice(0, 3).join(' ');
+}
+function finCashCalendar(days){
+  const horizon = days || 90;
+  const out = { events: [], weeks: [], startCash: 0, floorBreach: null, horizon };
+  try {
+    const today = new Date(); today.setHours(0,0,0,0);
+    const end = new Date(today.getTime() + horizon*864e5);
+    const iso = (d) => d.toISOString().slice(0,10);
+    const push = (date, dir, amount, label, kind, certainty) => {
+      if (!date || !isFinite(amount) || Math.abs(amount) < 1) return;
+      const d = new Date(String(date).slice(0,10) + 'T00:00:00');
+      if (isNaN(d) || d < today || d > end) return;
+      out.events.push({ date: iso(d), dir, amount: Math.abs(amount), label: String(label||'').slice(0,60), kind, certainty });
+    };
+
+    // ── OUT: factory obligations with real dates on them ──────────────────
+    (STATE.pos||[]).filter(po => po && ['received','cancelled'].indexOf(po.status) < 0).forEach(po => {
+      const total = po.total || 0; if (!total) return;
+      const dep = Math.round(total * ((po.depositPct != null ? po.depositPct : 30) / 100));
+      const bal = Math.round(total - dep);
+      if (po.depositDue && !po.depositPaidAt) push(po.depositDue, 'out', dep, 'PO ' + (po.id||'') + ' deposit — ' + (po.vendor||'factory'), 'po', 'committed');
+      if (po.balanceDue && !po.balancePaidAt) push(po.balanceDue, 'out', bal, 'PO ' + (po.id||'') + ' balance — ' + (po.vendor||'factory'), 'po', 'committed');
+      // Balance usually falls due around ex-factory when no explicit date is set.
+      if (!po.balanceDue && po.exFactory && !po.balancePaidAt) push(po.exFactory, 'out', bal, 'PO ' + (po.id||'') + ' balance (at ex-factory) — ' + (po.vendor||'factory'), 'po', 'expected');
+    });
+
+    // ── IN: receivables with a due date, and orders that will invoice ─────
+    const orders = (STATE.slOrders || []).filter(o => o && o.status !== 'cancelled');
+    orders.forEach(o => {
+      const pay = o.payment;
+      if (pay && pay.invoiceId && ['paid','void','uncollectible'].indexOf(pay.status) < 0) {
+        const amt = pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0);
+        const due = pay.dueDate || (pay.at ? iso(new Date(new Date(pay.at).getTime() + 14*864e5)) : '');
+        // Already-overdue invoices land today: they are collectible now.
+        if (due && new Date(due + 'T00:00:00') < today) push(iso(today), 'in', amt, 'Overdue invoice #' + o.id + ' — ' + (o.account||''), 'ar', 'expected');
+        else push(due, 'in', amt, 'Invoice #' + o.id + ' due — ' + (o.account||''), 'ar', 'committed');
+      } else if (!pay || !pay.invoiceId) {
+        // Not invoiced yet: expect the invoice around delivery, paid on net-14.
+        if (o.deliveryDate) push(iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)), 'in', o.total||0,
+          'Order #' + o.id + ' — invoice after delivery — ' + (o.account||''), 'ws', 'expected');
+      }
+    });
+
+    // ── OUT: recurring costs the bank history actually shows ─────────────
+    // Two or more of the same payee in 90 days is treated as monthly at the
+    // average amount. Clearly ESTIMATED — never presented as an obligation.
+    try {
+      const since = today.getTime() - 95*864e5;
+      const groups = {};
+      (STATE.finTxns||[]).forEach(t => {
+        if (!t || t.status === 'void' || !t.date) return;
+        if ((t.amount||0) >= 0) return;
+        const cat = finTxnCat(t); if (cat === 'transfer') return;
+        if (new Date(t.date + 'T00:00:00').getTime() < since) return;
+        const k = finCashNorm(t.desc); if (!k) return;
+        (groups[k] = groups[k] || { hits: [], cat, desc: t.desc }).hits.push(t);
+      });
+      Object.values(groups).forEach(g => {
+        if (g.hits.length < 2) return;
+        const avg = g.hits.reduce((s,t) => s + Math.abs(t.amount||0), 0) / g.hits.length;
+        if (avg < 40) return;                                  // ignore noise
+        const last = g.hits.map(t => t.date).sort().pop();
+        let next = new Date(last + 'T00:00:00');
+        for (let i = 0; i < 4; i++) {
+          next = new Date(next.getTime() + 30*864e5);
+          if (next > end) break;
+          push(iso(next), 'out', avg, (g.desc||'recurring').slice(0,34) + ' (recurring)', 'recurring', 'estimated');
+        }
+      });
+    } catch(e){}
+
+    // ── IN: DTC keeps arriving; project the trailing run rate ────────────
+    try {
+      const pulse = STATE.bizPulse || {};
+      const weekly = (pulse.r30 || 0) / 4.3;
+      if (weekly >= 25) {
+        for (let w = 1; w * 7 <= horizon; w++) {
+          push(iso(new Date(today.getTime() + w*7*864e5)), 'in', weekly, 'DTC sales (run rate)', 'dtc', 'estimated');
+        }
+      }
+    } catch(e){}
+
+    // ── Roll cash forward, week by week, from the real bank balance ──────
+    let cash = 0;
+    try { const bk = finBankData(); cash = bk && bk.connected ? bk.bal : 0; } catch(e){}
+    out.startCash = cash;
+    out.events.sort((a,b) => a.date.localeCompare(b.date));
+    let floor = 0; try { floor = finWatchCfg().cashFloor || 0; } catch(e){}
+    for (let w = 0; w * 7 < horizon; w++) {
+      const ws = new Date(today.getTime() + w*7*864e5), we = new Date(ws.getTime() + 7*864e5);
+      const inWeek = out.events.filter(e => { const d = new Date(e.date + 'T00:00:00'); return d >= ws && d < we; });
+      const cin = inWeek.filter(e => e.dir === 'in').reduce((s,e) => s + e.amount, 0);
+      const cout = inWeek.filter(e => e.dir === 'out').reduce((s,e) => s + e.amount, 0);
+      cash += cin - cout;
+      const week = { start: iso(ws), in: cin, out: cout, net: cin - cout, endCash: cash, events: inWeek };
+      out.weeks.push(week);
+      if (out.floorBreach == null && floor > 0 && cash < floor) out.floorBreach = week;
+    }
+  } catch(e){}
+  return out;
+}
 
 // ══════════════════════════════════════════════════════════
 //  CFO PLANNER (client half) — queue the multi-pass planning run, watch for
