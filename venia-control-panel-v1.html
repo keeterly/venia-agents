@@ -1748,7 +1748,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '329';
+  const BUILD = '330';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -25554,10 +25554,37 @@ function veniaFinanceContext(){
           + ' | ' + String(t.desc||'').slice(0,70) + ' | ' + (finTxnCat(t) ? finCatLabel(finTxnCat(t)) : 'UNCATEGORIZED');
         const un = live.filter(t => !finTxnCat(t));
         const filed = live.filter(t => finTxnCat(t)).slice(0, 30);
-        if (un.length) parts.push('UNCATEGORIZED bank transactions (' + un.length + ' — file with set_txn_category):\n'
-          + un.slice(0, 40).map(row).join('\n') + (un.length > 40 ? '\n…+' + (un.length-40) + ' more; ask the founder to run the categorize action again for the rest' : ''));
+        // Uncategorized rows arrive in RUNS — the same subscription every month,
+        // the same contractor every fortnight. Listing 30 of them as 30 line
+        // items burned context on repetition and invited the agent to file
+        // them one at a time. Grouping by merchant shows the same backlog as a
+        // handful of standing patterns, which is how it should be fixed:
+        // set_txn_category already accepts a description "match".
+        if (un.length) {
+          const norm = (d) => String(d||'').toLowerCase()
+            .replace(/\b[0-9]{3,}\b/g, '')        // trailing invoice / ref numbers
+            .replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim()
+            .split(' ').slice(0, 3).join(' ');   // the merchant, not the memo
+          const groups = {};
+          un.forEach(t => { const k = norm(t.desc) || '(no description)'; (groups[k] = groups[k] || []).push(t); });
+          const ordered = Object.entries(groups).sort((a,b) =>
+            Math.abs(b[1].reduce((x,t)=>x+(t.amount||0),0)) - Math.abs(a[1].reduce((x,t)=>x+(t.amount||0),0)));
+          const lines = ordered.slice(0, 24).map(([k, ts]) => {
+            const tot = ts.reduce((x,t)=>x+(t.amount||0),0);
+            if (ts.length === 1) return row(ts[0]);
+            return '• ' + ts.length + '× "' + String(ts[0].desc||'').slice(0,50) + '" — ' + money(tot) + ' total, '
+              + (ts[ts.length-1].date||'') + ' to ' + (ts[0].date||'')
+              + ' | ids: ' + ts.slice(0, 8).map(t => t.id).join(' ') + (ts.length > 8 ? ' …+' + (ts.length-8) : '');
+          });
+          const repeats = ordered.filter(([,ts]) => ts.length > 1).length;
+          parts.push('UNCATEGORIZED bank transactions (' + un.length + ' rows in ' + ordered.length + ' merchant pattern'
+            + (ordered.length===1?'':'s') + ' — file with set_txn_category):\n' + lines.join('\n')
+            + (ordered.length > 24 ? '\n…+' + (ordered.length-24) + ' more patterns' : '')
+            + (repeats ? '\nA repeating merchant is one rule, not one decision per row: use "match" with the description to file the whole run in a single item.' : ''));
+        }
         if (filed.length) parts.push('RECENT FILED transactions (newest first — re-file any of these with set_txn_category if the category is wrong):\n'
           + filed.map(row).join('\n') + (live.length > filed.length + un.length ? '\n…older rows exist; ask if you need them' : ''));
+        parts.push('RUNWAY above is measured from bank flow ALONE. It does not know about committed PO obligations or dated cash-calendar events, so a positive runway and a cash-calendar dip can both be true — read the calendar before calling the position safe.');
         parts.push('Every transaction above carries its real id. Use those ids in set_txn_category — never invent one. If you want to file something you can see here, you already have what you need; do not ask the founder to paste ids.');
         // What Money Watch is flagging right now — so a chat answer and the
     // morning push never tell the founders different stories.

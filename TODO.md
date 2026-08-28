@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 329._
+_Last reviewed at Build 330._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -119,6 +119,12 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+
+**Contracts are tested, not assumed.** One suite asserts that every specced
+agent action is dispatched and has a runner, every undo an action card offers
+exists, every `fin.*` key a scheduled function reads is one the app publishes,
+and every bank action the client calls is handled server-side. Each of those
+failures looks like nothing happening, which is also what success looks like.
 
 **The autonomous chain is verified live.** A signed-in device publishes the
 finance blob with the daily digest; `venia_daily_digest.items.fin` carried all
