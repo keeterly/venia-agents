@@ -59,7 +59,9 @@ export default async (req) => {
 
   if (action === 'ping') {
     const gate = !!(process.env.VENIA_GATE_HASH || process.env.STRIPE_GATE_HASH);
-    return json({ configured: !!key, pk_configured: !!pk, gate_configured: gate, build: '2026-08-27a' }, 200, cors);
+    // Build marker forces a fresh function bundle so env-var changes are
+    // captured (same pattern as the Shopify proxy).
+    return json({ configured: !!key, pk_configured: !!pk, gate_configured: gate, build: '2026-08-28a' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
 
