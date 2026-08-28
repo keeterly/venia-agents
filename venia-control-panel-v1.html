@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '317';
+  const BUILD = '318';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -24884,16 +24884,36 @@ function cmdMoneyData() {
   });
   arOpen.sort((a,b) => b.days - a.days);
   // DTC COGS: real landed cost × units actually sold (YTD bucket).
+  //
+  // Styles are GROUPED by the name Shopify sees before matching. VENIA's own
+  // rule is that two fabrications of one silhouette are separate styles that
+  // KEEP THE SAME NAME (silk and viscose AVELINE BLOUSE), so matching each of
+  // them against the same sales aggregate counted those units — and their
+  // cost — once per fabrication. A silhouette in three fabrics tripled its
+  // COGS and showed three rows each claiming every unit sold.
+  // Shopify reports one product title, so it cannot say which fabrication
+  // sold; the honest treatment is to count the units ONCE against the average
+  // landed cost of the matching styles, and tell the CFO the split is
+  // unknown rather than implying precision.
   const map = (STATE.styleSales && STATE.styleSales.map) || {};
-  let dtcCogsYtd = 0; const rows = [];
+  const byName = {};
   (STATE.styles || []).forEach(s => {
     const k = typeof plmSalesNorm === 'function' ? plmSalesNorm(s.name) : '';
-    const m = k && map[k];
-    if (!m || !m.u) return;
-    const lc = (typeof landedCost === 'function' ? landedCost(s) : 0) || 0;
+    if (!k) return;
+    (byName[k] = byName[k] || []).push(s);
+  });
+  let dtcCogsYtd = 0, dtcAmbiguous = 0; const rows = [];
+  Object.keys(byName).forEach(k => {
+    const m = map[k]; if (!m || !m.u) return;
+    const group = byName[k];
+    const costs = group.map(s => (typeof landedCost === 'function' ? landedCost(s) : 0) || 0).filter(c => c > 0);
+    const lc = costs.length ? costs.reduce((a,b) => a+b, 0) / costs.length : 0;
+    if (group.length > 1) dtcAmbiguous++;
     const uY = m.uY || 0, rY = m.rY || 0;
     dtcCogsYtd += lc * uY;
-    rows.push({ name: s.name, styleId: s.styleId, u: m.u, rev: m.r, uY, rY, cogs: lc * m.u, gp: m.r - lc * m.u });
+    rows.push({ name: group[0].name, styleId: group.map(s => s.styleId).filter(Boolean).join(' / '),
+                u: m.u, rev: m.r, uY, rY, cogs: lc * m.u, gp: m.r - lc * m.u,
+                fabrications: group.length });
   });
   rows.sort((a,b) => b.gp - a.gp);
   // Wholesale COGS from order line items (styles carry their landed cost).
@@ -24923,7 +24943,7 @@ function cmdMoneyData() {
       }
     });
   } catch(e){}
-  return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend,
+  return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous,
            revYtd, cogsYtd, operating: revYtd - cogsYtd - spend, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
 }
@@ -25020,9 +25040,11 @@ function veniaFinanceContext(){
       + ' | retail $' + x.r + (x.rm!=null ? ' ('+x.rm+'%)' : '')
       + ' | wholesale $' + x.w + (x.wm!=null ? ' ('+x.wm+'%)' : '')
     ).join('\n') + (lad.length>25 ? '\n…+' + (lad.length-25) + ' more' : ''));
-    if (d.rows.length) parts.push('Style P&L from live Shopify sales (units, revenue, gross profit — best first):\n' + d.rows.slice(0,10).map(r =>
+    if (d.rows.length) parts.push('Style P&L from live Shopify sales — ALL-TIME units, revenue and gross profit (best first; the YTD figures are in the P&L line above):\n' + d.rows.slice(0,10).map(r =>
       '• ' + [r.styleId, r.name].filter(Boolean).join(' ') + ' — ' + r.u + 'u, ' + money(r.rev) + ' rev, ' + money(r.gp) + ' GP'
-    ).join('\n') + (d.rows.length>10 ? '\n…+' + (d.rows.length-10) + ' more' : ''));
+      + (r.fabrications > 1 ? ' [' + r.fabrications + ' fabrications share this name — Shopify cannot say which sold, so cost is their average]' : '')
+    ).join('\n') + (d.rows.length>10 ? '\n…+' + (d.rows.length-10) + ' more' : '')
+      + (d.dtcAmbiguous ? '\n• ' + d.dtcAmbiguous + ' silhouette' + (d.dtcAmbiguous>1?'s have':' has') + ' multiple fabrications sharing one name; per-fabrication profit cannot be split from Shopify data — say so rather than guessing.' : ''));
     try {
       const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
       if (bdg) {
