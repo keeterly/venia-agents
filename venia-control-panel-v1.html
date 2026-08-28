@@ -1738,7 +1738,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '303';
+  const BUILD = '304';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -24930,20 +24930,23 @@ function veniaFinanceContext(){
         const rw = bk.runwayMo != null ? (bk.runwayMo >= 24 ? '24+ months' : bk.runwayMo.toFixed(1) + ' months')
                  : (bk.monthlyNet <= 0 ? 'not burning — net positive over the last 90d' : 'n/a');
         parts.push('BANK (live read-only feed; last sync ' + (bk.lastSync ? String(bk.lastSync).slice(0,10) : 'never') + '):\n'
-          + '• Accounts: ' + bk.accounts.map(a => {
+          + '• Cash accounts: ' + (bk.cashAccts.length ? bk.cashAccts.map(a => {
               const b = a.balance || {};
-              const v = b.available != null ? b.available : b.current;
-              return (a.institution || a.name) + ' …' + (a.last4||'') + ' ' + (v != null ? money(v) : 'balance pending') + (b.as_of ? ' (as of ' + b.as_of + ')' : '');
-            }).join('; ')
-          + '\n• Cash on hand ' + money(bk.bal)
+              return (a.institution || a.name) + ' …' + (a.last4||'') + ' ' + money(bk.amtOf(a)) + (b.as_of ? ' (as of ' + b.as_of + ')' : '');
+            }).join('; ') : 'none linked')
+          + (bk.debtAccts.length ? '\n• Owed (cards/loans — money OWED, never cash): ' + bk.debtAccts.map(a =>
+              (a.institution || a.name) + ' …' + (a.last4||'') + ' ' + (a.subcategory||'') + ' ' + money(bk.amtOf(a))
+            ).join('; ') : '')
+          + (bk.mirrors ? '\n• ' + bk.mirrors + ' extra card account' + (bk.mirrors>1?'s':'') + ' mirror the same credit line and are counted once.' : '')
+          + '\n• Cash on hand ' + money(bk.bal) + ' | owed ' + money(bk.debt) + ' | net position ' + money(bk.net)
           + ' | last 30d: in ' + money(bk.in30) + ', out ' + money(bk.out30)
           + ' | 90d avg monthly ' + (bk.monthlyNet > 0 ? 'net burn ' + money(bk.monthlyNet) : 'net surplus ' + money(-bk.monthlyNet))
           + ' | runway est ' + rw + ' (transfers + voided excluded)'
           + (Object.keys(bk.cat30).length ? '\n• Spend last 30d by category: ' + Object.entries(bk.cat30).sort((a,b) => b[1]-a[1]).slice(0,8).map(([c,v]) => c + ' ' + money(v)).join(', ') : ''));
-        const un = (STATE.finTxns||[]).filter(t => !t.category && t.status !== 'void').slice(0, 15);
+        const un = (STATE.finTxns||[]).filter(t => !finTxnCat(t) && t.status !== 'void').slice(0, 15);
         if (un.length) parts.push('Uncategorized bank transactions (' + bk.uncat + ' total — categorize with set_txn_category):\n'
           + un.map(t => '• ' + t.id + ' | ' + (t.date||'') + ' | ' + money(t.amount||0) + ' | ' + String(t.desc||'').slice(0,80)).join('\n'));
-        parts.push('The bank feed covers roughly the last 180 days on the linked accounts only. Burn/runway above use categorized reality — treat heavy uncategorized volume as a caveat.');
+        parts.push('Rules for the bank figures: "cash on hand" is CASH accounts only; card and loan balances are money OWED and must never be added to or netted against cash unless the user asks for net position. Runway = cash ÷ burn. The feed covers roughly the last 180 days on linked accounts only, and burn/runway reflect categorized reality — treat heavy uncategorized volume as a caveat.');
       } else {
         parts.push('BANK: not connected (Money → Bank). Rent, payroll/contractors, software, taxes, and bank balances are invisible until it is — total burn and runway need it; never guess those numbers.');
       }
@@ -25038,7 +25041,9 @@ function bankStripeJs(pk){
 // stays uncategorized for the CFO agent (set_txn_category) or a manual pick.
 function bankAutoCategory(desc, amount){
   const d = String(desc||'').toLowerCase();
-  if (/transfer|xfer/.test(d)) return 'transfer';
+  // Paying a card from checking, or moving between own accounts, is NOT spend —
+  // the purchases on that card were already counted. Mark as transfer.
+  if (/transfer|xfer|epay|autopay|online payment|payment thank you|card payment|chase credit crd/.test(d)) return 'transfer';
   if (/payroll|gusto|adp\b/.test(d)) return 'payroll';
   if (/\brent\b|wework/.test(d)) return 'rent';
   if (/usps|fedex|\bups\b|\bdhl\b|shippo|shipstation/.test(d)) return 'shipping';
@@ -25048,32 +25053,75 @@ function bankAutoCategory(desc, amount){
   if (/shopify|stripe/.test(d) && (amount||0) > 0) return 'income';
   return '';
 }
-// Cash math from the synced feed: balances, 90d in/out (transfers and voided
-// excluded), avg monthly net burn, runway estimate.
+// Cash math from the synced feed. CRITICAL distinction: a checking balance is
+// money you HAVE; a credit-card or loan balance is money you OWE. Summing the
+// two reports a wildly wrong "cash" figure, so they are kept apart here and
+// everywhere downstream (tiles, CFO snapshot, runway).
+// Banks also expose every card on ONE credit line as its own account, each
+// carrying that line's shared balance — counting all of them multiplies a debt
+// that exists once, so mirrors are detected and counted a single time.
+// A transaction's effective category: what was filed on it, else what the
+// rules can infer now. Lets a rule added later (e.g. card payments are
+// transfers, not spend) fix rows that synced before it existed — no re-sync.
+function finTxnCat(t){
+  if (t && t.category) return t.category;
+  try { return bankAutoCategory(t && t.desc, t && t.amount) || ''; } catch(e){ return ''; }
+}
 function finBankData(){
   const fb = STATE.finBank || {}; const txns = STATE.finTxns || [];
-  const accounts = fb.accounts || [];
-  const bal = accounts.reduce((s,a) => {
+  const all = (fb.accounts || []).filter(a => a && a.status !== 'disconnected');
+  const ignored = fb.ignored || [];
+  const amtOf = (a) => {
     const b = a.balance || {};
-    return s + ((b.available != null ? b.available : b.current) || 0);
-  }, 0);
+    if ((a.category || '') === 'cash') return (b.available != null ? b.available : b.current) || 0;
+    // Credit / loan: Stripe reports the balance owed (negative on `current`, or
+    // a positive `used`). Normalize to a POSITIVE debt figure.
+    if (b.used != null) return Math.abs(b.used);
+    return Math.abs(b.current || 0);
+  };
+  // Mirror detection: same institution + same subcategory + identical balance.
+  const seen = {};
+  all.forEach(a => {
+    a._mirror = false;
+    if ((a.category || '') !== 'credit') return;
+    const b = a.balance || {};
+    const amt = b.current != null ? b.current : (b.used != null ? b.used : null);
+    if (amt == null) return;
+    const k = (a.institution || '') + '|' + (a.subcategory || '') + '|' + amt;
+    if (seen[k]) a._mirror = true; else seen[k] = a.id;
+  });
+  const isOn = (a) => ignored.indexOf(a.id) < 0 && !a._mirror;
+  const active = all.filter(isOn);
+  const cashAccts  = active.filter(a => (a.category || '') === 'cash');
+  const debtAccts  = active.filter(a => (a.category || '') === 'credit');
+  const otherAccts = active.filter(a => ['cash','credit'].indexOf(a.category || '') < 0);
+  const bal  = cashAccts.reduce((s,a) => s + amtOf(a), 0);
+  const debt = debtAccts.reduce((s,a) => s + amtOf(a), 0);
+  const mirrors = all.filter(a => a._mirror).length;
+  // Only transactions on accounts that count feed burn.
+  const onIds = {}; active.forEach(a => { onIds[a.id] = 1; });
+  const live = txns.filter(t => !t.acct || onIds[t.acct]);
   const now = Date.now(), d90 = now - 90*864e5, d30 = now - 30*864e5;
   let in90=0, out90=0, in30=0, out30=0; const cat30 = {};
-  txns.forEach(t => {
-    if (t.status === 'void' || t.category === 'transfer' || !t.date) return;
+  live.forEach(t => {
+    const cat = finTxnCat(t);
+    if (t.status === 'void' || cat === 'transfer' || !t.date) return;
     const ts = new Date(t.date + 'T00:00:00').getTime();
     if (!(ts >= d90)) return;
     const amt = t.amount || 0;
     if (amt >= 0) { in90 += amt; if (ts >= d30) in30 += amt; }
     else {
       out90 -= amt;
-      if (ts >= d30) { out30 -= amt; const c = t.category || 'uncategorized'; cat30[c] = (cat30[c]||0) - amt; }
+      if (ts >= d30) { out30 -= amt; const c = cat || 'uncategorized'; cat30[c] = (cat30[c]||0) - amt; }
     }
   });
   const monthlyNet = (out90 - in90) / 3;                     // positive = burning
+  // Runway is cash ÷ burn — never net of debt, which would flatter the number.
   const runwayMo = (monthlyNet > 0 && bal > 0) ? bal / monthlyNet : null;
-  const uncat = txns.filter(t => !t.category && t.status !== 'void').length;
-  return { connected: accounts.length > 0, accounts, bal, in90, out90, in30, out30, cat30, monthlyNet, runwayMo, uncat, lastSync: fb.lastSync || '' };
+  const uncat = live.filter(t => !finTxnCat(t) && t.status !== 'void').length;
+  return { connected: all.length > 0, accounts: all, active, cashAccts, debtAccts, otherAccts,
+           amtOf, ignored, mirrors, bal, debt, net: bal - debt,
+           in90, out90, in30, out30, cat30, monthlyNet, runwayMo, uncat, lastSync: fb.lastSync || '' };
 }
 
 window.bankConnect = async function(){
@@ -25140,6 +25188,8 @@ window.bankSyncTxns = async function(silent){
       cursor = d.next;
     }
   }
+  // Backfill categories on rows that synced before a rule existed.
+  STATE.finTxns.forEach(t => { if (!t.category) { const c = bankAutoCategory(t.desc, t.amount); if (c) t.category = c; } });
   STATE.finTxns.sort((x,y) => String(y.date||'').localeCompare(String(x.date||'')));
   if (STATE.finTxns.length > 600) STATE.finTxns = STATE.finTxns.slice(0, 600);
   if (!STATE.finBank) STATE.finBank = {};
@@ -25153,6 +25203,17 @@ window.bankSetCategory = function(id, cat){
   if (!t) return;
   t.category = FIN_CATEGORIES.indexOf(cat) >= 0 ? cat : '';
   save();
+};
+// Include / exclude one account from the totals without severing the Stripe
+// link — for a card that mirrors another, or a personal account that should
+// not colour the business numbers.
+window.bankToggleIgnore = function(id){
+  const fb = STATE.finBank || (STATE.finBank = {});
+  if (!fb.ignored) fb.ignored = [];
+  const i = fb.ignored.indexOf(id);
+  if (i >= 0) fb.ignored.splice(i, 1); else fb.ignored.push(id);
+  save();
+  try { cmdRenderBank(); } catch(e){}
 };
 window.bankDisconnect = async function(id){
   const fb = STATE.finBank || {};
@@ -25193,20 +25254,36 @@ window.cmdRenderBank = function(){
     return;
   }
   const asOf = bk.accounts.map(a => a.balance && a.balance.as_of).filter(Boolean).sort().pop() || '';
+  const SUBLABEL = { checking:'checking', savings:'savings', credit_card:'credit card', line_of_credit:'line of credit', mortgage:'mortgage', other:'' };
   const stats = `<div class="ag-stats">
-    <div class="ag-stat"><div class="ag-stat-l">Cash on hand</div><div class="ag-stat-v">${money(bk.bal)}</div><div class="ag-stat-s">${bk.accounts.length} account${bk.accounts.length>1?'s':''}${asOf ? ' · as of ' + asOf : ''}</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Cash on hand</div><div class="ag-stat-v">${money(bk.bal)}</div><div class="ag-stat-s">${bk.cashAccts.length} cash account${bk.cashAccts.length===1?'':'s'}${asOf ? ' · as of ' + asOf : ''}</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Owed (cards + loans)</div><div class="ag-stat-v"${bk.debt ? ' style="color:var(--amber)"' : ''}>${money(bk.debt)}</div><div class="ag-stat-s">net position ${money(bk.net)}</div></div>
     <div class="ag-stat"><div class="ag-stat-l">${bk.monthlyNet > 0 ? 'Monthly burn' : 'Monthly surplus'}</div><div class="ag-stat-v" style="color:${bk.monthlyNet > 0 ? 'var(--amber)' : 'var(--green)'}">${money(Math.abs(bk.monthlyNet))}</div><div class="ag-stat-s">90d avg, transfers excluded</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Runway</div><div class="ag-stat-v">${bk.runwayMo != null ? (bk.runwayMo >= 24 ? '24+ mo' : bk.runwayMo.toFixed(1) + ' mo') : '—'}</div><div class="ag-stat-s">${bk.runwayMo != null ? 'cash ÷ net burn' : 'not burning'}</div></div>
-    <div class="ag-stat"><div class="ag-stat-l">Uncategorized</div><div class="ag-stat-v"${bk.uncat ? ' style="color:var(--amber)"' : ''}>${bk.uncat}</div><div class="ag-stat-s">${bk.uncat ? 'ask the CFO to sort them' : 'all sorted'}</div></div>
   </div>`;
-  const acctRows = bk.accounts.map(a => `
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);font-size:11.5px">
-      <span>${slEsc(a.institution || a.name)} <span style="color:var(--muted)">…${slEsc(a.last4||'')}${a.status !== 'active' ? ' · ' + slEsc(a.status) : ''}${(a.subscriptions||[]).indexOf('transactions') < 0 ? ' · no txn subscription' : ''}</span></span>
-      <span style="display:flex;align-items:center;gap:10px;white-space:nowrap">
-        <span style="font-family:'DM Mono',monospace">${a.balance && (a.balance.available != null || a.balance.current != null) ? money(a.balance.available != null ? a.balance.available : a.balance.current) : '—'}</span>
-        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankDisconnect('${slEsc(a.id)}')">✕</button>
+  const row = (a) => {
+    const off = bk.ignored.indexOf(a.id) >= 0 || a._mirror;
+    const isCash = (a.category||'') === 'cash';
+    const v = bk.amtOf(a);
+    const sub = SUBLABEL[a.subcategory] != null ? SUBLABEL[a.subcategory] : (a.subcategory||'');
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);font-size:11.5px${off?';opacity:.45':''}">
+      <span style="min-width:0">${slEsc(a.institution || a.name)} <span style="color:var(--muted)">…${slEsc(a.last4||'')}${sub ? ' · ' + slEsc(sub) : ''}${a.status !== 'active' ? ' · ' + slEsc(a.status) : ''}${a._mirror ? ' · mirrors another card on this line' : ''}${off && !a._mirror ? ' · excluded' : ''}</span></span>
+      <span style="display:flex;align-items:center;gap:8px;white-space:nowrap">
+        <span style="font-family:'DM Mono',monospace">${a.balance ? (isCash ? money(v) : '−' + money(v)) : '—'}</span>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" title="${off ? 'Include in totals' : 'Exclude from totals'}" onclick="bankToggleIgnore('${slEsc(a.id)}')">${off ? '+' : '−'}</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" title="Disconnect" onclick="bankDisconnect('${slEsc(a.id)}')">✕</button>
       </span>
-    </div>`).join('');
+    </div>`;
+  };
+  const group = (title, list, note) => list.length
+    ? `<div class="micro-label" style="margin:14px 0 2px">${title}</div>${note ? `<div style="font-size:10px;color:var(--muted);margin-bottom:4px">${note}</div>` : ''}${list.map(row).join('')}`
+    : '';
+  const mirrorList = bk.accounts.filter(a => a._mirror);
+  const ignoredList = bk.accounts.filter(a => bk.ignored.indexOf(a.id) >= 0 && !a._mirror);
+  const acctRows = group('Cash', bk.cashAccts)
+    + group('Credit &amp; loans', bk.debtAccts, 'Balances owed — never counted as cash.')
+    + group('Other', bk.otherAccts)
+    + group('Not counted', mirrorList.concat(ignoredList), mirrorList.length ? 'Extra cards reporting the same credit line’s balance — counted once above.' : '');
   const catOpts = (sel) => '<option value=""' + (!sel ? ' selected' : '') + '>—</option>'
     + FIN_CATEGORIES.map(c => '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' + c + '</option>').join('');
   const txRows = (STATE.finTxns||[]).slice(0, 30).map(t => `

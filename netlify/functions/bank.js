@@ -105,7 +105,7 @@ export default async (req) => {
     // Build marker forces a fresh function bundle so env-var changes are
     // captured (same pattern as the Shopify proxy).
     return json({ configured: !!key, sk_format_ok: skFormatOk, key_ok, key_error,
-                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28g' }, 200, cors);
+                  pk_configured: !!pk, pk_format_ok: pkFormatOk, gate_configured: gate, build: '2026-08-28h' }, 200, cors);
   }
   if (!key) return json({ error: 'Stripe not configured — set STRIPE_SECRET_KEY in Netlify environment variables.' }, 400, cors);
   if (!skFormatOk) return json({ error: 'STRIPE_SECRET_KEY contains an invalid character (a look-alike from typing it by hand?). Re-paste it in Netlify — copy/paste, never type.' }, 400, cors);
@@ -144,12 +144,19 @@ export default async (req) => {
     institution: a.institution_name || '',
     last4: a.last4 || '',
     status: a.status || '',
+    // category: cash | credit | investment | other. Only 'cash' is money you
+    // HAVE — a credit card or loan balance is money you OWE, and summing the
+    // two together is how a dashboard reports catastrophic fake numbers.
+    category: a.category || 'other',
+    subcategory: a.subcategory || 'other',
     subscriptions: a.subscriptions || [],
     // Balance arrives in cents keyed by currency; surface USD in dollars.
     balance: a.balance ? {
       as_of: a.balance.as_of ? new Date(a.balance.as_of * 1000).toISOString().slice(0, 10) : '',
       current: a.balance.current && a.balance.current.usd != null ? a.balance.current.usd / 100 : null,
       available: a.balance.cash && a.balance.cash.available && a.balance.cash.available.usd != null ? a.balance.cash.available.usd / 100 : null,
+      used: a.balance.credit && a.balance.credit.used && a.balance.credit.used.usd != null ? a.balance.credit.used.usd / 100 : null,
+      type: a.balance.type || '',
     } : null,
     txn_refresh: a.transaction_refresh ? { status: a.transaction_refresh.status || '' } : null,
   });
