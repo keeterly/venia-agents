@@ -1748,7 +1748,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '330';
+  const BUILD = '331';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20284,11 +20284,20 @@ function veniaOpsContext(){
     const ords = (S.slOrders || []).filter(o => o.status !== 'cancelled'
       && (o.status !== 'delivered' || (o.payment && o.payment.invoiceId && ['paid','void','uncollectible'].indexOf(o.payment.status) < 0)));
     if (ords.length) parts.push('Wholesale orders (open / unpaid):\n' + ords.slice(0,12).map(o => {
+      // Judging payment by invoiceId alone reported an order settled by wire —
+      // how most wholesale here actually pays, and what record_payment writes —
+      // as "not invoiced" after it had been paid in full. An agent reading
+      // that chases money already received.
       const p = o.payment || {};
-      const pay = p.invoiceId
-        ? (['paid','void','uncollectible'].indexOf(p.status) >= 0 ? p.status
-           : 'invoiced' + (p.dueDate ? ', due ' + p.dueDate : '') + (p.amountRemaining != null ? ', $' + Math.round(p.amountRemaining).toLocaleString() + ' outstanding' : ''))
-        : 'not invoiced';
+      const how = p.invoiceId ? 'invoiced' : (p.method ? 'recorded (' + p.method + ')' : '');
+      const pay = p.status
+        ? (['paid','void','uncollectible'].indexOf(p.status) >= 0
+           ? p.status + (p.paidAt ? ' ' + String(p.paidAt).slice(0,10) : '')
+           : [how, p.dueDate ? 'due ' + p.dueDate : '',
+              p.amountPaid ? '$' + Math.round(p.amountPaid).toLocaleString() + ' received' : '',
+              p.amountRemaining != null ? '$' + Math.round(p.amountRemaining).toLocaleString() + ' outstanding' : '',
+             ].filter(Boolean).join(', '))
+        : 'nothing recorded against it';
       return '• #' + o.id + ' ' + (o.account||'?') + ' | $' + Math.round(o.total||0).toLocaleString()
         + ' | ' + (o.status||'') + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
     }).join('\n') + more(ords, 12));
@@ -25879,9 +25888,10 @@ function veniaFinOpsContext(){
             const pay = p.status
               ? (['paid','void','uncollectible'].indexOf(p.status) >= 0
                  ? p.status + (p.paidAt ? ' ' + String(p.paidAt).slice(0,10) : '')
-                 : how + (p.dueDate ? ' due ' + p.dueDate : '')
-                   + (p.amountPaid ? ', ' + money(p.amountPaid) + ' received' : '')
-                   + (p.amountRemaining != null ? ', ' + money(p.amountRemaining) + ' outstanding' : ''))
+                 : [how, p.dueDate ? 'due ' + p.dueDate : '',
+                    p.amountPaid ? money(p.amountPaid) + ' received' : '',
+                    p.amountRemaining != null ? money(p.amountRemaining) + ' outstanding' : '',
+                   ].filter(Boolean).join(', '))
               : 'NOT INVOICED — nothing recorded against it';
             return '• #' + o.id + ' ' + (o.account||'?') + ' — ' + money(o.total||0) + ' | ' + (o.status||'')
               + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
