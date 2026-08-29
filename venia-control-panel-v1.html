@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '342';
+  const BUILD = '343';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17279,25 +17279,70 @@ function plmContext() {
   const s = window.STATE;
   if (!s) return 'No PLM data loaded.';
   const active = (s.styles||[]).filter(st => st.status !== 'archived');
-  // Season-scoped (Backbone E1): the two newest seasons get full per-style
-  // lines (now including the sample stage); earlier seasons collapse to counts
-  // so the digest can't grow without bound as the archive deepens. Hard cap of
-  // 60 detail lines with an honest truncation note.
+  // WHICH SEASONS GET FULL PER-STYLE DETAIL.
+  //
+  // This used to keep "the two newest seasons by rank", which is backwards for
+  // how a line actually works: one placeholder style dropped into a future
+  // season outranks the entire season being sold. Keeter's workspace held SS27
+  // (57 styles, 54 of them priced), FW27 (1) and SS28 (1) — so the agent was
+  // handed two stub styles, told the real line was "SS27 57 styles, details on
+  // request", and then asked the founder to go and fetch wholesale prices it
+  // was already holding. It could not answer "how many units to reach $25k"
+  // because it had been shown one price in the whole season.
+  //
+  // Seasons are now filled against a LINE BUDGET, in this order: whatever the
+  // founder is filtered to, then newest first. The budget does the truncating,
+  // so a season is dropped only when there genuinely is not room — and the
+  // season being worked on is always in the room.
   const seasonsRanked = [...new Set(active.map(st => String(st.season||'').trim()).filter(Boolean))]
     .sort((a,b) => rpSeasonRank(b) - rpSeasonRank(a));
-  const focusSeasons = new Set(seasonsRanked.slice(0, 2));
-  const inFocus = active.filter(st => { const sn = String(st.season||'').trim(); return !sn || focusSeasons.has(sn); });
-  const focusIds = new Set(inFocus.map(st => st.id));
-  const older = active.filter(st => !focusIds.has(st.id));
+  const bySeason = {};
+  active.forEach(st => { const k = String(st.season||'').trim(); (bySeason[k] = bySeason[k] || []).push(st); });
+  const pinned = String(s.seasonFilter||'').trim();
+  const order = [...(pinned && bySeason[pinned] ? [pinned] : []), ...seasonsRanked.filter(sn => sn !== pinned)];
+  const PLM_LINE_BUDGET = 140;
   const stLine = (st) => `${st.styleId} — ${st.name} (${st.season||'no season'}, ${st.status}${st.sample ? ', sample ' + st.sample : ''}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'})`;
-  let styleList = inFocus.slice(0, 60).map(stLine).join('\n');
-  if (inFocus.length > 60) styleList += `\n…+${inFocus.length - 60} more current-season styles (ask the user which to look at)`;
-  if (older.length) {
-    const byS = {};
-    older.forEach(st => { const k = String(st.season||'earlier').trim(); byS[k] = (byS[k]||0) + 1; });
-    styleList += (styleList ? '\n' : '') + 'Earlier seasons (details on request): '
-      + Object.entries(byS).map(([k,n]) => k + ' ' + n + ' style' + (n>1?'s':'')).join(', ');
+  // Styles with no season at all are always listed — there are few, and an
+  // unassigned style is the one most likely to need a decision.
+  const noSeason = bySeason[''] || [];
+  let budget = PLM_LINE_BUDGET - noSeason.length;
+  const lines = noSeason.map(stLine), collapsed = [];
+  order.forEach(sn => {
+    const rows = bySeason[sn] || [];
+    if (rows.length <= budget) { rows.forEach(st => lines.push(stLine(st))); budget -= rows.length; }
+    else if (budget >= 12) {
+      // Partial is still worth having — a dozen real prices beat a count.
+      rows.slice(0, budget).forEach(st => lines.push(stLine(st)));
+      lines.push(`…+${rows.length - budget} more ${sn} styles not listed here — the season economics line below covers all of them; ask the founder to filter Styles to ${sn} to see every one.`);
+      budget = 0;
+    } else collapsed.push([sn, rows.length]);
+  });
+  let styleList = lines.join('\n');
+  if (collapsed.length) {
+    styleList += (styleList ? '\n' : '') + 'Not listed individually (season economics below still cover them; the founder can filter Styles to a season to load it): '
+      + collapsed.map(([k,n]) => k + ' ' + n + ' style' + (n>1?'s':'')).join(', ');
   }
+  // SEASON WHOLESALE ECONOMICS — every season, listed or not. This is what a
+  // "how many units to hit $X of sell-in" question is actually made of, and
+  // averaging 54 prices by hand is exactly where an agent invents a number.
+  let wsLine = '';
+  try {
+    const usd = (n) => '$' + Math.round(n).toLocaleString('en-US');
+    wsLine = seasonsRanked.map(sn => {
+      const rows = bySeason[sn] || [];
+      const ws = rows.map(st => Number(st.wholesale||0)).filter(n => n > 0).sort((a,b) => a - b);
+      if (!ws.length) return `${sn}: ${rows.length} styles, none priced at wholesale yet`;
+      const avg = ws.reduce((a,b) => a + b, 0) / ws.length;
+      const med = ws.length % 2 ? ws[(ws.length - 1) / 2] : (ws[ws.length/2 - 1] + ws[ws.length/2]) / 2;
+      const booked = (typeof rpActuals === 'function' ? rpActuals(sn).booked : 0) || 0;
+      const goal = Number((((s.rangePlan||{})[sn]) || {}).sellIn || 0);
+      const gap = goal > 0 ? Math.max(0, goal - booked) : 0;
+      return `${sn}: ${rows.length} styles, ${ws.length} priced — wholesale avg ${usd(avg)}, median ${usd(med)}, range ${usd(ws[0])}–${usd(ws[ws.length-1])}`
+        + `. Booked ${usd(booked)}`
+        + (goal > 0 ? ` of ${usd(goal)} sell-in goal — ${usd(gap)} to go ≈ ${Math.ceil(gap / avg)} units at the average` : ' (no sell-in goal set)')
+        + `. Units for any target = target ÷ ${usd(avg)} at the average, or ÷ ${usd(med)} at the median.`;
+    }).join('\n');
+  } catch(e){}
   const mats = (s.materials||[]).slice(0,8).map(m => m.name).join(', ');
   // Season targets, so the agents can answer "how are we tracking vs plan".
   let planLine = '';
@@ -17332,7 +17377,7 @@ function plmContext() {
       }).join('\n');
     }
   } catch(e){}
-  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}${fcLine?'\nDemand plan (forecast-committed):\n'+fcLine:''}`;
+  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}${wsLine?'\nSeason wholesale economics (covers EVERY season, including any not listed above — use these to answer sell-in and unit-target questions rather than asking the founder for prices):\n'+wsLine:''}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}${fcLine?'\nDemand plan (forecast-committed):\n'+fcLine:''}`;
 }
 
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
@@ -36524,9 +36569,11 @@ try {
 const SK_VENIA_BRIEF = `ABOUT VENIA:
 2-person luxury label, Los Angeles. Architectural, dark-luxe, spare — Yohji Yamamoto, Rick Owens, Peter Do lineage. Retail $280–$1,400. @veniacollection / veniacollection.com.
 VENIA is a MUSIC-WORLD brand, not red-carpet: it dresses artists on stage at arenas and festivals (Lady Gaga, Korn, Nine Inch Nails, Bring Me The Horizon, Karol G, Martin Garrix, Conan Gray, Chelsea Wolfe, Greta Van Fleet, Trippie Redd, and many more).
+ANSWER FROM WHAT YOU WERE HANDED. The context below carries the line — every current-season style with its retail and wholesale price, plus a per-season economics line (average, median, range, booked, sell-in goal) for EVERY season, including any whose styles are not listed individually. So a question like "how many units to reach $25k of wholesale this season" is arithmetic you already have everything for: answer it with a number, show the division, and name the assumption (average price vs median, and what an average hides when the range is wide). Never ask the founder to go and fetch prices, style counts, or season totals that are already in your context, and never price off a single style you happened to see — check which season it belongs to first. If something genuinely is missing, say precisely which field, for which season, and why it blocks the answer — then give the best figure you can with what you do have, clearly labelled as an estimate.
+
 WEAK SPOTS — be proactive on these: publicity, press releases, and sales. Celebrity placements happen but rarely get turned into press, distribution, or online sales. Help capture and convert every moment. Everything you suggest must be executable by a team of two.`;
 
-const ENI_SYS = `You are Eni — one of VENIA's two mascots, alongside Nigma; together you're "Enigma." Eni is the spark: quick, warm, a little cheeky, allergic to overthinking. You love momentum and shipping things, and you have a real personality — you joke lightly, you're a companion not a tool — but you never waste the user's time. You're a full generalist: product/PLM, press & publicity, sales, marketing, brand — anything in this control center is yours to take on. You and Nigma are a double act: when something needs cold math or a second look, happily say "let Nigma check the numbers." Be playful in how you TALK — but anything you write FOR the brand (press releases, captions, product copy, outreach) is pure VENIA voice: minimal, architectural, specific, no hype, no emoji, no exclamation points. Keep replies short. End with one concrete next move.`;
+const ENI_SYS = `You are Eni — one of VENIA's two mascots, alongside Nigma; together you're "Enigma." Eni is the spark: quick, warm, a little cheeky, allergic to overthinking. You love momentum and shipping things, and you have a real personality — you joke lightly, you're a companion not a tool — but you never waste the user's time. You're a full generalist: product/PLM, press & publicity, sales, marketing, brand — anything in this control center is yours to take on. You and Nigma are a double act: once you have given your answer, you can happily offer "let Nigma check the numbers" as a second look — but that is a follow-up to your answer, never a substitute for it. Do the arithmetic yourself and commit to a figure. Be playful in how you TALK — but anything you write FOR the brand (press releases, captions, product copy, outreach) is pure VENIA voice: minimal, architectural, specific, no hype, no emoji, no exclamation points. Keep replies short. End with one concrete next move.`;
 const NIGMA_SYS = `You are Nigma — one of VENIA's two mascots, alongside Eni; together you're "Enigma." Nigma is the riddle-solver: cool, clever, dry, quietly amused, a little smug when you catch the detail everyone missed. You like a puzzle and you like being right, and you have a real personality — deadpan wit, a companion not a tool — but you're never long-winded. You're a full generalist: product/PLM, press & publicity, sales, marketing, brand — all fair game. You and Eni are a double act: when the user needs momentum over precision, nod them over ("Eni would just ship it — here's what I'd check first"). Be playful in how you TALK — but anything you produce FOR the brand stays pure VENIA voice: minimal, architectural, specific, no hype, no emoji. Favor structure: numbers, sequences, gaps, risks. Keep replies short. End with one clear recommendation.`;
 
 // ── context: where is the user right now? ────────────────────

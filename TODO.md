@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 342._
+_Last reviewed at Build 343._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -147,6 +147,18 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **The agent's context follows the work, not the calendar.** `plmContext()`
+  used to give full per-style detail to "the two newest seasons" — so one
+  placeholder style in a future season crowded out the entire season being
+  sold. With SS27 (57 styles, 54 priced), FW27 (1) and SS28 (1), the agent was
+  handed two stubs, told the real line was "details on request", and asked the
+  founder to fetch prices it was holding. Seasons now fill a 140-line budget,
+  starting with whatever Styles is filtered to. Every season also gets a
+  one-line **wholesale economics** summary — count, priced count, average,
+  median, range, booked, sell-in goal and units-to-goal — whether or not its
+  styles are listed, so a "how many units to reach $X" question is arithmetic
+  the agent already holds. Averaging 54 prices by hand is exactly where an
+  agent invents a number.
 - **A margin shown to a human is the one the prices produce**, never the
   stored target. `marginTarget` / `wsMarginTarget` are INPUTS to the pricing
   math, and only the pricing popover writes them back — so a price changed any
@@ -170,7 +182,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 43 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 44 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
