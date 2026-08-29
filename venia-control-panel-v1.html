@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '363';
+  const BUILD = '364';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16246,13 +16246,61 @@ function prSearchStyles(query) {
         <span style="font-size:18px;color:var(--muted)">+</span>
       </div>
     </div>`).join('') :
-    `<div style="background:var(--bg);padding:10px 14px;font-size:10px;color:var(--muted)">No styles found for "${query}"</div>`;
+    '';
+  // The way out of the dead end. Offered whenever what you typed is not already
+  // a style by that exact name — not only when there are zero matches, because
+  // "LARA VEST (archive)" is a real thing to pull and it partial-matches.
+  const exact = STATE.styles.some(s => s.status !== 'archived'
+    && (String(s.name||'').toLowerCase() === q || String(s.styleId||'').toLowerCase() === q));
+  const typed = query.trim();
+  if (!exact && typed) {
+    resultsEl.innerHTML += `
+      <div style="background:var(--bg);padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:11px;border-top:1px solid var(--border)"
+           onclick="prAddOneOff(${JSON.stringify(typed).replace(/"/g,'&quot;')})"
+           onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg)'">
+        <span style="width:38px;height:38px;flex:none;border:1px dashed var(--border-mid);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:15px">+</span>
+        <div style="min-width:0">
+          <div style="font-size:12px;font-weight:600;color:var(--ink)">Add “${escHtml(typed)}”</div>
+          <div style="font-size:10px;color:var(--muted)">A piece that isn't in Styles — archive, collab, or not entered yet</div>
+        </div>
+      </div>`;
+  }
 }
 
 // A pull item stores the style's id; the photo and fabric are read live off the
 // style rather than copied onto the item, so a re-shot photo shows up on the
 // old pull sheet too — and the STATE blob does not carry a second copy of every
 // image.
+window.prAddOneOff = function(name){
+  const nm = String(name||'').trim();
+  if (!nm) return;
+  PR_CART.push({
+    styleId: '', styleName: nm, styleCode: '', category: '', season: '',
+    retail: 0, size: '', color: '', nfcTag: '', oneOff: true,
+    returned: false, returnedAt: null, condition: 'good',
+  });
+  const searchEl = document.getElementById('pr-style-search');
+  if (searchEl) searchEl.value = '';
+  const res = document.getElementById('pr-style-results');
+  if (res) res.innerHTML = '';
+  prRenderCart();
+  toast(nm + ' added — set its retail value below');
+  // Straight to the field that is empty and matters: retail drives the pull's
+  // value, the fee if it is a percentage, and the hold if you take one.
+  setTimeout(() => { const f = document.getElementById('pr-oneoff-retail-' + (PR_CART.length - 1)); if (f) f.focus(); }, 60);
+};
+// Retail on a one-off is typed, so it has to update the totals it feeds without
+// re-rendering the row out from under the cursor.
+window.prCartRetail = function(idx, v){
+  if (!PR_CART[idx]) return;
+  PR_CART[idx].retail = Math.max(0, parseFloat(v) || 0);
+  const total = PR_CART.reduce((s,i) => s + (i.retail||0), 0);
+  const valEl = document.getElementById('pr-cart-val-inline');
+  if (valEl) valEl.textContent = PR_CART.length ? '$' + total.toLocaleString() + ' retail value' : '';
+  try { prCalcFee(); } catch(e){}
+};
+window.prCartName = function(idx, v){ if (PR_CART[idx]) PR_CART[idx].styleName = String(v||'').trim(); };
+
 function prItemStyle(item){
   if (!item) return null;
   return (STATE.styles||[]).find(x => x.id === item.styleId)
@@ -16918,15 +16966,24 @@ function prRenderCart() {
   el.innerHTML = PR_CART.map((item, idx) => `
     <div style="background:var(--bg);padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       ${prThumb(prItemStyle(item), 34)}
-      <div style="flex:1;min-width:0">
-        <div style="font-size:12px;font-weight:600;color:var(--ink)">${item.styleName}</div>
-        <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px">${item.styleCode} · ${item.season}</div>
-        <div style="font-size:10px;color:var(--soft);margin-top:2px;display:flex;align-items:center;gap:5px;min-width:0">${prFabLine(prItemStyle(item))}</div>
+      <div style="flex:1 1 ${item.oneOff && !prItemStyle(item) ? '160px' : '0'};min-width:0">
+        ${item.oneOff && !prItemStyle(item)
+          ? `<input class="fi" value="${escHtml(item.styleName||'')}" placeholder="What is it?" oninput="prCartName(${idx},this.value)"
+                 style="width:100%;min-height:auto;padding:3px 0;font-size:12px;font-weight:600" title="Name of this piece">
+             <div style="font-size:9px;letter-spacing:.8px;text-transform:uppercase;color:var(--amber);margin-top:3px" title="This piece lives on this pull only — it is not added to your Styles library">Not in Styles</div>`
+          : `<div style="font-size:12px;font-weight:600;color:var(--ink)">${item.styleName}</div>
+             <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px">${item.styleCode} · ${item.season}</div>
+             <div style="font-size:10px;color:var(--soft);margin-top:2px;display:flex;align-items:center;gap:5px;min-width:0">${prFabLine(prItemStyle(item))}</div>`}
       </div>
       <input class="fi fi-mono" style="width:70px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Size" value="${item.size}" oninput="PR_CART[${idx}].size=this.value" title="Size">
       <input class="fi" style="width:90px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Color" value="${item.color}" oninput="PR_CART[${idx}].color=this.value" title="Color">
       <input class="fi fi-mono" style="width:120px;min-height:auto;padding:4px 6px;font-size:10px" placeholder="NFC tag ID" value="${item.nfcTag||''}" oninput="PR_CART[${idx}].nfcTag=this.value" title="NFC tag ID">
-      <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);min-width:50px;text-align:right">${item.retail?'$'+item.retail:''}</span>
+      ${item.oneOff && !prItemStyle(item)
+        ? `<span style="display:inline-flex;align-items:center;gap:3px;color:var(--gold)"><span style="font-size:11px">$</span>
+             <input class="fi fi-mono" id="pr-oneoff-retail-${idx}" type="number" min="0" step="1" value="${item.retail||''}" placeholder="Retail"
+                    oninput="prCartRetail(${idx},this.value)" title="Retail value — drives the pull's total, a % fee, and any card hold"
+                    style="width:74px;min-height:auto;padding:4px 6px;font-size:11px;text-align:right"></span>`
+        : `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);min-width:50px;text-align:right">${item.retail?'$'+item.retail:''}</span>`}
       <button onclick="prRemoveFromCart(${idx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px;line-height:1">×</button>
     </div>`).join('');
 
