@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 346._
+_Last reviewed at Build 347._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -166,6 +166,29 @@ direct streaming path as the fallback. The financial plan is
   halves. Starter prompts stand down while the keyboard is up — their display is
   set inline, so that decision has to live in JS, and `skSuggestFit()` is its one
   owner.
+- **A cloud reply is applied exactly once.** `cfoChatPoll` had no re-entrancy
+  guard, and Builds 345 and 346 added two more callers (visibilitychange,
+  `skRestorePending`) on top of the chained timer. Two overlapping polls read the
+  same finished row before either deleted it, so the reply posted twice — the
+  second labelled "· cloud" because the first had consumed the working bubble —
+  and **its action ran twice**. A repeated price pass happens to be idempotent;
+  a repeated `add_buyers` or `record_payment` is a real duplicate. A busy flag
+  stops the overlap; `cfoChatClaim()` is the claim that survives it, taken
+  BEFORE the delete await. Proven both ways in a browser: without the guard,
+  four polls produced four replies and four action runs.
+- **Who to push is the server's question, not the browser's.** The dock's worker
+  sent only to the subscriber list the page attached, read from an RLS-protected
+  table with every failure swallowed — not signed in, a transient error, a tab
+  that never authenticated all mean no push, silently. It now fetches
+  subscribers through the same secret-scoped RPC the scheduled digest always
+  used, with the client list as fallback, and retires any endpoint the push
+  service reports 404/410 (`venia_push_sub_drop`) instead of letting it hold one
+  of the twelve slots for ever.
+- **There is a push self-test.** "I never got a notification" had five
+  indistinguishable causes — VAPID keys unset, no subscription, an expired one,
+  permission denied, or an iOS app never added to the Home Screen. Today →
+  "test notification" sends one through the real path and names which it was,
+  per device.
 - **A poller may only delete jobs it queued.** `venia_agent_jobs` is shared by
   three of them. Two fetch by id; `delegPoll` (Brainstorm delegations) selected
   EVERY row and deleted it — a queued row past 16 minutes outright, and any
@@ -234,7 +257,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 47 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 48 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at

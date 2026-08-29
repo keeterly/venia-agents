@@ -112,7 +112,29 @@ export default async (req) => {
     const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
     if (!text) throw new Error('empty reply');
     await complete(id, secret, 'done', text);
-    if (pushSubs.length && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PUBLIC_KEY) {
+    // WHO TO PUSH IS THE SERVER'S QUESTION, NOT THE BROWSER'S. This used to
+    // send only to the list the client attached, read from venia_push_subs in
+    // the page. That read is behind RLS and every failure of it was swallowed
+    // — not signed in yet, a transient error, a tab that never authenticated —
+    // and an empty list means no push, silently. The scheduled digest has
+    // always fetched its own subscribers through the secret-scoped RPC; this
+    // now does the same, and falls back to the client's list only if that
+    // fetch fails outright.
+    let subs = [];
+    if (process.env.VENIA_DIGEST_SECRET) {
+      try {
+        const sr = await fetch(SB_URL + '/rest/v1/rpc/venia_digest_fetch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON },
+          body: JSON.stringify({ p_secret: process.env.VENIA_DIGEST_SECRET }),
+        });
+        const sp = await sr.json();
+        if (sp && !sp.error && Array.isArray(sp.subs)) subs = sp.subs;
+      } catch (_) { /* fall through to the client's list */ }
+    }
+    if (!subs.length) subs = pushSubs;
+    subs = subs.slice(0, 12);
+    if (subs.length && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PUBLIC_KEY) {
       try {
         webpush.setVapidDetails('mailto:keeter@veniacollection.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
         // Whoever asked is who replies — a dock turn from Nigma must not push
@@ -123,7 +145,20 @@ export default async (req) => {
           body: String(n.body || 'The answer is waiting in the Eni dock.').slice(0, 160),
           tag: String(n.tag || 'venia-cfo-chat').slice(0, 60),
         });
-        await Promise.allSettled(pushSubs.map((s) => webpush.sendNotification(s, note)));
+        // An expired subscription answers 404/410 and then sits in the table
+        // forever, quietly consuming one of the twelve slots. Drop those.
+        const out = await Promise.allSettled(subs.map((sb) => webpush.sendNotification(sb, note)));
+        const dead = out.map((r, i) => (r.status === 'rejected'
+          && (r.reason && (r.reason.statusCode === 404 || r.reason.statusCode === 410)) ? subs[i] : null)).filter(Boolean);
+        for (const sb of dead) {
+          try {
+            await fetch(SB_URL + '/rest/v1/rpc/venia_push_sub_drop', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON },
+              body: JSON.stringify({ p_secret: process.env.VENIA_DIGEST_SECRET || '', p_endpoint: sb && sb.endpoint }),
+            });
+          } catch (_) {}
+        }
       } catch (_) {}
     }
     return new Response('', { status: 200 });
