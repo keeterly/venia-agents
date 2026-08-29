@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 345._
+_Last reviewed at Build 346._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -166,6 +166,24 @@ direct streaming path as the fallback. The financial plan is
   halves. Starter prompts stand down while the keyboard is up — their display is
   set inline, so that decision has to live in JS, and `skSuggestFit()` is its one
   owner.
+- **A poller may only delete jobs it queued.** `venia_agent_jobs` is shared by
+  three of them. Two fetch by id; `delegPoll` (Brainstorm delegations) selected
+  EVERY row and deleted it — a queued row past 16 minutes outright, and any
+  finished row that was not a Brainstorm item applied to nothing and deleted
+  anyway. The dock's job vanished from under it and it waited out its own
+  17-minute window on a row that no longer existed. The landmine was old; Build
+  344 routed every dock turn over it. `delegPoll` now filters by kind server-side
+  AND skips foreign kinds in the loop, and the dock deletes its own stale rows
+  since nothing else sweeps them.
+- **A run still in flight is visible when you come back.** `skRenderHistory`
+  redrew the saved question with no working indicator, so reopening the app
+  mid-run looked dead and invited a re-send — from a dock that had just told the
+  founder to close the app. `skRestorePending()` puts the working bubble back on
+  open and on every redraw, re-attached so the reply lands in it.
+- **A failed run offers a button, not an instruction.** "Send “try again”"
+  means retyping on a phone keyboard, and it re-queues down the path that just
+  died. `skRetryLast()` drops the failed exchange (so the retry replaces the
+  question rather than stacking a second copy) and re-runs it directly.
 - **Every dock turn runs server-side.** The dock used to call the model in the
   foreground, so a long run — rewriting margin targets across 57 styles — died
   the moment the screen locked or the app was closed. Eni and Nigma now queue to
@@ -216,7 +234,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 46 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 47 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
