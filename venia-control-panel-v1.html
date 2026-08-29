@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '358';
+  const BUILD = '359';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7225,6 +7225,72 @@ function cwClose(){
 }
 function cwAway(){ cwClose(); }
 function cwKey(e){ if (e.key === 'Escape') { e.stopPropagation(); cwClose(); } }
+// ══════════════════════════════════════════════════════════
+//  COLOURWAYS BELONG TO A FABRIC
+//  A colourway is a lab dip, and a lab dip is of a MATERIAL — "Black" in linen
+//  is a different dip, a different approval and a different lead time from
+//  "Black" in leather. Until Build 359 the colour list was a loose string on
+//  the style with nothing tying it to the fabric, so a style could carry a
+//  colour that fabric had never been dyed in, renaming a material orphaned
+//  nothing, and the popover said "in Linen" over a footnote reading "shared
+//  across the brand" — two true statements about different things, with
+//  nothing saying which was which.
+//
+//  Now: the MATERIAL holds the colours that fabric comes in; the STYLE holds
+//  which of them it is offered in. Both still needed — not every style in linen
+//  is cut in every linen colour. Swatches (the hex) stay brand-wide, so "Black"
+//  looks like Black everywhere; that is the third level and it is now named.
+// ══════════════════════════════════════════════════════════
+function cwSplit(v){ return String(v||'').split(',').map(x=>x.trim()).filter(Boolean); }
+// The material a style's fabric refers to. Matched by name because that is what
+// the style stores — the picker writes the library's own spelling, so this
+// resolves for anything chosen from it.
+function fabMaterial(st){
+  const f = String((st && st.fabric) || '').trim().toLowerCase();
+  if (!f) return null;
+  return (STATE.materials||[]).find(m => m && String(m.name||'').trim().toLowerCase() === f) || null;
+}
+function fabColors(st){ const m = fabMaterial(st); return m ? cwSplit(m.colors) : []; }
+// Colours on the style that its fabric does not list. Never dropped silently —
+// changing a style's fabric is exactly how these appear, and losing a colourway
+// because a fabric changed would be worse than showing it needs a decision.
+function cwOrphans(st){
+  const have = fabColors(st).map(c => c.toLowerCase());
+  return cwList(st).filter(c => !have.includes(c.toLowerCase()));
+}
+// Add a colour to a FABRIC (the material), not to one style.
+function fabAddColor(mat, name){
+  if (!mat) return false;
+  const list = cwSplit(mat.colors);
+  if (list.some(c => c.toLowerCase() === String(name).trim().toLowerCase())) return false;
+  list.push(String(name).trim());
+  mat.colors = list.join(', ');
+  mat.updatedAt = new Date().toISOString();
+  return true;
+}
+// ONE-TIME LIFT. Every colour already on a style is folded up into its fabric,
+// so nothing that existed before this build is lost and the library starts full
+// rather than empty. Idempotent — a union, never a replace — and flagged so it
+// does not run on every boot.
+function cwMigrateColorsToFabrics(){
+  try {
+    if (STATE.__cwFabricColors) return 0;
+    let n = 0;
+    (STATE.styles||[]).forEach(st => {
+      const m = fabMaterial(st);
+      if (!m) return;
+      cwList(st).forEach(c => { if (fabAddColor(m, c)) n++; });
+    });
+    STATE.__cwFabricColors = new Date().toISOString();
+    if (n) { try { logActivity('Lifted ' + n + ' colourway(s) onto their fabrics — colours now belong to the material'); } catch(e){} }
+    save();
+    return n;
+  } catch(e){ return 0; }
+}
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(function(){ try { cwMigrateColorsToFabrics(); } catch(e){} }, 2200);
+});
+
 function cwList(st){ return String(st.colors||'').split(',').map(x=>x.trim()).filter(Boolean); }
 
 function cwOpen(styleId, anchor, ev){
@@ -7250,41 +7316,73 @@ function cwRender(){
   const pop = document.getElementById('cw-pop');
   const st = (STATE.styles||[]).find(x => x.id === CW_STYLE);
   if (!pop || !st) return;
-  const list = cwList(st);
+  const on = cwList(st);
+  const onLC = on.map(c => c.toLowerCase());
+  const mat = fabMaterial(st);
+  const fabName = String(st.fabric||'').trim();
+  const palette = fabColors(st);
+  const orphans = cwOrphans(st);
+
+  // One row. `mine` = this style is offered in it; `stray` = the fabric does
+  // not list it, which is what a fabric change leaves behind.
+  const row = (c, i, stray) => {
+    const d = colorDef(c);
+    const css = colorCssFrom(d);
+    const patterned = !!(d && d.p && d.p !== 'solid');
+    const openPat = CW_PAT === c || patterned;
+    const mine = onLC.includes(c.toLowerCase());
+    return `<div style="padding:4px 12px${stray?';background:rgba(192,138,46,.07)':''}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="checkbox" ${mine?'checked':''} onchange="cwToggle('${esc(c).replace(/'/g,"\\'")}')"
+               title="${mine?'This style is offered in '+esc(c):'Offer this style in '+esc(c)}"
+               style="accent-color:var(--ink);cursor:pointer;flex:none;width:14px;height:14px">
+        <label style="position:relative;width:20px;height:20px;flex:none;cursor:pointer" title="${d?'Change the ground colour — shared brand-wide':'Pick a swatch for '+esc(c)+' — shared brand-wide'}">
+          <span style="position:absolute;inset:0;border-radius:50%;${d?`background:${css};border:1px solid rgba(0,0,0,.25)`:'background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px);border:1px solid var(--border)'}"></span>
+          <input type="color" value="${(d&&d.c)||'#cccccc'}" oninput="cwSetHexNamed('${esc(c).replace(/'/g,"\\'")}',this.value)" style="opacity:0;width:20px;height:20px;border:none;padding:0;cursor:pointer">
+        </label>
+        <span style="flex:1;min-width:0;font-size:11px;color:${mine?'var(--ink)':'var(--muted)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c)}</span>
+        ${stray ? (mat
+            ? `<button onclick="cwAdoptStray('${esc(c).replace(/'/g,"\\'")}')" title="${esc(fabName)} does not list this colour — add it" style="background:none;border:1px solid var(--border);color:var(--amber);font-size:8px;letter-spacing:.6px;text-transform:uppercase;padding:2px 5px;cursor:pointer;flex:none">+ ${esc(fabName)}</button>`
+            : `<span title="Set a fabric from your Materials library to file this colour against it" style="font-size:8px;letter-spacing:.6px;text-transform:uppercase;color:var(--amber);flex:none">no fabric</span>`)
+          : `<button onclick="cwTogglePatNamed('${esc(c).replace(/'/g,"\\'")}')" title="Stripe, check, melange — a colourway isn't always flat" style="background:none;border:none;color:${patterned?'var(--ink)':'var(--muted)'};font-size:12px;cursor:pointer;padding:0 2px;flex:none">◫</button>`}
+        <button onclick="cwDropFromFabric('${esc(c).replace(/'/g,"\\'")}')" title="${stray?'Remove from this style':'Remove from '+esc(fabName||'this fabric')+' — every style in it loses the option'}" style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:0 2px;flex:none">✕</button>
+      </div>
+      ${openPat && !stray ? `<div style="display:flex;align-items:center;gap:6px;padding:5px 0 2px 44px">
+        <select class="fs" onchange="cwSetPatternNamed('${esc(c).replace(/'/g,"\\'")}',this.value)" style="min-height:auto;padding:3px 5px;font-size:10px;flex:1;min-width:0">
+          ${CW_PATTERNS.map(pt => `<option value="${pt.id}" ${((d&&d.p)||'solid')===pt.id?'selected':''}>${pt.label}</option>`).join('')}
+        </select>
+        ${patterned ? `<label style="position:relative;width:18px;height:18px;flex:none;cursor:pointer" title="Second colour — the stripe, check or fleck">
+          <span style="position:absolute;inset:0;border-radius:3px;background:${(d&&d.c2)||'#ffffff'};border:1px solid rgba(0,0,0,.25)"></span>
+          <input type="color" value="${(d&&d.c2)||'#ffffff'}" oninput="cwSetHex2Named('${esc(c).replace(/'/g,"\\'")}',this.value)" style="opacity:0;width:18px;height:18px;border:none;padding:0;cursor:pointer">
+        </label>` : ''}
+      </div>` : ''}
+    </div>`;
+  };
+
+  // No fabric, or a fabric that is not in the library yet: there is nothing to
+  // hang the colours on. Say so and offer the one action that fixes it, rather
+  // than silently behaving like the old free-text list.
+  const noHome = !mat;
   pop.innerHTML = `
     <div style="padding:2px 12px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">
-      Colorways · ${esc(st.name)}${st.fabric?` <span style="text-transform:none;letter-spacing:.3px;font-weight:400">in ${esc(st.fabric)}</span>`:''}
+      Colorways · ${esc(st.name)}${fabName?` <span style="text-transform:none;letter-spacing:.3px;font-weight:400">in ${esc(fabName)}</span>`:''}
     </div>
-    ${list.length ? list.map((c,i) => {
-      const d = colorDef(c);
-      const css = colorCssFrom(d);
-      const patterned = !!(d && d.p && d.p !== 'solid');
-      const openPat = CW_PAT === i || patterned;
-      return `<div style="padding:4px 12px">
-        <div style="display:flex;align-items:center;gap:8px">
-        <label style="position:relative;width:20px;height:20px;flex:none;cursor:pointer" title="${d?'Change the ground colour':'Pick a swatch for '+esc(c)}">
-          <span style="position:absolute;inset:0;border-radius:50%;${d?`background:${css};border:1px solid rgba(0,0,0,.25)`:'background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px);border:1px solid var(--border)'}"></span>
-          <input type="color" value="${(d&&d.c)||'#cccccc'}" oninput="cwSetHex(${i},this.value)" style="opacity:0;width:20px;height:20px;border:none;padding:0;cursor:pointer">
-        </label>
-        <input class="fi" data-fkey="cw-name-${i}" value="${esc(c)}" onchange="cwRename(${i},this.value)" placeholder="Colour name"
-          style="min-height:auto;padding:4px 6px;font-size:11px;flex:1;min-width:0">
-        <button onclick="cwTogglePat(${i})" title="Stripe, check, melange — a colourway isn't always flat" style="background:none;border:none;color:${patterned?'var(--ink)':'var(--muted)'};font-size:12px;cursor:pointer;padding:0 2px;flex:none">◫</button>
-        <button onclick="cwRemove(${i})" title="Remove this colourway" style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;padding:0 2px;flex:none">✕</button>
-        </div>
-        ${openPat ? `<div style="display:flex;align-items:center;gap:6px;padding:5px 0 2px 28px">
-          <select class="fs" onchange="cwSetPattern(${i},this.value)" style="min-height:auto;padding:3px 5px;font-size:10px;flex:1;min-width:0">
-            ${CW_PATTERNS.map(pt => `<option value="${pt.id}" ${((d&&d.p)||'solid')===pt.id?'selected':''}>${pt.label}</option>`).join('')}
-          </select>
-          ${patterned ? `<label style="position:relative;width:18px;height:18px;flex:none;cursor:pointer" title="Second colour — the stripe, check or fleck">
-            <span style="position:absolute;inset:0;border-radius:3px;background:${(d&&d.c2)||'#ffffff'};border:1px solid rgba(0,0,0,.25)"></span>
-            <input type="color" value="${(d&&d.c2)||'#ffffff'}" oninput="cwSetHex2(${i},this.value)" style="opacity:0;width:18px;height:18px;border:none;padding:0;cursor:pointer">
-          </label>` : ''}
-        </div>` : ''}
-      </div>`;
-    }).join('') : '<div style="padding:4px 12px 8px;font-size:10px;color:var(--muted)">No colourways yet.</div>'}
-    <div style="padding:6px 12px 2px;border-top:1px solid var(--border);margin-top:6px;display:flex;gap:8px;align-items:center">
-      <button onclick="cwAdd()" style="background:none;border:none;color:var(--ink);font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;cursor:pointer;padding:4px 0">+ Add colourway</button>
-      <span style="margin-left:auto;font-size:9px;color:var(--muted);text-align:right;line-height:1.4">Swatches are shared<br>across the brand</span>
+    ${noHome ? `<div style="padding:2px 12px 8px;font-size:10px;color:var(--amber);line-height:1.5">
+        ${fabName ? esc(fabName) + ' is not in your Materials library yet.' : 'No fabric set.'}
+        Colours belong to a fabric — a lab dip is of a material.
+        <button onclick="cwClose();fabOpen('${st.id}',null,null)" style="background:none;border:none;color:var(--ink);font-size:10px;font-weight:700;text-decoration:underline;cursor:pointer;padding:0">${fabName ? 'Add it →' : 'Set a fabric →'}</button>
+      </div>` : ''}
+    ${palette.length ? `<div style="padding:2px 12px 2px;font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700">${esc(fabName)} comes in</div>` : ''}
+    ${palette.map((c,i) => row(c, i, false)).join('')}
+    ${orphans.length ? `<div style="padding:8px 12px 2px;font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--amber);font-weight:700">On this style only</div>`
+        + orphans.map((c,i) => row(c, i, true)).join('') : ''}
+    ${!palette.length && !orphans.length ? '<div style="padding:4px 12px 8px;font-size:10px;color:var(--muted)">No colourways yet.</div>' : ''}
+    <div style="padding:6px 12px 2px;border-top:1px solid var(--border);margin-top:6px">
+      <button onclick="cwAdd()" style="background:none;border:none;color:var(--ink);font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;cursor:pointer;padding:4px 0">+ Add colour${mat ? ' to ' + esc(fabName) : ''}</button>
+      <div style="font-size:9px;color:var(--muted);line-height:1.5;padding:4px 0 2px">
+        Ticked = this style is cut in it. The list belongs to <b>${esc(fabName||'the fabric')}</b>, so every style in it offers the same colours.
+        The swatch is brand-wide — ${esc(fabName||'a fabric')}'s Black and leather's Black look the same on screen.
+      </div>
     </div>`;
 }
 
@@ -7309,6 +7407,80 @@ function cwWrite(i, patch, what){
   STATE.colorLib[colorKey(name)] = next.p === 'solid' ? next.c : next;
   cwCommit(st, list, what + ' for ' + name);
 }
+// The picker now addresses colours BY NAME rather than by index into the
+// style's list — the rows come from the fabric, and most of them are not on the
+// style at all, so an index into st.colors would point at the wrong one.
+function cwWriteNamed(name, patch, what){
+  const cur = colorDef(name) || { c: '#cccccc', c2: '#ffffff', p: 'solid' };
+  const next = { c: cur.c, c2: cur.c2 || '#ffffff', p: cur.p || 'solid', ...patch };
+  if (!STATE.colorLib) STATE.colorLib = {};
+  STATE.colorLib[colorKey(name)] = next.p === 'solid' ? next.c : next;
+  save();
+  try { renderStyles(); } catch(e){}
+  popKeepFocus('cw-pop', cwRender);
+  try { logActivity(what + ' for ' + name); } catch(e){}
+}
+window.cwSetHexNamed = function(name, hex){ cwWriteNamed(name, { c: hex }, 'swatch set'); };
+window.cwSetHex2Named = function(name, hex){ cwWriteNamed(name, { c2: hex }, 'pattern colour set'); };
+window.cwSetPatternNamed = function(name, p){ CW_PAT = name; cwWriteNamed(name, { p }, p + ' set'); };
+window.cwTogglePatNamed = function(name){ CW_PAT = (CW_PAT === name) ? null : name; cwRender(); };
+
+// Tick / untick: is THIS style cut in this colour? The fabric keeps the colour
+// either way — unticking a style must never take the option away from the
+// others, which is the whole point of the colour living on the material.
+window.cwToggle = function(name){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const list = cwList(st);
+  const i = list.findIndex(c => c.toLowerCase() === String(name).toLowerCase());
+  if (i >= 0) list.splice(i, 1); else list.push(String(name));
+  cwCommit(st, list, (i >= 0 ? 'no longer offered in ' : 'now offered in ') + name);
+};
+// A colour the style carries that its fabric does not list — normally what a
+// fabric change leaves behind. One tap files it against the fabric.
+window.cwAdoptStray = function(name){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const mat = fabMaterial(st);
+  if (!mat) { toast('Set a fabric from your Materials library first', 'warn'); return; }
+  if (fabAddColor(mat, name)) {
+    save();
+    try { renderStyles(); } catch(e){}
+    try { logActivity(name + ' added to ' + mat.name); } catch(e){}
+    toast(name + ' is now a ' + mat.name + ' colourway', 'success');
+  }
+  popKeepFocus('cw-pop', cwRender);
+};
+// ✕ means two different things and says so in its tooltip: on a stray it drops
+// the colour from this style; on a fabric colour it retires the colour from the
+// FABRIC, so every style in it loses the option. That is destructive across
+// styles, so it asks first and names the count.
+window.cwDropFromFabric = function(name){
+  const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const mat = fabMaterial(st);
+  const inFabric = fabColors(st).some(c => c.toLowerCase() === String(name).toLowerCase());
+  if (!inFabric || !mat) {
+    const list = cwList(st).filter(c => c.toLowerCase() !== String(name).toLowerCase());
+    cwCommit(st, list, 'colourway removed: ' + name);
+    return;
+  }
+  const users = (STATE.styles||[]).filter(x => {
+    const f = String(x.fabric||'').trim().toLowerCase();
+    return f === String(mat.name||'').trim().toLowerCase()
+        && cwList(x).some(c => c.toLowerCase() === String(name).toLowerCase());
+  });
+  const msg = users.length > 1
+    ? 'Remove ' + name + ' from ' + mat.name + '?\n\n' + users.length + ' styles are currently offered in it — they will all lose the option.'
+    : 'Remove ' + name + ' from ' + mat.name + '?';
+  if (!confirm(msg)) return;
+  mat.colors = cwSplit(mat.colors).filter(c => c.toLowerCase() !== String(name).toLowerCase()).join(', ');
+  mat.updatedAt = new Date().toISOString();
+  users.forEach(x => { x.colors = cwList(x).filter(c => c.toLowerCase() !== String(name).toLowerCase()).join(', '); x.updatedAt = new Date().toISOString(); });
+  save();
+  try { buildSkus(); } catch(e){}
+  try { renderStyles(); } catch(e){}
+  try { logActivity(name + ' retired from ' + mat.name + ' (' + users.length + ' style(s) updated)'); } catch(e){}
+  popKeepFocus('cw-pop', cwRender);
+};
+
 function cwSetHex(i, hex){ cwWrite(i, { c: hex }, 'swatch set'); }
 function cwSetHex2(i, hex){ cwWrite(i, { c2: hex }, 'pattern colour set'); }
 function cwSetPattern(i, p){ CW_PAT = i; cwWrite(i, { p }, p + ' set'); }
@@ -7335,14 +7507,17 @@ function cwRemove(i){
 }
 function cwAdd(){
   const st = (STATE.styles||[]).find(x => x.id === CW_STYLE); if (!st) return;
+  const mat = fabMaterial(st);
+  const name = prompt(mat
+    ? 'New colourway for ' + mat.name + '\n\nEvery style in ' + mat.name + ' can then be offered in it.'
+    : 'New colourway for ' + st.name + '\n\nNo fabric is set, so this stays on this style until one is.', '');
+  if (name === null) return;
+  const n = String(name).replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!n) return;
+  if (mat) fabAddColor(mat, n);
   const list = cwList(st);
-  list.push('New colour');
-  cwCommit(st, list, 'colourway added');
-  setTimeout(() => {
-    const inputs = document.querySelectorAll('#cw-pop input.fi');
-    const last = inputs[inputs.length-1];
-    if (last) { last.focus(); last.select(); }
-  }, 0);
+  if (!list.some(c => c.toLowerCase() === n.toLowerCase())) list.push(n);
+  cwCommit(st, list, mat ? n + ' added to ' + mat.name : 'colourway added: ' + n);
 }
 
 // ── Fabric picker ────────────────────────────────────────────────────────
