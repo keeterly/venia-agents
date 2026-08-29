@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 350._
+_Last reviewed at Build 351._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -158,6 +158,21 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **Prices are stored in USD; the currency picker changes the VIEW only.** A
+  line sheet has to be readable in the buyer's money, but the costing chain
+  must not move — so `fxFmt()` converts what is shown and nothing else, and the
+  pricing popover (the editing surface) stays in USD and says so when a
+  converted view is active. The rate is the FOUNDER'S, set once and shown
+  wherever converted money is, not live FX: a wholesale price quoted at market
+  opens has to hold for the season, and a line sheet that moved with the spot
+  rate would quote a Paris buyer differently on Tuesday than on Monday. A
+  currency with no rate set stays in USD rather than inventing one.
+- **A style's Delivery falls back to the season calendar.** Most of a line ships
+  in one window and a handful are a second delivery, so `styleDelivery()` is the
+  same stored-wins-else-derived shape as origin and category, and an inherited
+  value renders muted. It is free text on purpose — brands write a delivery as a
+  date, a window ("Feb-Mar 27") or a drop name ("Delivery 2"), and a date picker
+  would make two of those unsayable.
 - **The dock composer is sized by the DOCK, not the screen.** Three 38px attach
   buttons plus send left the field 176px of 390 — under half the width — so a
   one-line question wrapped to six lines. That width happens on a phone (full
@@ -268,7 +283,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 50 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 51 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at

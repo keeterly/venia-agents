@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '350';
+  const BUILD = '351';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3625,6 +3625,10 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <option value="mens">Mens</option>
             <option value="unisex">Unisex</option>
           </select>
+          <!-- Display only. Every price is stored in USD; this converts what is
+               shown so a line sheet can be read in the buyer's currency. -->
+          <select id="styles-fx" class="fs" style="min-height:auto;padding:5px 8px;font-size:10px;letter-spacing:1px" onchange="fxSetView(this.value)" aria-label="Show prices in another currency"></select>
+          <span id="styles-fx-rate" style="font-size:9px;color:var(--muted);white-space:nowrap"></span>
           <!-- Stage dropdown removed — it duplicated the stage pills to its right,
                two controls fighting over the same filter. Pills win: one tap, visible state. -->
         </div>
@@ -6347,6 +6351,7 @@ const STYLE_COLS = [
   // most lines leave empty until the season calendar is set. One click brings
   // it back.
   { key: 'drop',     label: 'Drop',                        w: 84, def: false },
+  { key: 'delivery', label: 'Delivery', sort: 'delivery',    w: 142, def: false, title: 'When this style ships to the buyer. Falls back to the season calendar\u2019s delivery window until you set it per style — a Delivery 2 piece is the exception, not the rule.' },
   { key: 'vendor',   label: 'Manufacturer', sort: 'vendor',  w: 116, def: false, title: 'The factory making this style — from your Vendors library' },
   { key: 'origin',   label: 'Origin',                        w: 92,  def: false, title: 'Country of origin — follows the factory unless this style overrides it' },
   { key: 'desc',     label: 'Description',                   w: 220, def: false, title: 'Design intent and direction for the factory — the same note the tech pack carries' },
@@ -6363,6 +6368,87 @@ const STYLE_COLS = [
   { key: 'sold',     label: 'Sold',                        w: 96, def: false, title: 'Live Shopify — units · revenue since Jan 1 last year' },
   { key: 'priority', label: 'Priority',  sort: 'priority', w: 80 },
 ];
+// ══════════════════════════════════════════════════════════
+//  CURRENCY VIEW — every price in this app is stored in USD. This converts
+//  what is SHOWN, never what is stored, so a line sheet can be read in the
+//  buyer's currency without the underlying costing moving.
+//
+//  The rate is the FOUNDER'S, not the market's, and that is deliberate: a
+//  wholesale price quoted at market opens has to hold for the whole season.
+//  A line sheet that moved with the spot rate would quote a Paris buyer a
+//  different number on Tuesday than on Monday. So the rate is set once, shown
+//  wherever converted money is shown, and never guessed at silently — the
+//  first time a currency is chosen the founder is asked to confirm it.
+// ══════════════════════════════════════════════════════════
+const FX_CUR = {
+  USD: { sym: '$',  name: 'US Dollar' },
+  EUR: { sym: '\u20ac',  name: 'Euro',            hint: '0.92' },
+  GBP: { sym: '\u00a3',  name: 'British Pound',   hint: '0.79' },
+  JPY: { sym: '\u00a5',  name: 'Japanese Yen',    hint: '150' },
+  CNY: { sym: 'CN\u00a5', name: 'Chinese Yuan',   hint: '7.1' },
+  KRW: { sym: '\u20a9',  name: 'Korean Won',      hint: '1350' },
+  CAD: { sym: 'C$', name: 'Canadian Dollar',  hint: '1.36' },
+  AUD: { sym: 'A$', name: 'Australian Dollar',hint: '1.52' },
+  CHF: { sym: 'CHF', name: 'Swiss Franc',     hint: '0.88' },
+  AED: { sym: 'AED', name: 'UAE Dirham',      hint: '3.67' },
+};
+function fxView(){
+  const c = String((window.STATE && STATE.fxView) || 'USD').toUpperCase();
+  return FX_CUR[c] ? c : 'USD';
+}
+function fxRate(code){
+  code = code || fxView();
+  if (code === 'USD') return 1;
+  const r = Number(((window.STATE && STATE.fxRates) || {})[code]);
+  return (isFinite(r) && r > 0) ? r : 0;      // 0 means "not set yet"
+}
+// Convert and format a USD amount for display. Whole units throughout — a line
+// sheet does not carry cents, and neither does a costing conversation.
+function fxFmt(usd, opts){
+  const n = Number(usd || 0);
+  const code = fxView(), cur = FX_CUR[code];
+  if (code === 'USD') return '$' + Math.round(n).toLocaleString('en-US');
+  const rate = fxRate(code);
+  if (!rate) return '$' + Math.round(n).toLocaleString('en-US');   // no rate: stay honest, stay USD
+  const v = Math.round(n * rate);
+  return cur.sym + v.toLocaleString('en-US') + ((opts && opts.tag) ? ' ' + code : '');
+}
+function fxIsConverted(){ return fxView() !== 'USD' && fxRate() > 0; }
+// Ask once per currency rather than inventing a number and letting it be
+// trusted. The hint is a starting point, not an authority.
+function fxEnsureRate(code){
+  if (code === 'USD') return true;
+  if (fxRate(code) > 0) return true;
+  const cur = FX_CUR[code];
+  const inp = prompt('Rate for ' + code + ' (' + cur.name + ')\n\nHow many ' + code + ' to one US dollar?\n'
+    + 'This is YOUR season rate — it is what the line sheet quotes all season, so it should be the rate you agreed to hold, not today\u2019s spot.\n\n'
+    + 'Roughly ' + (cur.hint || '1') + ' at the time this was written \u2014 check it before you commit.', cur.hint || '');
+  if (inp === null) return false;
+  const r = Number(String(inp).replace(/[^0-9.]/g, ''));
+  if (!(r > 0)) { toast('That is not a rate I can use', 'warn'); return false; }
+  if (!STATE.fxRates) STATE.fxRates = {};
+  STATE.fxRates[code] = r;
+  save();
+  return true;
+}
+window.fxSetView = function(code){
+  code = FX_CUR[String(code).toUpperCase()] ? String(code).toUpperCase() : 'USD';
+  if (!fxEnsureRate(code)) { const sel = document.getElementById('styles-fx'); if (sel) sel.value = fxView(); return; }
+  STATE.fxView = code;
+  save();
+  try { renderStyles(); } catch(e){}
+  try { if (document.getElementById('px-pop')) pxRender(); } catch(e){}
+  toast(code === 'USD' ? 'Showing US dollars' : 'Showing ' + code + ' at ' + fxRate(code) + ' \u2014 display only, costing stays in USD');
+};
+window.fxEditRate = function(){
+  const code = fxView();
+  if (code === 'USD') { toast('US dollars is the currency everything is stored in', 'info'); return; }
+  if (STATE.fxRates) delete STATE.fxRates[code];
+  if (!fxEnsureRate(code)) { if (!STATE.fxRates) STATE.fxRates = {}; save(); }
+  try { renderStyles(); } catch(e){}
+  try { if (document.getElementById('px-pop')) pxRender(); } catch(e){}
+};
+
 const ST_SEL_W = 32;                       // the checkbox gutter — never resized
 const ST_COL_VIS_KEY = 'venia_style_cols', ST_COL_W_KEY = 'venia_style_colw';
 let ST_COL_HIDDEN = {}, ST_COL_W = {};
@@ -6438,7 +6524,11 @@ const ST_CELL = {
   season:   (s) => `<td style="font-size:10px">${s.season}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
-  cogs:     (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Cost of goods — click to edit the price chain" onclick="pxOpen('${s.id}',this,event)">${s.cogs?'$'+s.cogs:'<span style="color:var(--muted)">＋</span>'}</td>`,
+  delivery: (s) => {
+    const d = styleDelivery(s);
+    return `<td class="cell-edit" style="font-size:10px" title="${d.text ? esc(d.text) + (d.own ? ' — set on this style' : ' — from the ' + esc(s.season||'season') + ' calendar') + '. Click to change.' : 'When this style ships to the buyer — click to set'}" onclick="stTextEdit('delivery','${s.id}',this,event)"><div class="col-clip" style="color:${d.own?'var(--ink)':'var(--muted)'}">${d.text ? esc(d.text) : '<span style="color:var(--muted)">＋</span>'}</div></td>`;
+  },
+  cogs:     (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Cost of goods — click to edit the price chain${fxIsConverted()?' (entered in USD)':''}" onclick="pxOpen('${s.id}',this,event)">${s.cogs?fxFmt(s.cogs):'<span style="color:var(--muted)">＋</span>'}</td>`,
   wsMarginTarget: (s) => {
     // What the prices produce. A number derived from real prices is the truth
     // about this style, so it reads as set; only a bare house default is muted.
@@ -6448,8 +6538,8 @@ const ST_CELL = {
       : (own ? 'What you keep over COGS' : 'House default — no prices set yet');
     return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${esc(tip)}" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%${drift!==null?`<span style="color:var(--amber);margin-left:3px">•</span>`:''}</span></td>`;
   },
-  wholesale:(s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing" onclick="pxOpen('${s.id}',this,event)">${s.wholesale?'$'+s.wholesale:'<span style="color:var(--muted)">＋</span>'}</td>`,
-  retail:   (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing" onclick="pxOpen('${s.id}',this,event)">${s.retail?'$'+s.retail:'<span style="color:var(--muted)">＋</span>'}</td>`,
+  wholesale:(s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing${fxIsConverted()?' (entered in USD)':''}" onclick="pxOpen('${s.id}',this,event)">${s.wholesale?fxFmt(s.wholesale):'<span style="color:var(--muted)">＋</span>'}</td>`,
+  retail:   (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing${fxIsConverted()?' (entered in USD)':''}" onclick="pxOpen('${s.id}',this,event)">${s.retail?fxFmt(s.retail):'<span style="color:var(--muted)">＋</span>'}</td>`,
   marginTarget: (s) => {
     const m = pxMarginLive(s), drift = pxMarginDrift(s);
     const own = (Number(s.wholesale) > 0 && Number(s.retail) > 0) || !!s.marginTarget;
@@ -6734,7 +6824,7 @@ function pxRender(){
       <span style="font-size:9px;color:var(--muted);width:12px">%</span>
     </div>`;
   pop.innerHTML = `
-    <div style="padding:2px 12px 6px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Pricing · ${esc(st.name)}</div>
+    <div style="padding:2px 12px 6px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Pricing · ${esc(st.name)}${fxIsConverted() ? ' · <span style="color:var(--amber)">USD</span>' : ''}</div>
     ${money('COGS', 'cogs', cogs)}
     ${step('↓ your margin', 'wsmargin', wsM, 'what you keep over COGS' + (wsGap !== null ? ' · target ' + wsGap + '%' : ''))}
     ${money('Wholesale', 'wholesale', ws)}
@@ -6756,6 +6846,7 @@ function pxRender(){
       ${landed > cogs ? `Landed <b style="color:var(--soft)">$${landed.toFixed(2)}</b> (COGS + duty/freight/dye)` : (landed ? `Landed <b style="color:var(--soft)">$${landed.toFixed(2)}</b>` : 'No cost entered')}
       ${realWs !== null ? ` · real margin at wholesale <b style="color:${realWs>=40?'var(--green)':realWs>=25?'var(--amber)':'var(--red)'}">${realWs}%</b>` : ''}
       ${planTgt && planAct !== null ? `<br>Season plan wants <b style="color:var(--soft)">${planTgt}%</b> retail-vs-landed; this is <b style="color:${planAct>=planTgt?'var(--green)':'var(--amber)'}">${planAct}%</b>` : ''}
+      ${fxIsConverted() ? `<br>You are viewing the line in <b style="color:var(--soft)">${fxView()}</b> at your rate of ${fxRate()} \u2014 this panel edits the stored <b>USD</b>. Wholesale ${fxFmt(ws, {tag:1})}, retail ${fxFmt(retail, {tag:1})}.` : ''}
       <br>Editing a <b>margin</b> moves the price below it. Editing a <b>price</b> moves what sits below it; a COGS you have entered is never overwritten unless you press <b>Work back</b>.
     </div>`;
 }
@@ -6970,6 +7061,10 @@ window.stEnumFree = function(){
 };
 const ST_TEXT = {
   desc: { label: 'Description', hint: 'Design intent, silhouette notes, fit references, anything the factory needs to know.' },
+  // Free text on purpose. Brands write a delivery as a date, a window or a
+  // named drop — "2027-02-15", "Feb–Mar 27", "Delivery 2" are all real answers,
+  // and forcing a date picker would only make two of them unsayable.
+  delivery: { label: 'Delivery', hint: 'When this style ships — a date, a window ("Feb–Mar 27") or a drop name ("Delivery 2").\nLeave it empty to inherit the season calendar\u2019s delivery window.' },
 };
 window.stTextEdit = function(field, styleId, anchor, ev){
   if (ev) { ev.stopPropagation(); ev.preventDefault(); }
@@ -7691,6 +7786,20 @@ function renderStyles() {
   const syncFilter = (id, val) => { const el = document.getElementById(id); if (el && el.value !== (val||'')) el.value = val || ''; };
   syncFilter('styles-season-f', STATE.seasonFilter);
   syncFilter('styles-gender-f', STATE.genderFilter);
+  // The rate is shown wherever converted money is, so a EUR price is never read
+  // as if it came from somewhere authoritative.
+  const fxSel = document.getElementById('styles-fx');
+  if (fxSel) {
+    const want = Object.keys(FX_CUR).map(c => '<option value="' + c + '">' + (c === 'USD' ? '$ USD' : FX_CUR[c].sym + ' ' + c) + '</option>').join('');
+    if (fxSel.innerHTML !== want) fxSel.innerHTML = want;
+    if (fxSel.value !== fxView()) fxSel.value = fxView();
+  }
+  const fxNote = document.getElementById('styles-fx-rate');
+  if (fxNote) {
+    fxNote.innerHTML = fxIsConverted()
+      ? 'at <b style="color:var(--soft)">' + fxRate() + '</b> \u00b7 <span onclick="fxEditRate()" style="cursor:pointer;text-decoration:underline">your rate</span>'
+      : '';
+  }
   // Update filter pill counts
   const all = STATE.styles.filter(s=>s.status!=='archived');
   const stageCounts = {};
@@ -7734,7 +7843,7 @@ function renderStyles() {
       // The fields a founder would expect to search by name: what it is, what
       // it is made of, who makes it, and the note about it.
       const hay = (s) => [s.name, s.styleId, s.fabric, s.fabric2, s.colors,
-                          s.vendor, s.category, s.season, s.desc]
+                          s.vendor, s.category, s.season, s.desc, s.delivery]
         .map(v => String(v || '').toLowerCase()).join(' \u0001 ');
       list = list.filter(s => { const h = hay(s); return terms.some(t => h.includes(t)); });
     }
@@ -10059,6 +10168,20 @@ function styleOrigin(s){
     .find(x => x && (x.id === s.vendorId || String(x.name||'').trim().toLowerCase() === name.toLowerCase()));
   return (v && String(v.country||'').trim()) || '';
 }
+// A style ships when the season ships, unless it does not. Most of a line
+// moves in one window and a handful are a second delivery, so the season
+// calendar is the default and the per-style value is the exception — same
+// stored-wins-else-derived shape as origin and category. Returns whether the
+// value is the style's own, so the cell can show an inherited one muted.
+function styleDelivery(s){
+  const own = String((s && s.delivery) || '').trim();
+  if (own) return { text: own, own: true };
+  const cal = (((typeof STATE !== 'undefined' && STATE.seasonCal) || {})[String((s && s.season) || '').trim()]) || {};
+  const a = String(cal.deliveryStart || '').trim(), b = String(cal.deliveryEnd || '').trim();
+  if (!a && !b) return { text: '', own: false };
+  return { text: a && b ? a + ' \u2192 ' + b : (a || b), own: false };
+}
+
 function styleCategory(s){
   const own = String((s && s.category) || '').trim();
   if (own) return own;
