@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 357._
+_Last reviewed at Build 358._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -169,6 +169,23 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **A backdrop click never discards a form.** One global handler closed any open
+  `.overlay`, so a stray click beside the four-tab pull cart threw away
+  everything typed. An overlay can now carry `data-no-backdrop-close`; the pull
+  cart does, leaving ✕ and Cancel as the ways out. The cart also holds its shape
+  between tabs — Client Info is tall and Items short, so the shell collapsed
+  ~330px, sliding the footer under the cursor and opening dark area exactly
+  where you were about to click.
+- **A draft pull is findable.** `Active` correctly excludes drafts — they are not
+  out yet — but a draft was then reachable only under `All`, with no count
+  anywhere, so a half-built pull with samples in it simply vanished. A `Drafts N`
+  tab appears when there are any, and the empty Active tab points at them.
+- **Season is editable in the table**, like fabric, colorway, category and
+  gender — it was the one identity field that needed the full Edit Style modal,
+  and the one most often wrong on an imported or duplicated style. Free text, so
+  a season that does not exist yet can be typed straight in. `stEnumSet` already
+  calls `styleResyncCode`, so moving a style renumbers its code to the next free
+  number in the new season and keeps the old one as `prevStyleId`.
 - **Brainstorm is a SPACE, not a takeover.** It rendered as a full-viewport
   overlay at z-9200 that covered the global bar and the space nav, drew its own
   ✕ as the only way back, and used the opposite typographic treatment to every
@@ -327,7 +344,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 55 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 56 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
