@@ -116,11 +116,14 @@ export default async (req) => {
         if (cust.error) return json({ error: cust.error.message }, 400, cors);
         customerId = cust.id;
       }
-      const item = await call('invoiceitems', {
-        customer: customerId, amount: amt, currency: 'usd',
-        description: String(body.description || 'VENIA wholesale order').slice(0, 300),
-      });
-      if (item.error) return json({ error: item.error.message }, 400, cors);
+      // THE INVOICE IS CREATED FIRST AND THE LINE IS ATTACHED TO IT BY ID.
+      // Creating the invoiceitem first leaves it PENDING — unattached to any
+      // invoice — and Stripe's API-created invoices default to
+      // pending_invoice_items_behavior: 'exclude', so the line was never picked
+      // up. The result was a $0.00 invoice that auto-finalised as PAID and went
+      // to the buyer's inbox reading "Invoice paid $0.00" while VENIA recorded
+      // the full amount. Naming the invoice on the line removes the dependency
+      // on that default entirely.
       const inv = await call('invoices', {
         customer: customerId, collection_method: 'send_invoice',
         days_until_due: String(Math.min(parseInt(body.days, 10) || 14, 60)),
@@ -128,11 +131,26 @@ export default async (req) => {
         footer: 'VENIA Collection | veniacollection.com',
       });
       if (inv.error) return json({ error: inv.error.message }, 400, cors);
+      const item = await call('invoiceitems', {
+        customer: customerId, invoice: inv.id, amount: amt, currency: 'usd',
+        description: String(body.description || 'VENIA wholesale order').slice(0, 300),
+      });
+      if (item.error) return json({ error: item.error.message }, 400, cors);
       const fin = await call('invoices/' + encodeURIComponent(inv.id) + '/finalize', {});
       if (fin.error) return json({ error: fin.error.message }, 400, cors);
+      // CHECK THE TOTAL BEFORE IT IS SENT, NOT AFTER. An invoice for the wrong
+      // amount in a stylist's inbox cannot be taken back, and a $0 one is
+      // already marked paid by the time anyone notices. Void and refuse.
+      const total = Number(fin.total);
+      if (total !== amt) {
+        try { await call('invoices/' + encodeURIComponent(inv.id) + '/void', {}); } catch (_) {}
+        return json({ error: 'Stripe finalized this invoice at $' + (total / 100).toFixed(2)
+          + ' instead of $' + (amt / 100).toFixed(2) + '. It was voided and NOT sent — nothing reached the buyer.' }, 500, cors);
+      }
       const sent = await call('invoices/' + encodeURIComponent(inv.id) + '/send', {});
       if (sent.error) return json({ error: sent.error.message }, 400, cors);
-      return json({ id: inv.id, hosted_invoice_url: fin.hosted_invoice_url || sent.hosted_invoice_url || '' });
+      return json({ id: inv.id, total,
+        hosted_invoice_url: fin.hosted_invoice_url || sent.hosted_invoice_url || '' });
     }
     if (body.action === 'status') {
       const s = await call('checkout/sessions/' + encodeURIComponent(body.id), {}, 'GET');

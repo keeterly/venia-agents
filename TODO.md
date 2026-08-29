@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 353._
+_Last reviewed at Build 355._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -169,6 +169,15 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **A Stripe invoice line must NAME its invoice.** A $200 pull fee reached the
+  stylist's inbox as "Invoice paid $0.00". The invoiceitem was created with no
+  `invoice` id, which leaves it PENDING, and API-created invoices default to
+  `pending_invoice_items_behavior: 'exclude'` — so the line was never attached.
+  An empty invoice finalises as already paid. The invoice is now created FIRST
+  and the line names it, and the finalised total is checked against what was
+  asked for BEFORE the send: a mismatch voids the invoice and refuses, because
+  a wrong invoice in a buyer's inbox cannot be taken back. The pull records
+  what Stripe billed, not what was typed, so the two can never disagree.
 - **No Stripe key ever enters the browser.** Settings carried two Stripe cards
   sharing the same element ids, so `getElementById` only ever found the first —
   the real status went to the top card while the second sat frozen on "Not set"
@@ -305,7 +314,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 53 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 54 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
