@@ -518,3 +518,21 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   leaves from, and the Resend + DNS steps.
 - **Needs from Keeter:** a Resend account, `veniacollection.com` verified there
   (SPF + DKIM), then `RESEND_API_KEY` in Netlify and a redeploy.
+
+## Build 367 — a stylist pull is not a wholesale order
+- **"This was processed and it said wholesale, but a pull sheet is not
+  wholesale, it's a stylist pull."** Stripe filed the contact as *"VENIA
+  wholesale account"*. The string was hardcoded in the `invoice` action — and
+  the only caller of that action is the pull payment modal, so **every** press
+  contact this app has ever invoiced was filed as a wholesale buyer.
+- The action now takes `kind` ('pull' | 'wholesale'). **Default is `pull`**,
+  because that is what every existing caller is: defaulting the other way would
+  keep mislabelling anyone on a cached client.
+- Customer label, invoice-line description and `metadata[venia_kind]` all follow
+  the kind; `metadata[venia_ref]` carries the pull number, so a Stripe row can
+  be traced back without opening the app.
+- **Invariant: only a label we wrote ourselves is eligible to be rewritten.** A
+  description typed by a human in the Stripe dashboard is left alone. A contact
+  who both buys wholesale and borrows samples becomes "VENIA wholesale + press
+  pulls" rather than flipping on whichever invoice went out last.
+- Deidre's existing record corrects itself on the next pull invoice.
