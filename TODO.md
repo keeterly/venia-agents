@@ -385,3 +385,29 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
 - EDIT MATERIAL shows live chips under Available Colors (`mmColorChips`); a
   chip sets the brand-wide swatch (`mmSetColorHex`) and saves on the spot,
   because a swatch belongs to the brand, not to this material's edit.
+
+## Build 361 — a hold instead of a charge; a photo instead of a style ID
+- **"an option for putting a hold on a card as well instead of just a charge."**
+  The server has done manual-capture authorizations since the deposit flow was
+  built (`create` with `hold:true`, plus `capture`/`cancel`); the only door to
+  one was the NFC finish sheet. The payment modal now has a **Hold Card** tab:
+  amount defaults to the retail on loan (security), not the pull fee (revenue).
+- **Invariant: an authorization dies after 7 days.** That is the card networks.
+  It is stated before the hold is created, and `prHoldRender` turns it into a
+  date; past it, the panel says to expect a capture to fail rather than showing
+  a button that lies. Anything longer than a week should be a deposit + refund.
+- `prPayRepaint(pullId)` replaced the bare `prTagFinish(pullId)` calls in
+  check/capture/release — those popped the NFC sheet open over whatever surface
+  you were actually on. It repaints only what is on screen.
+- A hold now shows on the pull detail even when there is no fee at all: real
+  money is reserved on someone's card and only we can end it.
+- **"the search bar should also show fabric and image"** — `prThumb` and
+  `prFabLine` (fabric swatch + name + colourway dots) in the search results, the
+  cart rows and the sample items. Two LARA VESTs in different fabrications were
+  distinguishable only by a style ID.
+- **"in the pull sheet itself, it should include the image"** — the PDF gets a
+  56×70 photo column and the fabric under the style name; `tr{page-break-inside:
+  avoid}` and `print-color-adjust:exact` so it survives the print dialog.
+- Photos are read live via `prItemStyle(item)`, never copied onto the pull item:
+  a re-shot photo reaches old sheets, and STATE does not carry a second copy of
+  every image.
