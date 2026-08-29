@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 352._
+_Last reviewed at Build 353._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -34,6 +34,17 @@ _Last reviewed at Build 352._
 - **Marketing and Brand own no actions of their own** — their work is
   drafting, which needs none. If campaign or calendar records ever become
   real objects, they get actions and the remit map is where to add them.
+
+- **⚠️ ROTATE THE GOOGLE OAUTH CLIENT SECRET.** A `GOCSPX-` client secret had
+  been pasted into the "Picker API key" field. It was stored in
+  `STATE.googleApiKey`, which syncs — so it sat in every device's localStorage
+  AND in `venia_workspace.data` in Supabase. Build 353 refuses it, purges it
+  from both, and the cloud copy was cleared; but a secret that has been in a
+  browser and a database has to be rotated at the source: Google Cloud Console
+  → APIs & Services → Credentials → the OAuth client → Reset secret. The app
+  never needed it — Drive signs in with the Client ID alone. Drive attach has
+  in fact NEVER worked, because that field wants an `AIza…` Picker API key;
+  create one (Credentials → Create credentials → API key) and paste it there.
 
 - **Delete the old Stripe secret keys.** Several were created while getting the
   bank connected, including one that passed through a chat transcript. The live
@@ -294,7 +305,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 52 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 53 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
