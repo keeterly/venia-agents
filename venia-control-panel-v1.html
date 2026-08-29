@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '351';
+  const BUILD = '352';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2472,33 +2472,13 @@ body{padding-top:44px;box-sizing:border-box;}
             <div style="margin-top:8px;font-size:10px;color:var(--muted)"><a href="https://developers.facebook.com" target="_blank" style="color:var(--muted);text-decoration:underline">developers.facebook.com → Create App → Business → Instagram Graph API →</a></div>
           </div>
 
-          <!-- Stripe -->
-          <div style="background:var(--bg);border:1px solid var(--border);padding:20px;margin-bottom:12px">
-            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-              <div style="width:44px;height:44px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--ink);font-size:16px;font-weight:700;flex-shrink:0">ST</div>
-              <div style="flex:1">
-                <div style="font-size:14px;font-weight:700;color:var(--ink)">Stripe</div>
-                <div style="font-size:10px;color:var(--muted)">Pull fee invoicing &amp; hold charges</div>
-              </div>
-              <div style="display:flex;align-items:center;gap:8px">
-                <div id="set-conn-stripe-dot" style="width:8px;height:8px;border-radius:50%;background:var(--border-mid)"></div>
-                <span id="set-conn-stripe-label" style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:700">Not set</span>
-              </div>
-            </div>
-            <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end;flex-wrap:wrap">
-              <div class="fg"><label class="fl" for="set-stripe-secret">Secret Key (sk_live_ or sk_test_)</label>
-                <input class="fi fi-mono" type="password" id="set-stripe-secret" placeholder="sk_live_…" style="font-size:10px">
-              </div>
-              <div class="fg"><label class="fl" for="set-stripe-pub">Publishable Key (pk_live_ or pk_test_)</label>
-                <input class="fi fi-mono" id="set-stripe-pub" placeholder="pk_live_…" style="font-size:10px">
-              </div>
-            </div>
-            <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button class="btn btn-gold btn-sm" onclick="setStripeKeys()">Save</button>
-              <a href="https://dashboard.stripe.com/apikeys" target="_blank" style="font-size:10px;color:var(--muted);text-decoration:underline">dashboard.stripe.com → Developers → API keys →</a>
-            </div>
-          </div>
-
+          <!-- The second Stripe card lived here. It duplicated the one above —
+               same id="set-conn-stripe-dot"/"-label", so getElementById only ever
+               found the FIRST, which is why this one sat frozen on "Not set"
+               while the real status was reported to the card above it. It also
+               asked for a live SECRET key in the browser, which the card above
+               correctly says must never happen. Both cards, one truth: the key
+               is a Netlify env var and the status is probed from the server. -->
           <!-- Supabase -->
           <div style="background:var(--bg);border:1px solid var(--border);padding:20px;margin-bottom:12px">
             <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -16300,16 +16280,44 @@ window.prStripeRelease = async function(pullId){
   } catch(e){ showToast('Release failed','error'); }
 };
 
-window.setTestStripe = async function(){
-  const dot = document.getElementById('set-conn-stripe-dot');
-  const label = document.getElementById('set-conn-stripe-label');
+// ONE PLACE THAT KNOWS WHETHER STRIPE IS LIVE, and it asks the server. There is
+// nothing in the browser to inspect any more — the key is a Netlify env var —
+// so anything showing Stripe's state has to probe for it. Cached for a minute
+// so opening Settings twice does not mean two round trips.
+let __stripeProbe = { at: 0, ok: null, busy: false };
+async function stripeProbe(force){
+  const paint = () => {
+    const ok = __stripeProbe.ok;
+    const dot = document.getElementById('set-conn-stripe-dot');
+    const label = document.getElementById('set-conn-stripe-label');
+    if (dot) dot.style.background = ok === null ? 'var(--border-mid)' : (ok ? 'var(--green)' : 'var(--amber)');
+    if (label) label.textContent = ok === null ? 'Checking\u2026' : (ok ? 'Connected' : 'Not set in Netlify');
+    const pr = document.getElementById('pr-prefs-stripe-status');
+    if (pr) {
+      pr.innerHTML = ok === null ? 'checking\u2026'
+        : ok ? '<span style="color:var(--green)">\u2713 Connected</span>'
+             : '<span style="color:var(--amber)">\u26a0 STRIPE_SECRET_KEY not set in Netlify</span>';
+    }
+  };
+  if (!force && __stripeProbe.ok !== null && Date.now() - __stripeProbe.at < 60000) { paint(); return __stripeProbe.ok; }
+  if (__stripeProbe.busy) { paint(); return __stripeProbe.ok; }
+  __stripeProbe.busy = true;
+  paint();
   try {
     const res = await prStripe('ping', {});
-    const ok = !!res.configured;
-    if (dot) dot.style.background = ok ? '#22c55e' : 'var(--border-mid)';
-    if (label) label.textContent = ok ? 'Connected ✓' : 'Not set';
-    showToast(ok ? 'Stripe connected ✓' : 'STRIPE_SECRET_KEY not set in Netlify env', ok?'success':'warning');
-  } catch(e){ showToast('Stripe function unreachable (deploy first)','error'); }
+    __stripeProbe.ok = !!(res && res.configured);
+  } catch(e){ __stripeProbe.ok = false; }
+  __stripeProbe.at = Date.now();
+  __stripeProbe.busy = false;
+  paint();
+  return __stripeProbe.ok;
+}
+window.stripeProbe = stripeProbe;
+
+window.setTestStripe = async function(){
+  const ok = await stripeProbe(true);
+  showToast(ok ? 'Stripe connected \u2713' : 'STRIPE_SECRET_KEY is not set in Netlify \u2014 add it there, then redeploy',
+    ok ? 'success' : 'warning');
 };
 
 // Boot: process ?tag=… once the app is unlocked and STATE is live.
@@ -16812,18 +16820,10 @@ function prMarkAllReturned(pullId) {
 }
 
 // ── Stripe & Payment Integration ────────────────────────────────────────────
-function setStripeKeys() {
-  const secret = document.getElementById('set-stripe-secret')?.value.trim();
-  const pub    = document.getElementById('set-stripe-pub')?.value.trim();
-  if (!secret && !pub) { toast('Enter at least one key', 'warn'); return; }
-  if (secret) setKey('stripe_secret', secret);
-  if (pub)    setKey('stripe_pub', pub);
-  const dot   = document.getElementById('set-conn-stripe-dot');
-  const label = document.getElementById('set-conn-stripe-label');
-  if (dot)   dot.style.background   = 'var(--green)';
-  if (label) label.textContent      = 'Connected';
-  toast('✓ Stripe keys saved');
-}
+// setStripeKeys is gone with the input it served — it wrote a live secret key
+// into localStorage. Stripe keys are Netlify env vars; nothing in the browser
+// needs them.
+
 
 let PR_PAY_PULL_ID = null;
 
@@ -16882,18 +16882,13 @@ function prPayTab(tab, el) {
   });
 }
 
-async function prStripeRequest(method, endpoint, body) {
-  const key = getKey('stripe_secret');
-  if (!key) throw new Error('Stripe secret key not set — go to Settings → Connections');
-  const opts = {
-    method, headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/x-www-form-urlencoded' }
-  };
-  if (body) opts.body = new URLSearchParams(body).toString();
-  const res = await fetch('https://api.stripe.com/v1' + endpoint, opts);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message || 'Stripe error');
-  return data;
-}
+// prStripeRequest is gone. It signed requests to api.stripe.com with a live
+// secret key read out of localStorage, which meant the key had to be pasted
+// into the browser and stayed there — one XSS, one shared laptop or one
+// browser extension away from full account access. Everything it did now goes
+// through functions/stripe.js, where the key never leaves the server and the
+// money actions sit behind the founder access code.
+
 
 async function prSendStripeInvoice() {
   const btn = document.getElementById('pr-pay-invoice-btn');
@@ -16910,41 +16905,22 @@ async function prSendStripeInvoice() {
   statusEl.style.display = 'block'; statusEl.textContent = 'Connecting to Stripe…'; statusEl.style.color = 'var(--muted)';
 
   try {
-    // 1. Find or create customer
-    statusEl.textContent = 'Finding customer…';
-    let customerId;
+    // ONE GATED SERVER CALL. This used to run five requests to api.stripe.com
+    // straight from the browser, signed with a live secret key kept in
+    // localStorage. functions/stripe.js has done find-or-create → invoice item
+    // → finalize → send behind the access code since it was written; the
+    // browser path was simply never retired, so the key had to stay reachable
+    // from the page for it to work.
+    statusEl.textContent = 'Creating and sending the invoice…';
     const pull = (STATE.prPulls || []).find(p => p.id === PR_PAY_PULL_ID);
-    const custSearch = await prStripeRequest('GET', `/customers/search?query=email:'${encodeURIComponent(email)}'`);
-    if (custSearch.data && custSearch.data.length > 0) {
-      customerId = custSearch.data[0].id;
-    } else {
-      statusEl.textContent = 'Creating Stripe customer…';
-      const cust = await prStripeRequest('POST', '/customers', {
-        email, name: pull?.contact || '', description: `VENIA press contact — ${pull?.publication || ''}`
-      });
-      customerId = cust.id;
-    }
-
-    // 2. Create invoice item
-    statusEl.textContent = 'Building invoice…';
-    await prStripeRequest('POST', '/invoiceitems', {
-      customer: customerId, amount: Math.round(amount * 100), currency: 'usd', description: desc
+    const res = await prStripe('invoice', {
+      amount, email,
+      name: (pull && pull.contact) || '',
+      description: desc || ('VENIA PR — ' + ((pull && pull.invoiceNo) || '')),
+      days: due ? Math.max(1, Math.ceil((new Date(due).getTime() - Date.now()) / 86400000)) : 7,
     });
-
-    // 3. Create invoice
-    const dueTs = due ? Math.floor(new Date(due).getTime() / 1000) : undefined;
-    const invoiceBody = {
-      customer: customerId, collection_method: 'send_invoice',
-      days_until_due: 7, description: `VENIA PR — ${pull?.invoiceNo || ''}`,
-      footer: 'VENIA Collection | veniacollection.com | Credit required in all publications'
-    };
-    if (dueTs) invoiceBody.due_date = dueTs;
-    const inv = await prStripeRequest('POST', '/invoices', invoiceBody);
-
-    // 4. Finalize & send
-    statusEl.textContent = 'Sending invoice…';
-    await prStripeRequest('POST', `/invoices/${inv.id}/finalize`, {});
-    await prStripeRequest('POST', `/invoices/${inv.id}/send`, {});
+    if (!res || res.error) throw new Error((res && res.error) || 'Stripe did not accept that invoice');
+    const inv = { id: res.id, hosted_invoice_url: res.hosted_invoice_url || '' };
 
     // 5. Save to pull
     if (pull) {
@@ -16977,14 +16953,11 @@ async function prCreatePaymentLink() {
   if (!amount) { toast('Enter an amount', 'warn'); return; }
 
   try {
-    // Create a price (one-time)
-    const price = await prStripeRequest('POST', '/prices', {
-      unit_amount: Math.round(amount * 100), currency: 'usd',
-      'product_data[name]': desc
-    });
-    const link = await prStripeRequest('POST', '/payment_links', {
-      'line_items[0][price]': price.id, 'line_items[0][quantity]': 1
-    });
+    // Also moved off the browser secret key. A checkout session is what the
+    // deposit and card-hold flow already uses, so this is the same server
+    // action rather than a second way of taking money.
+    const link = await prStripe('create', { amount, description: desc, hold: false });
+    if (!link || link.error || !link.url) throw new Error((link && link.error) || 'Stripe did not return a link');
 
     const urlEl = document.getElementById('pr-pay-link-url');
     if (urlEl) urlEl.value = link.url;
@@ -16995,6 +16968,7 @@ async function prCreatePaymentLink() {
       if (!pull.payment) pull.payment = {};
       pull.payment.status = 'invoiced'; pull.payment.method = 'stripe';
       pull.payment.paymentLinkUrl = link.url; pull.payment.amount = amount;
+      pull.payment.sessionId = link.id || '';
       save();
     }
     toast('✓ Payment link created');
@@ -17199,6 +17173,20 @@ function dbUpdate(table, id, patch) {
 function dbDelete(table, id) { dbSet(table, dbGet(table).filter(r => r.id !== id)); }
 function keysRead()           { try { return JSON.parse(localStorage.getItem(KEYS_KEY)||'{}'); } catch(e){ return {}; } }
 function getKey(name)         { return keysRead()[name]||''; }
+// ONE-TIME PURGE. Until Build 352 the Settings page had an input that wrote a
+// live Stripe secret key into localStorage, and the PR invoice flow read it
+// back to call api.stripe.com from the page. Both are gone, but a key pasted
+// before today is still in this browser — so remove it rather than leaving it
+// sitting there unread. Stripe keys are Netlify env vars now; nothing local
+// needs them.
+try {
+  const _k = keysRead();
+  if (_k && (_k.stripe_secret || _k.stripe_pub)) {
+    delete _k.stripe_secret; delete _k.stripe_pub;
+    localStorage.setItem(KEYS_KEY, JSON.stringify(_k));
+    console.info('VENIA: removed a locally stored Stripe key — it lives in Netlify now.');
+  }
+} catch(e){}
 function setKey(name,val)     { const k=keysRead(); k[name]=val; localStorage.setItem(KEYS_KEY,JSON.stringify(k)); }
 function delKey(name)         { const k=keysRead(); if (name in k){ delete k[name]; localStorage.setItem(KEYS_KEY,JSON.stringify(k)); } }
 window.VENIA_DB = { dbRead, dbWrite, dbGet, dbSet, dbInsert, dbUpdate, dbDelete, getKey, setKey, delKey };
@@ -19013,6 +19001,10 @@ function setShowSection(id, navEl) {
   // Topbar shows the section, not a repeat of the rail's "Settings".
   const tEl = document.querySelector('#cp-screen-set .ag-page-title');
   if (tEl && navEl) tEl.textContent = navEl.textContent.trim();
+  // The status used to require pressing "Test Connection" and would otherwise
+  // sit on "Not tested" for ever — which reads as "not set up" when the key has
+  // been in Netlify all along. Opening the section asks the server.
+  if (id==='set-conns') { try { stripeProbe(); } catch(e){} }
   if (id==='set-data') setUpdateDataSummary();
   if (id==='set-security') setRenderFaceId();
   if (id==='set-carelabel' && typeof careDefaultsFillForm==='function') careDefaultsFillForm();
@@ -23384,6 +23376,8 @@ function prDeleteEditor(editorId) {
 // ══════════════════════════════════════════════════════════
 function agBuildPrPrefsSection() {
   const prefs = STATE.prPrefs || {};
+  // The panel renders "checking…"; the probe fills it in once the DOM exists.
+  setTimeout(() => { try { stripeProbe(); } catch(e){} }, 0);
   return `
     <div style="max-width:600px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Brand Voice for PR</h2></div>
@@ -23415,7 +23409,7 @@ function agBuildPrPrefsSection() {
       <div style="margin-bottom:24px;padding:12px 16px;background:var(--bg-off);border:1px solid var(--border);font-size:11px;color:var(--muted)">
         Stripe keys are managed in
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="cpGoto('set');setTimeout(()=>setShowSection('set-conns',null),200)" style="font-size:10px;margin:0 4px">Global Settings</button>
-        ${getKey('stripe_secret') ? '<span style="color:var(--green)">&#x2713; Connected</span>' : '<span style="color:var(--amber)">&#x26A0; Not configured</span>'}
+        <span id="pr-prefs-stripe-status" style="color:var(--muted)">checking\u2026</span>
       </div>
       <button class="ag-btn ag-btn-primary" onclick="prSavePrefs()">Save Preferences</button>
     </div>`;

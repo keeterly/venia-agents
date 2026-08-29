@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 351._
+_Last reviewed at Build 352._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -158,6 +158,17 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **No Stripe key ever enters the browser.** Settings carried two Stripe cards
+  sharing the same element ids, so `getElementById` only ever found the first —
+  the real status went to the top card while the second sat frozen on "Not set"
+  with the key live in Netlify all along. The second card also asked for a live
+  SECRET key, and `prStripeRequest` read it back to call api.stripe.com straight
+  from the page. `functions/stripe.js` had done all of it server-side behind the
+  access code since it was written; the browser path was simply never retired.
+  Both PR money flows (invoice, payment link) now go through it, the card and
+  the input are gone, and a key stored before Build 352 is purged on boot.
+  Status is probed from the server when the section opens rather than waiting
+  for someone to press "Test Connection" — "Not tested" reads as "not set up".
 - **Prices are stored in USD; the currency picker changes the VIEW only.** A
   line sheet has to be readable in the buyer's money, but the costing chain
   must not move — so `fxFmt()` converts what is shown and nothing else, and the
@@ -283,7 +294,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 51 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 52 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
