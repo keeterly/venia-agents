@@ -470,3 +470,26 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   Styles"; nothing is written to the Styles library.
 - `prCartRetail` updates the cart total and the fee without re-rendering the row
   out from under the cursor.
+
+## Build 365 — the pull is signed for, and the email is the agreement
+- **Playtest of the whole pull system** (draft → client → items → pricing/terms
+  → review → finalize → email → PDF → list → returns → close → payment): sound
+  end to end. Two things were missing entirely.
+- **The email was a teaser.** It listed the pieces and said "the full pull sheet
+  with terms is available on request" — on a handover document whose purpose IS
+  the terms. No value on loan, no fee, no return date, nothing to agree to. It
+  now carries all of it, plus an explicit line to reply to, and the subject says
+  whether it is signed or awaiting confirmation.
+- **Invariant: one draft for every path that emails a pull.** The agent-created
+  pulls had their own thinner template; `agentDraftPullEmail` now delegates to
+  `prSendEmail(pull, opener)`. Two templates for one agreement is how only one
+  of them ever gets fixed.
+- **Signature confirmation** (`prSignOpen`): the stylist signs on the phone at
+  handover. Canvas at device pixel ratio, pointer events (finger/stylus/mouse),
+  name required, mark required. `prTermsLines()` is the single definition of the
+  terms, shown in the pad, printed on the sheet, sent in the email.
+- **The signature freezes what it covered** — terms, item count, retail value —
+  so a later edit can never look like it was signed for. `prSignDrift()` says
+  which of the three changed.
+- The sheet prints the real signature and its timestamp; unsigned still prints
+  the ink line. Finalizing opens the pad while the stylist is still in the room.
