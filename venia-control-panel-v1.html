@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '337';
+  const BUILD = '338';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6861,10 +6861,22 @@ const ST_ENUM = {
   gender:   { label: 'Gender', values: ['womens','mens','unisex'], get: (s) => styleGender(s),
               show: (v) => v.charAt(0).toUpperCase() + v.slice(1),
               note: 'Rows with no gender set read it from the style code (…-W… womens, …-M… mens, …-U… unisex). Changing it here renumbers the code to match, so the two can never disagree.' },
+  // Vendor types are stored capitalised ('Factory'), so a lowercase comparison
+  // matched nothing and the picker was empty however many factories existed.
+  // And a library with no factory yet must not be a dead end: fall back to
+  // every vendor rather than offering nothing.
   vendor:   { label: 'Manufacturer', get: (s) => styleVendor(s), free: true,
-              values: () => ['', ...new Set(((STATE.vendors||[]).filter(v => v && v.type === 'factory').map(v => v.name).filter(Boolean)))],
-              show: (v) => v || '— none —',
-              note: 'Factories from your Vendors library. Assigning one also sets the country of origin, unless the style overrides it.' },
+              values: () => {
+                const all = (STATE.vendors||[]).filter(v => v && String(v.name||'').trim());
+                const fac = all.filter(v => String(v.type||'').trim().toLowerCase() === 'factory');
+                return ['', ...new Set((fac.length ? fac : all).map(v => v.name))];
+              },
+              show: (v) => {
+                if (!v) return '— none —';
+                const m = (STATE.vendors||[]).find(x => x && String(x.name||'').trim().toLowerCase() === String(v).trim().toLowerCase());
+                return (m && m.type && String(m.type).toLowerCase() !== 'factory') ? v + ' · ' + m.type : v;
+              },
+              note: 'Factories from your Vendors library — every vendor, if none is typed as a factory yet. Assigning one also sets the country of origin, unless the style overrides it.' },
   origin:   { label: 'Country of origin', get: (s) => styleOrigin(s), free: true,
               values: (s) => ['', ...new Set([...(STATE.vendors||[]).map(v => v && v.country).filter(Boolean),
                                               String((s && s.origin) || '').trim()].filter(Boolean))],
@@ -20439,7 +20451,8 @@ function agentActionSpec(key) {
       + '{"type":"update_vendors","updates":[{"name":"Exact vendor name","set":{"type":"Factory","location":"Tokyo, Japan","contact":"Ohnuki","email":""}}]}\n'
       + '```\n'
       + 'Put ONLY the fields you are changing inside "set" — allowed keys: type, location, city, country, website, contact, email, phone, terms, moq, specialty, notes, lead. Blank values are ignored, so this never clears a field. Replacing "location" re-splits city and country for you. Same rule as above: never invent a detail you were not given.\n'
-      + '\nNEVER claim you have filed, added, saved or corrected anything unless this reply actually carries the action block that does it. Saying it is done when nothing ran is worse than saying you cannot — the founder stops checking, and the record is missing when they need it.';
+      + '\nNEVER claim you have filed, added, saved or corrected anything unless this reply actually carries the action block that does it. Saying it is done when nothing ran is worse than saying you cannot — the founder stops checking, and the record is missing when they need it.\n'
+      + '\nWhen you DO emit a block, it runs the moment you finish and the app shows a confirmation card with what changed and an Undo. So state plainly what you did and stop. Do not ask the founder to go and check whether it worked, do not say "if it still does not show up", and do not offer to try again pre-emptively — you cannot see the result inside this turn, but they can see the card, and hedging reads as the app being unreliable. If something genuinely did not match, the card says so and you will see the corrected data on your next turn.';
   }
   if (key !== 'pr') return '';   // PR handled below
   return '\n\nACTIONS — you can take ONE real action in VENIA, but only when the user clearly asks for it:\n'
@@ -20925,6 +20938,16 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'price_from_retail') return agentRunPriceFromRetail(action, chatBody);
   if (action.type === 'handoff') return agentRunHandoff(action, chatBody);
   if (action.type === 'update_vendors') return agentRunUpdateVendors(action, chatBody);
+  // An action type nothing handles was consumed and dropped in silence: the
+  // block looked valid, no card appeared, and the sentence above it said the
+  // change had landed. That is exactly how a vendor went missing — the agent
+  // reached for update_vendors months before it existed, and the app said
+  // nothing at all. A block that cannot run must say so.
+  try {
+    appendAgentNote(chatBody, '⚠ Nothing was saved — I reached for an action this app does not have ("'
+      + String(action.type || '?').slice(0, 40) + '"). Say it again and I\'ll use one that exists, or add it by hand.');
+  } catch (e) {}
+  return { unknown: true, type: action.type };
 }
 
 // Passing work to the colleague who owns it. Nothing moves without a tap: the
@@ -22278,7 +22301,7 @@ function agentRunUpdateVendors(action, chatBody) {
   }
   window.__agPrevVendors = prev;
   save();
-  try { renderVendors(); } catch(e){}
+  try { if (STATE.currentPage === 'vendors') renderVendors(); } catch(e){}
   agentActionCard(chatBody, done.length + ' vendor' + (done.length>1?'s':'') + ' updated',
     '<div style="font-size:10.5px;line-height:1.7">' + done.map(d => escHtml(d.name + ' — ' + d.what)).join('<br>') + '</div>'
     + (missed.length ? '<div style="font-size:10px;color:var(--amber);margin-top:6px">Skipped: ' + escHtml(missed.slice(0,3).join('; ')) + '</div>' : '')
@@ -22290,7 +22313,7 @@ window.agentUndoVendors = function(){
   (STATE.vendors||[]).forEach((v, i) => { if (prev[v.id]) STATE.vendors[i] = prev[v.id]; });
   window.__agPrevVendors = null;
   save();
-  try { renderVendors(); } catch(e){}
+  try { if (STATE.currentPage === 'vendors') renderVendors(); } catch(e){}
   showToast('Vendor changes undone', 'info');
 };
 function agentRunAddVendors(action, chatBody) {
