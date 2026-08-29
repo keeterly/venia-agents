@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '368';
+  const BUILD = '369';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2399,8 +2399,12 @@ body{padding-top:44px;box-sizing:border-box;}
             </div>
             <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
               <button class="btn btn-ghost btn-sm" onclick="setConnectGmail()">Connect Gmail</button>
+              <button class="btn btn-ghost btn-sm" onclick="setSendTestMail()" id="set-mail-test" style="display:none">Send test email</button>
               <button class="btn btn-ghost btn-sm" onclick="setDisconnectGmail()" id="set-mail-disc" style="display:none;color:var(--muted)">Disconnect</button>
             </div>
+            <!-- A toast is gone in three seconds; a send that failed at 3am is
+                 not. The last refusal stays here until a send succeeds. -->
+            <div id="set-mail-err" style="display:none;margin-top:10px;padding:10px 12px;border:1px solid var(--red);font-size:10px;color:var(--red);line-height:1.7"></div>
             <details style="margin-top:14px">
               <summary style="font-size:10px;color:var(--muted);cursor:pointer;letter-spacing:.5px">How to connect →</summary>
               <div style="margin-top:8px;font-size:10px;color:var(--muted);line-height:1.8">
@@ -5052,7 +5056,7 @@ const SYNC_KEYS = [
   // Sending: which transport is connected, the address to send as, and who
   // every pull sheet is copied to. Same rule as finCats — a setting left out of
   // this list is a setting that vanishes on the next save.
-  'mailGmail', 'mailSendAs', 'pullCc',
+  'mailGmail', 'mailSendAs', 'pullCc', 'mailLastError',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -17016,10 +17020,52 @@ function setMailPaintFields(){
   const a = document.getElementById('set-mail-sendas');
   const c = document.getElementById('set-mail-cc');
   const dbtn = document.getElementById('set-mail-disc');
+  const tbtn = document.getElementById('set-mail-test');
+  const err = document.getElementById('set-mail-err');
   if (a) a.value = STATE.mailSendAs || '';
   if (c) c.value = (STATE.pullCc === undefined ? PULL_CC_DEFAULT : STATE.pullCc);
   if (dbtn) dbtn.style.display = STATE.mailGmail ? '' : 'none';
+  if (tbtn) tbtn.style.display = STATE.mailGmail ? '' : 'none';
+  if (err) {
+    const e = STATE.mailLastError;
+    if (e && e.why) {
+      err.style.display = '';
+      err.innerHTML = '<b>Last send refused</b> · ' + escHtml(new Date(e.at).toLocaleString()) + '<br>' + escHtml(e.why);
+    } else err.style.display = 'none';
+  }
 }
+// A send you can trigger deliberately, from a real tap, that goes to the
+// account you are signed in as. The point is the error message: whatever Google
+// says here is the actual reason pull sheets are not going out.
+window.setSendTestMail = async function(){
+  if (!STATE.mailGmail) { showToast('Connect Gmail first', 'warning'); return; }
+  const btn = document.getElementById('set-mail-test');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const g = await gmailProbe(false);
+    const to = (g.ok && g.account) || STATE.mailSendAs || '';
+    if (!to) throw new Error('Could not work out which account to send to — reconnect Gmail.');
+    const res = await gmailSend({
+      to, cc: '', subject: 'VENIA — test send',
+      text: 'This is a test from VENIA OS. If you are reading it, pull sheets will send the same way.\n\nSent as: '
+        + (STATE.mailSendAs || to) + '\nSigned-in account: ' + (g.account || 'unknown'),
+      html: '<div style="font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6">'
+        + '<p>This is a test from VENIA OS. If you are reading it, pull sheets will send the same way.</p>'
+        + '<p style="color:#666;font-size:12px">Sent as: ' + escHtml(STATE.mailSendAs || to)
+        + '<br>Signed-in account: ' + escHtml(g.account || 'unknown') + '</p></div>',
+    }, STATE.mailSendAs || '');
+    STATE.mailLastError = null; save();
+    setMailPaintFields();
+    showToast('✓ Test sent to ' + to + ' — check whether it arrives from ' + (res.from || to), 'success', 6000);
+  } catch(e) {
+    const why = String((e && e.message) || e);
+    STATE.mailLastError = { at: new Date().toISOString(), why }; save();
+    setMailPaintFields();
+    showToast('Gmail refused: ' + why, 'error', 9000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send test email'; }
+  }
+};
 window.setMailPaintFields = setMailPaintFields;
 
 window.setTestStripe = async function(){
@@ -18114,9 +18160,20 @@ function gmailToken(interactive){
       });
     }
     const c = window._gmailTC;
+    // GIS lets someone untick a permission on the consent screen and still
+    // returns a token — one Gmail then rejects with a 403 the moment it is
+    // used. The grant is checked here, where it can still be explained, rather
+    // than surfacing later as an API error nobody can act on.
     c.callback = (r) => {
-      if (r && r.access_token){ _gmailTok = { token: r.access_token, exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000 }; resolve(r.access_token); }
-      else reject(new Error((r && r.error_description) || (r && r.error) || 'Google did not return a token'));
+      if (r && r.access_token){
+        const granted = String((r && r.scope) || '');
+        if (granted && granted.indexOf('gmail.send') < 0) {
+          return reject(new Error('You signed in, but the "Send email on your behalf" permission was not granted. Tap Connect Gmail again and leave that box ticked.'));
+        }
+        _gmailTok = { token: r.access_token, exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000 };
+        return resolve(r.access_token);
+      }
+      reject(new Error((r && r.error_description) || (r && r.error) || 'Google did not return a token'));
     };
     try { c.requestAccessToken({ prompt: interactive ? 'consent' : '' }); } catch(e){ reject(e); }
   });
@@ -18224,17 +18281,28 @@ async function prSendEmail(pull, opener) {
   // 1 · GMAIL, through the Google account already connected for Drive. Preferred
   //     because it needs no second vendor and leaves a copy in the real Sent
   //     folder, where a reply will thread.
+  // ONE toast element exists and every call overwrites it, so a message
+  // followed by another message is a message nobody read. The Gmail refusal
+  // used to be posted and then instantly replaced by a generic "connect Gmail"
+  // line — which told the founders to do the thing they had already done, while
+  // the actual reason never reached anyone. The reason now travels with the
+  // fallback, and is written down where it outlives a toast.
+  let gmailWhy = '';
   if (STATE.mailGmail) {
     try {
       const res = await gmailSend({ to: pull.email, cc, subject: d.subject, text: d.text, html: d.html },
                                   STATE.mailSendAs || '');
       // Gmail replaces a From it has not verified, so report the ACCOUNT that
       // authenticated, plus the alias only if it was asked for and could hold.
+      STATE.mailLastError = null; save();
       done(res.from || res.account, 'gmail');
       return;
     } catch(e) {
-      toast('Gmail could not send — ' + String((e && e.message) || e), 'error');
-      // fall through to whatever else is configured rather than losing the mail
+      // Carried, not shouted over. Falling through keeps the email alive.
+      gmailWhy = String((e && e.message) || e);
+      STATE.mailLastError = { at: new Date().toISOString(), why: gmailWhy };
+      save();
+      try { logActivity('Gmail refused to send the pull sheet — ' + gmailWhy); } catch(_){}
     }
   }
 
@@ -18271,9 +18339,12 @@ async function prSendEmail(pull, opener) {
     }
   }
 
-  // 3 · No sender connected: the mail app draft, and the truth about it.
+  // 3 · Nothing sent it: the mail app draft, and the real reason why.
   prMailDraftOpen(pull, d, cc);
-  toast('✉ Drafted in your mail app — it will send from YOUR account, not info@veniacollection.com. Connect Gmail in Settings to send as VENIA.', 'warning');
+  toast(gmailWhy
+    ? 'Gmail is connected but refused: ' + gmailWhy + ' — drafted in your mail app instead (it will send from YOUR account).'
+    : '✉ Drafted in your mail app — it will send from YOUR account, not ' + (STATE.mailSendAs || 'info@veniacollection.com') + '. Connect Gmail in Settings to send as VENIA.',
+    gmailWhy ? 'error' : 'warning', gmailWhy ? 9000 : 2800);
 }
 
 // Manual NFC fallback — capture a tag code by hand when scanning isn't available.
