@@ -67,15 +67,31 @@ export default async (req) => {
   // legitimately produce any of those — a failed turn that never got its
   // reply, two questions sent before the first came back, a reply applied on
   // the other phone — so the worker repairs the shape rather than trusting it.
-  const raw = messages.slice(-40).map((m) => ({
-    role: m && m.role === 'assistant' ? 'assistant' : 'user',
-    content: String((m && m.content) || '').trim().slice(0, 40000),
-  })).filter((m) => m.content);
+  const raw = messages.slice(-40).map((m) => {
+    const role = m && m.role === 'assistant' ? 'assistant' : 'user';
+    // A user turn can carry content BLOCKS (text + image) when a screenshot
+    // rode the send. String() on those yields "[object Object]" — the picture
+    // is thrown away and the model is handed nonsense — so blocks pass through.
+    if (m && Array.isArray(m.content)) {
+      const blocks = m.content
+        .filter((b) => b && (b.type === 'text' || b.type === 'image'))
+        .slice(0, 12);
+      return blocks.length ? { role, content: blocks } : null;
+    }
+    const t = String((m && m.content) || '').trim().slice(0, 40000);
+    return t ? { role, content: t } : null;
+  }).filter(Boolean);
+  const asBlocks = (c) => (Array.isArray(c) ? c : [{ type: 'text', text: c }]);
   const msgs = [];
   raw.forEach((m) => {
     if (!msgs.length && m.role !== 'user') return;              // must open on a user turn
     const last = msgs[msgs.length - 1];
-    if (last && last.role === m.role) { last.content += '\n\n' + m.content; return; }  // no doubles
+    if (last && last.role === m.role) {                         // no doubles
+      if (Array.isArray(last.content) || Array.isArray(m.content)) {
+        last.content = asBlocks(last.content).concat(asBlocks(m.content));
+      } else last.content += '\n\n' + m.content;
+      return;
+    }
     msgs.push(m);
   });
   while (msgs.length && msgs[msgs.length - 1].role !== 'user') msgs.pop();   // must close on a user turn
@@ -99,7 +115,14 @@ export default async (req) => {
     if (pushSubs.length && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_PUBLIC_KEY) {
       try {
         webpush.setVapidDetails('mailto:keeter@veniacollection.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
-        const note = JSON.stringify({ title: 'Your CFO replied', body: 'The answer is waiting in the Eni dock.', tag: 'venia-cfo-chat' });
+        // Whoever asked is who replies — a dock turn from Nigma must not push
+        // as "Your CFO". The caller names it; the CFO's wording is the default.
+        const n = (p && p.note) || {};
+        const note = JSON.stringify({
+          title: String(n.title || 'Your CFO replied').slice(0, 80),
+          body: String(n.body || 'The answer is waiting in the Eni dock.').slice(0, 160),
+          tag: String(n.tag || 'venia-cfo-chat').slice(0, 60),
+        });
         await Promise.allSettled(pushSubs.map((s) => webpush.sendNotification(s, note)));
       } catch (_) {}
     }

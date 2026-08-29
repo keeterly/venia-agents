@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 343._
+_Last reviewed at Build 344._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -147,6 +147,21 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **Every dock turn runs server-side.** The dock used to call the model in the
+  foreground, so a long run — rewriting margin targets across 57 styles — died
+  the moment the screen locked or the app was closed. Eni and Nigma now queue to
+  `cfo-chat-background` exactly as the CFO does: the phone's job is one small
+  POST, a push says when it is done, and the reply lands in the working bubble
+  it was sent from. The direct streaming relay is the fallback for when the
+  cloud cannot be reached. Nothing streamed in the dock anyway, so the only cost
+  is poll granularity, and the poll opens at 1.2s before backing off.
+  The job record PERSISTS who asked and which screen's actions the reply may
+  run, because it can be picked up after a reload or on the other phone. The
+  user's turn is saved before the request goes out — otherwise closing the app,
+  which is the whole point, would orphan the answer. A cloud reply is policed
+  exactly like a direct one (unbacked claims, malformed blocks, one action per
+  turn, same Undo): a push saying something was filed is even harder to go back
+  and check. A job that ages out says so rather than spinning forever.
 - **The agent's context follows the work, not the calendar.** `plmContext()`
   used to give full per-style detail to "the two newest seasons" — so one
   placeholder style in a future season crowded out the entire season being
@@ -182,7 +197,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 44 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 45 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
