@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 358._
+_Last reviewed at Build 359._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -169,6 +169,19 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **A colourway belongs to a FABRIC, not a style.** A lab dip is of a material:
+  Black in linen is a different dip, approval and lead time from Black in
+  leather. Colours were a loose comma string on the style with nothing tying
+  them to the fabric, so a style could carry a colour that fabric had never been
+  dyed in. Three levels now, each named: the MATERIAL holds the colours that
+  fabric comes in, the STYLE holds which of them it is cut in (not every style
+  in linen is cut in every linen colour), and the SWATCH stays brand-wide so
+  Black looks like Black everywhere. A one-time union lifts every existing style
+  colour onto its fabric — idempotent, nothing lost. A colour the fabric does
+  not list is shown under "On this style only" with one tap to file it, never
+  dropped: changing a style's fabric is exactly how those appear. Retiring a
+  colour from a fabric is cross-style, so it confirms and names how many styles
+  lose the option.
 - **A backdrop click never discards a form.** One global handler closed any open
   `.overlay`, so a stray click beside the four-tab pull cart threw away
   everything typed. An overlay can now carry `data-no-backdrop-close`; the pull
@@ -344,7 +357,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 56 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 57 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
