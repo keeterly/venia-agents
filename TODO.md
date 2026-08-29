@@ -422,3 +422,35 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   label drops its letter-spacing under 430px so PRODUCT cannot clip), and `cmd`
   highlights **money** in both. Nothing maps `cmd` to `today` any more.
 - The drawer's "Go to" list was missing Growth *and* Money; both added.
+
+## Build 363 — the CFO could not write a category you invented
+- **"the CFO agent wasnt writing the changes to the transactions."** It could
+  not. `save()` persists ONLY the keys in `SYNC_KEYS`, and `finCats` — the spend
+  categories the founders create — was never in that list. Every category typed
+  into "+ Add category" lived in memory and died on reload, while the
+  transactions filed into it kept pointing at a name the app no longer knew.
+  `finAllCats()` then rejected it, so `set_txn_category` answered
+  "unknown category" and wrote nothing.
+- **Proven against the live workspace**: 43 transactions filed under six
+  categories (dining, insurance, parking, materials, office-supplies, travel)
+  and no `finCats` key in the synced blob at all.
+- **Invariant: a key left out of `SYNC_KEYS` is not a smaller bug than the
+  feature it belongs to.** `finCats` is now synced, and `finCatsHeal()` rebuilds
+  the list from the filings that outlived it (idempotent, additive, logged).
+- `catOpts` always includes the row's own value — a filed row can never render
+  as "—". `bankSetCategory` repaints the count that was saying it hadn't saved,
+  while holding the just-filed row on screen ("Filed ✓") so nothing vanishes
+  under the cursor.
+- The CFO's item cap went 40 → 200, and anything past it is the FIRST thing
+  reported. An unknown category now lists the ones that exist.
+- **Where the money goes** (Money → Cash): spend by category with share bars,
+  30d/90d/YTD/all, uncategorized called out as outside the total, every row a
+  tap into the transactions behind it. The P&L's flat opex list got the same
+  bars and the same drill-down.
+- Every category is a tag now, built-in or not — only the ones you made carry a
+  ×. Showing just the custom six made the founders' own vocabulary look bolted
+  on and hid the built-in names entirely.
+- **A default is not an observation.** `sample: 'Proto'` is what a style is born
+  with; the briefing read it as "58 styles stuck at Proto" while all 57 were at
+  stage SMS. `plmContext` now names both fields and says "no sample logged" when
+  the sample log is empty.

@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '362';
+  const BUILD = '363';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4964,8 +4964,16 @@ const SYNC_KEYS = [
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
   'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
   // Finance — the bank feed (linked-account metadata + categorized
-  // transactions) and Money Watch (thresholds + the weekly brief)
-  'finBank', 'finTxns', 'finWatch', 'finWatchBrief', 'finPlan', 'finPlanJob',
+  // transactions) and Money Watch (thresholds + the weekly brief).
+  // finCats — the spend categories the founders create themselves — was
+  // missing here until Build 363, and save() writes ONLY the keys in this list.
+  // So every category typed into "+ Add category" lived in memory and died on
+  // the next reload, while the transactions filed into it kept pointing at a
+  // name the app no longer knew. finAllCats() then rejected that name, which is
+  // why set_txn_category answered "unknown category" and wrote nothing, and why
+  // a filed row showed "—" in its dropdown. A key left out of this list is not
+  // a smaller bug than the feature it belongs to.
+  'finBank', 'finTxns', 'finWatch', 'finWatchBrief', 'finPlan', 'finPlanJob', 'finCats',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -7363,6 +7371,7 @@ document.addEventListener('DOMContentLoaded', function(){
   setTimeout(function(){
     try { matMergeColorFields(); } catch(e){}
     try { cwMigrateColorsToFabrics(); } catch(e){}
+    try { finCatsHeal(); } catch(e){}
   }, 2200);
 });
 
@@ -17969,7 +17978,12 @@ function plmContext() {
   const pinned = String(s.seasonFilter||'').trim();
   const order = [...(pinned && bySeason[pinned] ? [pinned] : []), ...seasonsRanked.filter(sn => sn !== pinned)];
   const PLM_LINE_BUDGET = 140;
-  const stLine = (st) => `${st.styleId} — ${st.name} (${st.season||'no season'}, ${st.status}${st.sample ? ', sample ' + st.sample : ''}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'})`;
+  const sampleTxt = (st) => {
+    const logged = Array.isArray(st.sampleLog) && st.sampleLog.length;
+    if (!st.sample) return '';
+    return logged ? ', sample round ' + st.sample : ', no sample logged';
+  };
+  const stLine = (st) => `${st.styleId} — ${st.name} (${st.season||'no season'}, stage ${st.status}${sampleTxt(st)}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'})`;
   // Styles with no season at all are always listed — there are few, and an
   // unassigned style is the one most likely to need a decision.
   const noSeason = bySeason[''] || [];
@@ -18045,7 +18059,18 @@ function plmContext() {
       }).join('\n');
     }
   } catch(e){}
-  return `VENIA PLM Context:\nActive styles (${active.length}):\n${styleList||'None'}${wsLine?'\nSeason wholesale economics (covers EVERY season, including any not listed above — use these to answer sell-in and unit-target questions rather than asking the founder for prices):\n'+wsLine:''}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}${fcLine?'\nDemand plan (forecast-committed):\n'+fcLine:''}`;
+  // The two words that got confused, defined once, where they are read.
+  let stageLine = '';
+  try {
+    const byStage = {}; active.forEach(st => { const k = st.status || 'unset'; byStage[k] = (byStage[k]||0)+1; });
+    const noLog = active.filter(st => !(Array.isArray(st.sampleLog) && st.sampleLog.length)).length;
+    stageLine = 'STAGE vs SAMPLE — two different things: "stage" is where the STYLE is (' 
+      + Object.entries(byStage).sort((a,b)=>b[1]-a[1]).map(([k,v]) => v + ' ' + k).join(', ')
+      + '). "sample round" is the last sample actually LOGGED against it. '
+      + (noLog ? noLog + ' of ' + active.length + ' styles have no sample logged at all — they are new to the sample log, NOT stuck in prototyping. Never describe a style as stuck at a round nobody has recorded.'
+               : 'Every style has at least one logged round.');
+  } catch(e){}
+  return `VENIA PLM Context:\n${stageLine ? stageLine + '\n' : ''}Active styles (${active.length}):\n${styleList||'None'}${wsLine?'\nSeason wholesale economics (covers EVERY season, including any not listed above — use these to answer sell-in and unit-target questions rather than asking the founder for prices):\n'+wsLine:''}\nMaterials: ${mats||'None'}\nPR pulls: ${(s.prPulls||[]).length}${planLine?'\nRange plan vs actual:\n'+planLine:''}${calLine?'\nSeason calendar (key dates):\n'+calLine:''}${fcLine?'\nDemand plan (forecast-committed):\n'+fcLine:''}`;
 }
 
 // ── COMMAND CENTER INIT ──────────────────────────────────────────────
@@ -18135,6 +18160,15 @@ function cmdShowSection(id, navEl) {
   if (id === 'cmd-plan')       cmdRenderPlan();
 }
 
+// A category on the P&L is a question ("what IS the $3,260 of software?"), and
+// the answer is the ledger filtered to it — one tap away, not a search.
+window.cmdGoSpend = function(cat){
+  cpGoto('cmd');
+  setTimeout(function(){
+    cmdShowSection('cmd-bank', document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*="cmd-bank"]'));
+    setTimeout(function(){ try { if (FIN_TX_FILTER.cat !== cat) bankTxCat(cat); } catch(e){} }, 120);
+  }, 140);
+};
 // The Money door and pulse land on the P&L — the daily money check is 1 tap.
 window.cmdGoMoney = function(){
   cpGoto('cmd');
@@ -22236,14 +22270,25 @@ function finResolveTxns(it, txns){
   return { hits };
 }
 function agentRunSetTxnCategory(action, chatBody){
-  const items = Array.isArray(action.items) ? action.items.slice(0, 40) : [];
+  // 40 was a silent ceiling: a backlog of 49 filed 40 and reported success on
+  // all of them. The cap exists to bound one bad block, not to trim real work,
+  // so it is high and whatever it cuts gets said out loud.
+  const allItems = Array.isArray(action.items) ? action.items : [];
+  const items = allItems.slice(0, 200);
+  const dropped = allItems.length - items.length;
   const txns = STATE.finTxns || [];
   const prev = {};
   const filed = [], missed = [];
   items.forEach(it => {
     if (!it) return;
     const cat = String(it.category||'').toLowerCase().trim();
-    if (finAllCats().indexOf(cat) < 0) { missed.push('unknown category "' + String(it.category||'') + '"'); return; }
+    if (finAllCats().indexOf(cat) < 0) {
+      // Until Build 363 a founder-made category was never saved, so this branch
+      // rejected the founders' own vocabulary and wrote nothing. Say which
+      // names exist rather than only which one did not.
+      missed.push('no category called "' + String(it.category||'') + '" — add it in Money → Cash first, or use one of: ' + finAllCats().join(', '));
+      return;
+    }
     const { hits, why } = finResolveTxns(it, txns);
     if (!hits.length) { missed.push(why || 'no match'); return; }
     hits.forEach(t => {
@@ -22256,6 +22301,7 @@ function agentRunSetTxnCategory(action, chatBody){
     appendAgentNote(chatBody, 'Nothing was changed — ' + (missed.length ? missed.slice(0,4).join('; ') : 'no transactions matched') + '.');
     return;
   }
+  if (dropped) missed.unshift(dropped + ' more item' + (dropped>1?'s were':' was') + ' in that block and did NOT run — ask me again for the rest');
   window.__agPrevTxnCats = prev;
   save();
   try { cmdRenderBank(); } catch(e){}
@@ -26896,9 +26942,27 @@ window.cmdRenderMoney = function() {
       ${line('Cost of goods — DTC', -d.dtcCogsYtd, 'landed × units sold')}
       ${line('Cost of goods — wholesale', -d.wsCogsYtd, 'landed × order units')}
       ${d.bankOpex
-        ? Object.entries(d.opexBy).sort((a,b) => b[1]-a[1]).map(([c,v]) =>
-            line('Operating expense — ' + finCatLabel(c), -v, 'bank feed')).join('')
-          + (d.opexUncat ? line('Uncategorized outflow', 0, 'not counted — ' + money(d.opexUncat) + ' still to classify') : '')
+        ? (() => {
+            // Twenty equal-weight rows told you every number and none of the
+            // shape. The bar is the point: rent being a third of the year is
+            // the fact, not the $13,404.
+            const ordered = Object.entries(d.opexBy).sort((a,b) => b[1]-a[1]);
+            const tot = ordered.reduce((a,[,v]) => a + v, 0) || 1;
+            return `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:9px 0 5px;border-bottom:1px solid var(--border)">
+                <span style="font-size:11px;color:var(--ink)">Operating expense <span style="color:var(--muted);font-weight:400;font-size:10px">· bank feed, by category</span></span>
+                <span style="font-family:'DM Mono',monospace;font-size:12px">-${money(tot)}</span>
+              </div>`
+              + ordered.map(([c,v]) => `<div onclick="cmdGoSpend('${c}')" title="Show the ${finCatLabel(c)} transactions"
+                  style="padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer">
+                  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+                    <span style="font-size:11px;color:var(--ink)">${finCatLabel(c)}</span>
+                    <span style="font-family:'DM Mono',monospace;font-size:11px;white-space:nowrap">-${money(v)}
+                      <span style="color:var(--muted);font-size:10px">${Math.round(v/tot*100)}%</span></span>
+                  </div>
+                  <div style="height:4px;background:var(--bg-off);margin-top:4px"><div style="height:4px;width:${Math.max(1,Math.round(v/tot*100))}%;background:var(--ink)"></div></div>
+                </div>`).join('')
+              + (d.opexUncat ? line('Uncategorized outflow', 0, 'not counted — ' + money(d.opexUncat) + ' still to classify') : '');
+          })()
         : line('Marketing spend', -d.spend, 'budget tracker')}
       ${line('Operating', d.operating, '', true)}
     </div>
@@ -28099,6 +28163,28 @@ function finCustomCats(){
   return (((typeof STATE !== 'undefined' && STATE.finCats) || [])).filter(c => c && FIN_CATEGORIES.indexOf(c) < 0);
 }
 function finAllCats(){ return FIN_CATEGORIES.concat(finCustomCats()); }
+// A category is proven to exist by a transaction filed into it. Until Build 363
+// the list itself was never persisted, so the names were lost while the filings
+// survived — this rebuilds the list from those filings rather than asking the
+// founders to remember what they had typed. Idempotent, and it only ever adds.
+function finCatsHeal(){
+  try {
+    const known = {}; finAllCats().forEach(c => known[c] = 1);
+    const found = [];
+    (STATE.finTxns || []).forEach(t => {
+      const c = t && String(t.category || '').trim();
+      if (!c || known[c]) return;
+      known[c] = 1; found.push(c);
+    });
+    if (!found.length) return 0;
+    if (!STATE.finCats) STATE.finCats = [];
+    found.forEach(c => STATE.finCats.push(c));
+    save();
+    try { logActivity('Recovered ' + found.length + ' spend categor' + (found.length===1?'y':'ies') + ' from filed transactions: ' + found.join(', ')); } catch(e){}
+    return found.length;
+  } catch(e){ return 0; }
+}
+window.finCatsHeal = finCatsHeal;
 function finCatLabel(c){ return FIN_CAT_LABEL[c] || c; }
 // A display name becomes a stable lowercase token, so "Studio Rent" typed on
 // one device and "studio rent" on another are the same category, not two.
@@ -28336,7 +28422,7 @@ window.bankSyncTxns = async function(silent){
 const FIN_TX_FILTER = { q: '', mode: 'all', limit: 40 };
 let FIN_TX_SEL = {};
 window.bankTxSearch = function(v){
-  FIN_TX_FILTER.q = v; FIN_TX_FILTER.limit = 40;
+  FIN_TX_FILTER.q = v; FIN_TX_FILTER.limit = 40; FIN_TX_KEEP = {};
   clearTimeout(window.__finTxT);
   window.__finTxT = setTimeout(() => {
     cmdRenderBank();
@@ -28344,7 +28430,7 @@ window.bankTxSearch = function(v){
     if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
   }, 220);
 };
-window.bankTxMode = function(m){ FIN_TX_FILTER.mode = m; FIN_TX_FILTER.limit = 40; cmdRenderBank(); };
+window.bankTxMode = function(m){ FIN_TX_FILTER.mode = m; FIN_TX_FILTER.limit = 40; FIN_TX_KEEP = {}; cmdRenderBank(); };
 // Ticking another row re-renders the bulk bar, so the category already chosen
 // has to survive that — otherwise picking a category then selecting one more
 // row silently resets it to "—".
@@ -28378,7 +28464,8 @@ window.bankAskCfo = function(){
 function finTxFiltered(all){
   const q = String(FIN_TX_FILTER.q || '').toLowerCase();
   return all.filter(t => {
-    if (FIN_TX_FILTER.mode === 'uncat' && finTxnCat(t)) return false;
+    if (FIN_TX_FILTER.cat && String(t.category||'') !== FIN_TX_FILTER.cat) return false;
+    if (FIN_TX_FILTER.mode === 'uncat' && finTxnCat(t) && !FIN_TX_KEEP[t.id]) return false;
     if (FIN_TX_FILTER.mode === 'in'  && (t.amount||0) < 0) return false;
     if (FIN_TX_FILTER.mode === 'out' && (t.amount||0) >= 0) return false;
     if (q && !((t.desc||'').toLowerCase().includes(q) || (t.date||'').includes(q))) return false;
@@ -28386,6 +28473,7 @@ function finTxFiltered(all){
   });
 }
 window.bankTxMore = function(){ FIN_TX_FILTER.limit = (FIN_TX_FILTER.limit || 40) + 60; cmdRenderBank(); };
+window.finSpendBlock = finSpendBlock;
 window.bankSelectTxn = function(id, on){ if (on) FIN_TX_SEL[id] = 1; else delete FIN_TX_SEL[id]; cmdRenderBank(); };
 window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
 // Bulk set — one undo restores every row it touched.
@@ -28409,11 +28497,107 @@ window.bankBulkCategorize = function(){
   cmdRenderBank();
   showToast(n + ' transaction' + (n>1?'s':'') + ' set to ' + (cat ? finCatLabel(cat) : 'uncategorized') + ' — Undo above the list', 'success');
 };
+// Rows filed since the last time the filter was touched. They stay visible
+// under "Uncategorized", marked, until you change filter or search.
+let FIN_TX_KEEP = {};
 window.bankSetCategory = function(id, cat){
   const t = (STATE.finTxns||[]).find(x => x.id === id);
   if (!t) return;
   t.category = finAllCats().indexOf(cat) >= 0 ? cat : '';
   save();
+  // Keep the row you just filed on screen — a row vanishing from under the
+  // cursor mid-list is worse than a stale count — but repaint everything that
+  // counts it, so the header and the filter tell the truth immediately.
+  FIN_TX_KEEP[id] = 1;
+  cmdRenderBank();
+};
+
+// ── Spend by category ────────────────────────────────────────────────────
+// Money OUT only. Transfers are our own money moving between our own accounts
+// and income is inflow — counting either as spend is how a "burn" number ends
+// up double what was actually spent.
+const FIN_SPEND_EXCLUDE = ['transfer','income'];
+let FIN_SPEND_PERIOD = '90d';
+window.finSpendPeriod = function(p){ FIN_SPEND_PERIOD = p; cmdRenderBank(); };
+function finSpendData(period){
+  const days = period === '30d' ? 30 : period === '90d' ? 90 : period === 'ytd' ? null : null;
+  const now = new Date();
+  const since = days ? new Date(now.getTime() - days*864e5).toISOString().slice(0,10)
+    : period === 'ytd' ? new Date(now.getFullYear(), 0, 1).toISOString().slice(0,10) : '';
+  const by = {}; let total = 0, uncat = 0, uncatN = 0;
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void') return;
+    const amt = t.amount || 0;
+    if (amt >= 0) return;                                  // outflow only
+    if (since && String(t.date||'') < since) return;
+    const c = finTxnCat(t);
+    if (!c) { uncat += -amt; uncatN++; return; }           // never guessed into a bucket
+    if (FIN_SPEND_EXCLUDE.indexOf(c) >= 0) return;
+    const r = by[c] || (by[c] = { amt: 0, n: 0 });
+    r.amt += -amt; r.n++; total += -amt;
+  });
+  const rows = Object.entries(by).map(([c,r]) => ({ cat: c, amt: r.amt, n: r.n,
+    share: total ? r.amt / total : 0 })).sort((a,b) => b.amt - a.amt);
+  return { rows, total, uncat, uncatN, since };
+}
+// The block itself. Each row is clickable — the question "what IS the $3,260 of
+// software?" is one tap from the answer instead of a search you have to invent.
+function finSpendBlock(){
+  const money = (n) => '$' + Math.round(n||0).toLocaleString('en-US');
+  const P = [['30d','30 days'],['90d','90 days'],['ytd','This year'],['all','All time']];
+  const d = finSpendData(FIN_SPEND_PERIOD);
+  const label = (P.find(p => p[0] === FIN_SPEND_PERIOD)||P[1])[1];
+  if (!d.rows.length && !d.uncat) {
+    return '<div class="ag-sec-head"><h2 class="ag-sec-title">Where the money goes</h2></div>'
+      + '<div style="font-size:11px;color:var(--muted);margin-bottom:20px">No categorized spending in the last ' + slEsc(label.toLowerCase()) + '.</div>';
+  }
+  const top = d.rows[0];
+  const bar = (share, amber) => '<div style="height:5px;background:var(--bg-off);margin-top:5px">'
+    + '<div style="height:5px;width:' + Math.max(1, Math.round(share*100)) + '%;background:' + (amber ? 'var(--amber)' : 'var(--ink)') + '"></div></div>';
+  const rows = d.rows.map(r => `
+    <div onclick="bankTxCat('${slEsc(r.cat)}')" title="Show the ${r.n} transaction${r.n===1?'':'s'} behind ${slEsc(finCatLabel(r.cat))}"
+         style="padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+        <span style="font-size:11.5px;color:var(--ink)">${slEsc(finCatLabel(r.cat))}
+          <span style="color:var(--muted);font-size:10px">· ${r.n} transaction${r.n===1?'':'s'}</span></span>
+        <span style="font-family:'DM Mono',monospace;font-size:11.5px;white-space:nowrap">${money(r.amt)}
+          <span style="color:var(--muted);font-size:10px">${Math.round(r.share*100)}%</span></span>
+      </div>
+      ${bar(r.share)}
+    </div>`).join('');
+  return `
+    <div class="ag-sec-head"><h2 class="ag-sec-title">Where the money goes</h2>
+      <div class="ag-sec-actions" style="display:flex;gap:6px;flex-wrap:wrap">
+        ${P.map(([k,l]) => '<button class="ag-pill' + (FIN_SPEND_PERIOD===k?' ag-pill-active':'') + '" onclick="finSpendPeriod(\'' + k + '\')">' + l + '</button>').join('')}
+      </div>
+    </div>
+    <div style="max-width:620px;margin-bottom:22px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;padding-bottom:9px;border-bottom:1px solid var(--ink)">
+        <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Spend · ${slEsc(label)}</span>
+        <span style="font-family:'DM Mono',monospace;font-size:15px;font-weight:700">${money(d.total)}</span>
+      </div>
+      ${rows}
+      ${d.uncat ? `<div onclick="bankTxMode('uncat')" title="File these — they are not counted above"
+        style="padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+          <span style="font-size:11.5px;color:var(--amber)">Not yet categorized
+            <span style="color:var(--muted);font-size:10px">· ${d.uncatN} transaction${d.uncatN===1?'':'s'} — not counted above</span></span>
+          <span style="font-family:'DM Mono',monospace;font-size:11.5px;color:var(--amber);white-space:nowrap">${money(d.uncat)}</span>
+        </div>
+        ${bar(d.total ? d.uncat / (d.total + d.uncat) : 1, true)}
+      </div>` : ''}
+      <div style="font-size:10px;color:var(--muted);line-height:1.6;padding-top:9px">
+        Money out only — transfers between your own accounts and income are excluded, so this is spend, not movement.
+        ${top ? slEsc(finCatLabel(top.cat)) + ' is ' + Math.round(top.share*100) + '% of it. ' : ''}Tap a row to see the transactions behind it.
+      </div>
+    </div>`;
+}
+// Filter the ledger to one category — the drill-down from a bar.
+window.bankTxCat = function(c){
+  FIN_TX_FILTER.cat = (FIN_TX_FILTER.cat === c) ? '' : c;
+  FIN_TX_FILTER.mode = 'all'; FIN_TX_FILTER.limit = 40; FIN_TX_KEEP = {};
+  cmdRenderBank();
+  try { const el = document.getElementById('fin-tx-q'); if (el && el.scrollIntoView) el.scrollIntoView({ behavior:'smooth', block:'center' }); } catch(e){}
 };
 // Include / exclude one account from the totals without severing the Stripe
 // link — for a card that mirrors another, or a personal account that should
@@ -28495,8 +28679,12 @@ window.cmdRenderBank = function(){
     + group('Credit &amp; loans', bk.debtAccts, 'Balances owed — never counted as cash.')
     + group('Other', bk.otherAccts)
     + group('Not counted', mirrorList.concat(ignoredList), mirrorList.length ? 'Extra cards reporting the same credit line’s balance — counted once above.' : '');
-  const catOpts = (sel) => '<option value=""' + (!sel ? ' selected' : '') + '>—</option>'
-    + finAllCats().map(c => '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' + finCatLabel(c) + '</option>').join('');
+  const catOpts = (sel) => {
+    const list = finAllCats().slice();
+    if (sel && list.indexOf(sel) < 0) list.push(sel);   // never hide what a row actually carries
+    return '<option value=""' + (!sel ? ' selected' : '') + '>—</option>'
+      + list.map(c => '<option value="' + c + '"' + (sel === c ? ' selected' : '') + '>' + finCatLabel(c) + '</option>').join('');
+  };
   // The ledger is searchable and filterable rather than a fixed "recent 30" —
   // fixing a category you spotted last month should not require scrolling past
   // everything since. Selection enables a bulk set, because these arrive in
@@ -28519,6 +28707,7 @@ window.cmdRenderBank = function(){
       <span style="grid-row:1;align-self:start;font-family:'DM Mono',monospace;text-align:right;white-space:nowrap;color:${(t.amount||0) < 0 ? 'var(--ink)' : 'var(--green)'}">${money(t.amount||0)}</span>
       <div style="grid-column:2/4;display:flex;gap:8px;align-items:center">
         <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(t.date||'')}</span>
+        ${FIN_TX_FILTER.mode === 'uncat' && FIN_TX_KEEP[t.id] && t.category ? '<span style="color:var(--green);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">Filed \u2713</span>' : ''}
         <select class="fs" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px" onchange="bankSetCategory('${slEsc(t.id)}', this.value)">${catOpts(t.category||'')}</select>
       </div>
     </div>`).join('');
@@ -28534,7 +28723,12 @@ window.cmdRenderBank = function(){
       ${acctsOpen
         ? `<div style="max-width:560px;margin-bottom:20px">${acctRows}</div>`
         : `<div style="font-size:11px;color:var(--muted);margin-bottom:20px">${money(bk.bal)} cash${bk.debt ? ' · ' + money(bk.debt) + ' owed' : ''} across ${bk.accounts.length} connected account${bk.accounts.length===1?'':'s'}.</div>`}
+      ${finSpendBlock()}
       <div class="ag-sec-head"><h2 class="ag-sec-title">Transactions</h2><div class="ag-sec-actions" style="font-size:10px;color:var(--muted)">${shown.length} of ${all.length}</div></div>
+      ${FIN_TX_FILTER.cat ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--ink);margin-bottom:10px;font-size:11px">
+        <span style="flex:1">Showing <b>${slEsc(finCatLabel(FIN_TX_FILTER.cat))}</b> only</span>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankTxCat('${slEsc(FIN_TX_FILTER.cat)}')">Show all</button>
+      </div>` : ''}
       ${all.length ? `
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
         <input class="fi" id="fin-tx-q" value="${slEsc(FIN_TX_FILTER.q||'')}" placeholder="Search description or date…" style="flex:1;min-width:150px;padding:7px 10px;font-size:11px" oninput="bankTxSearch(this.value)">
@@ -28553,7 +28747,27 @@ window.cmdRenderBank = function(){
       </div>` : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:10px;color:var(--muted)">
         <span>Categories:</span>
-        ${finCustomCats().map(c => `<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);padding:3px 5px 3px 8px">${slEsc(finCatLabel(c))}<button class="ag-btn ag-btn-ghost" style="min-height:auto;padding:0 4px;font-size:11px;line-height:1" title="Remove this category" onclick="finCatRemove('${slEsc(c)}')">&times;</button></span>`).join('')}
+        <!-- EVERY category, not just the ones you added. Showing only the custom
+             six made the founders' own vocabulary look like an afterthought
+             bolted onto an invisible list, and left no way to see what the
+             built-in names even are. One row, one vocabulary: tap any of them
+             to filter, and only the ones you made can be removed. -->
+        ${(function(){
+          const used = {};
+          all.forEach(t => { const c = t.category; if (c) used[c] = (used[c]||0) + 1; });
+          const custom = finCustomCats();
+          return finAllCats().map(c => {
+            const on = FIN_TX_FILTER.cat === c;
+            const n = used[c] || 0;
+            const mine = custom.indexOf(c) >= 0;
+            return `<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid ${on?'var(--ink)':'var(--border)'};${on?'background:var(--ink);color:var(--white);':(n?'':'opacity:.5;')}padding:3px ${mine?'4px':'8px'} 3px 8px">
+              <button class="ag-btn ag-btn-ghost" style="min-height:auto;padding:0;font-size:10px;line-height:1.4;color:inherit;letter-spacing:.3px"
+                title="${n ? 'Show the ' + n + ' transaction' + (n===1?'':'s') + ' filed as ' + slEsc(finCatLabel(c)) : 'Nothing filed here yet'}"
+                onclick="bankTxCat('${slEsc(c)}')">${slEsc(finCatLabel(c))}${n?' <span style="opacity:.6">'+n+'</span>':''}</button>
+              ${mine ? `<button class="ag-btn ag-btn-ghost" style="min-height:auto;padding:0 3px;font-size:11px;line-height:1;color:inherit" title="Remove this category" onclick="finCatRemove('${slEsc(c)}')">&times;</button>` : ''}
+            </span>`;
+          }).join('');
+        })()}
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finCatAdd()">+ Add category</button>
       </div>
       ${undoN ? `<div style="display:flex;gap:8px;align-items:center;padding:8px 12px;border:1px solid var(--border);margin-bottom:10px;font-size:10.5px;color:var(--muted)">
