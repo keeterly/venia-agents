@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 331._
+_Last reviewed at Build 342._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -147,6 +147,15 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **A margin shown to a human is the one the prices produce**, never the
+  stored target. `marginTarget` / `wsMarginTarget` are INPUTS to the pricing
+  math, and only the pricing popover writes them back — so a price changed any
+  other way (the agent's `update_styles` or `price_from_retail`, an inline
+  cell, an import) left the target behind and the panel reported a margin the
+  numbers beside it did not support. Every display reads `pxMarginLive` /
+  `pxWsMarginLive`; a target the prices no longer meet is shown as a note
+  rather than substituted for the truth. `pxTargetCogs` and Work back still
+  aim at the target — that is what a target is for.
 
 **Contracts are tested, not assumed.** One suite asserts that every specced
 agent action is dispatched and has a runner, every undo an action card offers
@@ -161,7 +170,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 16 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 43 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
