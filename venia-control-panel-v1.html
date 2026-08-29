@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '364';
+  const BUILD = '365';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4670,6 +4670,36 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
     </div>
     <div class="modal-body" id="pr-detail-body" style="padding:0;max-height:calc(100vh - 200px);overflow-y:auto"></div>
     <div class="modal-foot" id="pr-detail-foot"></div>
+  </div>
+</div>
+
+<!-- ── PR SIGNATURE MODAL ── -->
+<div class="overlay" id="pr-sign-modal">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head">
+      <div class="modal-title" id="pr-sign-title">Signature</div>
+      <button class="modal-close" aria-label="Close" onclick="closeModal('pr-sign-modal')">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px 24px">
+      <div id="pr-sign-summary" style="font-size:11px;line-height:1.7;color:var(--muted);margin-bottom:14px"></div>
+      <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Terms being accepted</div>
+      <div id="pr-sign-terms" style="font-size:11px;line-height:1.8;padding:12px 14px;background:var(--bg-off);border:1px solid var(--border);margin-bottom:18px"></div>
+      <div class="fg" style="margin-bottom:14px">
+        <label class="fl" for="pr-sign-name">Full name of the person signing</label>
+        <input class="fi" id="pr-sign-name" placeholder="Their name, as they'd write it" autocomplete="off">
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Sign below</span>
+        <button class="btn btn-ghost btn-sm" onclick="prSignClear()">Clear</button>
+      </div>
+      <canvas id="pr-sign-pad" style="width:100%;height:170px;border:1px solid var(--border-mid);background:var(--bg);touch-action:none;display:block;cursor:crosshair"></canvas>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">Sign with a finger or a stylus. This is kept with the pull and printed on the sheet.</div>
+      <div id="pr-sign-warn" style="font-size:10px;color:var(--amber);margin-top:8px;display:none"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('pr-sign-modal')">Cancel</button>
+      <button class="btn btn-gold" onclick="prSignSave()">✓ Confirm &amp; save signature</button>
+    </div>
   </div>
 </div>
 
@@ -17165,6 +17195,8 @@ function prFinalizePull() {
   if (email) {
     setTimeout(() => prSendEmail(pull), 300);
   }
+  // Then, while they are still in the room, take the signature.
+  setTimeout(() => { try { prSignOpen(pull.id); } catch(e){} }, email ? 900 : 350);
 }
 
 function prBuildPullObj(status='active') {
@@ -17228,6 +17260,25 @@ function prOpenDetail(pullId) {
         </div>
       </div>
 
+      <!-- Signed, or not. An unsigned pull that is already out is a fact worth
+           seeing before anything else on this screen. -->
+      ${(function(){
+        const g = pull.signature;
+        if (!g) return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
+          <span style="flex:1;min-width:160px;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
+          <button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')">✎ Get signature</button>
+        </div>`;
+        const drift = prSignDrift(pull);
+        return `<div style="padding:10px 14px;border:1px solid ${drift ? 'var(--amber)' : 'var(--border)'};background:var(--bg-off);margin-bottom:18px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <img src="${escHtml(g.image)}" alt="" style="height:30px;max-width:130px;flex:none;background:var(--bg);border:1px solid var(--border)">
+            <span style="flex:1;min-width:150px;font-size:11px;color:var(--ink)">Signed by <b>${escHtml(g.name)}</b>
+              <span style="color:var(--muted)">· ${new Date(g.at).toLocaleString()}</span></span>
+            <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')">Re-sign</button>
+          </div>
+          ${drift ? `<div style="font-size:10px;color:var(--amber);margin-top:7px;line-height:1.6">⚠ ${escHtml(drift)}. The signature covers what it covered — re-sign if they have accepted the change.</div>` : ''}
+        </div>`;
+      })()}
       <!-- Progress bar -->
       ${total > 0 ? `
       <div style="margin-bottom:20px">
@@ -17333,6 +17384,7 @@ function prOpenDetail(pullId) {
             : `<button class="btn btn-gold btn-sm" style="flex:1 1 100%" onclick="prMarkAllReturned('${pullId}')">✓ Mark pull complete</button>`)
         : ''}
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="closeModal('pr-detail-modal');openPrCart('${pullId}')">✎ Edit Pull</button>
+      <button class="btn btn-${pull.signature ? 'ghost' : 'gold'} btn-sm" style="flex:1 1 42%" onclick="prSignOpen('${pullId}')">✎ ${pull.signature ? 'Re-sign' : 'Get signature'}</button>
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prSendEmail(STATE.prPulls.find(p=>p.id==='${pullId}'))">✉ Re-send Sheet</button>
       ${pull.status === 'active' ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prPrintPullSheet('${pullId}')">↓ Pull Sheet PDF</button>` : ''}
       ${pull.feeAmount && pull.feeType !== 'none' ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prOpenPayment('${pullId}')">◈ Charge Fee</button>` : ''}
@@ -17674,26 +17726,155 @@ function prNFCReturnLookup(tagId) {
 }
 
 // Compose a pull-sheet email to the press contact (opens default mail client).
-function prSendEmail(pull) {
+// ── SIGNATURE CAPTURE ────────────────────────────────────────────────────
+// The terms, as text, in one place — so the modal, the sheet, the email and the
+// stored signature can never describe a different agreement from each other.
+function prTermsLines(pull){
+  const t = (pull && pull.terms) || {};
+  const out = [];
+  if (t.damage)     out.push('Borrower is liable for any damage or loss during the pull period.');
+  if (t.credit)     out.push('VENIA credit is required in all publications, captions, and credits.');
+  if (t.alteration) out.push('No alterations, pinning, or modifications are permitted.');
+  if (t.tearsheet)  out.push('A tearsheet, scan, or digital link of published coverage must be provided.');
+  if (pull && pull.termsNotes) out.push(String(pull.termsNotes).trim());
+  if (pull && pull.returnDate) out.push('All samples must be returned by ' + pull.returnDate + '.');
+  if (pull && pull.feeType && pull.feeType !== 'none' && pull.feeAmount)
+    out.push((pull.feeType === 'deposit' ? 'A refundable damage deposit of $' : 'A pull fee of $')
+      + Number(pull.feeAmount).toFixed(2) + ' applies'
+      + (pull.feeType === 'deposit' ? ', returned in full when the samples come back in good condition.' : '.'));
+  return out;
+}
+let PR_SIGN_ID = null, PR_SIGN_DRAWN = false;
+window.prSignOpen = function(pullId){
+  const pull = (STATE.prPulls || []).find(p => p.id === pullId);
+  if (!pull) return;
+  PR_SIGN_ID = pullId; PR_SIGN_DRAWN = false;
+  const lines = prTermsLines(pull);
+  document.getElementById('pr-sign-title').textContent = 'Signature — ' + pull.invoiceNo;
+  document.getElementById('pr-sign-summary').innerHTML =
+    '<b style="color:var(--ink)">' + escHtml(pull.client||'') + '</b> · '
+    + (pull.items||[]).length + ' piece' + ((pull.items||[]).length===1?'':'s') + ' · $'
+    + Number(pull.totalRetail||0).toLocaleString() + ' retail value'
+    + (pull.returnDate ? '<br>Due back <b style="color:var(--ink)">' + escHtml(pull.returnDate) + '</b>' : '');
+  document.getElementById('pr-sign-terms').innerHTML = lines.length
+    ? '<ul style="margin:0;padding-left:16px">' + lines.map(l => '<li>' + escHtml(l) + '</li>').join('') + '</ul>'
+    : '<span style="color:var(--muted)">No terms were set on this pull — the signature will record that.</span>';
+  const nameEl = document.getElementById('pr-sign-name');
+  nameEl.value = (pull.signature && pull.signature.name) || pull.contact || '';
+  const warn = document.getElementById('pr-sign-warn');
+  if (warn) { warn.style.display = 'none'; warn.textContent = ''; }
+  openModal('pr-sign-modal');
+  setTimeout(prSignPadInit, 60);
+};
+// The pad is sized from its rendered box and scaled to the device pixel ratio —
+// a signature drawn on a phone should not come out as a blurry smear on the PDF.
+function prSignPadInit(){
+  const c = document.getElementById('pr-sign-pad');
+  if (!c) return;
+  const r = c.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  c.width = Math.max(1, Math.round(r.width * dpr));
+  c.height = Math.max(1, Math.round(r.height * dpr));
+  const x = c.getContext('2d');
+  x.scale(dpr, dpr);
+  x.lineWidth = 2; x.lineCap = 'round'; x.lineJoin = 'round';
+  x.strokeStyle = '#111';
+  let drawing = false, last = null;
+  const pt = (e) => { const b = c.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+  c.onpointerdown = (e) => { e.preventDefault(); drawing = true; last = pt(e); try { c.setPointerCapture(e.pointerId); } catch(_){} };
+  c.onpointermove = (e) => {
+    if (!drawing) return;
+    e.preventDefault();
+    const p = pt(e);
+    x.beginPath(); x.moveTo(last.x, last.y); x.lineTo(p.x, p.y); x.stroke();
+    last = p; PR_SIGN_DRAWN = true;
+  };
+  const stop = () => { drawing = false; last = null; };
+  c.onpointerup = stop; c.onpointercancel = stop; c.onpointerleave = stop;
+}
+window.prSignClear = function(){
+  const c = document.getElementById('pr-sign-pad');
+  if (!c) return;
+  c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  PR_SIGN_DRAWN = false;
+};
+// A signature is a record of a moment, so it stores the moment: the terms as
+// they read when it was given, not as they read whenever someone next looks.
+window.prSignSave = function(){
+  const pull = (STATE.prPulls || []).find(p => p.id === PR_SIGN_ID);
+  if (!pull) return;
+  const name = (document.getElementById('pr-sign-name')||{}).value || '';
+  const warn = document.getElementById('pr-sign-warn');
+  const say = (m) => { if (warn) { warn.textContent = m; warn.style.display = ''; } };
+  if (!name.trim()) { say('Type the name of the person signing — a mark with no name is not a record of anything.'); return; }
+  if (!PR_SIGN_DRAWN) { say('Nothing has been drawn in the box yet.'); return; }
+  const c = document.getElementById('pr-sign-pad');
+  let url = '';
+  try { url = c.toDataURL('image/png'); } catch(e){ say('This browser would not let us read the signature back.'); return; }
+  pull.signature = {
+    name: name.trim(),
+    image: url,
+    at: new Date().toISOString(),
+    terms: prTermsLines(pull),          // frozen — later edits cannot rewrite what was agreed
+    items: (pull.items||[]).length,
+    totalRetail: pull.totalRetail || 0,
+  };
+  save();
+  try { logActivity('Pull signed: ' + pull.invoiceNo + ' by ' + pull.signature.name); } catch(e){}
+  closeModal('pr-sign-modal');
+  toast('✓ Signed by ' + pull.signature.name);
+  try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pull.id); } catch(e){}
+  try { renderPR(); } catch(e){}
+};
+// What the signature covers vs what the pull says NOW. A pull edited after
+// signing is not a scandal, but it must not look like it was signed for.
+window.prSignDrift = function(pull){
+  const g = pull && pull.signature;
+  if (!g) return '';
+  const now = prTermsLines(pull).join(' | ');
+  const then = (g.terms || []).join(' | ');
+  const bits = [];
+  if (now !== then) bits.push('the terms');
+  if ((pull.items||[]).length !== g.items) bits.push('the item list');
+  if (Number(pull.totalRetail||0) !== Number(g.totalRetail||0)) bits.push('the retail value');
+  return bits.length ? bits.join(' and ') + ' changed after it was signed' : '';
+};
+
+// ONE draft for every path that emails a pull. The agent-created pulls used to
+// build their own, with their own thinner terms line — two templates for one
+// agreement, and only one of them ever got fixed.
+function prSendEmail(pull, opener) {
   if (!pull) { toast('Pull not found', 'warn'); return; }
   if (!pull.email) { toast('No contact email on this pull — add one to send', 'warn'); return; }
   const itemLines = (pull.items || []).map(i =>
     `• ${i.styleName || i.styleCode || 'Item'}${i.styleCode ? ' ('+i.styleCode+')' : ''}` +
-    `${i.size ? ' — '+i.size : ''}${i.color ? ' / '+i.color : ''}`
+    `${i.size ? ' — '+i.size : ''}${i.color ? ' / '+i.color : ''}` +
+    `${i.retail ? '  ·  $' + Number(i.retail).toLocaleString() : ''}`
   ).join('\n');
-  const subject = `VENIA Pull Sheet — ${pull.invoiceNo}`;
+  const terms = prTermsLines(pull);
+  const sig = pull.signature;
+  const subject = `VENIA Pull Sheet — ${pull.invoiceNo}${sig ? ' (signed)' : ' — please confirm'}`;
   const body =
     `Hi ${pull.contact || pull.client || ''},\n\n` +
-    `Details for your VENIA press pull are below.\n\n` +
-    `Pull: ${pull.invoiceNo}\n` +
+    `${opener ? String(opener).trim() + '\n\n' : ''}` +
+    `Here is the full record of your VENIA press pull. Please read the terms below — they are what you are accepting by taking the samples.\n\n` +
+    `PULL ${pull.invoiceNo}\n` +
     (pull.publication ? `Publication / usage: ${pull.publication}\n` : '') +
-    (pull.returnDate ? `Return by: ${pull.returnDate}\n` : '') +
-    `\nItems (${(pull.items||[]).length}):\n${itemLines || '—'}\n` +
+    (pull.pullDate ? `Out: ${pull.pullDate}\n` : '') +
+    (pull.returnDate ? `RETURN BY: ${pull.returnDate}\n` : '') +
+    (pull.shootDate ? `Shoot: ${pull.shootDate}\n` : '') +
+    `\nSAMPLES (${(pull.items||[]).length})\n${itemLines || '—'}\n` +
+    `Total retail value on loan: $${Number(pull.totalRetail||0).toLocaleString()}\n` +
+    (pull.feeType && pull.feeType !== 'none' && pull.feeAmount
+      ? `${pull.feeType === 'deposit' ? 'Refundable damage deposit' : 'Pull fee'}: $${Number(pull.feeAmount).toFixed(2)}\n` : '') +
+    (terms.length ? `\nTERMS\n${terms.map(t => '• ' + t).join('\n')}\n` : '') +
     (pull.payment && pull.payment.url && (pull.payment.status||'pending') === 'pending'
-      ? `\n${pull.payment.type==='hold' ? 'Card hold (not charged unless samples are unreturned)' : 'Deposit'}: $${pull.payment.amount}\nPlease complete here before pickup:\n${pull.payment.url}\n`
+      ? `\n${pull.payment.type==='hold' ? 'CARD HOLD (reserved, not charged — released when the samples come back)' : 'DEPOSIT'}: $${pull.payment.amount}\nComplete here before pickup:\n${pull.payment.url}\n`
       : '') +
-    `\nThe full pull sheet with terms is available on request.\n\n` +
-    `Thank you,\nVENIA Collection\nveniacollection.com`;
+    (sig
+      ? `\nSIGNED\nAccepted by ${sig.name} on ${new Date(sig.at).toLocaleString()}. This email is your copy of that agreement.\n`
+      : `\nPLEASE CONFIRM\nReply to this email with "I agree" to confirm you accept the terms above. If you'd rather sign in person, we'll take it when you collect.\n`) +
+    `\nThank you,\nVENIA Collection\nveniacollection.com`;
   const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const a = document.createElement('a');
   a.href = href; a.style.display = 'none';
@@ -21218,7 +21399,12 @@ function prPrintPullSheet(pullId) {
     + (termsLines.length ? '<div class="section-title">Terms &amp; Conditions</div><div class="terms"><ul style="padding-left:16px">' + termsLines.map(t=>'<li>'+t+'</li>').join('') + '</ul></div>' : '')
     + (pull.notes ? '<div class="section-title">Notes</div><div style="font-size:10px;color:#444;padding:12px;border:1px solid #e0e0e0;margin-bottom:20px">' + pull.notes + '</div>' : '')
     + '<div class="sig-grid">'
-    + '<div><div class="sig-line"></div><div class="sig-label">Stylist / Borrower Signature + Date</div><div style="font-size:10px;color:var(--muted);margin-top:6px">' + pull.contact + ' — ' + (pull.publication||'') + '</div></div>'
+    + '<div>' + (pull.signature && pull.signature.image
+        ? '<div style="height:36px;margin-bottom:6px;border-bottom:1px solid #000;display:flex;align-items:flex-end"><img src="' + esc(pull.signature.image) + '" alt="signature" style="max-height:36px;max-width:100%;display:block"></div>'
+          + '<div class="sig-label">Stylist / Borrower Signature + Date</div>'
+          + '<div style="font-size:10px;color:#444;margin-top:6px">' + esc(pull.signature.name) + ' — accepted ' + new Date(pull.signature.at).toLocaleString() + '</div>'
+        : '<div class="sig-line"></div><div class="sig-label">Stylist / Borrower Signature + Date</div>'
+          + '<div style="font-size:10px;color:var(--muted);margin-top:6px">' + pull.contact + ' — ' + (pull.publication||'') + '</div>') + '</div>'
     + '<div><div class="sig-line"></div><div class="sig-label">VENIA Authorized Signature + Date</div><div style="font-size:10px;color:var(--muted);margin-top:6px">VENIA Collection — veniacollection.com</div></div>'
     + '</div>'
     + '<div class="footer">VENIA Collection · veniacollection.com · @veniacollection · ' + pull.invoiceNo + ' · Samples must be returned by ' + (pull.returnDate||'—') + '</div>'
@@ -23461,27 +23647,7 @@ function agentRunCreatePull(action, chatBody) {
 window.agentDraftPullEmail = function (pullId) {
   const pull = (window.STATE && STATE.prPulls || []).find(p => p.id === pullId);
   if (!pull) { toast('Pull not found', 'warn'); return; }
-  if (!pull.email) { toast('No contact email on this pull — open it and add one first', 'warn'); return; }
-  const items = (pull.items || []).map(i =>
-    `• ${i.styleName || i.styleCode || 'Item'}${i.styleCode ? ' (' + i.styleCode + ')' : ''}` +
-    `${i.size ? ' — ' + i.size : ''}${i.color ? ' / ' + i.color : ''}`).join('\n');
-  const subject = `VENIA pull — ${pull.publication || pull.client} (${pull.invoiceNo})`;
-  const opener = pull.emailNote
-    ? pull.emailNote
-    : `Here are the details for your VENIA pull${pull.publication ? ' for ' + pull.publication : ''}.`;
-  const body =
-    `Hi ${pull.contact || pull.client || ''},\n\n` +
-    opener + '\n\n' +
-    (pull.pullDate  ? `Pickup / ship: ${pull.pullDate}\n` : '') +
-    (pull.returnDate ? `Return by: ${pull.returnDate}\n` : '') +
-    `\nItems (${(pull.items || []).length}):\n${items || '—'}\n\n` +
-    `Please keep everything in original condition — unreturned or damaged samples are invoiced at full retail. The full pull sheet with terms is available on request.\n\n` +
-    `Thank you,\nVENIA Collection\nveniacollection.com`;
-  const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  const a = document.createElement('a');
-  a.href = href; a.style.display = 'none';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  toast(`✉ Email drafted to ${pull.email}`);
+  prSendEmail(pull, pull.emailNote || '');
 };
 
 // A plain agent note bubble (used when an action needs more info).
