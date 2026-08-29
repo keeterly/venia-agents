@@ -454,3 +454,19 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   with; the briefing read it as "58 styles stuck at Proto" while all 57 were at
   stage SMS. `plmContext` now names both fields and says "no sample logged" when
   the sample log is empty.
+
+## Build 364 — a piece that isn't in Styles
+- **"How do I add custom styles that are not in the system here?"** You couldn't.
+  The pull search matched existing styles only and answered a name it had never
+  seen with "No styles found" — a dead end at the rail.
+- The search now offers **+ Add "<what you typed>"** whenever that exact style
+  does not already exist (not only on zero matches — "LARA VEST (archive)" is a
+  real thing to pull and it partial-matches).
+- A one-off carries `oneOff: true`, its own editable name and retail, no
+  invented style code, and rides the sheet, the email, the return flow and the
+  fee exactly like any other item. `prItemStyle` finds nothing, so its photo
+  hatches rather than borrowing someone else's.
+- **Invariant: it never pretends to be a catalogue style.** The row says "Not in
+  Styles"; nothing is written to the Styles library.
+- `prCartRetail` updates the cart total and the fee without re-rendering the row
+  out from under the cursor.
