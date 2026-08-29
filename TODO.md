@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 355._
+_Last reviewed at Build 356._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -169,6 +169,16 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **Brainstorm is a SPACE, not a takeover.** It rendered as a full-viewport
+  overlay at z-9200 that covered the global bar and the space nav, drew its own
+  ✕ as the only way back, and used the opposite typographic treatment to every
+  other screen — an Apple large title (28px, weight 800, -0.02em, sentence case,
+  shrinking on scroll) beside an app whose titles are uppercase Archivo at 6px
+  tracking. In-app it now starts below the 44px bar at z-400, marks BRAINSTORM
+  active, and uses `.cpl-hero` / `.cpl-title` / `.cpl-sub`, `.pill` tabs and one
+  gutter matching the hero (48px desktop, 16px phone). The standalone
+  home-screen app (`?app=brainstorm`) stays full-bleed — it has no VENIA chrome
+  to sit under, and keeps the ⤢ OS button instead of a ✕.
 - **A Stripe invoice line must NAME its invoice.** A $200 pull fee reached the
   stylist's inbox as "Invoice paid $0.00". The invoiceitem was created with no
   `invoice` id, which leaves it PENDING, and API-created invoices default to
@@ -314,7 +324,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 54 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 55 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
