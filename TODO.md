@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 349._
+_Last reviewed at Build 350._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -14,6 +14,17 @@ _Last reviewed at Build 349._
   no policy deny all by default. Verified at Build 319 — including
   `venia_daily_digest`, which now carries the finance blob the Monday brief
   reads.
+- **Web Push: configured at Build 350.** `VAPID_PUBLIC_KEY` had been set alone
+  since 16 July with no private half, so nothing ever sent — the dock, the 7 AM
+  brief and the weekly money brief all skipped silently on
+  `if (VAPID_PRIVATE_KEY && VAPID_PUBLIC_KEY)`. A fresh pair is now installed.
+  Two things to know if it is ever touched again: a Netlify **secret** env var
+  cannot use the `all` context (the API accepts the write and drops it — the
+  only way to notice is to re-read the list), so `VAPID_PRIVATE_KEY` is scoped
+  to `production`; and **function env changes need a redeploy** to take effect.
+  The app no longer hardcodes the public key — it reads `/vapid-key` — so a
+  future rotation is a Netlify change plus a deploy, with no code edit.
+
 - **Bank feed: connected.** Chase via Stripe Financial Connections, read-only.
   `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` and `VENIA_GATE_HASH` are set;
   the Financial Connections registration was approved.
@@ -23,18 +34,6 @@ _Last reviewed at Build 349._
 - **Marketing and Brand own no actions of their own** — their work is
   drafting, which needs none. If campaign or calendar records ever become
   real objects, they get actions and the remit map is where to add them.
-
-- **⚠️ ADD `VAPID_PRIVATE_KEY` IN NETLIFY — push is dead until you do.** The
-  self-test answered it on the first tap: `VAPID_PUBLIC_KEY` was set on 16 July
-  and the private half was never added. Every sender guards on
-  `if (VAPID_PRIVATE_KEY && VAPID_PUBLIC_KEY)` and silently skips, so the dock,
-  the 7 AM brief and the weekly money brief have never sent a single
-  notification. Netlify → venia-creator → Environment variables, scope
-  `functions`, mark it secret. Best case: the private key from 16 July still
-  exists — paste it and nothing else changes. Otherwise generate a fresh pair
-  (`npx web-push generate-vapid-keys`) and set BOTH vars. No code change either
-  way: as of Build 349 the app reads the public key from `/vapid-key`, and a
-  device rebuilds its subscription by itself when that key moves.
 
 - **Delete the old Stripe secret keys.** Several were created while getting the
   bank connected, including one that passed through a chat transcript. The live
