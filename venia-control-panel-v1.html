@@ -1785,8 +1785,8 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '359';
-  const BUILD_DATE = '2026.08.28';
+  const BUILD = '360';
+  const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -4396,7 +4396,9 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="fg"><label class="fl" for="mm-unit">Unit</label><input class="fi" id="mm-unit" placeholder="yd, m, pcs…"></div>
           <div class="fg"><label class="fl" for="mm-lead">Lead Time (days)</label><input class="fi fi-mono" id="mm-lead" type="number" placeholder="30"></div>
           <div class="fg"><label class="fl" for="mm-content">Fiber Content</label><input class="fi" id="mm-content" placeholder="e.g. 100% Organic Cotton"></div>
-          <div class="fg"><label class="fl" for="mm-color">Available Colors</label><input class="fi" id="mm-color" placeholder="e.g. Natural, Black, Sulfur"></div>
+          <div class="fg full"><label class="fl" for="mm-color">Available Colors</label>
+            <input class="fi" id="mm-color" placeholder="e.g. Natural, Black, Sulfur" oninput="mmColorChips()">
+            <div id="mm-color-chips" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:2px"></div></div>
           <div class="fg"><label class="fl" for="mm-width">Fabric Width</label><input class="fi" id="mm-width" placeholder='e.g. 60", 148cm'></div>
           <div class="fg"><label class="fl" for="mm-article">Article # (mill)</label><input class="fi fi-mono" id="mm-article" placeholder="Mill article / ref #"></div>
           <div class="fg"><label class="fl" for="mm-weight">Weight</label><input class="fi" id="mm-weight" placeholder="e.g. 180 gsm, 7 oz"></div>
@@ -6497,7 +6499,7 @@ const ST_CELL = {
     const m = s.fabricMatId ? (STATE.materials||[]).find(x => x.id === s.fabricMatId) : null;
     return `<td class="cell-edit" style="font-size:10px" title="${s.fabric?esc(s.fabric)+(m?' · linked to Materials':' · not in Materials')+' — click to change':'Click to set the fabric'}" onclick="fabOpen('${s.id}',this,event)">
       <div class="col-clip" style="display:flex;align-items:center;gap:6px">
-        ${s.fabric ? `<span style="width:11px;height:11px;flex:none;border:1px solid var(--border);background:${m ? swatchColor(m.color,'var(--bg-off)') : 'repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)'}"></span><span style="overflow:hidden;text-overflow:ellipsis">${esc(s.fabric)}</span>` : '<span style="color:var(--muted)">＋ fabric</span>'}
+        ${s.fabric ? `<span style="width:11px;height:11px;flex:none;border:1px solid var(--border);background:${m ? matSwatch(m,'var(--bg-off)') : 'repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)'}"></span><span style="overflow:hidden;text-overflow:ellipsis">${esc(s.fabric)}</span>` : '<span style="color:var(--muted)">＋ fabric</span>'}
       </div></td>`;
   },
   colors:   (s) => `<td class="cell-edit" title="Click to edit colourways and set swatches" onclick="cwOpen('${s.id}',this,event)">${String(s.colors||'').trim() ? colorSwatches(s.colors, 6) : '<span style="color:var(--muted);font-size:10px">＋ colourways</span>'}</td>`,
@@ -7242,6 +7244,51 @@ function cwKey(e){ if (e.key === 'Escape') { e.stopPropagation(); cwClose(); } }
 //  looks like Black everywhere; that is the third level and it is now named.
 // ══════════════════════════════════════════════════════════
 function cwSplit(v){ return String(v||'').split(',').map(x=>x.trim()).filter(Boolean); }
+// ── The colours a material comes in ──────────────────────────────────────
+// One list, and it had two names. The Materials modal has always written its
+// "Available Colors" box to `color`; Build 359 gave colourways to the fabric
+// and read a `colors` it invented, so both existed and disagreed — a fabric
+// you had typed "Black" into showed no colourways at all, because the lift
+// that filled `colors` only ever ran over colours already on styles.
+// `colors` wins (the colourway model is built on it); `color` is still read
+// so an older device syncing an old blob keeps its colours, and is merged
+// away on sight.
+function matColors(m){
+  if (!m) return [];
+  const out = [], seen = {};
+  cwSplit(m.colors).concat(cwSplit(m.color)).forEach(c => {
+    const k = c.toLowerCase();
+    if (!seen[k]) { seen[k] = 1; out.push(c); }
+  });
+  return out;
+}
+function matSetColors(m, list){
+  if (!m) return;
+  m.colors = (list||[]).join(', ');
+  m.color = '';                       // the old half, emptied so it cannot drift back
+  m.updatedAt = new Date().toISOString();
+}
+// The chip that stands for the fabric itself — its first colour.
+function matSwatch(m, fallback){ return m ? swatchColor(matColors(m).join(', '), fallback) : fallback; }
+// ONE-TIME. Fold the two fields together in stored data so the split above is
+// a reading quirk for one boot rather than forever. Union, never a replace.
+function matMergeColorFields(){
+  try {
+    if (STATE.__matColorMerge) return 0;
+    let n = 0;
+    (STATE.materials||[]).forEach(m => {
+      if (!m) return;
+      const stray = cwSplit(m.color).filter(c => !cwSplit(m.colors).some(x => x.toLowerCase() === c.toLowerCase()));
+      if (!String(m.color||'').trim() && !stray.length) return;
+      n += stray.length;
+      matSetColors(m, matColors(m));
+    });
+    STATE.__matColorMerge = new Date().toISOString();
+    if (n) { try { logActivity('Recovered ' + n + ' material colour(s) — a fabric now has one list of colours, not two'); } catch(e){} }
+    save();
+    return n;
+  } catch(e){ return 0; }
+}
 // The material a style's fabric refers to. Matched by name because that is what
 // the style stores — the picker writes the library's own spelling, so this
 // resolves for anything chosen from it.
@@ -7250,7 +7297,7 @@ function fabMaterial(st){
   if (!f) return null;
   return (STATE.materials||[]).find(m => m && String(m.name||'').trim().toLowerCase() === f) || null;
 }
-function fabColors(st){ const m = fabMaterial(st); return m ? cwSplit(m.colors) : []; }
+function fabColors(st){ return matColors(fabMaterial(st)); }
 // Colours on the style that its fabric does not list. Never dropped silently —
 // changing a style's fabric is exactly how these appear, and losing a colourway
 // because a fabric changed would be worse than showing it needs a decision.
@@ -7261,11 +7308,10 @@ function cwOrphans(st){
 // Add a colour to a FABRIC (the material), not to one style.
 function fabAddColor(mat, name){
   if (!mat) return false;
-  const list = cwSplit(mat.colors);
+  const list = matColors(mat);
   if (list.some(c => c.toLowerCase() === String(name).trim().toLowerCase())) return false;
   list.push(String(name).trim());
-  mat.colors = list.join(', ');
-  mat.updatedAt = new Date().toISOString();
+  matSetColors(mat, list);
   return true;
 }
 // ONE-TIME LIFT. Every colour already on a style is folded up into its fabric,
@@ -7288,7 +7334,10 @@ function cwMigrateColorsToFabrics(){
   } catch(e){ return 0; }
 }
 document.addEventListener('DOMContentLoaded', function(){
-  setTimeout(function(){ try { cwMigrateColorsToFabrics(); } catch(e){} }, 2200);
+  setTimeout(function(){
+    try { matMergeColorFields(); } catch(e){}
+    try { cwMigrateColorsToFabrics(); } catch(e){}
+  }, 2200);
 });
 
 function cwList(st){ return String(st.colors||'').split(',').map(x=>x.trim()).filter(Boolean); }
@@ -7471,8 +7520,7 @@ window.cwDropFromFabric = function(name){
     ? 'Remove ' + name + ' from ' + mat.name + '?\n\n' + users.length + ' styles are currently offered in it — they will all lose the option.'
     : 'Remove ' + name + ' from ' + mat.name + '?';
   if (!confirm(msg)) return;
-  mat.colors = cwSplit(mat.colors).filter(c => c.toLowerCase() !== String(name).toLowerCase()).join(', ');
-  mat.updatedAt = new Date().toISOString();
+  matSetColors(mat, matColors(mat).filter(c => c.toLowerCase() !== String(name).toLowerCase()));
   users.forEach(x => { x.colors = cwList(x).filter(c => c.toLowerCase() !== String(name).toLowerCase()).join(', '); x.updatedAt = new Date().toISOString(); });
   save();
   try { buildSkus(); } catch(e){}
@@ -7609,7 +7657,7 @@ function fabRender(q){
       ${mList.length ? `<div style="padding:6px 12px 2px;font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700">Materials library</div>` : ''}
       ${mList.map(m => row(m.name,
           [m.content, m.supplier, m.costPerUnit ? '$'+m.costPerUnit+'/'+(m.unit||'yd') : ''].filter(Boolean).join(' · '),
-          swatchColor(m.color, 'var(--bg-off)'),
+          matSwatch(m, 'var(--bg-off)'),
           `fabPick('${m.id}')`, '')).join('')}
       ${lList.length ? `<div style="padding:8px 12px 2px;font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700">Used on styles · not in Materials</div>` : ''}
       ${lList.map(f => {
@@ -7669,7 +7717,7 @@ function fabCreate(){
   if (!name) return;
   if (!STATE.materials) STATE.materials = [];
   const m = { id: 'MAT' + Date.now(), name, type: 'Fabric', supplier: '', costPerUnit: 0,
-    unit: 'yd', leadDays: 0, content: '', color: '', width: '', moq: '', notes: '', lots: [] };
+    unit: 'yd', leadDays: 0, content: '', colors: '', color: '', width: '', moq: '', notes: '', lots: [] };
   STATE.materials.push(m);
   try { logActivity('Material added from a style: ' + name); } catch(e){}
   try { if (STATE.currentPage === 'materials') renderMaterials(); } catch(e){}
@@ -7685,7 +7733,7 @@ function fabLinkLoose(name){
   let m = (STATE.materials||[]).find(x => String(x.name||'').trim().toLowerCase() === n.toLowerCase());
   if (!m) {
     m = { id: 'MAT' + Date.now(), name: n, type: 'Fabric', supplier: '', costPerUnit: 0,
-      unit: 'yd', leadDays: 0, content: '', color: '', width: '', moq: '', notes: '', lots: [] };
+      unit: 'yd', leadDays: 0, content: '', colors: '', color: '', width: '', moq: '', notes: '', lots: [] };
     STATE.materials.push(m);
   }
   let linked = 0;
@@ -9065,7 +9113,7 @@ function renderMaterials(filter) {
     <div class="mat-card" onclick="openMatModal('${m.id}')">
       ${m.photoUrl
         ? `<img class="mat-swatch" src="${esc(m.photoUrl)}" alt="" loading="lazy" title="Click to enlarge" onclick="lbOpenOne('${esc(m.photoUrl)}','${esc(m.name)}','${esc([m.content,m.supplier].filter(Boolean).join(' · '))}',event)" style="object-fit:cover;cursor:zoom-in;display:block">`
-        : `<div class="mat-swatch" style="background:${swatchColor(m.color,colors[m.type]||'#555')}"></div>`}
+        : matSwatchBlock(m, colors[m.type]||'#555')}
       <div class="mat-name">${m.name}</div>
       <div class="mat-type">${m.type}</div>
       <div class="mat-detail">Supplier: <span>${m.supplier||'—'}</span></div>
@@ -9075,6 +9123,15 @@ function renderMaterials(filter) {
       ${m.moq ? `<div class="mat-detail">MOQ: <span>${m.moq}${/\d$/.test(String(m.moq).trim())&&unit?' '+unit:''}</span></div>` : ''}
       ${m.width ? `<div class="mat-detail">Width: <span>${m.width}</span></div>` : ''}
       ${m.content?`<div class="mat-detail" style="margin-top:4px;font-size:10px;color:var(--muted)">${m.content}</div>`:''}
+      ${(function(){
+        const cols = matColors(m);
+        if (!cols.length) return m.type === 'Fabric' || m.type === 'Lining'
+          ? `<div class="mat-detail" style="margin-top:6px;color:var(--muted)">Colours: <span style="color:var(--muted)">none yet</span></div>` : '';
+        return `<div class="mat-detail" style="margin-top:6px;display:flex;align-items:center;gap:7px" title="${esc(cols.join(', '))}">
+          Colours: ${colorSwatches(cols.join(', '), 8, 14)}
+          <span style="min-width:0;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(cols.join(', '))}</span>
+        </div>`;
+      })()}
       ${(function(){
         // Fabric liability — required (BOM yield × outstanding PO units) vs
         // on hand + on order. All derived except on-hand, which is optional.
@@ -9228,6 +9285,17 @@ function colorSwatches(csv, max, size){
   }).join('');
   const rest = list.length - Math.min(list.length, cap);
   return `<div style="display:flex;align-items:center;gap:4px" title="${esc(list.join(', '))}">${dots}${rest?`<span style="font-size:9px;color:var(--muted);font-family:'DM Mono',monospace">+${rest}</span>`:''}</div>`;
+}
+
+function matSwatchBlock(m, fallback){
+  const cols = matColors(m);
+  if (cols.length < 2) return `<div class="mat-swatch" style="background:${swatchColor(cols[0]||'', fallback)}"></div>`;
+  return `<div class="mat-swatch" style="display:flex;padding:0" title="${esc(cols.join(', '))}">${
+    cols.map(c => {
+      const d = colorDef(c);
+      return `<span style="flex:1;min-width:0;background:${d ? colorCssFrom(d) : 'repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)'}" title="${esc(c)}${d?'':' — no swatch on file'}"></span>`;
+    }).join('')
+  }</div>`;
 }
 
 function swatchColor(colorStr, fallback) {
@@ -9951,7 +10019,7 @@ function openDp(styleId) {
       ${dpRow('Fabric', (()=>{
         const m = s.fabricMatId ? (STATE.materials||[]).find(x => x.id === s.fabricMatId) : null;
         return `<button onclick="fabOpen('${s.id}',this,event)" title="Pick from Materials, or add a new one" style="background:none;border:none;padding:2px 0;cursor:pointer;display:flex;align-items:center;gap:7px;justify-content:flex-end;width:100%">
-          ${s.fabric ? `<span style="width:13px;height:13px;flex:none;border:1px solid var(--border);background:${m ? swatchColor(m.color,'var(--bg-off)') : 'repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)'}"></span><span style="font-size:12px;color:var(--ink)">${esc(s.fabric)}</span>${m?'':'<span style="font-size:9px;color:var(--muted);letter-spacing:.5px">NOT IN MATERIALS</span>'}` : '<span style="font-size:11px;color:var(--muted)">＋ Set fabric</span>'}
+          ${s.fabric ? `<span style="width:13px;height:13px;flex:none;border:1px solid var(--border);background:${m ? matSwatch(m,'var(--bg-off)') : 'repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)'}"></span><span style="font-size:12px;color:var(--ink)">${esc(s.fabric)}</span>${m?'':'<span style="font-size:9px;color:var(--muted);letter-spacing:.5px">NOT IN MATERIALS</span>'}` : '<span style="font-size:11px;color:var(--muted)">＋ Set fabric</span>'}
           <span style="font-size:10px;color:var(--muted);flex:none">✎</span>
         </button>`;
       })())}
@@ -10664,7 +10732,7 @@ function openMatModal(id=null) {
       document.getElementById('mm-unit').value = m.unit||'';
       document.getElementById('mm-lead').value = m.leadDays||'';
       document.getElementById('mm-content').value = m.content||'';
-      document.getElementById('mm-color').value = m.color||'';
+      document.getElementById('mm-color').value = matColors(m).join(', ');
       document.getElementById('mm-article').value = m.article||'';
       document.getElementById('mm-weight').value = m.weight||'';
       document.getElementById('mm-sample-price').value = m.samplePrice||'';
@@ -10678,6 +10746,7 @@ function openMatModal(id=null) {
   } else {
     mmRenderLots([]);
   }
+  mmColorChips();
   openModal('mat-modal');
 }
 
@@ -10879,6 +10948,43 @@ function mmUploadPhoto(){
 }
 function mmClearPhoto(){ mmSetPhoto(''); }
 
+function mmColorChips(){
+  const box = document.getElementById('mm-color-chips');
+  const inp = document.getElementById('mm-color');
+  if (!box || !inp) return;
+  const list = cwSplit(inp.value);
+  if (!list.length) {
+    box.innerHTML = '<span style="font-size:10px;color:var(--muted)">No colourways yet — every style cut in this fabric picks from this list.</span>';
+    return;
+  }
+  let unknown = 0;
+  box.innerHTML = list.map(c => {
+    const d = colorDef(c);
+    if (!d) unknown++;
+    return `<span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);padding:3px 8px 3px 4px">
+      <label style="position:relative;width:16px;height:16px;flex:none;cursor:pointer" title="${d?'Change the swatch for '+esc(c)+' — shared brand-wide':'No swatch on file for '+esc(c)+' — click to set one'}">
+        <span style="position:absolute;inset:0;border-radius:50%;${d?`background:${colorCssFrom(d)};border:1px solid rgba(0,0,0,.25)`:'background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px);border:1px solid var(--border)'}"></span>
+        <input type="color" value="${(d&&d.c)||'#cccccc'}" oninput="mmSetColorHex('${esc(c).replace(/'/g,"\\'")}',this.value)" style="opacity:0;width:16px;height:16px;border:none;padding:0;cursor:pointer">
+      </label>
+      <span style="font-size:10px;color:var(--ink)">${esc(c)}</span>
+    </span>`;
+  }).join('') + `<span style="width:100%;font-size:10px;color:var(--muted);line-height:1.6">${
+    unknown ? unknown + ' without a swatch — click a hatched chip to set one. ' : ''
+  }Swatches are brand-wide: this Black and leather's Black look the same everywhere.</span>`;
+}
+// Saved on the spot, not on Save Material — a swatch belongs to the brand, not
+// to this material's edit, and cancelling here should not undo it.
+function mmSetColorHex(name, hex){
+  if (!STATE.colorLib) STATE.colorLib = {};
+  const cur = colorDef(name) || { c:'#cccccc', c2:'#ffffff', p:'solid' };
+  STATE.colorLib[colorKey(name)] = (cur.p === 'solid') ? hex : { c: hex, c2: cur.c2, p: cur.p };
+  save();
+  mmColorChips();
+  try { renderStyles(); } catch(e){}
+  try { if (STATE.currentPage === 'materials') renderMaterials(); } catch(e){}
+  try { logActivity('swatch set for ' + name); } catch(e){}
+}
+
 function saveMaterial() {
   const name = document.getElementById('mm-name').value.trim();
   if (!name) { toast('Material name required'); return; }
@@ -10891,7 +10997,8 @@ function saveMaterial() {
     unit: document.getElementById('mm-unit').value,
     leadDays: parseInt(document.getElementById('mm-lead').value)||0,
     content: document.getElementById('mm-content').value,
-    color: document.getElementById('mm-color').value,
+    colors: cwSplit(document.getElementById('mm-color').value).join(', '),
+    color: '',
     width: document.getElementById('mm-width').value,
     article: document.getElementById('mm-article').value,
     weight: document.getElementById('mm-weight').value,

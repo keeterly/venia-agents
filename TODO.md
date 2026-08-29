@@ -363,3 +363,25 @@ categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
 390px and 1440px against a seeded workspace — use it before claiming a UI or
 a number is right; several apparent bugs turned out to be malformed fixtures.
+
+## Build 360 — a fabric has one list of colours, and you can see them
+- **The bug Keeter caught:** "bamboo jersey is black but the colorway shows no
+  black." Two fields meant the same thing. The Materials modal has always
+  written its "Available Colors" box to `material.color`; Build 359 gave
+  colourways to the fabric and read a `material.colors` it invented, filled
+  only by a lift over colours already on styles. Bamboo Jersey was the one
+  fabric a human had typed into rather than one the lift reached, so its Black
+  sat in the field nothing read.
+- `matColors(m)` reads both halves and dedupes case-insensitively;
+  `matSetColors(m, list)` is the only writer and empties the legacy half.
+  `matMergeColorFields()` folds them together once (`STATE.__matColorMerge`),
+  as a union, and says how many colours it recovered.
+- **Invariant: nothing reads `m.color` directly any more.** Every fabric chip
+  goes through `matSwatch(m, fallback)`; every colourway reader through
+  `matColors`. A new reader on the raw field re-opens this bug.
+- Materials tab is swatched: the card block splits into one band per colour
+  (`matSwatchBlock`), a "Colours:" row lists them as chips, and a fabric with
+  none says "none yet" — that silence is what hid the Black.
+- EDIT MATERIAL shows live chips under Available Colors (`mmColorChips`); a
+  chip sets the brand-wide swatch (`mmSetColorHex`) and saves on the spot,
+  because a swatch belongs to the brand, not to this material's edit.
