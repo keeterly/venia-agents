@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '341';
+  const BUILD = '342';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6440,15 +6440,22 @@ const ST_CELL = {
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
   cogs:     (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Cost of goods — click to edit the price chain" onclick="pxOpen('${s.id}',this,event)">${s.cogs?'$'+s.cogs:'<span style="color:var(--muted)">＋</span>'}</td>`,
   wsMarginTarget: (s) => {
-    const m = pxWsMargin(s), own = !!s.wsMarginTarget;
-    return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${own?'Set on this style':'House default'} — what you keep over COGS" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%</span></td>`;
+    // What the prices produce. A number derived from real prices is the truth
+    // about this style, so it reads as set; only a bare house default is muted.
+    const m = pxWsMarginLive(s), drift = pxWsMarginDrift(s);
+    const own = (Number(s.cogs) > 0 && Number(s.wholesale) > 0) || !!s.wsMarginTarget;
+    const tip = drift !== null ? 'Wholesale $' + s.wholesale + ' over COGS $' + s.cogs + ' — your target was ' + drift + '%'
+      : (own ? 'What you keep over COGS' : 'House default — no prices set yet');
+    return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${esc(tip)}" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%${drift!==null?`<span style="color:var(--amber);margin-left:3px">•</span>`:''}</span></td>`;
   },
   wholesale:(s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing" onclick="pxOpen('${s.id}',this,event)">${s.wholesale?'$'+s.wholesale:'<span style="color:var(--muted)">＋</span>'}</td>`,
   retail:   (s) => `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="Click to edit pricing" onclick="pxOpen('${s.id}',this,event)">${s.retail?'$'+s.retail:'<span style="color:var(--muted)">＋</span>'}</td>`,
   marginTarget: (s) => {
-    const m = pxMargin(s);
-    const own = !!s.marginTarget;
-    return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${own?'Set on this style':'Inherited from the season plan or the house default'} — ${pxMarkup(m).toFixed(2)}x markup" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%</span></td>`;
+    const m = pxMarginLive(s), drift = pxMarginDrift(s);
+    const own = (Number(s.wholesale) > 0 && Number(s.retail) > 0) || !!s.marginTarget;
+    const tip = (drift !== null ? 'Retail $' + s.retail + ' over wholesale $' + s.wholesale + ' — your target was ' + drift + '% — '
+      : (own ? '' : 'Inherited from the season plan or the house default — ')) + pxMarkup(m).toFixed(2) + 'x markup';
+    return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${esc(tip)}" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%${drift!==null?`<span style="color:var(--amber);margin-left:3px">•</span>`:''}</span></td>`;
   },
   sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>`,
   priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
@@ -6635,6 +6642,31 @@ function pxMarginOf(price, cost){
   const p = Number(price||0), c = Number(cost||0);
   return p > 0 ? pxClamp(Math.round(((p - c) / p) * 100)) : 0;
 }
+// THE MARGIN THE PRICES ACTUALLY PRODUCE. pxMargin/pxWsMargin above return the
+// stored TARGET, which is an input to the pricing math and nothing else. It
+// only stays in step with the prices when they are edited in the pricing
+// popover, because that is the one path that writes the target back. Change a
+// price any other way — the agent's update_styles or price_from_retail, an
+// inline cell, an import — and the target is left behind, so anything DISPLAYING
+// it reported a margin the numbers beside it did not support. Everything that
+// shows a margin to a human reads these; only the math reads the raw target.
+function pxWsMarginLive(st){
+  const c = Number(st && st.cogs || 0), w = Number(st && st.wholesale || 0);
+  return (c > 0 && w > 0) ? pxMarginOf(w, c) : pxWsMargin(st);
+}
+function pxMarginLive(st){
+  const w = Number(st && st.wholesale || 0), r = Number(st && st.retail || 0);
+  return (w > 0 && r > 0) ? pxMarginOf(r, w) : pxMargin(st);
+}
+// True when the prices have drifted off the target that was set for them.
+function pxWsMarginDrift(st){
+  const c = Number(st && st.cogs || 0), w = Number(st && st.wholesale || 0);
+  return (c > 0 && w > 0 && pxMarginOf(w, c) !== pxWsMargin(st)) ? pxWsMargin(st) : null;
+}
+function pxMarginDrift(st){
+  const w = Number(st && st.wholesale || 0), r = Number(st && st.retail || 0);
+  return (w > 0 && r > 0 && pxMarginOf(r, w) !== pxMargin(st)) ? pxMargin(st) : null;
+}
 // Backwards up the chain: the price a market will bear, minus the margins you
 // need, is the most you can afford to spend making it. This is how a line is
 // costed in practice — the retail is a given, the cost is the question.
@@ -6678,8 +6710,13 @@ function pxRender(){
   const pop = document.getElementById('px-pop');
   const st = (STATE.styles||[]).find(x => x.id === PX_STYLE);
   if (!pop || !st) return;
-  const wsM = pxWsMargin(st), rM = pxMargin(st);
   const cogs = Number(st.cogs||0), ws = Number(st.wholesale||0), retail = Number(st.retail||0);
+  // The margin these three prices produce, not the target somebody set once.
+  const wsM = pxWsMarginLive(st), rM = pxMarginLive(st);
+  const wsTgt = pxWsMargin(st), rTgt = pxMargin(st);
+  // A target the prices no longer meet is worth seeing, not hiding — it is the
+  // difference between what was intended and what is being charged.
+  const wsGap = pxWsMarginDrift(st), rGap = pxMarginDrift(st);
   const landed = (typeof landedCost === 'function' ? landedCost(st) : cogs) || 0;
   // Landed adds duty, freight and dye on top of COGS. Pricing off COGS alone
   // flatters the margin, so the true one is spelled out rather than implied.
@@ -6699,16 +6736,16 @@ function pxRender(){
   pop.innerHTML = `
     <div style="padding:2px 12px 6px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Pricing · ${esc(st.name)}</div>
     ${money('COGS', 'cogs', cogs)}
-    ${step('↓ your margin', 'wsmargin', wsM, 'what you keep over COGS')}
+    ${step('↓ your margin', 'wsmargin', wsM, 'what you keep over COGS' + (wsGap !== null ? ' · target ' + wsGap + '%' : ''))}
     ${money('Wholesale', 'wholesale', ws)}
-    ${step('↓ boutique margin', 'margin', rM, pxMarkup(rM).toFixed(2) + '× markup')}
+    ${step('↓ boutique margin', 'margin', rM, pxMarkup(rM).toFixed(2) + '× markup' + (rGap !== null ? ' · target ' + rGap + '%' : ''))}
     ${money('Retail', 'retail', retail)}
     ${retail > 0 ? (()=>{
       const tgt = pxTargetCogs(st);
       const fits = cogs > 0 ? cogs <= tgt : null;
       return `<div style="border-top:1px solid var(--border);margin-top:6px;padding:7px 12px 3px;display:flex;align-items:center;gap:8px">
         <span style="flex:1;font-size:9px;color:var(--muted);line-height:1.5">
-          To hit <b style="color:var(--soft)">$${retail}</b> at these margins,<br>COGS needs to be
+          To hit <b style="color:var(--soft)">$${retail}</b> at ${(wsGap !== null || rGap !== null) ? `your <b style="color:var(--soft)">target</b> ${rTgt}/${wsTgt}` : 'these'} margins,<br>COGS needs to be
           <b style="color:${fits === null ? 'var(--soft)' : (fits ? 'var(--green)' : 'var(--red)')}">$${tgt}</b>${cogs > 0 ? ` — you're at <b style="color:${fits?'var(--green)':'var(--red)'}">$${cogs}</b>` : ''}
         </span>
         <button onclick="pxSet('backsolve',0)" title="Set wholesale and COGS from this retail price"
@@ -9670,8 +9707,8 @@ function openDp(styleId) {
       ${landedCost(s) > 0 ? dpRow('Landed Cost', `<span style="color:var(--gold)">$${landedCost(s).toFixed(2)}</span>${hasCostSheet(s)?'':' <span style="font-size:10px;color:var(--muted)">est.</span>'}`) : ''}
       ${dpRow('Wholesale', `<button onclick="pxOpen('${s.id}',this,event)" title="Retail, wholesale and margin move together" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:var(--ink);font-weight:500">${s.wholesale ? '$'+s.wholesale : '＋ Set'} <span style="font-size:10px;color:var(--muted)">✎</span></button>`)}
       ${dpRow('Retail Price', `<button onclick="pxOpen('${s.id}',this,event)" title="Retail, wholesale and margin move together" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:var(--ink);font-weight:500">${s.retail ? '$'+s.retail : '＋ Set'} <span style="font-size:10px;color:var(--muted)">✎</span></button>`)}
-      ${dpRow('Your Margin (over COGS)', `<button onclick="pxOpen('${s.id}',this,event)" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:${s.wsMarginTarget?'var(--ink)':'var(--muted)'};font-weight:500">${pxWsMargin(s)}% <span style="font-size:10px;color:var(--muted)">✎</span></button>`)}
-      ${dpRow('Boutique Margin', `<button onclick="pxOpen('${s.id}',this,event)" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:${s.marginTarget?'var(--ink)':'var(--muted)'};font-weight:500">${pxMargin(s)}% <span style="font-size:10px;color:var(--muted)">· ${pxMarkup(pxMargin(s)).toFixed(2)}× ✎</span></button>`)}
+      ${dpRow('Your Margin (over COGS)', `<button onclick="pxOpen('${s.id}',this,event)" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:${(Number(s.cogs)>0&&Number(s.wholesale)>0)||s.wsMarginTarget?'var(--ink)':'var(--muted)'};font-weight:500">${pxWsMarginLive(s)}% <span style="font-size:10px;color:var(--muted)">${pxWsMarginDrift(s)!==null?`· target ${pxWsMarginDrift(s)}% `:''}✎</span></button>`)}
+      ${dpRow('Boutique Margin', `<button onclick="pxOpen('${s.id}',this,event)" style="background:none;border:none;padding:0;cursor:pointer;font-size:13px;color:${(Number(s.wholesale)>0&&Number(s.retail)>0)||s.marginTarget?'var(--ink)':'var(--muted)'};font-weight:500">${pxMarginLive(s)}% <span style="font-size:10px;color:var(--muted)">· ${pxMarkup(pxMarginLive(s)).toFixed(2)}×${pxMarginDrift(s)!==null?` · target ${pxMarginDrift(s)}%`:''} ✎</span></button>`)}
       ${wsMargin !== null ? dpRow('WS Margin', `<span style="color:var(--gold)">${wsMargin}%</span>`) : ''}
       ${margin !== null ? dpRow('Retail Margin', `<span style="color:var(--gold)">${margin}%</span>`) : ''}
       ${margin !== null ? dpRow('Profit / Unit', `<span style="color:var(--green)">$${(s.retail-s.cogs).toFixed(0)}</span>`) : ''}
