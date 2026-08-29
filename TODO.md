@@ -493,3 +493,28 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   which of the three changed.
 - The sheet prints the real signature and its timestamp; unsigned still prints
   the ink line. Finalizing opens the pad while the stylist is still in the room.
+
+## Build 366 — mail that comes from VENIA
+- **"The email defaulted to this when finalizing — it should be from
+  info@veniacollection.com."** The pull sheet went out from a personal iCloud
+  address. Not a bug in the draft: **a `mailto:` link cannot set a From
+  address.** The phone's mail app picks its own default account, and no amount
+  of client-side work changes that. The only way mail leaves as info@ is if a
+  server sends it.
+- `netlify/functions/mail.js` — Resend behind the existing origin check and the
+  access-code gate (fail-closed). **Invariant: `from` is set by the server and
+  never read from the request**, or the endpoint becomes a way to send mail as
+  anyone. `MAIL_FROM` overrides via env only; defaults to
+  `VENIA Collection <info@veniacollection.com>`.
+- `prMailBuild()` writes the message once in plain text **and** HTML;
+  `prSendEmail()` sends it. The HTML sheet carries no `data:` images — Gmail
+  strips them, and a broken box in the one place we cannot see it is worse than
+  no photo.
+- **The app never claims more than it did.** If the server is not connected it
+  still drafts in the mail app, and says the mail will leave from *your* account
+  rather than info@. A real send records `emailedAt` / `emailedFrom`, and the
+  pull detail shows both.
+- Settings → API Keys has an Email card: connected state, the address mail
+  leaves from, and the Resend + DNS steps.
+- **Needs from Keeter:** a Resend account, `veniacollection.com` verified there
+  (SPF + DKIM), then `RESEND_API_KEY` in Netlify and a redeploy.
