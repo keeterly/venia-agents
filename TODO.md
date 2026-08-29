@@ -411,3 +411,14 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
 - Photos are read live via `prItemStyle(item)`, never copied onto the pull item:
   a re-shot photo reaches old sheets, and STATE does not carry a second copy of
   every image.
+
+## Build 362 — Money gets a tab
+- **"money doesnt have a tab at the top."** It never had one. The Money screen
+  (`cp-screen-cmd`) has always had its own nav headed "Money" — Overview, Cash,
+  P&L, Orders, Plan, Goals, Budget — but the only ways in were a door on Today
+  and a link in the pulse, and `cpGoto` mapped `cmd` to the **today** highlight,
+  so standing in Money lit TODAY.
+- Money is now a tab in the desktop bar and the phone bottom bar (six tabs; the
+  label drops its letter-spacing under 430px so PRODUCT cannot clip), and `cmd`
+  highlights **money** in both. Nothing maps `cmd` to `today` any more.
+- The drawer's "Go to" list was missing Growth *and* Money; both added.
