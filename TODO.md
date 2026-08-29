@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 356._
+_Last reviewed at Build 357._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -178,7 +178,10 @@ direct streaming path as the fallback. The financial plan is
   active, and uses `.cpl-hero` / `.cpl-title` / `.cpl-sub`, `.pill` tabs and one
   gutter matching the hero (48px desktop, 16px phone). The standalone
   home-screen app (`?app=brainstorm`) stays full-bleed — it has no VENIA chrome
-  to sit under, and keeps the ⤢ OS button instead of a ✕.
+  to sit under, and keeps the ⤢ OS button instead of a ✕. Navigating to any other
+  space dismisses the sheet: making the nav clickable was only half the job, and
+  `cpGoto` is the one place every space button, the phone's bottom bar and the
+  drawer all pass through.
 - **A Stripe invoice line must NAME its invoice.** A $200 pull fee reached the
   stylist's inbox as "Invoice paid $0.00". The invoiceitem was created with no
   `invoice` id, which leaves it PENDING, and API-created invoices default to
