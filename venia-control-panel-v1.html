@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '360';
+  const BUILD = '361';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4682,6 +4682,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <div style="display:flex;gap:1px;background:var(--border);margin-bottom:20px">
         <button class="pr-pay-tab active" id="pr-ptab-invoice" onclick="prPayTab('invoice',this)" style="flex:1;padding:10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:none;cursor:pointer;background:var(--ink);color:var(--bg);font-weight:700">Send Invoice</button>
         <button class="pr-pay-tab" id="pr-ptab-link" onclick="prPayTab('link',this)" style="flex:1;padding:10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:none;cursor:pointer;background:var(--bg);color:var(--muted)">Payment Link</button>
+        <button class="pr-pay-tab" id="pr-ptab-hold" onclick="prPayTab('hold',this)" style="flex:1;padding:10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:none;cursor:pointer;background:var(--bg);color:var(--muted)">Hold Card</button>
         <button class="pr-pay-tab" id="pr-ptab-manual" onclick="prPayTab('manual',this)" style="flex:1;padding:10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:none;cursor:pointer;background:var(--bg);color:var(--muted)">Manual / Cash</button>
       </div>
 
@@ -4713,6 +4714,26 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           </div>
         </div>
         <button class="btn btn-gold" onclick="prCreatePaymentLink()" style="width:100%">◈ Generate Link</button>
+      </div>
+
+      <!-- Hold tab: an authorization, not a charge -->
+      <div id="pr-pay-panel-hold" style="display:none">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:14px;line-height:1.6">
+          Puts the amount on hold against the stylist's card without taking it. They enter the card on Stripe's page;
+          the funds are reserved, not moved. When the samples come back you <strong>release</strong> it and they are never charged —
+          or <strong>capture</strong> it, in whole, if something does not.
+        </div>
+        <div class="form-grid" style="margin-bottom:16px">
+          <div class="fg"><label class="fl" for="pr-hold-amount">Hold Amount (USD)</label><input class="fi fi-mono" id="pr-hold-amount" type="number" step="1" min="0"></div>
+          <div class="fg"><label class="fl" for="pr-hold-desc">Description</label><input class="fi" id="pr-hold-desc" placeholder="VENIA sample hold"></div>
+        </div>
+        <div id="pr-hold-state" style="margin-bottom:14px"></div>
+        <div style="font-size:10px;color:var(--amber);line-height:1.6;margin-bottom:14px;padding:10px 12px;border:1px solid var(--border);background:var(--bg-off)">
+          ⚠ A card authorization expires on its own after <strong>7 days</strong> — that is the card networks, not Stripe or us.
+          If this pull runs longer than a week the hold will be gone before the samples are back, and there will be nothing left to capture.
+          For a long loan, charge a deposit and refund it instead.
+        </div>
+        <button class="btn btn-gold" id="pr-hold-btn" onclick="prCreateHold()" style="width:100%">◈ Create Hold Link</button>
       </div>
 
       <!-- Manual tab -->
@@ -16162,6 +16183,26 @@ function prCartTab(tab, el) {
   if (tab === 'styles') prRenderCart();
 }
 
+// One thumbnail, used wherever a style has to be recognised rather than read.
+// Falls back to the hatch used everywhere else for "nothing on file", never to
+// a blank box that reads as a loading failure.
+function prThumb(s, px){
+  const p = px || 34;
+  if (s && s.photoUrl) return `<img src="${esc(s.photoUrl)}" alt="" loading="lazy" style="width:${p}px;height:${p}px;object-fit:cover;border:1px solid var(--border);flex:none;display:block">`;
+  return `<span title="No photo on file" style="width:${p}px;height:${p}px;flex:none;display:block;border:1px solid var(--border);background:repeating-linear-gradient(45deg,var(--bg-off) 0 3px,var(--border) 3px 6px)"></span>`;
+}
+// The line that separates two styles sharing a name: what it is cut in.
+function prFabLine(s){
+  if (!s) return '';
+  const f = String(s.fabric||'').trim();
+  const cols = String(s.colors||'').trim();
+  if (!f && !cols) return '';
+  return `<span style="display:inline-flex;align-items:center;gap:5px;min-width:0">
+    ${f ? `<span style="width:9px;height:9px;flex:none;border:1px solid var(--border);background:${matSwatch(fabMaterial(s),'var(--bg-off)')}"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(f)}</span>` : '<span style="color:var(--muted)">no fabric</span>'}
+    ${cols ? colorSwatches(cols, 4, 9) : ''}
+  </span>`;
+}
+
 function prSearchStyles(query) {
   const resultsEl = document.getElementById('pr-style-results');
   if (!resultsEl) return;
@@ -16176,9 +16217,13 @@ function prSearchStyles(query) {
     <div style="background:var(--bg);padding:10px 14px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px"
          onclick="prAddToCart('${s.id}')"
          onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg)'">
-      <div>
-        <div style="font-size:12px;font-weight:600;color:var(--ink)">${s.name}</div>
-        <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${s.styleId} · ${s.season} · ${s.category}</div>
+      <div style="display:flex;align-items:center;gap:11px;min-width:0">
+        ${prThumb(s, 38)}
+        <div style="min-width:0">
+          <div style="font-size:12px;font-weight:600;color:var(--ink)">${s.name}</div>
+          <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${s.styleId} · ${s.season} · ${s.category}</div>
+          <div style="font-size:10px;color:var(--soft);margin-top:2px;display:flex;align-items:center;gap:5px;min-width:0">${prFabLine(s)}</div>
+        </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--gold)">${s.retail?'$'+s.retail:''}</span>
@@ -16186,6 +16231,16 @@ function prSearchStyles(query) {
       </div>
     </div>`).join('') :
     `<div style="background:var(--bg);padding:10px 14px;font-size:10px;color:var(--muted)">No styles found for "${query}"</div>`;
+}
+
+// A pull item stores the style's id; the photo and fabric are read live off the
+// style rather than copied onto the item, so a re-shot photo shows up on the
+// old pull sheet too — and the STATE blob does not carry a second copy of every
+// image.
+function prItemStyle(item){
+  if (!item) return null;
+  return (STATE.styles||[]).find(x => x.id === item.styleId)
+      || (STATE.styles||[]).find(x => String(x.styleId||'') === String(item.styleCode||'')) || null;
 }
 
 function prAddToCart(styleId, nfcTag='', size='', color='') {
@@ -16579,6 +16634,99 @@ async function prStripe(action, payload){
   return r.json();
 }
 
+// One repaint for three surfaces: the NFC finish sheet, the payment modal and
+// the pull detail behind it can each be open, and a status that only lands on
+// one of them is the kind of stale number someone acts on.
+function prPayRepaint(pullId){
+  try { if (document.getElementById('pr-tag-sheet')) prTagFinish(pullId); } catch(e){}
+  try {
+    const m = document.getElementById('pr-payment-modal');
+    if (m && m.classList.contains('open')) { prHoldRender(); prPaySummary(pullId); }
+  } catch(e){}
+  try {
+    const d = document.getElementById('pr-detail-modal');
+    if (d && d.classList.contains('open')) prOpenDetail(pullId);
+  } catch(e){}
+  try { renderPrPulls(); } catch(e){}
+}
+
+// A HOLD IS NOT A CHARGE, and the difference is the whole feature: money is
+// reserved on the card and released untouched if the samples come back clean.
+// Stripe does this with a manual-capture PaymentIntent — the same server action
+// the deposit flow has always used, with hold:true.
+window.prCreateHold = async function(){
+  const pull = (STATE.prPulls || []).find(p => p.id === PR_PAY_PULL_ID);
+  if (!pull) return;
+  const amount = parseFloat((document.getElementById('pr-hold-amount')||{}).value) || 0;
+  const desc = (document.getElementById('pr-hold-desc')||{}).value.trim() || `VENIA sample hold — ${pull.invoiceNo}`;
+  if (!amount || amount < 0.5) { toast('Enter a hold amount (min $0.50)', 'warn'); return; }
+  // Replacing a live authorization silently would leave real money reserved on
+  // someone's card with nothing in the app pointing at it.
+  const cur = pull.payment;
+  if (cur && cur.type === 'hold' && (cur.status === 'authorized' || cur.status === 'pending')) {
+    if (!confirm('This pull already has a ' + cur.status + ' hold for $' + (cur.amount||0) + '.\n\nCreating a new one replaces the link here — release the old hold in Stripe first, or the funds stay reserved on their card.')) return;
+  }
+  const btn = document.getElementById('pr-hold-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+  try {
+    const res = await prStripe('create', { amount, hold: true, email: pull.email || '', description: desc });
+    if (!res || res.error || !res.url) throw new Error((res && res.error) || 'Stripe did not return a link');
+    pull.payment = { sessionId: res.id, url: res.url, amount, type: 'hold', status: 'pending',
+                     method: 'stripe', createdAt: new Date().toISOString() };
+    save();
+    logActivity(`Stripe card hold created — $${amount} · ${pull.client}`);
+    prHoldRender();
+    toast('✓ Hold link created — send it to the stylist');
+  } catch(e) {
+    toast(e.message, 'warn');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '◈ Create Hold Link'; }
+  }
+};
+
+// The panel says what the hold actually is right now, and offers only the moves
+// that are legal in that state. An expiry date, not a duration — "7 days" from
+// when is the question you are trying to answer while holding the phone.
+window.prHoldRender = function(){
+  const box = document.getElementById('pr-hold-state');
+  if (!box) return;
+  const pull = (STATE.prPulls || []).find(p => p.id === PR_PAY_PULL_ID);
+  const pay = pull && pull.payment;
+  if (!pay || pay.type !== 'hold' || !pay.url) { box.innerHTML = ''; return; }
+  const st = pay.status || 'pending';
+  const exp = pay.createdAt ? new Date(new Date(pay.createdAt).getTime() + 7*864e5) : null;
+  const expired = exp && Date.now() > exp.getTime() && (st === 'authorized' || st === 'pending');
+  const expTxt = exp ? exp.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '';
+  const chip = st === 'captured' ? `<span style="color:var(--green);font-weight:700">✓ Captured $${pay.amount}</span>`
+    : st === 'released' ? `<span style="color:var(--muted)">Hold released — the stylist was never charged</span>`
+    : st === 'authorized' ? `<span style="color:var(--green);font-weight:700">✓ $${pay.amount} held on their card</span>`
+    : `<span style="color:var(--amber);font-weight:700">⏳ Waiting for the stylist to enter a card — $${pay.amount}</span>`;
+  box.innerHTML = `
+    <div style="padding:12px;border:1px solid var(--border);background:var(--bg-off)">
+      <div style="font-size:11px;margin-bottom:8px">${chip}</div>
+      ${expired ? `<div style="font-size:10px;color:var(--red);font-weight:700;margin-bottom:8px">This authorization passed its 7-day life on ${expTxt} — the funds have almost certainly been released already. Run ↻ Check status before trying to capture; expect it to fail.</div>`
+        : (exp && st !== 'captured' && st !== 'released' ? `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Expires ${expTxt} — capture or release before then.</div>` : '')}
+      ${st === 'pending' ? `<div style="display:flex;gap:8px;margin-bottom:8px">
+        <input readonly value="${esc(pay.url)}" style="flex:1;min-width:0;font-family:'DM Mono',monospace;font-size:10px;padding:7px 9px;border:1px solid var(--border);background:var(--bg);color:var(--ink);outline:none">
+        <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${esc(pay.url)}').then(()=>toast('Link copied'))">Copy</button>
+      </div>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${st !== 'captured' && st !== 'released' ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="prStripeCheck('${pull.id}')">↻ Check status</button>` : ''}
+        ${st === 'authorized' ? `<button class="btn btn-gold btn-sm" style="flex:1" onclick="prHoldCapture('${pull.id}')">◈ Capture $${pay.amount}</button>` : ''}
+        ${st === 'authorized' ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="prStripeRelease('${pull.id}')">Release hold</button>` : ''}
+      </div>
+    </div>`;
+};
+
+// Capturing takes real money from a real person. It is the one move here that
+// cannot be undone from this screen, so it says the amount and the reason back.
+window.prHoldCapture = function(pullId){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
+  if (!pay) return;
+  if (!confirm('Charge ' + (pull.contact || 'the stylist') + ' $' + pay.amount + ' from the hold?\n\nThis takes the money. Do this only for damage, loss or a late return you have decided to charge for — releasing costs them nothing.')) return;
+  prStripeCapture(pullId);
+};
+
 window.prStripeCreate = async function(pullId, hold){
   const pull = (STATE.prPulls||[]).find(p => p.id === pullId); if (!pull) return;
   const amt = parseFloat((document.getElementById('pr-fin-amt')||{}).value) || 0;
@@ -16602,7 +16750,7 @@ window.prStripeCheck = async function(pullId){
     if (res.payment_intent) pay.paymentIntent = res.payment_intent;
     if (pay.type === 'hold') pay.status = res.payment_status === 'paid' ? 'captured' : (res.status === 'complete' ? 'authorized' : 'pending');
     else pay.status = res.payment_status === 'paid' ? 'paid' : 'pending';
-    save(); prTagFinish(pullId);
+    save(); prPayRepaint(pullId);
     showToast(pay.status === 'pending' ? 'Not completed yet' : '✓ ' + pay.status, 'info');
   } catch(e){ showToast('Could not check status','error'); }
 };
@@ -16613,7 +16761,7 @@ window.prStripeCapture = async function(pullId){
   try {
     const res = await prStripe('capture', { payment_intent: pay.paymentIntent });
     if (res.error) { showToast(res.error,'error'); return; }
-    pay.status = 'captured'; save(); prTagFinish(pullId);
+    pay.status = 'captured'; save(); prPayRepaint(pullId);
     logActivity(`Stripe hold captured — $${pay.amount} · ${pull.client}`);
     showToast(`✓ Captured $${pay.amount}`,'success');
   } catch(e){ showToast('Capture failed','error'); }
@@ -16625,7 +16773,7 @@ window.prStripeRelease = async function(pullId){
   try {
     const res = await prStripe('cancel', { payment_intent: pay.paymentIntent });
     if (res.error) { showToast(res.error,'error'); return; }
-    pay.status = 'released'; save(); prTagFinish(pullId);
+    pay.status = 'released'; save(); prPayRepaint(pullId);
     logActivity(`Stripe hold released — $${pay.amount} · ${pull.client}`);
     showToast('Hold released','success');
   } catch(e){ showToast('Release failed','error'); }
@@ -16753,9 +16901,11 @@ function prRenderCart() {
 
   el.innerHTML = PR_CART.map((item, idx) => `
     <div style="background:var(--bg);padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      ${prThumb(prItemStyle(item), 34)}
       <div style="flex:1;min-width:0">
         <div style="font-size:12px;font-weight:600;color:var(--ink)">${item.styleName}</div>
         <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px">${item.styleCode} · ${item.season}</div>
+        <div style="font-size:10px;color:var(--soft);margin-top:2px;display:flex;align-items:center;gap:5px;min-width:0">${prFabLine(prItemStyle(item))}</div>
       </div>
       <input class="fi fi-mono" style="width:70px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Size" value="${item.size}" oninput="PR_CART[${idx}].size=this.value" title="Size">
       <input class="fi" style="width:90px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Color" value="${item.color}" oninput="PR_CART[${idx}].color=this.value" title="Color">
@@ -16847,6 +16997,7 @@ function prBuildReview() {
       <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;margin-bottom:16px">
       <table style="width:100%;border-collapse:collapse;min-width:560px">
         <thead><tr style="background:var(--ink);color:var(--white)">
+          <th style="padding:8px 12px;width:46px"></th>
           <th style="padding:8px 12px;text-align:left;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:400">Style</th>
           <th style="padding:8px 12px;text-align:left;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:400">Code</th>
           <th style="padding:8px 12px;text-align:left;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:400">Size</th>
@@ -16858,6 +17009,7 @@ function prBuildReview() {
         </tr></thead>
         <tbody>
           ${PR_CART.map((item, i) => `<tr style="border-bottom:1px solid var(--border);${i%2?'background:var(--bg-off)':''}">
+            <td style="padding:6px 12px">${prThumb(prItemStyle(item), 34)}</td>
             <td style="padding:10px 12px;font-size:11px;font-weight:600">${item.styleName}</td>
             <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${item.styleCode}</td>
             <td style="padding:10px 12px;font-size:11px">${item.size||'—'}</td>
@@ -16868,12 +17020,12 @@ function prBuildReview() {
             <td style="padding:10px 12px;text-align:center"><div style="width:18px;height:18px;border:1px solid var(--border-mid);margin:auto"></div></td>
           </tr>`).join('')}
           <tr style="border-top:2px solid var(--ink)">
-            <td colspan="5" style="padding:10px 12px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);text-align:right;font-weight:700">Total Retail Value</td>
+            <td colspan="6" style="padding:10px 12px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);text-align:right;font-weight:700">Total Retail Value</td>
             <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;text-align:right">$${total.toLocaleString()}</td>
             <td colspan="2"></td>
           </tr>
           ${type !== 'none' ? `<tr style="background:var(--bg-off)">
-            <td colspan="5" style="padding:8px 12px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);text-align:right;font-weight:700">${type==='deposit'?'Damage Deposit':type==='percent'?'Pull Fee':'Flat Fee'}</td>
+            <td colspan="6" style="padding:8px 12px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);text-align:right;font-weight:700">${type==='deposit'?'Damage Deposit':type==='percent'?'Pull Fee':'Flat Fee'}</td>
             <td style="padding:8px 12px;font-family:'DM Mono',monospace;font-size:13px;font-weight:700;text-align:right;color:var(--gold)">$${feeAmt.toFixed(2)}</td>
             <td colspan="2"></td>
           </tr>` : ''}
@@ -17021,12 +17173,17 @@ function prOpenDetail(pullId) {
       <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:22px">
         ${(pull.items||[]).map((item, idx) => `
           <div style="background:var(--bg);border:1px solid var(--border);padding:14px 16px;${item.returned?'opacity:.62;':''}">
+            <div style="display:flex;gap:12px;align-items:flex-start">
+              ${prThumb(prItemStyle(item), 46)}
+              <div style="flex:1;min-width:0">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
               <div style="font-size:13px;font-weight:${item.returned?'400':'600'};color:${item.returned?'var(--muted)':'var(--ink)'};${item.returned?'text-decoration:line-through;':''}min-width:0">${item.styleName}</div>
               <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--gold);flex-shrink:0">${item.retail?'$'+item.retail.toLocaleString():''}</div>
             </div>
             <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:5px;line-height:1.6">
               ${[item.styleCode, item.size, item.color, item.nfcTag?('NFC '+item.nfcTag):''].filter(Boolean).join(' · ')}
+            </div>
+              </div>
             </div>
             ${item.returned
               ? `<div style="font-size:10px;color:var(--green);margin-top:8px">✓ Returned ${item.returnedAt?new Date(item.returnedAt).toLocaleDateString():''}${item.returnCondition?' · '+item.returnCondition:''}</div>`
@@ -17066,16 +17223,24 @@ function prOpenDetail(pullId) {
 
   // Payment status block for detail view
   const payBlock = (() => {
-    if (!pull.feeAmount || pull.feeType === 'none') return '';
     const pay = pull.payment || {};
+    const isHold = pay.type === 'hold' && pay.url;
+    // A card hold has to show even on a fee-free press loan: there is real money
+    // reserved on someone's card, and the only thing that ends it is us.
+    if ((!pull.feeAmount || pull.feeType === 'none') && !isHold) return '';
     const payStatus = pay.status || 'none';
-    const statusBadge = payStatus === 'paid' ? `<span style="color:var(--green);font-weight:700">✓ Paid $${pay.amount||pull.feeAmount}</span>`
+    const statusBadge = isHold
+      ? (payStatus === 'authorized' ? `<span style="color:var(--green);font-weight:700">✓ $${pay.amount} held on their card</span> <span style="color:var(--muted)">— release it when the samples are back</span>`
+        : payStatus === 'captured' ? `<span style="color:var(--green);font-weight:700">✓ Hold captured — $${pay.amount} charged</span>`
+        : payStatus === 'released' ? `<span style="color:var(--muted)">Hold released — nothing was charged</span>`
+        : `<span style="color:var(--amber)">⏳ Hold link sent — $${pay.amount}, no card entered yet</span>`)
+      : payStatus === 'paid' ? `<span style="color:var(--green);font-weight:700">✓ Paid $${pay.amount||pull.feeAmount}</span>`
       : payStatus === 'invoiced' ? `<span style="color:var(--muted)">Invoice sent — awaiting payment</span>`
       : payStatus === 'waived' ? `<span style="color:var(--muted)">Waived / Comped</span>`
       : `<span style="color:var(--amber)">⚠ Unpaid — $${(pull.feeAmount||0).toFixed ? pull.feeAmount.toFixed(2) : pull.feeAmount} outstanding</span>`;
     return `<div style="padding:12px 18px;background:var(--bg-off);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
       <div style="font-size:10px">${statusBadge}${pay.method?' · '+pay.method:''}</div>
-      <button class="btn btn-ghost btn-sm" onclick="prOpenPayment('${pullId}')">◈ ${payStatus==='none'?'Charge Fee':'Update Payment'}</button>
+      <button class="btn btn-ghost btn-sm" onclick="prOpenPayment('${pullId}')">◈ ${isHold&&payStatus==='authorized'?'Release or capture':payStatus==='none'?'Charge or hold':'Update Payment'}</button>
     </div>`;
   })();
   if (payBlock) {
@@ -17178,19 +17343,18 @@ function prMarkAllReturned(pullId) {
 
 let PR_PAY_PULL_ID = null;
 
-function prOpenPayment(pullId) {
-  PR_PAY_PULL_ID = pullId;
+// PAYMENT ON FILE, repaintable. A hold that has just been authorized or
+// released has to be able to say so without the modal being reopened.
+function prPaySummary(pullId){
   const pull = (STATE.prPulls || []).find(p => p.id === pullId);
-  if (!pull) return;
-
+  const box = document.getElementById('pr-pay-summary');
+  if (!pull || !box) return;
   const fee = pull.feeAmount || 0;
   const feeLabel = pull.feeType === 'deposit' ? 'Hold Deposit'
     : pull.feeType === 'percent' ? `Fee (${pull.feeType}% of retail)`
     : pull.feeType === 'flat' ? 'Flat Pull Fee'
     : 'Pull Fee';
-
-  document.getElementById('pr-pay-title').textContent = `Charge — ${pull.invoiceNo}`;
-  document.getElementById('pr-pay-summary').innerHTML = `
+  box.innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
       <div><div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Client</div>
         <div style="font-size:13px;font-weight:600">${pull.client}</div>
@@ -17206,6 +17370,18 @@ function prOpenPayment(pullId) {
     </div>
     ${pull.payment?.status && pull.payment.status !== 'none' ? `<div style="margin-top:12px;padding:8px;background:var(--green-dim);border:1px solid rgba(39,174,96,.2);font-size:10px;color:var(--green)">✓ Payment on file: ${pull.payment.status.toUpperCase()} — $${pull.payment.amount||0} via ${pull.payment.method||'stripe'}</div>` : ''}`;
 
+}
+
+function prOpenPayment(pullId) {
+  PR_PAY_PULL_ID = pullId;
+  const pull = (STATE.prPulls || []).find(p => p.id === pullId);
+  if (!pull) return;
+
+  const fee = pull.feeAmount || 0;
+
+  document.getElementById('pr-pay-title').textContent = `Charge — ${pull.invoiceNo}`;
+  prPaySummary(pullId);
+
   // Pre-fill fields
   const due = new Date(); due.setDate(due.getDate() + 7);
   document.getElementById('pr-pay-email').value = pull.email || '';
@@ -17215,6 +17391,12 @@ function prOpenPayment(pullId) {
   document.getElementById('pr-link-amount').value = fee || '';
   document.getElementById('pr-link-desc').value = `VENIA press pull — ${pull.invoiceNo}`;
   document.getElementById('pr-manual-amount').value = fee || '';
+  // A hold is security against the value that walked out of the door, so it is
+  // defaulted to the retail on loan — not to the pull fee, which is revenue and
+  // belongs on an invoice.
+  document.getElementById('pr-hold-amount').value = Math.round(pull.totalRetail || 0) || fee || '';
+  document.getElementById('pr-hold-desc').value = `VENIA sample hold — ${pull.invoiceNo}`;
+  prHoldRender();
   document.getElementById('pr-pay-link-result').style.display = 'none';
   document.getElementById('pr-pay-stripe-status').style.display = 'none';
 
@@ -17227,7 +17409,7 @@ function prPayTab(tab, el) {
     t.style.background = 'var(--bg)'; t.style.color = 'var(--muted)'; t.style.fontWeight = '400';
   });
   if (el) { el.style.background = 'var(--ink)'; el.style.color = 'var(--bg)'; el.style.fontWeight = '700'; }
-  ['invoice','link','manual'].forEach(p => {
+  ['invoice','link','hold','manual'].forEach(p => {
     const el = document.getElementById('pr-pay-panel-' + p);
     if (el) el.style.display = p === tab ? '' : 'none';
   });
@@ -20865,16 +21047,22 @@ function prPrintPullSheet(pullId) {
   const pull = (STATE.prPulls || []).find(p => p.id === pullId);
   if (!pull) { toast('Pull not found', 'warn'); return; }
 
-  const items = (pull.items || []).map(item => `
+  const items = (pull.items || []).map(item => {
+    const st = prItemStyle(item);
+    return `
     <tr>
-      <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:11px;font-weight:600">${item.styleName}</td>
+      <td style="padding:8px 10px;border-bottom:1px solid #e0e0e0;width:64px">${st && st.photoUrl
+        ? '<img src="' + esc(st.photoUrl) + '" alt="" style="width:56px;height:70px;object-fit:cover;border:1px solid #e0e0e0;display:block">'
+        : '<div style="width:56px;height:70px;border:1px solid #e0e0e0;background:repeating-linear-gradient(45deg,#f4f4f4 0 4px,#e6e6e6 4px 8px)"></div>'}</td>
+      <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:11px;font-weight:600">${item.styleName}${st && st.fabric ? '<div style="font-size:9px;font-weight:400;color:#666;margin-top:3px">' + esc(st.fabric) + '</div>' : ''}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px;font-family:monospace">${item.styleCode||'—'}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px">${item.size||'—'}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px">${item.color||'—'}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px;font-family:monospace">${item.nfcTag||'—'}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px;text-align:right;font-family:monospace">${item.retail?'$'+item.retail:''}</td>
       <td style="padding:10px 14px;border-bottom:1px solid #e0e0e0;font-size:10px;color:var(--muted)">${item.returned?'✓ Returned':''}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   const termsLines = [];
   if (pull.terms && pull.terms.damage)    termsLines.push('Borrower is liable for any damage or loss during the pull period.');
@@ -20891,7 +21079,8 @@ function prPrintPullSheet(pullId) {
   const html = '<!DOCTYPE html><html><head>'
     + '<meta charset="utf-8"><title>Pull Sheet — ' + pull.invoiceNo + '</title>'
     + '<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;color:#000;background:#fff;font-size:11px;line-height:1.5}'
-    + '@media print{@page{margin:20mm 18mm}}.page{max-width:780px;margin:0 auto;padding:32px}'
+    + '@media print{@page{margin:20mm 18mm}tr{page-break-inside:avoid}img{-webkit-print-color-adjust:exact;print-color-adjust:exact}}'
+    + '.page{max-width:780px;margin:0 auto;padding:32px}'
     + '.header{display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:20px;border-bottom:2px solid #000;margin-bottom:24px}'
     + '.brand{font-size:22px;font-weight:900;letter-spacing:3px;text-transform:uppercase}'
     + '.brand-sub{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-top:3px}'
@@ -20921,9 +21110,9 @@ function prPrintPullSheet(pullId) {
     + (pull.address ? '<div style="grid-column:span 3"><div class="info-label">Delivery Address</div><div class="info-val" style="font-size:10px;font-weight:400">' + pull.address + '</div></div>' : '')
     + '</div>'
     + '<div class="section-title">Sample Items — ' + (pull.items||[]).length + ' pieces</div>'
-    + '<table><thead><tr><td>Style Name</td><td>Style ID</td><td>Size</td><td>Color</td><td>NFC Tag</td><td style="text-align:right">Retail</td><td>Return</td></tr></thead>'
+    + '<table><thead><tr><td></td><td>Style Name</td><td>Style ID</td><td>Size</td><td>Color</td><td>NFC Tag</td><td style="text-align:right">Retail</td><td>Return</td></tr></thead>'
     + '<tbody>' + items + '</tbody>'
-    + '<tfoot><tr class="total-row"><td colspan="5">Total Retail Value</td><td style="text-align:right">$' + (pull.totalRetail||0).toLocaleString() + '</td><td></td></tr></tfoot></table>'
+    + '<tfoot><tr class="total-row"><td colspan="6">Total Retail Value</td><td style="text-align:right">$' + (pull.totalRetail||0).toLocaleString() + '</td><td></td></tr></tfoot></table>'
     + '<div class="fee-box"><div><div class="info-label">Fee Structure</div><div style="font-size:12px;font-weight:600">' + feeText + '</div></div>'
     + (pull.feeType !== 'none' && pull.feeAmount ? '<div style="text-align:right"><div class="info-label">Amount Due</div><div style="font-size:18px;font-weight:900;font-family:monospace">$' + pull.feeAmount + '</div></div>' : '') + '</div>'
     + (termsLines.length ? '<div class="section-title">Terms &amp; Conditions</div><div class="terms"><ul style="padding-left:16px">' + termsLines.map(t=>'<li>'+t+'</li>').join('') + '</ul></div>' : '')
