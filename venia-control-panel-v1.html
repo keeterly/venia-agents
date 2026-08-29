@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '338';
+  const BUILD = '339';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3614,10 +3614,10 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
       <div id="styles-stats" style="display:none"></div>
       <div class="filters" id="styles-filters">
         <div style="display:flex;align-items:center;gap:6px;margin-right:10px;padding-right:10px;border-right:1px solid var(--border)">
+          <!-- Options are filled from the line itself (see stSeasonFilterOptions).
+               Hand-listing them meant the season being worked in was missing. -->
           <select id="styles-season-f" class="fs" style="min-height:auto;padding:5px 8px;font-size:10px;letter-spacing:1px" onchange="applyStyleFilters()" aria-label="Filter styles by season">
             <option value="">All Seasons</option>
-            <option value="SS25">SS25</option><option value="FW25">FW25</option>
-            <option value="SS26">SS26</option><option value="FW26">FW26</option>
           </select>
           <select id="styles-gender-f" class="fs" style="min-height:auto;padding:5px 8px;font-size:10px;letter-spacing:1px" onchange="applyStyleFilters()" aria-label="Filter styles by gender">
             <option value="">All Genders</option>
@@ -7610,11 +7610,27 @@ function stColMenuRender() {
       </div>`;
 }
 
+// Every season the line actually uses, plus the upcoming ones — the same list
+// the new-style modal offers, so a season you can create a style in is always
+// a season you can filter by.
+function stSeasonFilterOptions(){
+  const sel = document.getElementById('styles-season-f');
+  if (!sel) return;
+  const opts = (typeof smSeasonOptions === 'function' ? smSeasonOptions() : [])
+    .filter(Boolean);
+  // A season only present on archived styles must still be selectable, or the
+  // Archived view cannot be narrowed to it.
+  (STATE.styles||[]).forEach(s => { if (s.season && opts.indexOf(s.season) < 0) opts.push(String(s.season).trim()); });
+  const want = ['<option value="">All Seasons</option>']
+    .concat(opts.map(o => '<option value="' + esc(o) + '">' + esc(o) + '</option>')).join('');
+  if (sel.innerHTML !== want) { const keep = sel.value; sel.innerHTML = want; sel.value = keep; }
+}
 function renderStyles() {
   // The filter controls must show the filter that is actually applied. A season
   // set from elsewhere (the dashboard's season alerts do exactly this) left the
   // dropdown reading "All Seasons" over a filtered list — the control lying
   // about the state it controls.
+  stSeasonFilterOptions();
   const syncFilter = (id, val) => { const el = document.getElementById(id); if (el && el.value !== (val||'')) el.value = val || ''; };
   syncFilter('styles-season-f', STATE.seasonFilter);
   syncFilter('styles-gender-f', STATE.genderFilter);
@@ -36863,6 +36879,28 @@ function skMakeWorking(whoLabel, steps){
   return el;
 }
 
+// A conversation the API will accept: no empty turns, no two of the same role
+// in a row, opening and ending on the user. Mirrors what cfo-chat-background
+// does server-side — the dock had no equivalent, so one malformed turn was
+// terminal.
+function skCleanHistory(hist){
+  const out = [];
+  (Array.isArray(hist) ? hist : []).forEach((m) => {
+    if (!m) return;
+    const role = m.role === 'assistant' ? 'assistant' : 'user';
+    const text = typeof m.content === 'string' ? m.content.trim()
+               : (Array.isArray(m.content) ? m.content : '');
+    if (!text || (Array.isArray(text) && !text.length)) return;   // drop the empty
+    if (!out.length && role !== 'user') return;                   // must open on the user
+    const last = out[out.length - 1];
+    if (last && last.role === role && typeof last.content === 'string' && typeof text === 'string') {
+      last.content += '\n\n' + text; return;                     // no doubled roles
+    }
+    out.push({ role, content: text });
+  });
+  while (out.length && out[out.length - 1].role !== 'user') out.pop();
+  return out;
+}
 async function skSend(preset){
   const field = document.getElementById('sk-field');
   const rawMsg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
@@ -36875,6 +36913,11 @@ async function skSend(preset){
   // CRM path and produced a loop of "this isn't buyers". Ask, don't assume.
   const msg = rawMsg || (fileAtt
     ? 'Read this file and tell me what it contains and what you can do with it. Do not assume it is a buyer list.'
+    // A photo sent with no words stored a turn with empty content. The API
+    // rejects the WHOLE conversation for one empty message, so that single
+    // turn broke every send after it until the history was cleared.
+    : photo
+    ? 'Read this image and tell me what it shows and what you can do with it.'
     : rawMsg);
   if (photo) skPhotoClear();
   if (fileAtt) skFileClear();
@@ -36928,11 +36971,17 @@ async function skSend(preset){
     // Call history: the same turns, but if a photo rode this send, the last user
     // turn becomes an Anthropic content-block array (text + image). Stored
     // SK.history stays string-only, so display/persistence never see the blob.
-    let callHist = SK.history[SK.agent];
+    // REPAIR the conversation before it goes out. One empty-content turn makes
+    // the API reject the entire history, so a single bad message left the dock
+    // permanently unusable — every later send failed on the same old index,
+    // with no way back except wiping the thread. Histories already carrying
+    // one are fixed here rather than requiring that.
+    let callHist = skCleanHistory(SK.history[SK.agent]);
     if (photo) {
-      callHist = SK.history[SK.agent].map(m => ({ role: m.role, content: m.content }));
       const last = callHist[callHist.length - 1];
-      last.content = [ { type:'text', text: msg || 'Photo attached — read it and act on what it shows.' }, photo.block ];
+      if (last && last.role === 'user') {
+        last.content = [ { type:'text', text: msg || 'Photo attached — read it and act on what it shows.' }, photo.block ];
+      }
     }
     const reply = await callClaude(system, null, callHist);
     let shown = reply, action = null;
