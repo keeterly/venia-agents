@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '352';
+  const BUILD = '353';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14783,7 +14783,41 @@ function deleteComment(styleId, commentId) {
 // (the Google Picker grants per-file access, Shared Drives included) and can
 // create files — which we only ever do inside the designated Shared Drive
 // folder. Reading is pick-anything; writing is the new drive, nowhere else.
-function driveApiKey(){ return (STATE.googleApiKey || localStorage.getItem('venia-google-apikey') || '').trim(); }
+// A Picker developer key is an AIza… string. Nothing else is one.
+const DRIVE_KEY_RE = /^AIza[0-9A-Za-z_\-]{20,}$/;
+// VALIDATE ON READ, NOT JUST ON WRITE. setDriveApiKey has rejected non-AIza
+// values for a while, but a value saved BEFORE that check stayed in STATE — and
+// STATE syncs to Supabase and mirrors to every device. What was actually stored
+// was a GOCSPX- OAuth CLIENT SECRET pasted into the Picker field: a credential
+// that must never be in a browser, in a field it could never work in. Because
+// driveReady() only asked "is it non-empty", Settings reported "✓ Drive ready"
+// for a key Google rejects on sight. Reading through the same check means a bad
+// value cannot be used, cannot be reported as ready, and gets cleaned up.
+function driveApiKeyRaw(){ return (STATE.googleApiKey || localStorage.getItem('venia-google-apikey') || '').trim(); }
+function driveApiKey(){ const v = driveApiKeyRaw(); return DRIVE_KEY_RE.test(v) ? v : ''; }
+// A stored value that is not a key is either a mistake or a leaked secret;
+// either way it should not sit in localStorage and sync to the cloud.
+// Boot AND post-sync: another device that has not updated yet can push the old
+// value back down, so cleaning up once on load is not enough.
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(function(){ try { drivePurgeBadKey(); } catch(e){} }, 1500);
+  setTimeout(function(){ try { drivePurgeBadKey(); } catch(e){} }, 12000);
+});
+function drivePurgeBadKey(){
+  const v = driveApiKeyRaw();
+  if (!v || DRIVE_KEY_RE.test(v)) return false;
+  const wasSecret = /^GOCSPX-/i.test(v);
+  STATE.googleApiKey = null;
+  try { localStorage.removeItem('venia-google-apikey'); } catch(e){}
+  try { save(); } catch(e){}
+  try {
+    showToast(wasSecret
+      ? 'Removed a Google OAuth CLIENT SECRET stored in the Picker key field — rotate it in Google Cloud Console, then paste the AIza… API key here'
+      : 'Removed a stored Picker value that is not a Google API key', 'warning');
+  } catch(e){}
+  try { console.warn('VENIA: purged a non-API-key value from googleApiKey' + (wasSecret ? ' (it was an OAuth client secret — ROTATE IT)' : '')); } catch(e){}
+  return true;
+}
 window.setDriveApiKey = function(v){
   v = String(v || '').trim();
   // Catch the classic paste mix-up before Google's opaque "developer key is
@@ -14792,7 +14826,14 @@ window.setDriveApiKey = function(v){
     showToast('That\'s the OAuth Client ID — the Picker key is a different value starting with AIza…', 'warning');
     return;
   }
-  if (v && !/^AIza[0-9A-Za-z_\-]{20,}$/.test(v)) {
+  // The one paste that is not just wrong but dangerous: a client secret should
+  // never reach a browser at all, and this app has no use for one — the Drive
+  // token flow signs in with the Client ID alone.
+  if (v && /^GOCSPX-/i.test(v)) {
+    showToast('That\'s your OAuth CLIENT SECRET. It must never be stored in a browser — rotate it in Google Cloud Console. The Picker key is a separate AIza… value.', 'error');
+    return;
+  }
+  if (v && !DRIVE_KEY_RE.test(v)) {
     showToast('That doesn\'t look like a Google API key (they start with AIza…). Credentials → Create credentials → API key.', 'warning');
     return;
   }
@@ -18984,7 +19025,10 @@ function setInit() {
   const gEl = document.getElementById('set-google-clientid');
   if (gEl) gEl.value = (typeof googleClientId === 'function' ? googleClientId() : '');
   // Picker API key lives beside the Client ID (the Drive page just points here).
+  try { if (typeof drivePurgeBadKey === 'function') drivePurgeBadKey(); } catch(e){}
   const pkEl = document.getElementById('set-google-pickerkey');
+  // driveApiKey() (not Raw) — the field must never re-offer a value the app
+  // refuses to use, or Save looks broken when it is doing its job.
   if (pkEl) pkEl.value = (typeof driveApiKey === 'function' ? driveApiKey() : '');
   if (typeof setGoogleDot === 'function') setGoogleDot();
   // Update connection dots
@@ -19209,6 +19253,14 @@ function setDriveStatus(){
   const el = document.getElementById('set-drive-status'); if (!el) return;
   const hasId  = typeof googleClientId === 'function' && !!googleClientId();
   const hasKey = typeof driveApiKey === 'function' && !!driveApiKey();
+  // "Stored but unusable" is not the same as "missing", and reporting it as
+  // ready is how a broken Drive attach looked configured for weeks.
+  const badStored = typeof driveApiKeyRaw === 'function' && !!driveApiKeyRaw() && !hasKey;
+  if (badStored){
+    el.innerHTML = '<span style="color:var(--red);font-weight:700">That Picker value is not a Google API key</span>'
+      + ' <span style="color:var(--muted)">— a Picker key starts with <code>AIza</code>. Replace it above; Drive attach stays off until you do.</span>';
+    return;
+  }
   if (hasId && hasKey){
     el.innerHTML = '<span style="color:var(--green);font-weight:700">✓ Drive ready</span>'
       + ' <span style="color:var(--muted)">— the ▲ button in Eni can read files you pick.</span>'
