@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '344';
+  const BUILD = '345';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36171,6 +36171,26 @@ function gSignIn() {
   cursor:pointer;transition:all .15s;text-align:left}
 .sk-chip:hover{border-color:#555;color:#fff}
 .sk-input{display:flex;gap:8px;align-items:flex-end;padding:12px 14px;border-top:1px solid #1c1c1c}
+/* The attach buttons are wrapped only so a narrow dock can move them as a unit;
+   while there is room the wrapper dissolves and the row is what it always was. */
+.sk-tools{display:contents}
+
+/* THE COMPOSER IS SIZED BY THE DOCK, NOT THE SCREEN. Three 38px attach buttons
+   and a send button leave the field under half the width of a ~390px dock — a
+   one-line question wrapped to six lines and the box swallowed the
+   conversation. That dock width happens on a phone (full screen) AND on a
+   tablet or narrow window, where the floating panel bottoms out at 392px, so a
+   screen-width media query fixed the phone and left the tablet broken. Below
+   430px of DOCK the field takes the top row at full width and the buttons sit
+   under it, still one tap each. */
+#sk-dock{container-type:inline-size}
+@container (max-width:430px){
+  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
+             gap:8px; align-items:center; }
+  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
+  #sk-field{ grid-area:field; width:100%; }
+  .sk-send{ grid-area:send; }
+}
 /* 120px was about four lines — a paragraph-length question became a scroll box
    with its own beginning and end hidden. Kept in step with SK_FIELD_MAX. */
 #sk-field{flex:1;min-width:0;background:#151515;border:1px solid #2a2a2a;border-radius:0;color:#fff;font-size:13px;font-family:inherit;
@@ -36483,7 +36503,23 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   #sk-dock{ inset:0; top:0; right:0; bottom:0; left:0; width:100vw; max-width:100vw;
             height:100dvh; max-height:100dvh; border-radius:0; border:none; }
   .sk-head{ padding-top:calc(12px + var(--sat)); }
-  .sk-input{ padding-bottom:calc(12px + var(--sab)); }
+
+  /* Same two-row composer, restated for a browser with no container queries. */
+  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
+             gap:8px; padding:10px 12px calc(10px + var(--sab)); align-items:center; }
+  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
+  #sk-field{ grid-area:field; width:100%;
+             /* With the keyboard up there is ~500px to work with — a 300px
+                field would leave no conversation to answer about. skViewportFit
+                sets --sk-fmax from the VISIBLE height; the vh value is the
+                fallback before it runs, or without visualViewport. */
+             max-height:var(--sk-fmax, min(300px, 22vh)); }
+  .sk-send{ grid-area:send; }
+  /* 38px is under Apple's 44px minimum target; on a phone these are thumbs. */
+  .sk-cam, .sk-send{ width:44px; height:44px; }
+  /* While the keyboard covers the home indicator, its inset is dead space. */
+  html.sk-kb .sk-input{ padding-bottom:10px; }
+
 }
 
 /* ═══ 3-SPACE NAV + TODAY HOME (Apple-level simplification, stage 1) ═══ */
@@ -36598,9 +36634,11 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   <div class="sk-input">
     <input type="file" id="sk-photo-input" accept="image/*" style="display:none" onchange="skPhotoPick(this)">
     <input type="file" id="sk-file-input" accept=".csv,.tsv,.txt,.xlsx,.xls" style="display:none" onchange="skFilePick(this)">
-    <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
-    <button class="sk-cam" onclick="document.getElementById('sk-file-input').click()" aria-label="Attach a spreadsheet or CSV" title="Attach a spreadsheet (Excel / CSV) — Eni reads it">▤</button>
-    <button class="sk-cam" onclick="skDrivePick()" aria-label="Attach from Google Drive" title="Pick a file from Google Drive — Eni reads its contents">▲</button>
+    <div class="sk-tools">
+      <button class="sk-cam" onclick="document.getElementById('sk-photo-input').click()" aria-label="Attach a photo" title="Attach a photo">◉</button>
+      <button class="sk-cam" onclick="document.getElementById('sk-file-input').click()" aria-label="Attach a spreadsheet or CSV" title="Attach a spreadsheet (Excel / CSV) — Eni reads it">▤</button>
+      <button class="sk-cam" onclick="skDrivePick()" aria-label="Attach from Google Drive" title="Pick a file from Google Drive — Eni reads its contents">▲</button>
+    </div>
     <textarea id="sk-field" rows="1" placeholder="Ask Eni anything…" onpaste="skPasteImage(event)" oninput="skAutoGrow(this)"
       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();skSend();}"></textarea>
     <button class="sk-send" onclick="skSend()" aria-label="Send">↑</button>
@@ -36690,17 +36728,73 @@ function skUpdateContext(){
   if (ctx) ctx.textContent = 'Following: ' + info.label;
   const sg = document.getElementById('sk-suggest');
   if (sg) {
-    // Starter prompts help on an empty dock and cost a row of the conversation
-    // once one is under way, so they stand down after the first exchange.
     const talking = ((SK.history && SK.history[SK.agent]) || []).length > 0;
-    sg.style.display = talking ? 'none' : 'flex';
     sg.innerHTML = talking ? '' : info.suggests.map(s => agChip('__sk', s, 'sk-chip')).join('');
+    skSuggestFit();
   }
   const f = document.getElementById('sk-field');
   if (f) f.placeholder = 'Ask ' + (SK.agent==='eni'?'Eni':'Nigma') + ' anything…';
 }
 
 // ── UI ───────────────────────────────────────────────────────
+// KEEP THE DOCK INSIDE WHAT THE PHONE CAN ACTUALLY SHOW.
+// iOS does not shrink the layout viewport when the keyboard opens, and 100dvh
+// tracks the collapsing URL bar, not the keyboard — so a full-screen dock stays
+// 844px tall while only ~508px is visible. The composer ends up below the fold,
+// iOS scroll-shifts the page to chase the caret, and the founder gets a band of
+// dead black under the input with the conversation pushed out of sight. Sizing
+// to visualViewport makes the keyboard the sheet's floor instead.
+// Starter prompts help on an empty dock and cost a row of the conversation once
+// one is under way — so they stand down after the first exchange, and again
+// whenever the keyboard is up, where they would eat a third of a ~200px reading
+// area to offer questions the founder has already started typing past.
+function skSuggestFit(){
+  const sg = document.getElementById('sk-suggest');
+  if (!sg) return;
+  const talking = ((SK.history && SK.history[SK.agent]) || []).length > 0;
+  const kb = document.documentElement.classList.contains('sk-kb');
+  sg.style.display = (talking || kb) ? 'none' : 'flex';
+}
+
+function skViewportFit(){
+  const dock = document.getElementById('sk-dock');
+  if (!dock) return;
+  const vv = window.visualViewport;
+  const phone = window.innerWidth <= 560;
+  if (!vv || !phone || !SK.open) {
+    dock.style.height = ''; dock.style.top = '';
+    document.documentElement.classList.remove('sk-kb');
+    return;
+  }
+  const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+  dock.style.height = vv.height + 'px';
+  dock.style.top = vv.offsetTop + 'px';
+  // Only a real keyboard, not the URL bar collapsing by a few dozen pixels.
+  const up = kb > 120, was = document.documentElement.classList.contains('sk-kb');
+  document.documentElement.classList.toggle('sk-kb', up);
+  // The reading area just halved — put the newest message back against the
+  // composer, or the founder is left looking at the middle of an old answer.
+  if (up !== was) {
+    skSuggestFit();
+    const b = document.getElementById('sk-body');
+    if (b) setTimeout(() => { b.scrollTop = b.scrollHeight; }, 60);
+  }
+  // Cap the field against what is VISIBLE, not the viewport. A vh-based cap
+  // does not shrink for the keyboard, so a long question could still grow to
+  // swallow the conversation it is asking about.
+  const fmax = Math.round(Math.max(72, Math.min(300, vv.height * 0.30)));
+  dock.style.setProperty('--sk-fmax', fmax + 'px');
+  const f = document.getElementById('sk-field');
+  if (f && f.style.height) skAutoGrow(f);      // re-clamp a box already grown
+}
+let __skFitT = null;
+function skViewportFitSoon(){ clearTimeout(__skFitT); __skFitT = setTimeout(skViewportFit, 60); }
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', skViewportFitSoon);
+  window.visualViewport.addEventListener('scroll', skViewportFitSoon);
+}
+window.addEventListener('orientationchange', skViewportFitSoon);
+
 function skToggle(force){
   const dock = document.getElementById('sk-dock'), launch = document.getElementById('sk-launch');
   if (!dock) return;
@@ -36714,8 +36808,13 @@ function skToggle(force){
     const body = document.getElementById('sk-body');
     if (body && !body.childElementCount && (SK.history[SK.agent]||[]).length) skRenderHistory();
     if (!SK.greeted[SK.agent]) skGreet();
-    const f = document.getElementById('sk-field'); if (f) setTimeout(()=>f.focus(), 60);
+    const f = document.getElementById('sk-field');
+    if (f) setTimeout(()=>{ f.focus(); skViewportFit(); }, 60);
+    // The keyboard animates in after focus; re-fit once it has settled and put
+    // the newest message back in view, since the reading area just halved.
+    setTimeout(()=>{ skViewportFit(); const b2 = document.getElementById('sk-body'); if (b2) b2.scrollTop = b2.scrollHeight; }, 420);
   }
+  skViewportFit();
 }
 function skSetAgent(a){
   if (a === SK.agent) return;
@@ -37003,10 +37102,16 @@ function skFileClear(){
 function skFormat(t){
   return escHtml(t).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/\n/g,'<br>');
 }
-// Must match #sk-field's max-height, or the box stops growing before the CSS
-// says it should and the text scrolls inside a half-used field.
+// The cap now lives in CSS, because it differs by screen: 300px on a desktop,
+// 22vh on a phone where the keyboard leaves ~500px in total. Reading it back
+// means the two can no longer drift apart — the constant is only the fallback
+// for a browser that reports no computed max-height.
 const SK_FIELD_MAX = 300;
-function skAutoGrow(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight, SK_FIELD_MAX)+'px'; }
+function skFieldMax(el){
+  const m = parseFloat(getComputedStyle(el).maxHeight);
+  return (isFinite(m) && m > 0) ? m : SK_FIELD_MAX;
+}
+function skAutoGrow(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight, skFieldMax(el))+'px'; }
 function skClear(){
   SK.history[SK.agent] = []; SK.greeted[SK.agent] = false;
   skSaveHistory();
