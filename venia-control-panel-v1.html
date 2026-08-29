@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '345';
+  const BUILD = '346';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -27065,6 +27065,8 @@ window.cfoChatPoll = async function(){
   // spinning for the rest of the session with no reply ever coming.
   all.filter(j => !jobs.includes(j)).forEach(j => {
     try { cfoChatApply('error', 'the cloud run went past its 15-minute window without answering', j); } catch(e){}
+    // Nothing else sweeps our rows any more, so clear our own.
+    try { const cc = window.__sbClient; if (cc) cc.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
   });
   cfoChatSetJobs(jobs);
   if (!jobs.length) { __cfoChatN = 0; return; }
@@ -27121,8 +27123,13 @@ function cfoChatApply(status, result, job){
   };
   if (status !== 'done') {
     const why = String(result || 'something went wrong').slice(0, 220);
-    const shown = '\u26a0 That run failed \u2014 ' + why + '. Nothing was saved; your message is still in the chat, so send \u201ctry again\u201d.';
-    if (!land('<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">' + escHtml(shown) + '</span></div>')) {
+    const shown = '\u26a0 That run failed \u2014 ' + why + '. Nothing was saved.';
+    // A button, not an instruction. "Send \u201ctry again\u201d" means retyping on a
+    // phone keyboard, and it re-queues down the same path that just died — so
+    // the retry runs DIRECTLY instead.
+    const btn = '<button onclick="skRetryLast()" style="margin-top:9px;background:none;border:1px solid #5a2b27;color:#e07a6f;'
+      + 'font-size:10px;letter-spacing:1px;text-transform:uppercase;padding:6px 11px;cursor:pointer">\u21ba Try again</button>';
+    if (!land('<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">' + escHtml(shown) + '</span><br>' + btn + '</div>')) {
       showToast(who + '\u2019s cloud run failed \u2014 open the dock and retry', 'error');
     }
     if (live.workKey) agentEndWork(live.workKey, false);
@@ -34646,11 +34653,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function delegPollRun(){
     var c = delegSb(); if (!c) return;
     var res = null;
-    try { res = await c.from('venia_agent_jobs').select('*'); } catch(e){ return; }
+    // OWN ONLY WHAT YOU QUEUED. venia_agent_jobs is shared by three pollers —
+    // this one (Brainstorm delegations), cfoChatPoll (the dock and the CFO) and
+    // cfoPlanPoll. The other two fetch by id; this one swept EVERY row and
+    // deleted it, treating a finished dock reply as a Brainstorm brief with no
+    // target and dropping it on the floor. On a 15s timer against the dock's
+    // 1.2s one it usually lost the race, but not always — and a queued row it
+    // aged out at 16 minutes was deleted outright, so the dock then waited out
+    // its own 17-minute window and reported a run that had actually completed.
+    // Every dock turn went through here from Build 344, which is when this
+    // long-standing landmine started going off.
+    try { res = await c.from('venia_agent_jobs').select('*').neq('kind', 'cfochat').neq('kind', 'cfoplan'); }
+    catch(e){ return; }
     if (!res || res.error) return;
     var rows = res.data || [], changed = false, waiting = false;
     for (var k = 0; k < rows.length; k++){
       var j = rows[k];
+      // Belt and braces: the filter above is the server's job, this is ours.
+      if (j.kind === 'cfochat' || j.kind === 'cfoplan') continue;
       if (j.status === 'queued'){
         var age = Date.now() - new Date(j.created_at).getTime();
         if (age < 16 * 60 * 1000){
@@ -36748,6 +36768,51 @@ function skUpdateContext(){
 // one is under way — so they stand down after the first exchange, and again
 // whenever the keyboard is up, where they would eat a third of a ~200px reading
 // area to offer questions the founder has already started typing past.
+// A run queued before the app was closed is STILL OUT THERE. Without this the
+// founder reopens to their own question sitting alone with nothing happening,
+// reasonably concludes it died, and sends it again — which is exactly what
+// happened: two identical questions in the thread and one error. The dock is
+// only allowed to invite you to close the app if it can show you the run again
+// when you come back.
+function skRestorePending(){
+  const body = document.getElementById('sk-body');
+  if (!body || typeof cfoChatJobs !== 'function') return;
+  SK.cloudJobs = SK.cloudJobs || {};
+  let any = false;
+  cfoChatJobs().forEach(job => {
+    const agent = job.agent === 'nigma' ? 'nigma' : 'eni';
+    if (agent !== SK.agent) return;                      // it belongs to the other tab
+    const held = SK.cloudJobs[job.id];
+    if (held && held.think && held.think.isConnected) return;   // already on screen
+    const think = skMakeWorking(agent === 'nigma' ? 'Nigma' : 'Eni', skWorkSteps(job.q || '', job.agKey));
+    body.appendChild(think);
+    try { think.__note && think.__note('Still working in the cloud — picked this back up'); } catch(e){}
+    SK.cloudJobs[job.id] = Object.assign({ workKey: null, photo: '', nextRows: false }, held, { think });
+    any = true;
+  });
+  if (any) {
+    body.scrollTop = body.scrollHeight;
+    try { cfoChatPoll(); } catch(e){}   // it may already have finished
+  }
+}
+
+// Re-run the last question, straight to the model. The failed exchange is
+// dropped from the thread first, so a retry replaces it rather than stacking a
+// second copy of the same question — which is how the founder ended up looking
+// at their own message twice.
+window.skRetryLast = function(){
+  const h = SK.history[SK.agent] || [];
+  let i = h.length - 1;
+  while (i >= 0 && h[i].role !== 'user') i--;      // drop the error reply
+  if (i < 0) return;
+  const last = h[i];
+  const msg = String(last.content || '');
+  SK.history[SK.agent] = h.slice(0, i);            // and the question itself
+  try { skSaveHistory(); } catch(e){}
+  skRenderHistory();
+  skSend(msg, { direct: true });
+};
+
 function skSuggestFit(){
   const sg = document.getElementById('sk-suggest');
   if (!sg) return;
@@ -36808,6 +36873,7 @@ function skToggle(force){
     const body = document.getElementById('sk-body');
     if (body && !body.childElementCount && (SK.history[SK.agent]||[]).length) skRenderHistory();
     if (!SK.greeted[SK.agent]) skGreet();
+    try { skRestorePending(); } catch(e){}
     const f = document.getElementById('sk-field');
     if (f) setTimeout(()=>{ f.focus(); skViewportFit(); }, 60);
     // The keyboard animates in after focus; re-fit once it has settled and put
@@ -36836,6 +36902,8 @@ function skRenderHistory(){
   const body = document.getElementById('sk-body'); if (!body) return;
   body.innerHTML = '';
   (SK.history[SK.agent]||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.disp || m.content, m.img));
+  // Redrawing throws away any working bubble, so put back the ones still running.
+  try { skRestorePending(); } catch(e){}
 }
 function skAppend(who, text, img){
   const body = document.getElementById('sk-body'); if (!body) return;
@@ -37189,7 +37257,8 @@ function skCleanHistory(hist){
   while (out.length && out[out.length - 1].role !== 'user') out.pop();
   return out;
 }
-async function skSend(preset){
+async function skSend(preset, opts){
+  opts = opts || {};
   const field = document.getElementById('sk-field');
   const rawMsg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
   // A photo or a file can be sent on its own — any one of the three is enough.
@@ -37283,7 +37352,9 @@ async function skSend(preset){
     // the dock anyway (the reply has always rendered in one go), so the only
     // cost is poll granularity, and the poll opens at 1.2s. Direct streaming
     // stays as the fallback for when the cloud cannot be reached at all.
-    const jobId = await cfoChatQueue(system, callHist, msg, {
+    // opts.direct is the recovery path: the cloud accepted the last turn and
+    // then never answered, so queueing again would just hang the same way.
+    const jobId = opts.direct ? false : await cfoChatQueue(system, callHist, msg, {
       agent: SK.agent, agKey, itemId: 'dock-' + SK.agent,
       note: { title: (SK.agent === 'nigma' ? 'Nigma' : 'Eni') + ' replied',
               body: String(msg || 'Your answer is ready.').replace(/\s+/g, ' ').slice(0, 120),
