@@ -562,3 +562,21 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   connection status had been stuck on "Not tested" no matter how often the panel
   was opened, and the one caller passing the short name opened Settings to a
   blank page. Both names resolve now.
+
+## Build 369 — the reason survives the toast
+- The screenshot said *"Connect Gmail in Settings to send as VENIA"* while the
+  synced workspace had `mailGmail: true`. **Gmail was connected.** It had been
+  tried, it had refused, and the reason was posted to the toast — a single
+  element every call overwrites — so the generic fallback replaced it a moment
+  later. The founders were told to do the thing they had already done, and the
+  real reason never reached anyone.
+- **Invariant: never post a message you are about to overwrite.** A Gmail
+  refusal is now carried into the one final message ("Gmail is connected but
+  refused: …"), shown for 9s, and stored in `STATE.mailLastError` (a synced key)
+  so it outlives the toast. A success clears it.
+- Settings shows the last refusal under the Email card until a send succeeds,
+  and a **Send test email** button sends to the signed-in account from a real
+  tap — the body names which account authenticated, so a wrong From is obvious.
+- A token granted **without** the send scope (GIS lets you untick it and still
+  returns a token) is now rejected up front with what to do differently, rather
+  than surfacing later as a 403 nobody can act on.
