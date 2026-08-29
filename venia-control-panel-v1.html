@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '343';
+  const BUILD = '344';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26991,15 +26991,23 @@ async function cfoCallCloudFirst(sysPrompt, history, userMsg){
   // streaming path is the backup for when the cloud can't be reached (not
   // signed in, worker unreachable) — reversed from the usual order because
   // for the CFO, survivability beats a few seconds of latency.
-  const queued = await cfoChatQueue(sysPrompt, history, userMsg);
+  const queued = await cfoChatQueue(sysPrompt, history, userMsg, {
+    agent: 'eni', agKey: 'fin', itemId: 'cfo-chat',
+    note: { title: 'Your CFO replied', body: 'The answer is waiting in the Eni dock.', tag: 'venia-cfo-chat' },
+  });
   if (queued) { const q = new Error('queued'); q.__cfoQueued = true; throw q; }
   return await _callClaudeOnce(sysPrompt, null, history);
 }
-async function cfoChatQueue(system, history, userMsg){
+// Queue ONE agent turn to the cloud. Used by the CFO and by both dock personas
+// — opts names who asked (`agent`), which screen's actions the reply may run
+// (`agKey`), and what the push should say. Returns the job id, or false when
+// the cloud is unreachable and the caller should run the turn directly.
+async function cfoChatQueue(system, history, userMsg, opts){
+  opts = opts || {};
   try {
     const c = window.__sbClient; if (!c) return false;
     const id = cfoPlanUid(), secret = cfoPlanUid() + cfoPlanUid();
-    const ins = await c.from('venia_agent_jobs').insert({ id, secret, item_id: 'cfo-chat', kind: 'cfochat', q: String(userMsg||'').slice(0, 300), status: 'queued' });
+    const ins = await c.from('venia_agent_jobs').insert({ id, secret, item_id: opts.itemId || 'cfo-chat', kind: 'cfochat', q: String(userMsg||'').slice(0, 300), status: 'queued' });
     if (ins && ins.error) return false;
     let subs = [];
     try { const sr = await c.from('venia_push_subs').select('sub'); subs = ((sr && sr.data) || []).slice(0, 12).map(x => x.sub); } catch(e){}
@@ -27007,7 +27015,7 @@ async function cfoChatQueue(system, history, userMsg){
     const msgs = (history || []).map(m => ({ role: m.role, content: m.content }));
     const post = () => fetch('/.netlify/functions/cfo-chat-background', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, secret, system, messages: msgs, push: subs }),
+      body: JSON.stringify({ id, secret, system, messages: msgs, push: subs, note: opts.note || null }),
     });
     let r = null; try { r = await post(); } catch(e){}
     if (r && r.status === 401) {
@@ -27015,9 +27023,14 @@ async function cfoChatQueue(system, history, userMsg){
       if (window.veniaAC(true, 'Enter your VENIA access code so the cloud can answer:')) { try { r = await post(); } catch(e){} }
     }
     if (!r || (r.status !== 202 && !r.ok)) { try { await c.from('venia_agent_jobs').delete().eq('id', id); } catch(e){} return false; }
-    cfoChatSetJobs(cfoChatJobs().concat([{ id, at: new Date().toISOString() }]));
-    clearTimeout(__cfoChatT); __cfoChatT = setTimeout(cfoChatPoll, 3000);
-    return true;
+    // agent/agKey are PERSISTED with the job: the reply may be picked up after
+    // a reload or on the other phone, where nothing is left in memory to say
+    // who asked or which screen's action it is allowed to run.
+    cfoChatSetJobs(cfoChatJobs().concat([{ id, at: new Date().toISOString(),
+      agent: opts.agent || 'eni', agKey: opts.agKey || 'fin', q: String(userMsg||'').slice(0, 120) }]));
+    __cfoChatN = 0;
+    clearTimeout(__cfoChatT); __cfoChatT = setTimeout(cfoChatPoll, 1200);
+    return id;
   } catch(e){ return false; }
 }
 // In-flight cloud turns, per-device. An array so two quick asks both land;
@@ -27032,12 +27045,29 @@ function cfoChatJobs(){
   return jobs;
 }
 function cfoChatSetJobs(jobs){ try { localStorage.setItem('venia_cfochat_jobs', JSON.stringify(jobs.slice(-5))); } catch(e){} }
-let __cfoChatT = null;
+// Coming BACK to the app is the moment to check. A backgrounded tab has its
+// timers throttled to near-nothing on mobile, so the polling chain can be
+// minutes stale by the time the founder taps the push — without this, the
+// reply they were notified about sits there unapplied while they stare at a
+// spinner.
+document.addEventListener('visibilitychange', function(){
+  if (document.visibilityState === 'visible' && cfoChatJobs().length) {
+    __cfoChatN = 0;
+    clearTimeout(__cfoChatT); __cfoChatT = setTimeout(function(){ try { cfoChatPoll(); } catch(e){} }, 250);
+  }
+});
+let __cfoChatT = null, __cfoChatN = 0;
 window.cfoChatPoll = async function(){
   clearTimeout(__cfoChatT);
-  let jobs = cfoChatJobs().filter(j => j && j.id && (Date.now() - new Date(j.at).getTime()) <= 17 * 60 * 1000);
+  const all = cfoChatJobs();
+  let jobs = all.filter(j => j && j.id && (Date.now() - new Date(j.at).getTime()) <= 17 * 60 * 1000);
+  // A job that ages out used to vanish silently, leaving its working bubble
+  // spinning for the rest of the session with no reply ever coming.
+  all.filter(j => !jobs.includes(j)).forEach(j => {
+    try { cfoChatApply('error', 'the cloud run went past its 15-minute window without answering', j); } catch(e){}
+  });
   cfoChatSetJobs(jobs);
-  if (!jobs.length) return;
+  if (!jobs.length) { __cfoChatN = 0; return; }
   const c = window.__sbClient;
   if (c) {
     for (const job of jobs.slice()) {
@@ -27048,42 +27078,81 @@ window.cfoChatPoll = async function(){
           jobs = jobs.filter(j => j.id !== job.id);
           cfoChatSetJobs(jobs);
           try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
-          cfoChatApply(row.status, String(row.result || ''));
+          cfoChatApply(row.status, String(row.result || ''), job);
         }
       } catch(e){}
     }
   }
-  if (cfoChatJobs().length) __cfoChatT = setTimeout(cfoChatPoll, 5000);
+  // Fast while a short reply is still plausible, easing off so a ten-minute
+  // run isn't polled three hundred times.
+  const wait = __cfoChatN < 8 ? 1200 : __cfoChatN < 20 ? 2500 : 5000;
+  __cfoChatN++;
+  if (cfoChatJobs().length) __cfoChatT = setTimeout(cfoChatPoll, wait);
+  else __cfoChatN = 0;
 };
-function cfoChatApply(status, result){
+// Land a finished cloud turn: in the working bubble it was sent from when this
+// tab is still the one that sent it, appended otherwise (a reload, or the reply
+// arriving on the other phone). The reply reaches the founder exactly as a
+// direct one does — same action, same undo, same warnings — because a push
+// saying something was filed is even harder to go back and check.
+function cfoChatApply(status, result, job){
+  job = job || {};
+  const agent = job.agent === 'nigma' ? 'nigma' : 'eni';
+  const who = agent === 'nigma' ? 'Nigma' : 'Eni';
+  const agKey = job.agKey || 'fin';
+  const live = (SK.cloudJobs || {})[job.id] || {};
+  delete (SK.cloudJobs || {})[job.id];
   const body = document.getElementById('sk-body');
+  const land = (html) => {
+    const th = live.think;
+    if (th && th.isConnected) {
+      try { th.__done && th.__done(); } catch(e){}
+      const t = th.querySelector('.sk-work');
+      if (t) { t.outerHTML = html; if (body) body.scrollTop = body.scrollHeight; return true; }
+    }
+    if (body && SK.open) {
+      const el = document.createElement('div');
+      el.className = 'sk-msg agent';
+      el.innerHTML = '<div class="sk-msg-who">' + who + ' \u00b7 cloud</div>' + html;
+      body.appendChild(el); body.scrollTop = body.scrollHeight;
+      return true;
+    }
+    return false;
+  };
   if (status !== 'done') {
-    if (body && SK.open) { try { appendAgentNote(body, '⚠ The cloud run failed — ' + String(result).slice(0, 200)); } catch(e){} }
-    else showToast('The CFO cloud run failed — open the dock and retry', 'error');
+    const why = String(result || 'something went wrong').slice(0, 220);
+    const shown = '\u26a0 That run failed \u2014 ' + why + '. Nothing was saved; your message is still in the chat, so send \u201ctry again\u201d.';
+    if (!land('<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">' + escHtml(shown) + '</span></div>')) {
+      showToast(who + '\u2019s cloud run failed \u2014 open the dock and retry', 'error');
+    }
+    if (live.workKey) agentEndWork(live.workKey, false);
     return;
   }
   const { clean, action, parseError, unbackedClaim, extraBlocks } = agentExtractAction(result);
   let shown = parseError
-    ? ((clean ? clean + '\n\n' : '') + '⚠ I couldn’t complete that change — nothing was saved. Please try once more.')
-    : (clean || (action ? 'Done — here’s what I set up:' : result));
-    // The cloud path reaches the founder exactly like the direct one, so a claim
-  // with nothing behind it has to be caught here too — a push notification
-  // saying it filed something is even harder to go back and check.
+    ? ((clean ? clean + '\n\n' : '') + '\u26a0 I couldn\u2019t complete that change \u2014 nothing was saved. Please try once more.')
+    : (clean || (action ? 'Done \u2014 here\u2019s what I set up:' : result));
   if (!action && !parseError && unbackedClaim) {
-    shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it. Ask me again and I\'ll file it properly, or add it by hand.';
+    shown += '\n\n\u26a0 Nothing was actually saved \u2014 that reply had no save action behind it. Ask me again and I\u2019ll file it properly, or add it by hand.';
   }
-  if (extraBlocks) shown += '\n\n⚠ I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
-SK.history.eni.push({ role: 'assistant', content: shown });
-  if (SK.history.eni.length > 40) SK.history.eni = SK.history.eni.slice(-40);
+  if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
+  SK.history[agent] = SK.history[agent] || [];
+  SK.history[agent].push({ role: 'assistant', content: shown });
+  if (SK.history[agent].length > 40) SK.history[agent] = SK.history[agent].slice(-40);
   try { skSaveHistory(); } catch(e){}
-  if (body && SK.open) {
-    const el = document.createElement('div');
-    el.className = 'sk-msg agent';
-    el.innerHTML = '<div class="sk-msg-who">Eni · cloud</div><div class="sk-msg-body">' + skFormat(shown) + '</div>';
-    body.appendChild(el); body.scrollTop = body.scrollHeight;
+  land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
+  if (action && !parseError) {
+    // A photo that rode the turn is restored so an action can still keep it —
+    // only when this tab sent it, since the blob was never persisted.
+    window.__agTurnPhoto = live.photo || '';
+    try { agentRunAction(agKey, action, body || document.createElement('div')); }
+    catch(e){ try { appendAgentNote(body, '\u26a0 That change did NOT save \u2014 ' + (e && e.message || 'something went wrong') + '. Please try again.'); } catch(_){} }
+    window.__agTurnPhoto = '';
   }
-  if (action && !parseError) { try { agentRunAction('fin', action, body || document.createElement('div')); } catch(e){} }
-  showToast('CFO reply ready', 'success');
+  if (live.workKey) agentEndWork(live.workKey, !!action);
+  // A windowed CSV keeps going once its batch lands.
+  if (live.nextRows) { try { skOfferNextRows(); } catch(e){} }
+  showToast(who + ' replied', 'success');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -37054,6 +37123,11 @@ async function skSend(preset){
   // Stored turn keeps content as a plain string (+ preview img for this session);
   // the image block rides only in the call history built below.
   SK.history[SK.agent].push({role:'user', content:fullText, disp: fileAtt ? dispText : undefined, img: photo ? photo.dataUrl : undefined});
+  // PERSIST THE QUESTION NOW, not when the answer lands. The turn runs in the
+  // cloud and the founder is invited to close the app — so if this waited for
+  // the reply, closing the app would drop the question from storage and the
+  // answer would come back attached to nothing.
+  try { skSaveHistory(); } catch(e){}
   try { skUpdateContext(); } catch(e){}   // stands the starter prompts down
   if (SK.history[SK.agent].length > 40) SK.history[SK.agent] = SK.history[SK.agent].slice(-40);
   const body = document.getElementById('sk-body');
@@ -37096,6 +37170,28 @@ async function skSend(preset){
       if (last && last.role === 'user') {
         last.content = [ { type:'text', text: msg || 'Photo attached — read it and act on what it shows.' }, photo.block ];
       }
+    }
+    // CLOUD FIRST. The phone's whole job is one small POST, so a long run —
+    // rewriting margin targets across 57 styles, reading a screenshot, working
+    // a CSV batch — survives the app being closed, the screen locking, or the
+    // connection dropping, and a push says when it is done. Nothing streams in
+    // the dock anyway (the reply has always rendered in one go), so the only
+    // cost is poll granularity, and the poll opens at 1.2s. Direct streaming
+    // stays as the fallback for when the cloud cannot be reached at all.
+    const jobId = await cfoChatQueue(system, callHist, msg, {
+      agent: SK.agent, agKey, itemId: 'dock-' + SK.agent,
+      note: { title: (SK.agent === 'nigma' ? 'Nigma' : 'Eni') + ' replied',
+              body: String(msg || 'Your answer is ready.').replace(/\s+/g, ' ').slice(0, 120),
+              tag: 'venia-dock-' + SK.agent },
+    });
+    if (jobId) {
+      // Hand the SAME working bubble to the poller so a quick reply lands in
+      // place and reads like any other turn; only a slow one looks different.
+      SK.cloudJobs = SK.cloudJobs || {};
+      SK.cloudJobs[jobId] = { think, workKey, photo: photo ? photo.dataUrl : '', nextRows: !!(fileAtt && fileAtt.window) };
+      try { think.__note && think.__note('Working in the cloud \u2014 you can close the app'); } catch(e){}
+      if (body) body.scrollTop = body.scrollHeight;
+      return;
     }
     const reply = await callClaude(system, null, callHist);
     let shown = reply, action = null;
