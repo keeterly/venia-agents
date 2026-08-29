@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 344._
+_Last reviewed at Build 345._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -147,6 +147,25 @@ direct streaming path as the fallback. The financial plan is
 - The ledger's ask box sends the CFO the **rows on screen, by id** — ticked
   ones if any, else exactly what the filter shows. It never asks the agent to
   guess at a transaction it was not shown.
+- **The dock composer is sized by the DOCK, not the screen.** Three 38px attach
+  buttons plus send left the field 176px of 390 — under half the width — so a
+  one-line question wrapped to six lines. That width happens on a phone (full
+  screen) and on a tablet or narrow window, where the floating panel bottoms out
+  at 392px, so a screen-width media query fixed the phone and left the tablet
+  broken. A container query on `#sk-dock` now gives the field its own full-width
+  row below 430px of dock, with the phone media query restating it for browsers
+  without container queries.
+- **The dock sizes to the visible viewport, not `100dvh`.** iOS does not shrink
+  the layout viewport for the keyboard, and `dvh` tracks the collapsing URL bar,
+  not the keyboard — so the dock stayed 844px tall while 508px was visible, the
+  composer sat below the fold, and iOS scroll-shifted the page to chase the
+  caret. That was the band of dead black under the input. `skViewportFit()` sets
+  height and top from `visualViewport`, publishes `--sk-fmax` so the field is
+  capped against what is actually VISIBLE (a vh cap does not shrink for the
+  keyboard), and scrolls the newest message back into view when the reading area
+  halves. Starter prompts stand down while the keyboard is up — their display is
+  set inline, so that decision has to live in JS, and `skSuggestFit()` is its one
+  owner.
 - **Every dock turn runs server-side.** The dock used to call the model in the
   foreground, so a long run — rewriting margin targets across 57 styles — died
   the moment the screen locked or the app was closed. Eni and Nigma now queue to
@@ -197,7 +216,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 45 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 46 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
