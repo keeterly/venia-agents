@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '365';
+  const BUILD = '366';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2371,6 +2371,35 @@ body{padding-top:44px;box-sizing:border-box;}
             <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn btn-gold btn-sm" onclick="setApiKey('shopify')">Save domain</button>
               <button class="btn btn-ghost btn-sm" onclick="setTestShopify()">Test Connection</button>
+            </div>
+          </div>
+
+          <!-- Email (server-side — a mailto: cannot choose who mail is from) -->
+          <div style="background:var(--bg);border:1px solid var(--border);padding:20px;margin-bottom:12px">
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+              <div style="width:44px;height:44px;background:var(--bg);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--ink);font-weight:700;font-size:16px;flex-shrink:0">✉</div>
+              <div style="flex:1;min-width:150px">
+                <div style="font-size:14px;font-weight:700;color:var(--ink)">Email — send as VENIA</div>
+                <div style="font-size:10px;color:var(--muted)">Pull sheets go out from info@veniacollection.com instead of whichever account your phone happens to use</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div id="set-conn-mail-dot" style="width:8px;height:8px;border-radius:50%;background:var(--border-mid)"></div>
+                <span id="set-conn-mail-label" style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:700">Not tested</span>
+              </div>
+            </div>
+            <details style="margin-top:14px">
+              <summary style="font-size:10px;color:var(--muted);cursor:pointer;letter-spacing:.5px">How to connect →</summary>
+              <div style="margin-top:8px;font-size:10px;color:var(--muted);line-height:1.8">
+                A <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">mailto:</code> link cannot choose the sender — the phone's mail app uses its own default account, which is how a pull sheet went out from a personal address. Sending as VENIA needs a server:
+                <br>1 · Create an account at <a href="https://resend.com" target="_blank" style="color:var(--muted);text-decoration:underline">resend.com</a> and add <strong>veniacollection.com</strong> as a domain — it gives you SPF and DKIM records to paste into your DNS.
+                <br>2 · Once the domain shows verified, create an API key.
+                <br>3 · Netlify → Site configuration → Environment variables → add <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">RESEND_API_KEY</code>. Optionally set <code style="font-family:'DM Mono',monospace;background:var(--bg-off);padding:1px 5px">MAIL_FROM</code> to change the display name; it defaults to <strong>VENIA Collection &lt;info@veniacollection.com&gt;</strong>.
+                <br>4 · Redeploy, then test here.
+                <br><br>Until then, pull sheets still open as a draft in your mail app — the app will say so rather than implying VENIA sent it.
+              </div>
+            </details>
+            <div style="margin-top:10px">
+              <button class="btn btn-ghost btn-sm" onclick="setTestMail()">Test Connection</button>
             </div>
           </div>
 
@@ -16907,6 +16936,26 @@ async function stripeProbe(force){
 }
 window.stripeProbe = stripeProbe;
 
+// Paints the Email card the same way the Stripe one is painted, and says which
+// address mail will actually leave from — the point of the whole feature.
+window.setPaintMail = function(st){
+  const dot = document.getElementById('set-conn-mail-dot');
+  const lbl = document.getElementById('set-conn-mail-label');
+  if (!dot || !lbl) return;
+  if (!st) { dot.style.background = 'var(--border-mid)'; lbl.textContent = 'Not tested'; lbl.style.color = 'var(--muted)'; return; }
+  dot.style.background = st.ok ? 'var(--green)' : 'var(--amber)';
+  lbl.textContent = st.ok ? 'Sending as ' + (st.from || 'VENIA') : 'Not connected';
+  lbl.style.color = st.ok ? 'var(--green)' : 'var(--amber)';
+};
+window.setTestMail = async function(){
+  const st = await prMailProbe(true);
+  setPaintMail(st);
+  showToast(st.ok
+    ? 'Email connected — pull sheets send from ' + (st.from || 'VENIA')
+    : 'RESEND_API_KEY is not set in Netlify — pull sheets will keep drafting from your own mail account',
+    st.ok ? 'success' : 'warning');
+};
+
 window.setTestStripe = async function(){
   const ok = await stripeProbe(true);
   showToast(ok ? 'Stripe connected \u2713' : 'STRIPE_SECRET_KEY is not set in Netlify \u2014 add it there, then redeploy',
@@ -17264,12 +17313,18 @@ function prOpenDetail(pullId) {
            seeing before anything else on this screen. -->
       ${(function(){
         const g = pull.signature;
-        if (!g) return `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
+        const emailedLine = pull.emailedAt
+          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}</div>`
+          : '';
+        if (!g) return emailedLine + `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
           <span style="flex:1;min-width:160px;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
           <button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')">✎ Get signature</button>
         </div>`;
+        const em = pull.emailedAt
+          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}</div>`
+          : '';
         const drift = prSignDrift(pull);
-        return `<div style="padding:10px 14px;border:1px solid ${drift ? 'var(--amber)' : 'var(--border)'};background:var(--bg-off);margin-bottom:18px">
+        return em + `<div style="padding:10px 14px;border:1px solid ${drift ? 'var(--amber)' : 'var(--border)'};background:var(--bg-off);margin-bottom:18px">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <img src="${escHtml(g.image)}" alt="" style="height:30px;max-width:130px;flex:none;background:var(--bg);border:1px solid var(--border)">
             <span style="flex:1;min-width:150px;font-size:11px;color:var(--ink)">Signed by <b>${escHtml(g.name)}</b>
@@ -17840,12 +17895,10 @@ window.prSignDrift = function(pull){
   return bits.length ? bits.join(' and ') + ' changed after it was signed' : '';
 };
 
-// ONE draft for every path that emails a pull. The agent-created pulls used to
-// build their own, with their own thinner terms line — two templates for one
-// agreement, and only one of them ever got fixed.
-function prSendEmail(pull, opener) {
-  if (!pull) { toast('Pull not found', 'warn'); return; }
-  if (!pull.email) { toast('No contact email on this pull — add one to send', 'warn'); return; }
+// ONE draft for every path that emails a pull, in both formats. The
+// agent-created pulls used to build their own, with their own thinner terms
+// line — two templates for one agreement, and only one of them ever got fixed.
+function prMailBuild(pull, opener) {
   const itemLines = (pull.items || []).map(i =>
     `• ${i.styleName || i.styleCode || 'Item'}${i.styleCode ? ' ('+i.styleCode+')' : ''}` +
     `${i.size ? ' — '+i.size : ''}${i.color ? ' / '+i.color : ''}` +
@@ -17875,11 +17928,132 @@ function prSendEmail(pull, opener) {
       ? `\nSIGNED\nAccepted by ${sig.name} on ${new Date(sig.at).toLocaleString()}. This email is your copy of that agreement.\n`
       : `\nPLEASE CONFIRM\nReply to this email with "I agree" to confirm you accept the terms above. If you'd rather sign in person, we'll take it when you collect.\n`) +
     `\nThank you,\nVENIA Collection\nveniacollection.com`;
-  const href = `mailto:${encodeURIComponent(pull.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  return { subject, text: body, html: prMailHtml(pull, opener, terms, sig) };
+}
+
+// The same sheet as HTML, for the server path. No photos: a data: URI in an
+// <img> is stripped by Gmail and most webmail, so a picture here would be a
+// broken box in the one place we cannot see it. The print sheet keeps them.
+function prMailHtml(pull, opener, terms, sig){
+  const e = (x) => escHtml(String(x == null ? '' : x));
+  const money = (x) => '$' + Number(x||0).toLocaleString();
+  const rows = (pull.items||[]).map(i => `<tr>
+      <td style="padding:8px 10px;border-bottom:1px solid #e6e6e6;font-size:13px">${e(i.styleName||i.styleCode||'Item')}${
+        i.styleCode ? '<div style="font-size:11px;color:#777;font-family:monospace">'+e(i.styleCode)+'</div>' : ''}</td>
+      <td style="padding:8px 10px;border-bottom:1px solid #e6e6e6;font-size:12px;color:#555">${e([i.size, i.color].filter(Boolean).join(' / ') || '—')}</td>
+      <td style="padding:8px 10px;border-bottom:1px solid #e6e6e6;font-size:12px;text-align:right;font-family:monospace">${i.retail ? money(i.retail) : ''}</td>
+    </tr>`).join('');
+  return `<div style="font-family:Helvetica,Arial,sans-serif;color:#111;max-width:600px;line-height:1.6">
+    <div style="font-size:20px;font-weight:900;letter-spacing:3px;text-transform:uppercase">VENIA</div>
+    <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#777;margin-bottom:18px">Press Sample Pull Sheet</div>
+    <p style="font-size:14px">Hi ${e(pull.contact || pull.client || '')},</p>
+    ${opener ? '<p style="font-size:14px">' + e(opener) + '</p>' : ''}
+    <p style="font-size:14px">Here is the full record of your VENIA press pull. Please read the terms below — they are what you are accepting by taking the samples.</p>
+    <table style="width:100%;border-collapse:collapse;margin:18px 0">
+      <tr><td style="padding:4px 0;font-size:12px;color:#777;width:130px">Pull</td><td style="padding:4px 0;font-size:13px;font-family:monospace"><b>${e(pull.invoiceNo)}</b></td></tr>
+      ${pull.publication ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Publication</td><td style="padding:4px 0;font-size:13px">'+e(pull.publication)+'</td></tr>' : ''}
+      ${pull.pullDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Out</td><td style="padding:4px 0;font-size:13px">'+e(pull.pullDate)+'</td></tr>' : ''}
+      ${pull.returnDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Return by</td><td style="padding:4px 0;font-size:13px"><b>'+e(pull.returnDate)+'</b></td></tr>' : ''}
+    </table>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:6px">
+      <thead><tr style="background:#111;color:#fff">
+        <td style="padding:7px 10px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase">Sample</td>
+        <td style="padding:7px 10px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase">Size / colour</td>
+        <td style="padding:7px 10px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;text-align:right">Retail</td>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr>
+        <td colspan="2" style="padding:9px 10px;font-size:12px;font-weight:700;border-top:2px solid #111">Total retail value on loan</td>
+        <td style="padding:9px 10px;font-size:13px;font-weight:700;text-align:right;font-family:monospace;border-top:2px solid #111">${money(pull.totalRetail)}</td>
+      </tr>${pull.feeType && pull.feeType !== 'none' && pull.feeAmount ? `<tr>
+        <td colspan="2" style="padding:6px 10px;font-size:12px">${pull.feeType === 'deposit' ? 'Refundable damage deposit' : 'Pull fee'}</td>
+        <td style="padding:6px 10px;font-size:13px;text-align:right;font-family:monospace">${money(pull.feeAmount)}</td>
+      </tr>` : ''}</tfoot>
+    </table>
+    ${terms.length ? '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#777;margin:20px 0 6px;font-weight:700">Terms</div><ul style="font-size:13px;padding-left:18px;margin:0">' + terms.map(t => '<li style="margin-bottom:4px">' + e(t) + '</li>').join('') + '</ul>' : ''}
+    ${pull.payment && pull.payment.url && (pull.payment.status||'pending') === 'pending' ? `
+      <div style="margin:20px 0;padding:12px 14px;border:1px solid #e6e6e6;background:#fafafa;font-size:13px">
+        <b>${pull.payment.type==='hold' ? 'Card hold' : 'Deposit'}: ${money(pull.payment.amount)}</b><br>
+        ${pull.payment.type==='hold' ? 'Reserved on your card, not charged — released when the samples come back.' : ''}
+        <a href="${e(pull.payment.url)}" style="color:#111">Complete it here before pickup →</a>
+      </div>` : ''}
+    ${sig
+      ? '<div style="margin:20px 0;padding:12px 14px;border:1px solid #e6e6e6;font-size:13px"><b>Signed.</b> Accepted by ' + e(sig.name) + ' on ' + e(new Date(sig.at).toLocaleString()) + '. This email is your copy of that agreement.</div>'
+      : '<div style="margin:20px 0;padding:12px 14px;border:1px solid #111;font-size:13px"><b>Please confirm.</b> Reply to this email with “I agree” to confirm you accept the terms above. If you would rather sign in person, we will take it when you collect.</div>'}
+    <p style="font-size:13px;color:#555">Thank you,<br>VENIA Collection<br><a href="https://veniacollection.com" style="color:#555">veniacollection.com</a></p>
+  </div>`;
+}
+
+// IS THERE A SERVER TO SEND FROM? Asked once a minute, because the answer
+// decides what the app is allowed to claim about an email it just sent.
+let __prMail = { at: 0, ok: null, from: '' };
+async function prMailProbe(force){
+  if (!force && __prMail.ok !== null && Date.now() - __prMail.at < 60000) return __prMail;
+  try {
+    const r = await fetch('/.netlify/functions/mail', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:'{"action":"ping"}'
+    });
+    const d = await r.json();
+    __prMail = { at: Date.now(), ok: !!(d && d.configured), from: (d && d.from) || '' };
+  } catch(e){ __prMail = { at: Date.now(), ok: false, from: '' }; }
+  return __prMail;
+}
+window.prMailProbe = prMailProbe;
+
+// The mailto draft. Kept as the fallback, not the default — it cannot set who
+// the mail is from, which is the whole problem it caused.
+function prMailDraftOpen(pull, d){
+  const href = 'mailto:' + encodeURIComponent(pull.email)
+    + '?subject=' + encodeURIComponent(d.subject) + '&body=' + encodeURIComponent(d.text);
   const a = document.createElement('a');
   a.href = href; a.style.display = 'none';
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  toast(`✉ Pull sheet drafted to ${pull.email}`);
+}
+
+async function prSendEmail(pull, opener) {
+  if (!pull) { toast('Pull not found', 'warn'); return; }
+  if (!pull.email) { toast('No contact email on this pull — add one to send', 'warn'); return; }
+  const d = prMailBuild(pull, opener);
+  const probe = await prMailProbe();
+  if (!probe.ok) {
+    // Say which account it will leave from, because it is not ours and the
+    // stylist will reply to whatever it came from.
+    prMailDraftOpen(pull, d);
+    toast('✉ Drafted in your mail app — it will send from YOUR account, not info@veniacollection.com. Connect email in Settings to send as VENIA.', 'warning');
+    return;
+  }
+  const send = async () => {
+    const r = await fetch('/.netlify/functions/mail', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ action:'send', to: pull.email, subject: d.subject, text: d.text, html: d.html })
+    });
+    return { status: r.status, data: await r.json().catch(() => ({})) };
+  };
+  try {
+    toast('Sending as ' + (probe.from || 'VENIA') + '…', 'info');
+    let res = await send();
+    if (res.status === 401) {
+      // The device has never stored the access code, or stored a stale one.
+      const code = window.veniaAC(true, 'Enter your VENIA access code to send this as VENIA:');
+      if (!code) { toast('Not sent — access code required.', 'warn'); return; }
+      res = await send();
+    }
+    if (res.status >= 400 || (res.data && res.data.error)) {
+      const why = (res.data && res.data.error) || ('the mail server returned ' + res.status);
+      prMailDraftOpen(pull, d);
+      toast('Could not send as VENIA — ' + why + '. Drafted in your mail app instead.', 'error');
+      return;
+    }
+    pull.emailedAt = new Date().toISOString();
+    pull.emailedFrom = res.data.from || probe.from || '';
+    save();
+    try { logActivity('Pull sheet emailed to ' + pull.email + ' from ' + (pull.emailedFrom || 'VENIA')); } catch(e){}
+    toast('✓ Sent to ' + pull.email + ' from ' + (pull.emailedFrom || 'VENIA'), 'success');
+    try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pull.id); } catch(e){}
+  } catch(e) {
+    prMailDraftOpen(pull, d);
+    toast('Mail server unreachable — drafted in your mail app instead.', 'error');
+  }
 }
 
 // Manual NFC fallback — capture a tag code by hand when scanning isn't available.
@@ -19836,7 +20010,10 @@ function setShowSection(id, navEl) {
   // The status used to require pressing "Test Connection" and would otherwise
   // sit on "Not tested" for ever — which reads as "not set up" when the key has
   // been in Netlify all along. Opening the section asks the server.
-  if (id==='set-conns') { try { stripeProbe(); } catch(e){} }
+  if (id==='set-conns') {
+    try { stripeProbe(); } catch(e){}
+    try { prMailProbe().then(setPaintMail); } catch(e){}
+  }
   if (id==='set-data') setUpdateDataSummary();
   if (id==='set-security') setRenderFaceId();
   if (id==='set-carelabel' && typeof careDefaultsFillForm==='function') careDefaultsFillForm();
@@ -24230,6 +24407,7 @@ function agBuildPrPrefsSection() {
   const prefs = STATE.prPrefs || {};
   // The panel renders "checking…"; the probe fills it in once the DOM exists.
   setTimeout(() => { try { stripeProbe(); } catch(e){} }, 0);
+  setTimeout(() => { try { prMailProbe().then(setPaintMail); } catch(e){} }, 0);
   return `
     <div style="max-width:600px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Brand Voice for PR</h2></div>
