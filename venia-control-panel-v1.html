@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '346';
+  const BUILD = '347';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17719,7 +17719,7 @@ function buildTodayFocus() {
     return `<button onclick="event.stopPropagation();todayAssign('${slEsc(i.key)}')" title="${a ? 'Assigned to ' + a.to + ' — tap to reassign' : 'Unassigned — tap to assign'}" style="background:${a ? col : 'none'};border:1px solid ${col};color:${a ? 'var(--bg)' : col};cursor:pointer;font-size:11px;font-weight:700;line-height:1;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%">${lbl}</button>`;
   };
   const digestOff = localStorage.getItem('venia-digest-optin') === 'off';
-  const footer = `<div style="padding-top:8px;font-size:10px;color:var(--muted)">Morning brief ${digestOff ? 'off' : 'on'} — 7:00 AM push to this device · <span onclick="todayDigestToggle()" style="cursor:pointer;text-decoration:underline">${digestOff ? 'turn on' : 'turn off'}</span></div>`;
+  const footer = `<div style="padding-top:8px;font-size:10px;color:var(--muted)">Morning brief ${digestOff ? 'off' : 'on'} — 7:00 AM push to this device · <span onclick="todayDigestToggle()" style="cursor:pointer;text-decoration:underline">${digestOff ? 'turn on' : 'turn off'}</span> · <span onclick="veniaPushTest()" style="cursor:pointer;text-decoration:underline" title="Send one test notification to every subscribed device and report exactly what happened">test notification</span></div>`;
   const html = header + (!shown.length
     ? `<span style="color:var(--muted)">${view === 'mine' ? 'Nothing assigned to you — tap ＋ on an item under All.' : 'All clear — nothing urgent today.'}</span>`
     : shown.map(i =>
@@ -17765,6 +17765,46 @@ window.todayView = function(v){
   localStorage.setItem('venia-today-view', v === 'mine' ? 'mine' : 'all');
   buildTodayFocus();
 };
+// "I never got a notification" has at least five causes — VAPID keys missing,
+// no subscription stored, an expired one, permission never granted, or an iOS
+// app that was never added to the Home Screen — and they look identical from
+// here. This sends one through the exact path the workers use and says which
+// it was, so a push problem stops being a guess.
+window.veniaPushTest = async function(){
+  try {
+    if (window.Notification && Notification.permission === 'default') {
+      const res = await Notification.requestPermission();
+      if (res !== 'granted') { toast('This device has notifications blocked — allow them in Settings, then try again', 'warn'); return; }
+    }
+    if (window.Notification && Notification.permission === 'denied') {
+      toast('This device has notifications blocked. On iPhone: Settings → Notifications → VENIA.', 'warn'); return;
+    }
+    // A phone with permission but no stored subscription would report "no
+    // device subscribed" — register it first so the test measures delivery.
+    try { if (typeof window.veniaPushEnsure === 'function') await window.veniaPushEnsure(); } catch(e){}
+    const code = window.veniaAC ? window.veniaAC(true, 'Enter your VENIA access code to send a test notification:') : '';
+    if (window.veniaAC && !code) return;
+    toast('Sending a test notification…', 'info');
+    const r = await fetch('/.netlify/functions/push-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (r.status === 401) { toast('That access code was not accepted', 'error'); return; }
+    const d = await r.json().catch(() => null);
+    if (!d) { toast('The test could not run — HTTP ' + r.status, 'error'); return; }
+    if (d.ok) {
+      const n = d.sent, tot = d.total;
+      toast('Sent to ' + n + ' of ' + tot + ' device' + (tot > 1 ? 's' : '') + ' — it should arrive now'
+        + (n < tot ? '. Some are stale and have been retired.' : ''), 'success');
+    } else if (d.reason === 'vapid_missing' || d.reason === 'secret_missing') {
+      toast(d.detail, 'error');
+    } else if (d.reason === 'no_subs') {
+      toast(d.detail, 'warn');
+    } else {
+      const why = (d.results || []).filter(x => !x.ok).map(x => x.host + ': ' + x.why).join(' · ');
+      toast('No device accepted it' + (why ? ' — ' + why : ''), 'error');
+    }
+    try { console.log('push test:', d); } catch(e){}
+  } catch(e){ toast('The test could not run — ' + (e && e.message || 'unknown error'), 'error'); }
+};
+
 window.todayDigestToggle = function(){
   const wasOff = localStorage.getItem('venia-digest-optin') === 'off';
   localStorage.setItem('venia-digest-optin', wasOff ? 'on' : 'off');
@@ -27056,14 +27096,37 @@ document.addEventListener('visibilitychange', function(){
     clearTimeout(__cfoChatT); __cfoChatT = setTimeout(function(){ try { cfoChatPoll(); } catch(e){} }, 250);
   }
 });
-let __cfoChatT = null, __cfoChatN = 0;
+let __cfoChatT = null, __cfoChatN = 0, __cfoChatBusy = false;
+// EVERY JOB IS APPLIED ONCE. Three things call this poll — the chained timer,
+// coming back to the app, and restoring a run after a reopen — and Builds 345
+// and 346 added the last two on top of the first. Two of them reading the same
+// finished row before either had deleted it posted the reply TWICE (the second
+// labelled "· cloud", because the first had already consumed the working
+// bubble) and, far worse, ran its ACTION twice. A repeated price pass happens
+// to be idempotent; a repeated add_buyers or record_payment is a real duplicate
+// in the workspace. The busy flag stops the overlap and this set is the claim
+// that survives it.
+const __cfoChatApplied = new Set();
 window.cfoChatPoll = async function(){
   clearTimeout(__cfoChatT);
+  if (__cfoChatBusy) return;             // the run already in flight reschedules
+  __cfoChatBusy = true;
+  try { await cfoChatPollRun(); } finally { __cfoChatBusy = false; }
+};
+// Claim a job for this tab. Returns false if it has already been applied.
+function cfoChatClaim(id){
+  if (!id || __cfoChatApplied.has(id)) return false;
+  __cfoChatApplied.add(id);
+  if (__cfoChatApplied.size > 200) __cfoChatApplied.delete(__cfoChatApplied.values().next().value);
+  return true;
+}
+async function cfoChatPollRun(){
   const all = cfoChatJobs();
   let jobs = all.filter(j => j && j.id && (Date.now() - new Date(j.at).getTime()) <= 17 * 60 * 1000);
   // A job that ages out used to vanish silently, leaving its working bubble
   // spinning for the rest of the session with no reply ever coming.
   all.filter(j => !jobs.includes(j)).forEach(j => {
+    if (!cfoChatClaim(j.id)) return;
     try { cfoChatApply('error', 'the cloud run went past its 15-minute window without answering', j); } catch(e){}
     // Nothing else sweeps our rows any more, so clear our own.
     try { const cc = window.__sbClient; if (cc) cc.from('venia_agent_jobs').delete().eq('id', j.id); } catch(e){}
@@ -27077,10 +27140,13 @@ window.cfoChatPoll = async function(){
         const r = await c.from('venia_agent_jobs').select('*').eq('id', job.id);
         const row = r && r.data && r.data[0];
         if (row && (row.status === 'done' || row.status === 'error')) {
+          // Drop it from the tracked list and CLAIM it before any further await,
+          // so a concurrent poll cannot reach the same finished row.
           jobs = jobs.filter(j => j.id !== job.id);
           cfoChatSetJobs(jobs);
+          const mine = cfoChatClaim(job.id);
           try { await c.from('venia_agent_jobs').delete().eq('id', job.id); } catch(e){}
-          cfoChatApply(row.status, String(row.result || ''), job);
+          if (mine) cfoChatApply(row.status, String(row.result || ''), job);
         }
       } catch(e){}
     }
@@ -27091,7 +27157,7 @@ window.cfoChatPoll = async function(){
   __cfoChatN++;
   if (cfoChatJobs().length) __cfoChatT = setTimeout(cfoChatPoll, wait);
   else __cfoChatN = 0;
-};
+}
 // Land a finished cloud turn: in the working bubble it was sent from when this
 // tab is still the one that sent it, appended otherwise (a reload, or the reply
 // arriving on the other phone). The reply reaches the founder exactly as a
