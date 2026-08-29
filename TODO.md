@@ -536,3 +536,29 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   who both buys wholesale and borrows samples becomes "VENIA wholesale + press
   pulls" rather than flipping on whichever invoice went out last.
 - Deidre's existing record corrects itself on the next pull invoice.
+
+## Build 368 — Gmail sends it, press@ is copied
+- **"The pull sheet should also cc press@veniacollection.com."** It does, by
+  default, on every transport including the mail-app draft. Editable in
+  Settings; empty means none.
+- **"Can we email the pull sheet another way without another api? We have Google
+  connected."** Yes — Drive already signs in through Google Identity Services,
+  and Gmail is the same token client with one more scope. No second vendor, no
+  API key, and the mail lands in the real Sent folder where a reply threads.
+- Transport order: **Gmail → the mail server (Resend, if a key is set) → a
+  mail-app draft.** A failure at any step falls through rather than losing the
+  email, and the pull records `emailedVia` / `emailedFrom` / `emailedCc`.
+- **The app never assumes who sent it.** `gmailWho()` reads the signed-in
+  account back from Google. Gmail replaces a `From` it has not verified, so the
+  Send-as field says plainly it must be the account or one of its verified
+  "Send mail as" aliases.
+- MIME is built by hand: encoded-word subject (VENIA subjects carry em dashes),
+  base64 bodies, multipart/alternative, base64url raw.
+- `gmail.send` is a sensitive scope — on an External consent screen the signing
+  account must be a listed test user; Internal Workspace apps just work.
+  Google's own error is surfaced, since those two cases need different fixes.
+- **Found while testing:** `setShowSection` gated its auto-probe on `set-conns`,
+  which was never a section id (the panel is `set-connections`). Every
+  connection status had been stuck on "Not tested" no matter how often the panel
+  was opened, and the one caller passing the short name opened Settings to a
+  blank page. Both names resolve now.
