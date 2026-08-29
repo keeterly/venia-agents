@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '348';
+  const BUILD = '349';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -34629,10 +34629,34 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Web Push: subscribe this installed device and store the subscription so
   // the server worker can ping the phone when a job finishes — even with the
   // app closed. (iOS: requires the app on the home screen, iOS 16.4+.)
-  // Must be the PUBLIC half of the pair in Netlify's VAPID_PUBLIC_KEY /
-  // VAPID_PRIVATE_KEY. If they are not a pair, every push is rejected.
+  // THE SERVER OWNS THE KEY. This constant is only the last-resort fallback for
+  // a first run with no network: the live value comes from /vapid-key, which
+  // serves Netlify's VAPID_PUBLIC_KEY. Hardcoding it meant the app and the
+  // server had to be kept in step by hand, nothing enforced it, and a drift
+  // shows up only as a bare 403 from the push service. Now any valid pair set
+  // in Netlify works with no code change — and because a changed key makes
+  // delegPushEnsure rebuild the subscription, devices follow it by themselves.
   var VAPID_PUB = 'BMLgyZd8ioZ9GQqCdLjwMrefEkYn9psbZvIO9FD79jFlIVaZK2g_-PKJighOJKOIcUetOMxNQkg4pmRNJlQrKBY';
+  try { var _vk = localStorage.getItem('venia_vapid_pub'); if (_vk) VAPID_PUB = _vk; } catch(e){}
   window.VENIA_VAPID_PUB = VAPID_PUB;   // the self-test compares it to the server's
+  // Refresh from the server, remember it, and tell the caller whether it moved.
+  async function vapidRefresh(){
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 6000);
+      const r = await fetch('/.netlify/functions/vapid-key', { signal: ctl.signal });
+      clearTimeout(t);
+      if (!r || !r.ok) return false;
+      const d = await r.json();
+      const k = d && typeof d.key === 'string' ? d.key.trim() : '';
+      if (!k || k === VAPID_PUB) return false;
+      VAPID_PUB = k;
+      window.VENIA_VAPID_PUB = k;
+      try { localStorage.setItem('venia_vapid_pub', k); } catch(e){}
+      return true;
+    } catch(e){ return false; }
+  }
+  window.veniaVapidRefresh = vapidRefresh;
   function pushKeyBytes(str){
     var pad = '='.repeat((4 - str.length % 4) % 4);
     var raw = atob((str + pad).replace(/-/g, '+').replace(/_/g, '/'));
@@ -34643,6 +34667,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function delegPushEnsure(){
     try {
       if (!('serviceWorker' in navigator) || !window.Notification || Notification.permission !== 'granted') return;
+      await vapidRefresh();          // subscribe with the key the server holds
+
       var c = delegSb(); if (!c) return;
       var reg = await navigator.serviceWorker.ready;
       if (!reg || !reg.pushManager) return;

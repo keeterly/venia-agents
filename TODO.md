@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 348._
+_Last reviewed at Build 349._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -32,9 +32,9 @@ _Last reviewed at Build 348._
   notification. Netlify → venia-creator → Environment variables, scope
   `functions`, mark it secret. Best case: the private key from 16 July still
   exists — paste it and nothing else changes. Otherwise generate a fresh pair
-  (`npx web-push generate-vapid-keys`), set BOTH vars, and update `VAPID_PUB`
-  in the app to the new public key; devices now re-subscribe themselves when
-  that key changes.
+  (`npx web-push generate-vapid-keys`) and set BOTH vars. No code change either
+  way: as of Build 349 the app reads the public key from `/vapid-key`, and a
+  device rebuilds its subscription by itself when that key moves.
 
 - **Delete the old Stripe secret keys.** Several were created while getting the
   bank connected, including one that passed through a chat transcript. The live
@@ -269,7 +269,7 @@ that contract, so a key renamed in the app cannot silently break the Monday
 brief — the function would just go quiet, which is the one failure mode
 nobody would notice.
 
-**Tests:** `node check.js` (inline script syntax) plus 49 suites in the session
+**Tests:** `node check.js` (inline script syntax) plus 50 suites in the session
 scratchpad covering the money math, agent actions, ledger editing, custom
 categories, operating expense, cloud-run conversation shape, and instruction
 drift. A Playwright harness (`scratchpad/gauntlet`) drives the real app at
