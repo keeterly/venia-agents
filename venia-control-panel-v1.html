@@ -1778,7 +1778,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '347';
+  const BUILD = '348';
   const BUILD_DATE = '2026.08.28';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17785,7 +17785,10 @@ window.veniaPushTest = async function(){
     const code = window.veniaAC ? window.veniaAC(true, 'Enter your VENIA access code to send a test notification:') : '';
     if (window.veniaAC && !code) return;
     toast('Sending a test notification…', 'info');
-    const r = await fetch('/.netlify/functions/push-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    // Send the key this app subscribes with, so the server can say plainly
+    // when its own public key is a different one — the two must be a pair.
+    const clientPub = (typeof window.VENIA_VAPID_PUB === 'string') ? window.VENIA_VAPID_PUB : '';
+    const r = await fetch('/.netlify/functions/push-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientPub }) });
     if (r.status === 401) { toast('That access code was not accepted', 'error'); return; }
     const d = await r.json().catch(() => null);
     if (!d) { toast('The test could not run — HTTP ' + r.status, 'error'); return; }
@@ -17793,7 +17796,7 @@ window.veniaPushTest = async function(){
       const n = d.sent, tot = d.total;
       toast('Sent to ' + n + ' of ' + tot + ' device' + (tot > 1 ? 's' : '') + ' — it should arrive now'
         + (n < tot ? '. Some are stale and have been retired.' : ''), 'success');
-    } else if (d.reason === 'vapid_missing' || d.reason === 'secret_missing') {
+    } else if (d.reason === 'vapid_missing' || d.reason === 'secret_missing' || d.reason === 'key_mismatch') {
       toast(d.detail, 'error');
     } else if (d.reason === 'no_subs') {
       toast(d.detail, 'warn');
@@ -34626,7 +34629,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Web Push: subscribe this installed device and store the subscription so
   // the server worker can ping the phone when a job finishes — even with the
   // app closed. (iOS: requires the app on the home screen, iOS 16.4+.)
+  // Must be the PUBLIC half of the pair in Netlify's VAPID_PUBLIC_KEY /
+  // VAPID_PRIVATE_KEY. If they are not a pair, every push is rejected.
   var VAPID_PUB = 'BMLgyZd8ioZ9GQqCdLjwMrefEkYn9psbZvIO9FD79jFlIVaZK2g_-PKJighOJKOIcUetOMxNQkg4pmRNJlQrKBY';
+  window.VENIA_VAPID_PUB = VAPID_PUB;   // the self-test compares it to the server's
   function pushKeyBytes(str){
     var pad = '='.repeat((4 - str.length % 4) % 4);
     var raw = atob((str + pad).replace(/-/g, '+').replace(/_/g, '/'));
@@ -34641,6 +34647,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var reg = await navigator.serviceWorker.ready;
       if (!reg || !reg.pushManager) return;
       var sub = await reg.pushManager.getSubscription();
+      // A SUBSCRIPTION IS BOUND TO THE KEY THAT CREATED IT. Reusing whatever
+      // was already there meant a changed VAPID key left every device
+      // subscribed under the old one for ever — the server signs with the new
+      // key, the push service rejects it, and nothing anywhere says why. So
+      // check the key this subscription was made with and rebuild it if the
+      // app is now handing out a different one.
+      if (sub) {
+        try {
+          var want = pushKeyBytes(VAPID_PUB);
+          var have = new Uint8Array((sub.options && sub.options.applicationServerKey) || new ArrayBuffer(0));
+          var same = have.length === want.length && want.every(function(b, i){ return have[i] === b; });
+          if (!same) { try { await sub.unsubscribe(); } catch(e){} sub = null; }
+        } catch(e){ /* a browser that hides options keeps its subscription */ }
+      }
       if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: pushKeyBytes(VAPID_PUB) });
       if (!sub) return;
       var j = sub.toJSON ? sub.toJSON() : JSON.parse(JSON.stringify(sub));

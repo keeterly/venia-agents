@@ -37,9 +37,26 @@ export default async (req) => {
     if (!sent || hex !== gateHash) return new Response('', { status: 401 });
   }
 
+  let p = null;
+  try { p = JSON.parse(await req.text()); } catch (_) { p = null; }
+
   const pub = process.env.VAPID_PUBLIC_KEY, priv = process.env.VAPID_PRIVATE_KEY;
-  if (!pub || !priv) return json({ ok: false, reason: 'vapid_missing',
-    detail: 'VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY are not set in Netlify — no push can ever be sent.' });
+  // Name the half that is missing. Setting only the public key looks like
+  // "notifications are configured" in the Netlify UI and sends nothing — which
+  // is exactly how this went unnoticed from July to the end of August.
+  if (!pub && !priv) return json({ ok: false, reason: 'vapid_missing',
+    detail: 'Neither VAPID key is set in Netlify — no push can ever be sent.' });
+  if (!priv) return json({ ok: false, reason: 'vapid_missing',
+    detail: 'VAPID_PRIVATE_KEY is missing in Netlify (the public key is set). Push cannot be signed without both halves of the pair.' });
+  if (!pub) return json({ ok: false, reason: 'vapid_missing',
+    detail: 'VAPID_PUBLIC_KEY is missing in Netlify (the private key is set).' });
+  // The app subscribes devices with its own copy of the public key. If the
+  // server holds a different one, every send is refused and the push service
+  // says only "403".
+  let clientPub = '';
+  try { clientPub = String((p && p.clientPub) || ''); } catch (_) {}
+  if (clientPub && clientPub !== pub) return json({ ok: false, reason: 'key_mismatch',
+    detail: 'The app subscribes with a different VAPID public key than the server holds. They must be the two halves of one pair — update VAPID_PUBLIC_KEY in Netlify to match the app, or the app to match Netlify, then re-subscribe this device.' });
   const secret = process.env.VENIA_DIGEST_SECRET;
   if (!secret) return json({ ok: false, reason: 'secret_missing',
     detail: 'VENIA_DIGEST_SECRET is not set, so the server cannot look up who to notify.' });
@@ -51,9 +68,9 @@ export default async (req) => {
       headers: { 'Content-Type': 'application/json', apikey: SB_ANON, Authorization: 'Bearer ' + SB_ANON },
       body: JSON.stringify({ p_secret: secret }),
     });
-    const p = await r.json();
-    if (p && p.error) return json({ ok: false, reason: 'rpc_' + p.error, detail: 'The subscriber lookup was refused.' });
-    if (p && Array.isArray(p.subs)) subs = p.subs;
+    const lookup = await r.json();          // not `p` — that is the request body
+    if (lookup && lookup.error) return json({ ok: false, reason: 'rpc_' + lookup.error, detail: 'The subscriber lookup was refused.' });
+    if (lookup && Array.isArray(lookup.subs)) subs = lookup.subs;
   } catch (e) {
     return json({ ok: false, reason: 'rpc_failed', detail: String((e && e.message) || e) });
   }
@@ -68,7 +85,10 @@ export default async (req) => {
     const host = (() => { try { return new URL(subs[i].endpoint).host; } catch (_) { return 'unknown'; } })();
     if (r.status === 'fulfilled') return { host, ok: true };
     const code = (r.reason && r.reason.statusCode) || 0;
-    return { host, ok: false, code, why: (code === 404 || code === 410) ? 'expired — this device must re-subscribe' : String((r.reason && r.reason.message) || 'send failed').slice(0, 140) };
+    const why = (code === 404 || code === 410) ? 'expired — this device must re-subscribe'
+      : code === 403 ? 'the VAPID key does not match the one this device subscribed with — re-subscribe it'
+      : String((r.reason && r.reason.message) || 'send failed').slice(0, 140);
+    return { host, ok: false, code, why };
   });
   // Retire the endpoints the push service says are gone, so they stop taking a slot.
   for (const r of results.filter((x) => !x.ok && (x.code === 404 || x.code === 410))) {
