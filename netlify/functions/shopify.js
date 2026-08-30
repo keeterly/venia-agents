@@ -135,6 +135,49 @@ export default async (req) => {
   } else if (action === 'products') {
     const limit = clampInt(body.limit, 1, 250, 50);
     endpoint = `/products.json?limit=${limit}`;
+  } else if (action === 'inventory') {
+    // Stock for the styles that are actually LISTED. Shopify's product status
+    // is the only honest definition of "we are selling this" — a draft or
+    // archived product still has variants and quantities, and counting them
+    // would inflate stock with garments no customer can buy.
+    //
+    // Paged, because a season is more than 250 variants and a silent first
+    // page would read as "that is all the stock we have".
+    const wanted = ['active','draft','archived'].includes(body.status) ? body.status : 'active';
+    const cap = clampInt(body.pages, 1, 10, 6);
+    let url = `https://${domain}/admin/api/${version}/products.json?status=${wanted}&limit=250`
+      + '&fields=id,title,handle,status,variants,tags,product_type';
+    const out = [];
+    let pages = 0, truncated = false;
+    try {
+      while (url && pages < cap) {
+        const r = await fetch(url, { method:'GET',
+          headers: { 'X-Shopify-Access-Token': token, 'Content-Type':'application/json' } });
+        const txt = await r.text();
+        if (!r.ok) return json({ error: 'Shopify returned ' + r.status + ' — ' + txt.slice(0,200) }, 400, cors);
+        let d = {}; try { d = JSON.parse(txt); } catch(e){ return json({ error:'Shopify sent something that is not JSON' }, 502, cors); }
+        (d.products || []).forEach(p => out.push({
+          id: p.id, title: p.title, handle: p.handle, status: p.status,
+          variants: (p.variants || []).map(v => ({
+            id: v.id, sku: v.sku || '', title: v.title || '',
+            qty: Number(v.inventory_quantity) || 0,
+            tracked: v.inventory_management != null,
+            price: v.price || '',
+          })),
+        }));
+        pages++;
+        // Cursor pagination lives in the Link header, not the body.
+        const link = r.headers.get('link') || r.headers.get('Link') || '';
+        const m = link.match(/<([^>]+)>;\s*rel="next"/);
+        url = m ? m[1] : '';
+        if (url && pages >= cap) truncated = true;
+      }
+    } catch (e) {
+      return json({ error: String((e && e.message) || e).slice(0, 200) }, 500, cors);
+    }
+    // truncated is reported, never hidden: a partial count presented as a total
+    // is worse than no count.
+    return json({ products: out, pages, truncated, status: wanted, at: new Date().toISOString() }, 200, cors);
   } else if (action === 'customers') {
     const limit = clampInt(body.limit, 1, 250, 50);
     endpoint = `/customers.json?limit=${limit}`;

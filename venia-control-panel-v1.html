@@ -1836,7 +1836,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '385';
+  const BUILD = '386';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4060,6 +4060,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button class="pill" onclick="filterInv('low',this)">Low Stock</button>
         <button class="pill" onclick="filterInv('reorder',this)">Reorder Now</button>
         <button class="pill" onclick="filterInv('active',this)">Active Only</button>
+        <button class="pill" onclick="filterInv('shopify',this)" title="Only the styles Shopify is counting">From Shopify</button>
       </div>
       <div id="inv-content"></div>
     </div>
@@ -5109,6 +5110,11 @@ const SYNC_KEYS = [
   'dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed', 'dumpMasterTitle',
   'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed', 'googleClientId', 'board', 'activityLog', 'samples', 'bizSnap', 'eniMemory', 'bsVenia',
   'googleApiKey', 'driveFolder', 'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'pos', 'seasonCal', 'growthSeen', 'todayAssign',
+  // save() persists ONLY the keys in SYNC_KEYS — a key left out of it dies on
+  // the next save. That is the finCats bug from Build 363, and the inventory
+  // sync report would have hit it: the "last asked 4 min ago" line would have
+  // vanished the moment anything else was saved.
+  'invSync',
   // Finance — the bank feed (linked-account metadata + categorized
   // transactions) and Money Watch (thresholds + the weekly brief).
   // finCats — the spend categories the founders create themselves — was
@@ -12738,17 +12744,126 @@ function exportLineSheet() { window.print(); toast('Opening print — save as PD
 // ═══════════════════════════════════════════════
 //  INVENTORY / REORDER
 // ═══════════════════════════════════════════════
-function renderInventory(filter='all') {
-  let styles=STATE.styles.filter(s=>['active','sale','production'].includes(s.status));
-  if(filter==='low') styles=styles.filter(s=>(s.stock||0)<(s.reorderPoint||20)&&(s.stock||0)>0);
-  if(filter==='reorder') styles=styles.filter(s=>(s.stock||0)<=(s.reorderPoint||10));
-  if(filter==='active') styles=styles.filter(s=>s.status==='active');
+// ── INVENTORY FROM SHOPIFY ───────────────────────────────────────────────────
+// Stock was a number you typed into a box, on a page that then computed a stock
+// VALUE from it and reported it as fact. Nothing ever checked it against what
+// the store actually holds, so the only thing "Total Units" measured was how
+// recently someone had remembered to update it.
+//
+// Shopify knows. It is asked, for the products that are actually LISTED —
+// active status only, because a draft or archived product still has variants
+// and quantities, and counting them inflates stock with garments no customer
+// can buy.
+//
+// Matching is by SKU, and only by SKU. The app builds SKUs as
+// `${styleId}-${COLOR}-${SIZE}`, so a Shopify variant whose SKU starts with a
+// style's styleId is that style — an exact, checkable rule. Nothing is matched
+// on a title resembling a name: "SPIKE PANTS" and "Spike Pant (Sample)" would
+// pass any fuzzy test, and attaching the wrong stock to a style is worse than
+// attaching none. Everything unmatched is counted and named.
+function invSkuStyleId(sku){
+  const t = String(sku||'').trim().toUpperCase();
+  if (!t) return '';
+  // Longest styleId that prefixes this SKU — so VN-1 cannot claim VN-10's SKUs.
+  let best = '';
+  (STATE.styles||[]).forEach(s => {
+    const id = String(s.styleId||'').trim().toUpperCase();
+    if (!id || id.length <= best.length) return;
+    if (t === id || t.startsWith(id + '-')) best = id;
+  });
+  return best;
+}
+window.invShopifySync = async function(){
+  const btn = document.getElementById('inv-sync-btn');
+  if (btn){ btn.disabled = true; btn.textContent = 'Asking Shopify…'; }
+  const done = (msg, kind) => { if (btn){ btn.disabled = false; btn.textContent = '↻ Sync from Shopify'; }
+    if (msg) showToast(msg, kind || 'info'); };
+  let res;
+  try {
+    const r = await fetch('/.netlify/functions/shopify', { method:'POST',
+      headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ action:'inventory', status:'active' }) });
+    res = await r.json();
+  } catch(e){ done('Could not reach Shopify — ' + (e.message||e), 'error'); return; }
+  if (!res || res.error){ done(String((res && res.error) || 'Shopify did not answer'), 'error'); return; }
 
-  const totalUnits=styles.reduce((sum,s)=>sum+(s.stock||0),0);
-  const totalVal=styles.reduce((sum,s)=>sum+(s.stock||0)*(s.retail||0),0);
-  const needsReorder=styles.filter(s=>(s.stock||0)<=(s.reorderPoint||10)).length;
+  const byStyle = {};            // styleId → { units, variants, tracked }
+  const unmatched = [];          // variants whose SKU matches no style
+  let variants = 0, untracked = 0;
+  (res.products||[]).forEach(p => (p.variants||[]).forEach(v => {
+    variants++;
+    if (!v.tracked) untracked++;
+    const sid = invSkuStyleId(v.sku);
+    if (!sid){ if (v.sku) unmatched.push(p.title + ' · ' + v.sku); return; }
+    const b = byStyle[sid] = byStyle[sid] || { units:0, variants:0, untracked:0 };
+    b.units += v.qty; b.variants++; if (!v.tracked) b.untracked++;
+  }));
+
+  let matched = 0;
+  (STATE.styles||[]).forEach(s => {
+    const key = String(s.styleId||'').trim().toUpperCase();
+    const b = key && byStyle[key];
+    if (!b) { s.shopifyStock = undefined; s.shopifyAt = undefined; s.shopifyVariants = undefined; return; }
+    matched++;
+    s.shopifyStock = b.units;
+    s.shopifyVariants = b.variants;
+    s.shopifyUntracked = b.untracked;
+    s.shopifyAt = res.at || new Date().toISOString();
+  });
+  STATE.invSync = { at: res.at || new Date().toISOString(), products: (res.products||[]).length,
+    variants, matched, unmatched: unmatched.length, unmatchedSample: unmatched.slice(0,6),
+    untracked, truncated: !!res.truncated, pages: res.pages || 0 };
+  try { save(); } catch(e){}
+  renderInventory(INV_FILTER);
+  logActivity('Inventory synced from Shopify — ' + matched + ' styles, ' + variants + ' variants');
+  done('✓ ' + matched + ' style' + (matched===1?'':'s') + ' from Shopify'
+    + (unmatched.length ? ' · ' + unmatched.length + ' variant' + (unmatched.length===1?'':'s') + ' matched no style' : ''), 'success');
+};
+// What a style's stock IS, and where the number came from. The app must never
+// present a typed number and a live one as the same kind of fact.
+function invStock(s){
+  if (s && s.shopifyStock != null) return { units: s.shopifyStock, src: 'shopify', at: s.shopifyAt };
+  return { units: (s && s.stock) || 0, src: (s && s.stock != null && s.stock !== '') ? 'manual' : 'none' };
+}
+let INV_FILTER = 'all';
+
+function renderInventory(filter='all') {
+  INV_FILTER = filter;
+  let styles=STATE.styles.filter(s=>['active','sale','production'].includes(s.status));
+  // Every count reads through invStock, so a Shopify figure and a typed one are
+  // never quietly added together as if they were the same kind of number.
+  const U = (s) => invStock(s).units;
+  if(filter==='low') styles=styles.filter(s=>U(s)<(s.reorderPoint||20)&&U(s)>0);
+  if(filter==='reorder') styles=styles.filter(s=>U(s)<=(s.reorderPoint||10));
+  if(filter==='active') styles=styles.filter(s=>s.status==='active');
+  if(filter==='shopify') styles=styles.filter(s=>s.shopifyStock!=null);
+
+  const totalUnits=styles.reduce((sum,s)=>sum+U(s),0);
+  const totalVal=styles.reduce((sum,s)=>sum+U(s)*(s.retail||0),0);
+  const needsReorder=styles.filter(s=>U(s)<=(s.reorderPoint||10)).length;
+  const live = styles.filter(s=>s.shopifyStock!=null).length;
+  const sy = STATE.invSync || null;
+  const ago = (iso) => { if(!iso) return ''; const m=Math.round((Date.now()-Date.parse(iso))/60000);
+    return m<1?'just now':m<60?m+' min ago':m<1440?Math.round(m/60)+'h ago':Math.round(m/1440)+'d ago'; };
 
   document.getElementById('inv-content').innerHTML=`
+    <!-- WHERE THESE NUMBERS COME FROM, before the numbers. Total Units used to
+         be the sum of whatever anyone had last typed, presented as fact. -->
+    <div style="border:1px solid ${live?'var(--border)':'rgba(230,160,0,.3)'};background:${live?'var(--bg-off)':'var(--amber-dim)'};padding:11px 14px;margin-bottom:16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="flex:1;min-width:230px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--ink)">${
+          live ? live + ' of ' + styles.length + ' styles counted by Shopify' : 'Not counted by Shopify yet'}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.6">${
+          live
+            ? 'Active listings only — a draft or archived product is not stock anyone can buy.' + (sy && sy.at ? ' Last asked ' + ago(sy.at) + '.' : '')
+              + (styles.length - live ? ' The other ' + (styles.length - live) + ' show what was typed by hand.' : '')
+            : 'These are hand-typed figures. Nothing has checked them against the store.'}</div>
+        ${sy && sy.unmatched ? `<div style="font-size:10px;color:var(--amber);margin-top:4px">${sy.unmatched} Shopify variant${sy.unmatched===1?'':'s'} matched no style by SKU${
+          sy.unmatchedSample && sy.unmatchedSample.length ? ' — e.g. ' + sy.unmatchedSample.slice(0,2).map(x=>String(x).replace(/</g,'&lt;')).join(', ') : ''} · not counted</div>` : ''}
+        ${sy && sy.untracked ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">${sy.untracked} variant${sy.untracked===1?'':'s'} have inventory tracking off in Shopify — they count as 0</div>` : ''}
+        ${sy && sy.truncated ? `<div style="font-size:10px;color:var(--amber);margin-top:3px">⚠ More products than this pull reads — the count is partial</div>` : ''}
+      </div>
+      <button class="btn btn-ghost btn-sm" id="inv-sync-btn" onclick="invShopifySync()">↻ Sync from Shopify</button>
+    </div>
     <div class="stats-row stats-3" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Total Units</div><div class="stat-val">${totalUnits.toLocaleString()}</div></div>
       <div class="stat-card"><div class="stat-label">Stock Value (Retail)</div><div class="stat-val">$${(totalVal/1000).toFixed(0)}k</div></div>
@@ -12758,7 +12873,7 @@ function renderInventory(filter='all') {
       <th>Style</th><th>Season</th><th>Status</th><th>Stock Level</th><th>Edit Stock</th><th>Reorder At</th><th>Units Sold</th><th>Retail</th><th>Stock Value</th><th>Reorder Qty</th>
     </tr></thead><tbody>
     ${styles.map(s=>{
-      const stock=s.stock||0;const reorder=s.reorderPoint||20;const sold=(typeof unitsSoldFor==='function')?unitsSoldFor(s):(s.unitsSold||0);
+      const st=invStock(s); const stock=st.units; const reorder=s.reorderPoint||20;const sold=(typeof unitsSoldFor==='function')?unitsSoldFor(s):(s.unitsSold||0);
       const isLow=stock<reorder&&stock>0;const isOut=stock===0;
       const stockVal=(stock*(s.retail||0)).toLocaleString();
       return `<tr onclick="openDp('${s.id}')">
@@ -12767,8 +12882,16 @@ function renderInventory(filter='all') {
         <td data-label="Status">${stageBadge(s.status)}</td>
         <td data-label="Stock"><span style="font-family:'DM Mono',monospace;font-size:14px;font-weight:700;color:${isOut?'var(--red)':isLow?'var(--amber)':'var(--green)'}">${stock}</span>
           ${isOut?'<span style="margin-left:6px;font-size:10px;letter-spacing:1px;color:var(--red);text-transform:uppercase">Out</span>':isLow?'<span style="margin-left:6px;font-size:10px;letter-spacing:1px;color:var(--amber);text-transform:uppercase">Low</span>':''}
+          <span style="display:block;font-size:9px;letter-spacing:.6px;text-transform:uppercase;margin-top:2px;color:${st.src==='shopify'?'var(--green)':'var(--muted)'}" title="${
+            st.src==='shopify' ? 'Counted in Shopify across '+(s.shopifyVariants||0)+' variant'+((s.shopifyVariants||0)===1?'':'s') : 'Typed by hand — nothing has checked this against the store'}">${
+            st.src==='shopify' ? 'Shopify' : st.src==='manual' ? 'typed' : 'not set'}</span>
         </td>
-        <td data-label="Edit stock"><input type="number" class="fi fi-mono" style="width:65px;font-size:11px;padding:4px 0;min-height:auto" value="${stock||''}" placeholder="0" onchange="setStock('${s.id}',this.value)" onclick="event.stopPropagation()" title="Units in stock"></td>
+        <!-- A Shopify-counted style is not editable here: Shopify is the record,
+             and a number typed over it would be overwritten on the next sync
+             without ever having meant anything. -->
+        <td data-label="Edit stock">${st.src==='shopify'
+          ? `<span style="font-size:10px;color:var(--muted)" title="Change it in Shopify">—</span>`
+          : `<input type="number" class="fi fi-mono" style="width:65px;font-size:11px;padding:4px 0;min-height:auto" value="${s.stock||''}" placeholder="0" onchange="setStock('${s.id}',this.value)" onclick="event.stopPropagation()" title="Units in stock">`}</td>
         <td data-label="Reorder at" style="font-family:'DM Mono',monospace;font-size:11px">${reorder}</td>
         <td data-label="Units sold" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${sold}</td>
         <td data-label="Retail" style="font-family:'DM Mono',monospace;font-size:11px">${s.retail?'$'+s.retail:'—'}</td>

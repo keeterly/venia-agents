@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 385._
+_Last reviewed at Build 386._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1107,3 +1107,46 @@ material total was right and the labour total was stubbornly zero.
 
 Fifth time this session: an explanation written as a comment in the patch script
 rather than in the replacement string. smoke82 asserts on it.
+
+## Build 386 — inventory comes from Shopify
+*"Inventory Should Come from Shopify Stock of Actively listed styles."*
+
+Stock was a number typed into a box, on a page that computed a stock **value**
+from it and reported it as fact. Nothing ever checked it against the store, so
+the only thing "Total Units" measured was how recently someone had remembered to
+update it.
+
+- **Active listings only.** A draft or archived product still has variants and
+  quantities; counting them inflates stock with garments no customer can buy.
+- **Every page.** Shopify's cursor pagination lives in the `Link` header, and a
+  silent first page would read as "that is all the stock we have". A pull that
+  hits the page cap reports itself as **partial** rather than passing as a total.
+- **Matching is by SKU and only by SKU.** The app builds SKUs as
+  `${styleId}-${COLOR}-${SIZE}`, so a variant whose SKU is prefixed by a style's
+  styleId *is* that style — exact and checkable. The **longest** styleId wins, so
+  `VN-1` cannot claim `VN-10`'s SKUs. Nothing is matched on a title resembling a
+  name: "SPIKE PANTS" and "Spike Pant (Sample)" would pass any fuzzy test, and
+  attaching the wrong stock to a style is worse than attaching none.
+- **What it could not match is named, not absorbed.** An unmatched variant is
+  counted, sampled and shown — a stray 99-unit SKU stays out of the total instead
+  of quietly inflating it. A variant with inventory tracking off is named too,
+  rather than silently counting as zero.
+- **Every number says where it came from.** `invStock()` returns `shopify`,
+  `manual` or `none`, every total reads through it, each row is labelled, and the
+  page states how many styles are live and how fresh the pull is. An unsynced
+  page says *"These are hand-typed figures. Nothing has checked them against the
+  store."*
+- **Shopify owns what Shopify counts** — those rows are not hand-editable,
+  because a number typed over one would be overwritten on the next sync without
+  ever having meant anything. A style Shopify stops listing **drops** its figure
+  and falls back to the typed one, labelled as typed, rather than freezing a
+  stale live number.
+
+`invSync` went into `SYNC_KEYS` — `save()` persists only what is listed there,
+and this is the finCats bug from Build 363: the "last asked 4 min ago" line would
+have vanished on the next save.
+
+Test note, twice over now: `addInitScript` runs on **every** navigation, so
+re-seeding storage in it wipes exactly what a reload assertion is testing. And
+the app pings Shopify on load, so the first captured call is never the one under
+test.
