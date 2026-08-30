@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 393._
+_Last reviewed at Build 394._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1459,3 +1459,48 @@ Shopify's.
 Locked by `gauntlet/claudeconn.js`, which boots with `VENIA_API_KEYS` removed —
 the phone's exact situation — and stubs the relay both ways. Against live 389,
 four of its six assertions fail.
+
+
+## Build 394 — forgot password
+*"Can we reset christine@veniacollection.com password?"*
+
+Her sign-in is a **Supabase Auth** password — not Google, and not the shared
+VENIA access code. She has signed in exactly once, on 23 July, 0.3 seconds after
+the account was created, and never since. The app had no recovery path at all:
+`resetPasswordForEmail` and `type=recovery` appeared nowhere in it.
+
+- **"Forgot password?"** on the sign-in screen mails a link, restricted to the
+  two founder addresses — the form is on a public page, and without the guard it
+  would confirm-or-deny arbitrary addresses and spend VENIA's Supabase quota on
+  them.
+- The link is pinned to `VENIA_PUBLIC_BASE`, never `location.origin`: a link
+  built from a `.netlify.app` or `github.io` address 404s for whoever opens it.
+- **The recovery screen comes in above the access-code gate**, exactly as
+  `?share` and `?agent` do. A recovery token proves control of the mailbox, so
+  it is its own credential — and it can *only* set a password. The app stays
+  locked behind the gate afterwards, so letting it past costs nothing. The
+  founder sign-in stands down while it is up.
+- Three link shapes are recognised, because the shape depends on which flow
+  supabase-js is using: `?reset=1` (our own marker, for PKCE), `#type=recovery`
+  (implicit), and `#error=…`. An expired or already-used link shows the reason
+  and a way back, not a form that cannot work.
+- On success it clears the token from the URL and reloads, so she returns
+  through the ordinary front door rather than being dropped into the app by a
+  link that is now spent.
+
+Locked by `gauntlet/pwreset.js` — 14 assertions against a stubbed supabase-js
+that records what the app asks of `auth`, so the test checks the app's calls and
+not a mock's behaviour.
+
+**Two Supabase settings decide whether the mail actually arrives, and neither is
+reachable from here:**
+1. **Authentication → URL Configuration → Redirect URLs** must allow
+   `https://creator.veniacollection.com/*`, or Supabase refuses the redirect.
+2. **Authentication → SMTP.** The built-in sender is rate-limited and meant for
+   testing; production delivery wants custom SMTP.
+
+If the email does not arrive, the fallback stands: her `auth.users` row is
+disposable — **nothing** is keyed to her user id (no FK to `auth.users`, no
+`user_id` / `owner` / `created_by` column in `public`, and all ten RLS policies
+match on `auth.jwt() ->> 'email'`). Delete the row and her next sign-in
+recreates the account with a password she chooses, losing nothing.

@@ -1924,7 +1924,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '393';
+  const BUILD = '394';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1966,6 +1966,16 @@ body{padding-top:44px;box-sizing:border-box;}
       document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff;flex:1 1 auto;width:100%"></div>';
     });
   }
+  // Password recovery (?reset=1 / #type=recovery / #error=...). See the
+  // recovery module for the screen itself; this only has to decide, before the
+  // first paint, that the gate is not what should be on screen.
+  (function(){
+    var q = location.search, h = location.hash || '';
+    window.VENIA_RECOVERY = /[?&]reset=1(?:[&]|$)/.test(q)
+      || /(?:^|[#&])type=recovery(?:[&]|$)/.test(h)
+      || /(?:^|[#&])error(?:_code)?=/.test(h);
+    if (window.VENIA_RECOVERY) $('venia-auth-gate').classList.add('hidden');
+  })();
   // Stripe returns the STYLIST here after paying (?pay=success|cancelled) —
   // they should see a branded confirmation, never the app or its gate.
   window.VENIA_PAY = new URLSearchParams(location.search).get('pay') || null;
@@ -35665,7 +35675,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +   '<button onclick="veniaEntrySignIn()" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;border-radius:0;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Sign in</button>'
       + '</div>'
       + '<div id="vsi-error" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center"></div>'
-      + '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">First time on this device? Enter your VENIA email and choose a password — your account is created automatically.</div>';
+      + '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">First time on this device? Enter your VENIA email and choose a password — your account is created automatically.</div>'
+      + '<button id="vsi-forgot" onclick="veniaForgotPassword()" style="margin-top:16px;background:none;border:none;color:#8a8a8a;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border-bottom:1px solid #3a3a3a;padding:0 0 3px">Forgot password?</button>';
     document.body.appendChild(o);
     var pick = o.querySelector('#vsi-pick');
     EMAILS.forEach(function(e){
@@ -35703,6 +35714,87 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       try { logActivity('Signed in: ' + email); } catch(e){}
     } catch(e){ if (err) err.textContent = 'Sign-in failed — ' + (e.message||e); }
   };
+  // Send a recovery email. Restricted to the two founder addresses: this form
+  // is on a public page, and without the guard it would happily confirm-or-deny
+  // and mail arbitrary addresses on VENIA's Supabase quota.
+  window.veniaForgotPassword = async function(){
+    var c = sb(), err = document.getElementById('vsi-error');
+    if (!c || !c.auth){ if (err) err.textContent = 'Still connecting — try again in a moment.'; return; }
+    var email = ((document.getElementById('vsi-email')||{}).value||'').trim().toLowerCase();
+    if (!email){ if (err) err.textContent = 'Enter your VENIA email first, then tap Forgot password.'; return; }
+    if (EMAILS.indexOf(email) < 0){ if (err) err.textContent = 'That is not a VENIA account.'; return; }
+    if (err) err.textContent = 'Sending…';
+    try {
+      // Pinned to the canonical host — never location.origin. A link built from
+      // a .netlify.app or github.io address 404s for whoever opens it.
+      var back = (window.VENIA_PUBLIC_BASE || location.origin) + '/?reset=1';
+      var r = await c.auth.resetPasswordForEmail(email, { redirectTo: back });
+      if (r && r.error){ if (err) err.textContent = r.error.message; return; }
+      if (err) err.textContent = 'Check ' + email + ' — the reset link lasts one hour.';
+    } catch(e){ if (err) err.textContent = 'Could not send — ' + (e.message||e); }
+  };
+
+  // ── THE RECOVERY SCREEN ────────────────────────────────────────────────
+  // Sets a password and nothing else. On success it clears the token out of the
+  // URL and reloads, so she comes back through the ordinary front door rather
+  // than being dropped into the app by a link that is now spent.
+  function recErr(m){ var e = document.getElementById('vrec-error'); if (e) e.textContent = m || ''; }
+  window.veniaRecoverySubmit = async function(){
+    var c = sb(); if (!c || !c.auth) return recErr('Still connecting — try again in a moment.');
+    var a = (document.getElementById('vrec-pw')||{}).value||'';
+    var b = (document.getElementById('vrec-pw2')||{}).value||'';
+    if (a.length < 6) return recErr('Password must be at least 6 characters.');
+    if (a !== b) return recErr('Those two do not match.');
+    recErr('Saving…');
+    try {
+      var r = await c.auth.updateUser({ password: a });
+      if (r && r.error) return recErr(r.error.message);
+      recErr('');
+      var done = document.getElementById('vrec-done');
+      if (done) done.style.display = 'block';
+      setTimeout(function(){ location.replace((window.VENIA_PUBLIC_BASE || location.origin) + '/'); }, 1600);
+    } catch(e){ recErr('Could not save — ' + (e.message||e)); }
+  };
+  function recoveryShow(){
+    if (document.getElementById('venia-recovery')) return;
+    // An expired or already-used link comes back as #error=... — say so, rather
+    // than showing a form that cannot work.
+    var h = new URLSearchParams((location.hash||'').replace(/^#/,''));
+    var bad = h.get('error_description') || h.get('error') || '';
+    var o = document.createElement('div');
+    o.id = 'venia-recovery';
+    o.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#0a0a0a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
+    o.innerHTML =
+      '<div style="font-family:\'Archivo\',Helvetica,Arial,sans-serif;font-size:30px;letter-spacing:8px;font-weight:700">VENIA</div>'
+      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Set a new password</div>'
+      + (bad
+        ? '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#e0736a;margin:22px 0 4px">' + String(bad).replace(/\+/g,' ') + '</div>'
+          + '<div style="max-width:320px;text-align:center;font-size:12px;line-height:1.6;color:#b7b7b7;margin:8px 0 18px">Reset links last one hour and work once. Ask for a new one from the sign-in screen.</div>'
+          + '<button onclick="location.replace((window.VENIA_PUBLIC_BASE||location.origin)+\'/\')" style="min-width:220px;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Back to sign-in</button>'
+        : '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Choose a new password for your VENIA account. At least 6 characters.</div>'
+          + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
+          +   '<input id="vrec-pw" type="password" autocomplete="new-password" placeholder="New password" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none">'
+          +   '<input id="vrec-pw2" type="password" autocomplete="new-password" placeholder="Type it again" onkeydown="if(event.key===\'Enter\')veniaRecoverySubmit()" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none">'
+          +   '<button onclick="veniaRecoverySubmit()" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Save password</button>'
+          + '</div>')
+      + '<div id="vrec-error" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center"></div>'
+      + '<div id="vrec-done" style="display:none;font-size:12.5px;color:#7fd18e;margin-top:6px;text-align:center">Saved. Taking you to sign-in…</div>';
+    document.body.appendChild(o);
+  }
+  // supabase-js turns the link into a session itself (detectSessionInUrl), and
+  // announces it as PASSWORD_RECOVERY. We listen for that AND draw immediately,
+  // because the marker in the URL is enough to know this is a reset — waiting
+  // for the event would leave a blank screen if it never arrives.
+  if (window.VENIA_RECOVERY) {
+    document.addEventListener('DOMContentLoaded', recoveryShow);
+    if (document.readyState !== 'loading') recoveryShow();
+    (function waitClient(n){
+      var c = sb();
+      if (!c || !c.auth) { if (n < 40) setTimeout(function(){ waitClient(n+1); }, 300); return; }
+      try { c.auth.onAuthStateChange(function(ev){ if (ev === 'PASSWORD_RECOVERY') recoveryShow(); }); } catch(e){}
+    })(0);
+  }
+
   // Sign-in is required now that the database is locked to VENIA accounts —
   // there is no "skip". (Kept as a harmless no-op in case anything references it.)
   window.veniaEntrySkip = function(){};
@@ -35715,6 +35807,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // her credential; showing her this overlay would both block her portal and
     // invite her to guess at a VENIA account she must never have.
     if (window.VENIA_SHARE || window.VENIA_PAY || window.VENIA_AGENT) return;
+    if (window.VENIA_RECOVERY) return;   // she is setting a password, not entering
     var tries = 0;
     (function wait(){
       var c = sb();
