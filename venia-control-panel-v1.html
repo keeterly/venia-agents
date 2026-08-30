@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '375';
+  const BUILD = '376';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16323,6 +16323,31 @@ function openPrCart(pullId=null) {
         });
         const typeEl = document.getElementById('pr-pull-type');
         if (typeEl && pull.pullType) typeEl.value = pull.pullType;
+        // THE FEE AND THE TERMS ARE PART OF THE PULL TOO. Only the text inputs
+        // were being restored, so opening a pull to fix a typo re-saved it with
+        // fee type "none", $0, and every term unticked — the money and the
+        // agreement, gone, silently. The signature then reported that the terms
+        // had changed after it was signed, which was true and entirely our doing.
+        try {
+          const ft = pull.feeType || 'none';
+          const radio = [...document.querySelectorAll('input[name="pr-fee-type"]')].find(r => r.value === ft);
+          if (radio) { radio.checked = true; if (typeof prFeeTypeChanged === 'function') prFeeTypeChanged(); }
+          const amt = Number(pull.feeAmount || 0);
+          // A percentage is stored as the dollars it produced; recover the rate
+          // from the retail it was taken on when the pull predates feePct.
+          const pct = pull.feePct != null ? Number(pull.feePct)
+            : (Number(pull.totalRetail) > 0 ? Math.round((amt / Number(pull.totalRetail)) * 1000) / 10 : 0);
+          const setV = (id, v) => { const e = document.getElementById(id); if (e) e.value = (v || v === 0) ? v : ''; };
+          if (ft === 'percent') setV('pr-fee-pct-val', pct || '');
+          if (ft === 'flat')    setV('pr-fee-flat-val', amt || '');
+          if (ft === 'deposit') setV('pr-fee-deposit-val', amt || '');
+          const t = pull.terms || {};
+          [['pr-term-damage','damage'],['pr-term-credit','credit'],
+           ['pr-term-alteration','alteration'],['pr-term-tearsheet','tearsheet']].forEach(([id,k]) => {
+            const e = document.getElementById(id); if (e) e.checked = !!t[k];
+          });
+          if (typeof prCalcFee === 'function') prCalcFee();
+        } catch(e){}
       }, 50);
     }
   } else {
@@ -16976,6 +17001,36 @@ window.prStripeCreate = async function(pullId, hold){
   } catch(e){ showToast('Stripe function unreachable — is the site deployed?','error'); }
 };
 
+window.prInvoiceCheck = async function(pullId, quiet){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId);
+  const pay = pull && pull.payment;
+  if (!pay || !pay.stripeInvoiceId) { if (!quiet) showToast('No Stripe invoice on this pull yet', 'warning'); return; }
+  try {
+    const res = await prStripe('invoice_status', { id: pay.stripeInvoiceId });
+    if (!res || res.error) { if (!quiet) showToast(String((res && res.error) || 'Stripe did not answer'), 'error'); return; }
+    const was = pay.status;
+    // Stripe's word for it, mapped once: paid / open / void / uncollectible.
+    if (res.status === 'paid') { pay.status = 'paid'; pay.paidAt = pay.paidAt || new Date().toISOString(); }
+    else if (res.status === 'void') pay.status = 'void';
+    else if (res.status === 'uncollectible') pay.status = 'uncollectible';
+    else pay.status = 'invoiced';
+    if (res.amount_paid != null) pay.amountPaid = res.amount_paid;
+    if (res.amount_remaining != null) pay.amountRemaining = res.amount_remaining;
+    if (res.hosted_invoice_url) pay.stripeInvoiceUrl = res.hosted_invoice_url;
+    pay.checkedAt = new Date().toISOString();
+    save();
+    if (was !== pay.status) { try { logActivity('Stripe invoice ' + pay.status + ' — ' + pull.invoiceNo); } catch(e){} }
+    try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pullId); } catch(e){}
+    try { renderPR(); } catch(e){}
+    if (!quiet || was !== pay.status) {
+      showToast(pay.status === 'paid'
+        ? '✓ Paid — $' + Number(res.amount_paid || pay.amount || 0).toLocaleString() + ' confirmed by Stripe'
+        : 'Stripe says: ' + pay.status + (res.amount_remaining ? ' — $' + Number(res.amount_remaining).toLocaleString() + ' outstanding' : ''),
+        pay.status === 'paid' ? 'success' : 'info');
+    }
+  } catch(e){ if (!quiet) showToast('Could not reach Stripe', 'error'); }
+};
+
 window.prStripeCheck = async function(pullId){
   const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
   if (!pay || !pay.sessionId) return;
@@ -17548,7 +17603,7 @@ function prSaveDraft() {
   const pull = prBuildPullObj('draft');
   if (!pull.client) { toast('Add client name first'); return; }
   const existingIdx = STATE.prPulls.findIndex(p => p.id === pull.id);
-  if (existingIdx >= 0) STATE.prPulls[existingIdx] = pull;
+  if (existingIdx >= 0) STATE.prPulls[existingIdx] = prMergePull(STATE.prPulls[existingIdx], pull);
   else STATE.prPulls.unshift(pull);
   // A draft in progress is where tag taps should land — make it the working pull.
   STATE.workingPullId = pull.id;
@@ -17566,8 +17621,9 @@ function prFinalizePull() {
   const email = document.getElementById('pr-contact-email')?.value.trim();
   if (!client) { toast('Client name required'); prCartTab('client', document.querySelectorAll('#pr-cart-modal .modal-tab')[0]); return; }
 
-  const pull = prBuildPullObj('active');
-  const existingIdx = STATE.prPulls.findIndex(p => p.id === pull.id);
+  const built = prBuildPullObj('active');
+  const existingIdx = STATE.prPulls.findIndex(p => p.id === built.id);
+  const pull = existingIdx >= 0 ? prMergePull(STATE.prPulls[existingIdx], built) : built;
   if (existingIdx >= 0) STATE.prPulls[existingIdx] = pull;
   else STATE.prPulls.unshift(pull);
   // The pull you just finalized is the one you're handing garments to —
@@ -17586,6 +17642,20 @@ function prFinalizePull() {
   }
   // Then, while they are still in the room, take the signature.
   setTimeout(() => { try { prSignOpen(pull.id); } catch(e){} }, email ? 900 : 350);
+}
+
+// THE FORM DOES NOT OWN THE WHOLE PULL. prBuildPullObj rebuilds a pull from
+// the fields on screen, and both Save Draft and Finalize used to assign that
+// object straight over the existing one — which threw away everything the form
+// has no input for: the payment record, the signature, when the sheet was
+// emailed and from what address. Editing a pull silently un-paid and un-signed
+// it. Merge over the old record instead, and never let a re-save rewrite the
+// document's own creation date.
+function prMergePull(prev, next) {
+  if (!prev) return next;
+  const merged = Object.assign({}, prev, next);
+  if (prev.createdAt) merged.createdAt = prev.createdAt;   // the date on the sheet
+  return merged;
 }
 
 function prBuildPullObj(status='active') {
@@ -17611,6 +17681,9 @@ function prBuildPullObj(status='active') {
     invoiceNo: document.getElementById('pr-invoice-no')?.value || `PR-${new Date().getFullYear()}-${String((STATE.prPulls||[]).length+1).padStart(3,'0')}`,
     termsNotes: document.getElementById('pr-terms-notes')?.value.trim() || '',
     feeType, feeAmount: feeAmt, totalRetail: total,
+    // The RATE, not just the dollars it produced — re-opening a percentage pull
+    // had to divide back out of the total to guess it.
+    feePct: feeType === 'percent' ? (parseFloat((document.getElementById('pr-fee-pct-val')||{}).value) || 0) : undefined,
     items: JSON.parse(JSON.stringify(PR_CART)),
     createdAt: new Date().toISOString(),
     terms: {
@@ -17753,18 +17826,36 @@ function prOpenDetail(pullId) {
         : payStatus === 'captured' ? `<span style="color:var(--green);font-weight:700">✓ Hold captured — $${pay.amount} charged</span>`
         : payStatus === 'released' ? `<span style="color:var(--muted)">Hold released — nothing was charged</span>`
         : `<span style="color:var(--amber)">⏳ Hold link sent — $${pay.amount}, no card entered yet</span>`)
-      : payStatus === 'paid' ? `<span style="color:var(--green);font-weight:700">✓ Paid $${pay.amount||pull.feeAmount}</span>`
-      : payStatus === 'invoiced' ? `<span style="color:var(--muted)">Invoice sent — awaiting payment</span>`
+      : payStatus === 'paid' ? `<span style="color:var(--green);font-weight:700">✓ Paid $${pay.amountPaid != null ? Number(pay.amountPaid).toLocaleString() : (pay.amount||pull.feeAmount)}</span>${pay.paidAt ? ` <span style="color:var(--muted)">· confirmed by Stripe</span>` : ''}`
+      : payStatus === 'void' ? `<span style="color:var(--muted)">Invoice voided in Stripe</span>`
+      : payStatus === 'uncollectible' ? `<span style="color:var(--red)">Written off as uncollectible in Stripe</span>`
+      : payStatus === 'invoiced' ? `<span style="color:var(--muted)">Invoice sent — awaiting payment${pay.amountRemaining != null ? ' · $' + Number(pay.amountRemaining).toLocaleString() + ' outstanding' : ''}</span>`
       : payStatus === 'waived' ? `<span style="color:var(--muted)">Waived / Comped</span>`
       : `<span style="color:var(--amber)">⚠ Unpaid — $${(pull.feeAmount||0).toFixed ? pull.feeAmount.toFixed(2) : pull.feeAmount} outstanding</span>`;
+    // A Stripe invoice can be paid without this app ever hearing about it, so
+    // the answer is one tap away rather than a state you have to trust.
+    const canCheck = !!pay.stripeInvoiceId;
     return `<div style="padding:12px 18px;background:var(--bg-off);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-      <div style="font-size:10px">${statusBadge}${pay.method?' · '+pay.method:''}</div>
-      <button class="btn btn-ghost btn-sm" onclick="prOpenPayment('${pullId}')">◈ ${isHold&&payStatus==='authorized'?'Release or capture':payStatus==='none'?'Charge or hold':'Update Payment'}</button>
+      <div style="font-size:10px;flex:1;min-width:150px">${statusBadge}${pay.method?' · '+pay.method:''}${
+        pay.checkedAt ? `<span style="color:var(--muted)"> · checked ${new Date(pay.checkedAt).toLocaleString()}</span>` : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${canCheck ? `<button class="btn btn-ghost btn-sm" onclick="prInvoiceCheck('${pullId}')">↻ Check Stripe</button>` : ''}
+        ${pay.stripeInvoiceUrl ? `<button class="btn btn-ghost btn-sm" onclick="window.open('${pay.stripeInvoiceUrl}','_blank')">Open invoice</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="prOpenPayment('${pullId}')">◈ ${isHold&&payStatus==='authorized'?'Release or capture':payStatus==='none'?'Charge or hold':'Update Payment'}</button>
+      </div>
     </div>`;
   })();
   if (payBlock) {
     const bodyEl = document.getElementById('pr-detail-body');
     if (bodyEl) bodyEl.insertAdjacentHTML('beforeend', payBlock);
+    // Opening the pull is the moment you want the truth, so ask Stripe then —
+    // quietly, and only while there is still something to find out.
+    try {
+      const pay = pull.payment || {};
+      if (pay.stripeInvoiceId && pay.status !== 'paid' && pay.status !== 'void') {
+        setTimeout(() => { try { prInvoiceCheck(pullId, true); } catch(e){} }, 250);
+      }
+    } catch(e){}
   }
 
   // Footer: one even grid of equal-height buttons (the old mixed-size stack
