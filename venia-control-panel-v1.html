@@ -1924,7 +1924,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '394';
+  const BUILD = '395';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2447,7 +2447,7 @@ body{padding-top:44px;box-sizing:border-box;}
         </div>
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">System</div>
-          <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh()">Security</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh();window.setPwResetRefresh&&setPwResetRefresh()">Security</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
           <div class="ag-nav-item" onclick="setShowSection('set-about',this)">About</div>
         </div>
@@ -2814,6 +2814,26 @@ body{padding-top:44px;box-sizing:border-box;}
             </div>
             <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:14px">Sign in with your VENIA email so we can move the app onto real accounts (and lock the shared data down). This doesn't change how you get in yet — the access code still works. First time: type your email and <strong>choose</strong> a password; that becomes your account.</div>
             <div id="set-auth-status" style="font-size:11px;color:var(--muted)">Checking…</div>
+          </div>
+          <!-- RESET THE OTHER FOUNDER'S PASSWORD.
+               VENIA has no mail sender configured, so an emailed reset link
+               cannot be delivered — see Build 393/395 notes. Between two people
+               who share an office, the honest substitute is for one of you to
+               set it and say it out loud. Hidden entirely unless a founder is
+               signed in; the database refuses the call regardless of what this
+               panel does, so the UI is a convenience, not the control. -->
+          <div id="set-pwreset-card" style="display:none;background:var(--bg);border:1px solid var(--border);padding:20px;margin-top:16px">
+            <div style="font-size:13px;color:var(--ink);font-weight:600;margin-bottom:4px">Reset <span id="set-pwreset-who">the other founder</span>'s password</div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:14px">
+              For when they are locked out. Choose a temporary password, tell them in person, and they can change it from
+              <strong>Forgot password</strong> once email is set up. Every device still signed in as them is signed out.
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;max-width:340px">
+              <input class="fi" id="set-pwreset-pw" type="password" autocomplete="new-password" placeholder="Temporary password — at least 8 characters">
+              <input class="fi" id="set-pwreset-pw2" type="password" autocomplete="new-password" placeholder="Type it again" onkeydown="if(event.key==='Enter')setResetFounderPw()">
+              <button class="btn btn-ghost btn-sm" style="align-self:flex-start" onclick="setResetFounderPw()">Set password</button>
+            </div>
+            <div id="set-pwreset-msg" style="font-size:11px;line-height:1.5;margin-top:10px;min-height:15px"></div>
           </div>
         </div>
       </div>
@@ -35794,6 +35814,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       try { c.auth.onAuthStateChange(function(ev){ if (ev === 'PASSWORD_RECOVERY') recoveryShow(); }); } catch(e){}
     })(0);
   }
+
+  // Show the reset card only to a signed-in founder, aimed at the OTHER one.
+  // Deriving the target rather than offering a field is deliberate: there is no
+  // address to mistype, and the only account you can act on is your partner's.
+  window.setPwResetRefresh = async function(){
+    var card = document.getElementById('set-pwreset-card');
+    if (!card) return;
+    var c = sb(); var me = '';
+    try { var u = c && c.auth ? await c.auth.getUser() : null; me = ((u && u.data && u.data.user && u.data.user.email) || '').toLowerCase(); } catch(e){}
+    var other = EMAILS.filter(function(e){ return e !== me; })[0] || '';
+    if (!me || EMAILS.indexOf(me) < 0 || !other){ card.style.display = 'none'; return; }
+    card.style.display = '';
+    var who = document.getElementById('set-pwreset-who');
+    if (who) who.textContent = other.split('@')[0].replace(/^./, function(m){ return m.toUpperCase(); });
+    card.dataset.target = other;
+  };
+  window.setResetFounderPw = async function(){
+    var card = document.getElementById('set-pwreset-card');
+    var msg  = document.getElementById('set-pwreset-msg');
+    var say  = function(t, bad){ if (msg){ msg.textContent = t; msg.style.color = bad ? 'var(--red)' : 'var(--green)'; } };
+    var c = sb(); if (!c){ return say('Still connecting — try again in a moment.', true); }
+    var target = (card && card.dataset.target) || '';
+    var a = (document.getElementById('set-pwreset-pw')||{}).value||'';
+    var b = (document.getElementById('set-pwreset-pw2')||{}).value||'';
+    if (a.length < 8) return say('At least 8 characters.', true);
+    if (a !== b) return say('Those two do not match.', true);
+    say('Setting…');
+    try {
+      // The guards live in the database (venia_reset_founder_password is
+      // SECURITY DEFINER and checks the caller's JWT and the target), so a
+      // tampered page cannot widen what this does.
+      var r = await c.rpc('venia_reset_founder_password', { target_email: target, new_password: a });
+      if (r && r.error) return say(r.error.message, true);
+      document.getElementById('set-pwreset-pw').value = '';
+      document.getElementById('set-pwreset-pw2').value = '';
+      var name = target.split('@')[0].replace(/^./, function(m){ return m.toUpperCase(); });
+      say('Done — tell ' + name + ' this password. Anywhere they were signed in has been signed out.');
+      try { logActivity('Reset the password for ' + target); } catch(e){}
+    } catch(e){ say('Could not set it — ' + (e.message||e), true); }
+  };
 
   // Sign-in is required now that the database is locked to VENIA accounts —
   // there is no "skip". (Kept as a harmless no-op in case anything references it.)

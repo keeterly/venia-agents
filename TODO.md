@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 394._
+_Last reviewed at Build 395._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1504,3 +1504,62 @@ disposable — **nothing** is keyed to her user id (no FK to `auth.users`, no
 `user_id` / `owner` / `created_by` column in `public`, and all ten RLS policies
 match on `auth.jwt() ->> 'email'`). Delete the row and her next sign-in
 recreates the account with a password she chooses, losing nothing.
+
+
+## Build 395 — an actual forgot-password
+**The finding that decided the design: VENIA has no working mail sender.**
+`/.netlify/functions/mail` with `{"action":"ping"}` answers
+`{"configured":false,"from":""}` — `RESEND_API_KEY` is not set — and no function
+holds a Supabase service-role key. So *no* emailed reset link can be delivered
+today, whether Supabase sends it or we do. Build 394's flow was correct and
+undeliverable. (Separately: this means **"Email — send as VENIA" is dead**, so
+pull sheets are not going out from VENIA either.)
+
+So the reset that works today does not use email. One signed-in founder sets the
+other's password from Settings → Security.
+
+**The guard is in the database, not the page.** `venia_reset_founder_password`
+is `SECURITY DEFINER` — `auth.users` is not writable by `anon`/`authenticated`,
+which is the whole point — so it carries its own checks:
+
+- `set search_path = ''` with every name schema-qualified, so the definer's
+  privileges cannot be turned against it by a caller-controlled search_path
+- the **caller** must be a founder, proven by `auth.jwt() ->> 'email'`
+- the **target** must be a founder, so it can never be aimed elsewhere
+- 8 characters minimum — stricter than the sign-in screen's 6, because this one
+  is typed by someone else and travels by voice before it is used
+- existing refresh tokens for the target are revoked: a password change must end
+  the sessions opened with the old one
+- `EXECUTE` granted to `authenticated` only. Verified:
+  `has_function_privilege` says anon **false**, authenticated **true**
+
+Proven in SQL against the live database before any UI was wired to it:
+
+| case | result |
+|---|---|
+| no JWT at all | blocked |
+| signed-in non-founder | blocked |
+| founder aiming outside VENIA | blocked |
+| password too short | blocked |
+| founder → founder | allowed; the new hash **verifies** under `crypt()`, so GoTrue would accept it |
+
+The happy path ran inside a subtransaction that was then rolled back — both
+password fingerprints are byte-identical to the baseline, so nothing was left
+set. (plpgsql variables outlive the rollback; the write does not — which is why
+the probe records its verdict *after* the handler.)
+
+The UI derives the target rather than offering a field: there is no address to
+mistype and the only account you can act on is your partner's. It is hidden
+entirely unless a founder is signed in. `gauntlet/founderreset.js` — 11
+assertions — covers both directions, the hidden case, and that a short or
+mismatched password never reaches the database at all.
+
+**The security advisor flags this function** under
+`authenticated_security_definer_function_executable`. That is the design, not an
+oversight: signed-in founders are exactly who may call it, and the function
+checks the caller itself. It is deliberately **absent** from the `anon` version
+of that lint.
+
+Still worth doing when there is time: set `RESEND_API_KEY` (and verify the
+domain at resend.com). It revives sending as VENIA *and* makes 394's emailed
+reset work for real.
