@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 382._
+_Last reviewed at Build 383._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -990,3 +990,41 @@ a one-tap regrade.
 Recurring mistake, fourth time this session: two explanations were written as
 comments in the **patch script** rather than inside the replacement string, so
 they never reached the file. Caught by smoke79 asserting on them.
+
+## Build 383 — importing a PDF pack, without believing it
+*"Also no way to import pdf atm."* Half the archive is PDFs — ISOLDE 3RD PP,
+ZEPHYRUS, FLIP WATERFALL — exported from the sheet and never coming back as one.
+
+One **Import pack** button now takes a Sheet or a PDF, from Drive or from the
+device. A PDF has no cells, so the layout has to be *read* rather than
+addressed, and that is a job for the model already wired into the app.
+
+Which raises the obvious risk: a model asked to pull numbers out of a document
+will occasionally produce a number that is not in the document. On a spec sheet
+that is the worst failure there is — a plausible 13 1/2 that nobody typed.
+
+**So the model's answer is a suggestion, and nothing more.** Every value must
+appear **verbatim** in the extracted text before it is allowed in; anything that
+does not is dropped and named by value in the report. The check is mechanical,
+not a matter of prompting. The boundary is marked in the code: *"Everything
+above this line is a suggestion."*
+
+- Text is rebuilt into **lines from item positions** — one flat stream loses
+  which value belongs to which point.
+- The comparison survives how PDFs actually write fractions: `13 3/8`,
+  `13-3/8`, the `⅜` ligature, `6.00`, and any case or dash style.
+- Text fields are held to the same rule, so an invented designer name is refused
+  too and the field reads blank rather than filled with fiction.
+- A PDF with no text layer says it is **probably a scan** and stops: a scan
+  would have to be re-typed, and the app will not guess at pixels.
+- It lands in the **same preview and the same merge** as the Sheets importer, so
+  the never-overwrite guarantees are the ones already tested.
+
+Verified by feeding the verifier a model reply containing a real style, an
+invented designer, an invented measurement point, and — separately — a
+plausible-but-absent `13 1/2` on a real point. All three refused and named; the
+real values imported exactly.
+
+Prerequisite the app cannot do for them: **enable the Google Sheets API** on the
+same Cloud project as the OAuth client (APIs & Services → Library). The error
+message already says this and the Settings link goes to the right project.
