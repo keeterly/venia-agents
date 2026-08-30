@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '376';
+  const BUILD = '377';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17031,6 +17031,110 @@ window.prInvoiceCheck = async function(pullId, quiet){
   } catch(e){ if (!quiet) showToast('Could not reach Stripe', 'error'); }
 };
 
+// RECONNECTING A PULL TO AN INVOICE THAT ALREADY EXISTS.
+//
+// prInvoiceCheck can only ask about an invoice the pull remembers. Two real
+// pulls have no memory of theirs — a pre-376 edit rebuilt them from the form
+// and dropped the payment object, invoice id and all. Stripe still has the
+// invoice; the pull just lost the string that points at it. Without this, a
+// paid invoice reads "Unpaid" on screen permanently and the only repair is
+// someone editing the database by hand.
+//
+// Nothing here is invented: the pull is attached to an invoice Stripe returned,
+// and its status comes straight from prInvoiceCheck afterwards.
+window.prInvoiceFind = async function(pullId){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId);
+  if (!pull) return;
+  showToast('Looking for this pull in Stripe…', 'info');
+  let res;
+  try { res = await prStripe('invoice_find', { ref: pull.invoiceNo || '', email: pull.email || '' }); }
+  catch(e){ showToast('Could not reach Stripe', 'error'); return; }
+  if (!res || res.error) { showToast(String((res && res.error) || 'Stripe did not answer'), 'error'); return; }
+  const list = res.invoices || [];
+  if (!list.length) {
+    // An empty result is an answer, and it should say what was actually asked
+    // rather than implying the invoice does not exist.
+    showToast('No Stripe invoice found for ' + (pull.invoiceNo||'this pull') +
+      (pull.email ? ' or ' + pull.email : ' — the pull has no client email to search by') +
+      '. If you know the invoice ID you can paste it in.', 'warning');
+    prInvoicePaste(pullId);
+    return;
+  }
+  if (list.length === 1) { prInvoiceAttach(pullId, list[0]); return; }
+  prInvoicePick(pullId, list);
+};
+
+// More than one candidate is the normal case for a repeat client, and picking
+// the wrong one would attach someone else's money to this pull. So it asks,
+// showing the three things that tell them apart.
+function prInvoicePick(pullId, list){
+  const rows = list.map((inv, i) => {
+    const when = inv.created ? new Date(inv.created).toLocaleDateString() : '';
+    // The status is already on the line above — repeating it here read
+    // "PAID PAID $257".
+    const money = inv.status === 'paid'
+      ? '$' + Number(inv.amount_paid).toLocaleString()
+      : '$' + Number(inv.amount_remaining || inv.amount_due).toLocaleString() + ' outstanding';
+    return `<button class="btn btn-ghost" style="width:100%;text-align:left;margin-bottom:6px;padding:10px 12px;height:auto"
+      onclick="prInvoiceAttach('${pullId}', window.__prFindList[${i}]); closeModal('pr-invoice-pick-modal')">
+      <div style="font-weight:700">${inv.number || inv.id} · ${inv.status}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:3px">${money}${when ? ' · ' + when : ''}${
+        inv.ref ? ' · tagged ' + inv.ref : ''}</div>
+    </button>`;
+  }).join('');
+  window.__prFindList = list;
+  const html = `<div style="padding:16px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:12px">
+      Stripe has more than one invoice for this client. Pick the one that belongs to this pull —
+      the tagged one is the safest match.</div>
+    ${rows}</div>`;
+  let m = document.getElementById('pr-invoice-pick-modal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'pr-invoice-pick-modal'; m.className = 'overlay';
+    m.innerHTML = `<div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Which invoice?</div>
+        <button class="modal-close" aria-label="Close" onclick="closeModal('pr-invoice-pick-modal')">✕</button>
+      </div>
+      <div class="modal-body" id="pr-invoice-pick-body"></div></div>`;
+    document.body.appendChild(m);
+  }
+  document.getElementById('pr-invoice-pick-body').innerHTML = html;
+  openModal('pr-invoice-pick-modal');
+}
+
+// The last resort, and the only one that works when the client email on the
+// pull is not the email Stripe billed.
+function prInvoicePaste(pullId){
+  const id = prompt('Stripe invoice ID for this pull (starts with in_ — copy it from the invoice in Stripe):');
+  if (!id) return;
+  const clean = String(id).trim();
+  if (!/^in_[A-Za-z0-9]+$/.test(clean)) { showToast('That does not look like a Stripe invoice ID — they start with in_', 'warning'); return; }
+  prInvoiceAttach(pullId, { id: clean });
+}
+
+// Attach, then immediately ask Stripe what it says. The attach alone would only
+// be another stored assumption; the status has to come from Stripe.
+window.prInvoiceAttach = async function(pullId, inv){
+  const pull = (STATE.prPulls||[]).find(p => p.id === pullId);
+  if (!pull || !inv || !inv.id) return;
+  // Merge over whatever is there rather than replacing it — the same mistake
+  // that lost these records in the first place.
+  pull.payment = Object.assign({}, pull.payment || {}, {
+    status: 'invoiced', method: 'stripe',
+    stripeInvoiceId: inv.id,
+    stripeInvoiceUrl: inv.hosted_invoice_url || (pull.payment && pull.payment.stripeInvoiceUrl) || '',
+    amount: Number(inv.amount_due || inv.amount_paid || 0) || (pull.payment && pull.payment.amount) || pull.feeAmount || 0,
+    // Say where this link came from, so a reconnected pull is never mistaken
+    // for one this app invoiced and tracked all along.
+    relinkedAt: new Date().toISOString(),
+  });
+  save();
+  logActivity('Stripe invoice reconnected to ' + (pull.invoiceNo||pull.id) + ' — ' + inv.id);
+  await prInvoiceCheck(pullId, false);
+};
+
 window.prStripeCheck = async function(pullId){
   const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
   if (!pay || !pay.sessionId) return;
@@ -17835,11 +17939,17 @@ function prOpenDetail(pullId) {
     // A Stripe invoice can be paid without this app ever hearing about it, so
     // the answer is one tap away rather than a state you have to trust.
     const canCheck = !!pay.stripeInvoiceId;
+    // ...and when it CANNOT be checked, that is itself worth a button. A pull
+    // with a fee and no invoice id is either never invoiced or invoiced and
+    // forgotten, and only Stripe can tell you which. Offering nothing here is
+    // what left two paid pulls reading "Unpaid" with no way forward.
+    const canFind = !canCheck && (pull.feeAmount > 0 || !!pull.email);
     return `<div style="padding:12px 18px;background:var(--bg-off);border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
       <div style="font-size:10px;flex:1;min-width:150px">${statusBadge}${pay.method?' · '+pay.method:''}${
         pay.checkedAt ? `<span style="color:var(--muted)"> · checked ${new Date(pay.checkedAt).toLocaleString()}</span>` : ''}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${canCheck ? `<button class="btn btn-ghost btn-sm" onclick="prInvoiceCheck('${pullId}')">↻ Check Stripe</button>` : ''}
+        ${canFind ? `<button class="btn btn-ghost btn-sm" onclick="prInvoiceFind('${pullId}')">⌕ Find in Stripe</button>` : ''}
         ${pay.stripeInvoiceUrl ? `<button class="btn btn-ghost btn-sm" onclick="window.open('${pay.stripeInvoiceUrl}','_blank')">Open invoice</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="prOpenPayment('${pullId}')">◈ ${isHold&&payStatus==='authorized'?'Release or capture':payStatus==='none'?'Charge or hold':'Update Payment'}</button>
       </div>

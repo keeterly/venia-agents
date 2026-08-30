@@ -60,7 +60,7 @@ export default async (req) => {
   // 'invoice' creates and SENDS a real invoice to a buyer's inbox — it was the
   // one money action left ungated, exploitable by any caller forging an Origin
   // header. Gated fail-closed like the card actions.
-  const GATED = ['capture', 'cancel', 'invoice', 'invoice_status'];
+  const GATED = ['capture', 'cancel', 'invoice', 'invoice_status', 'invoice_find'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
     // Fail CLOSED: if the gate hash isn't configured, refuse the money action
@@ -195,6 +195,56 @@ export default async (req) => {
         due_date: inv.due_date ? new Date(inv.due_date * 1000).toISOString().slice(0, 10) : '',
         hosted_invoice_url: inv.hosted_invoice_url || '',
       }, 200, cors);
+    }
+    // RECOVERY. An invoice can exist in Stripe while the pull has no record of
+    // it — a pre-376 edit wiped the payment object off two real pulls, and the
+    // invoice id went with it. Without a way back, a paid invoice stays "Unpaid"
+    // on screen forever and the only fix is someone editing the database.
+    //
+    // Two ways in, because either one alone has a hole: metadata[venia_ref] is
+    // exact but Stripe's search index lags a minute behind a fresh invoice, and
+    // the customer's invoice list is immediate but only as good as the email on
+    // the pull. Both are tried, results merged, newest first. This READS only —
+    // nothing here creates, sends or modifies anything.
+    if (body.action === 'invoice_find') {
+      const ref = String(body.ref || '').trim().slice(0, 60);
+      const email = String(body.email || '').trim();
+      if (!ref && !email) return json({ error: 'Nothing to search by — the pull needs an invoice number or a client email.' }, 400, cors);
+      const seen = new Map();
+      const add = (inv) => {
+        if (!inv || !inv.id || seen.has(inv.id)) return;
+        seen.set(inv.id, {
+          id: inv.id,
+          number: inv.number || '',
+          status: inv.status || '',
+          amount_due: (inv.amount_due || 0) / 100,
+          amount_paid: (inv.amount_paid || 0) / 100,
+          amount_remaining: (inv.amount_remaining || 0) / 100,
+          created: inv.created ? new Date(inv.created * 1000).toISOString() : '',
+          description: inv.description || '',
+          ref: (inv.metadata && inv.metadata.venia_ref) || '',
+          hosted_invoice_url: inv.hosted_invoice_url || '',
+        });
+      };
+      if (ref) {
+        const q = "metadata['venia_ref']:'" + ref.replace(/'/g, '') + "'";
+        const r = await call('invoices/search?limit=10&query=' + encodeURIComponent(q), {}, 'GET');
+        // A search failure is not a "no invoice" — fall through to the customer
+        // list rather than reporting an absence we did not establish.
+        if (r && r.data) r.data.forEach(add);
+      }
+      if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        const cs = await call('customers/search?query=' + encodeURIComponent("email:'" + email.replace(/'/g, '') + "'"), {}, 'GET');
+        const cust = cs && cs.data && cs.data[0];
+        if (cust && cust.id) {
+          const inv = await call('invoices?limit=10&customer=' + encodeURIComponent(cust.id), {}, 'GET');
+          if (inv && inv.data) inv.data.forEach(add);
+        }
+      }
+      const list = [...seen.values()].sort((a, b) => (b.created || '').localeCompare(a.created || ''));
+      // Say which doors were tried, so "none found" can be read as an answer
+      // rather than as a failure of unknown shape.
+      return json({ invoices: list, searched: { ref: !!ref, email: !!email } }, 200, cors);
     }
     if (body.action === 'capture') {
       const pi = await call('payment_intents/' + encodeURIComponent(body.payment_intent) + '/capture', {});
