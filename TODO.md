@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 381._
+_Last reviewed at Build 382._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -936,3 +936,57 @@ Three findings worth keeping from the test work:
 
 Invariant: **a number that changed should say what it changed from, and every
 judgement should name the number it was judged against.**
+
+## Build 382 — hierarchy in the tech pack, and the order of the work
+*"A ton of information that doesn't have clear hierarchy and is hard to read
+and parse."* Fair — and Build 379 made it worse by adding eleven fields to
+Overview without touching the layout.
+
+**One structural bug was doing most of the damage.** The BOM header row
+`<div class="tpbr tpbh">` was **never closed**, so every BOM line, the total
+row, and then sections ⑤ POM, ⑥ Pattern Card, ⑦ Care and ⑧ Costing all rendered
+*inside* it. That is why "Total" printed on top of the "Unit" column, why the
+BOM columns never aligned, and why collapsing the BOM collapsed half the pack.
+Its grid also declared seven columns for eight cells, so the edit pencil and the
+status badge wrapped onto their own row. Both fixed; a nameless material now
+reads "Unnamed material" instead of `undefined`.
+
+**Type.** A label at 10px uppercase with 1.5px tracking is visually louder than
+a 12px sentence-case value, so every section read as a wall of headings with the
+content hiding between them. Labels are now 9px, quieter, less tracked; values
+13px and heavier; a group title outranks the fields inside it.
+
+**Overview**, which had eleven equal-weight fields and repeated five things the
+black header bar already showed:
+- A dense **fact strip** for the short identity values — style #, group, gender,
+  size range, base size, fit, drop — read across, not down a form.
+- **Empty fields fold** behind one line. They stay *enterable*: hiding an unset
+  gender outright would make it impossible to set, which is worse than clutter.
+  A pack with nothing filled opens them instead of hiding them.
+- The three fields that all sound like "what stage is this at" — Stage,
+  Production status, Sample round — are grouped **with a line saying what each
+  is for**.
+- Shrinkage is a 2×2 of self/lining × length/width instead of four full-width
+  rows.
+- Name, season and category fold away: the header bar already shows them.
+
+**The base size is a column**, not `S ·base` jammed into the header — tinted,
+bounded, with "Base" on its own line under the size. The tech pack's own POM
+table marks it too; it never did.
+
+**The order of the work, made visible.** Development specs is now the first tab
+and the default. Grading multiplies the base spec across the run, so the graded
+sheet says which step it is on: *not fitted yet* · *still in development — 1 of
+2 points in tolerance on the Proto* · *approved on the Proto, safe to grade*.
+Nothing is blocked; sometimes a rough run is needed for costing.
+
+**Grading is no longer one-shot.** It filled blanks only — right for protecting
+a hand-tuned grade, wrong the moment the base spec is revised, because then the
+whole run derives from a number that no longer exists. It now asks: regrade
+everything, or fill blanks only. Each point records the base it was graded from,
+so a later revision surfaces *"1 point was graded from an older base spec"* with
+a one-tap regrade.
+
+Recurring mistake, fourth time this session: two explanations were written as
+comments in the **patch script** rather than inside the replacement string, so
+they never reached the file. Caught by smoke79 asserting on them.
