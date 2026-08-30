@@ -657,3 +657,20 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   Switch account and sign in as info@ instead.
 - Connecting says it at that moment too, and a mismatch is a warning, not a
   success.
+
+## Build 375 — each of you sends as yourself
+- **"What if I wanted it to send from keeter@ when I'm logged in and christine@
+  when she is?"** That already worked — an empty Send-as means "whoever is
+  signed in", the one arrangement needing no alias verification on either
+  account. It was invisible: a blank box whose placeholder was a brand address,
+  which reads as "unset, should probably be info@".
+- The field now says `— whoever is signed in —`, with a button for it and one
+  for info@, and spells out both consequences: empty = each founder sends as
+  themselves (nothing to verify); a fixed address must be verified **on every
+  device**.
+- `mailSendAs` is synced, so changing it changes the other founder's device too
+  — the toast says which of the two things just happened.
+- The status chip reads `Sending as keeter@… · this device` when the address
+  follows the signer, distinguishing it from a fixed brand address.
+- The cc keeps both founders on every pull sheet regardless of who sent it, and
+  the pull records who actually did.
