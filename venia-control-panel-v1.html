@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '379';
+  const BUILD = '380';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4049,6 +4049,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <div style="display:flex;align-items:center;flex-shrink:0">
           <button class="pill active" id="tp-mode-work" onclick="setTpMode('work')">✎ Working</button>
           <button class="pill" id="tp-mode-print" onclick="setTpMode('print')">◻ Print</button>
+          <button class="btn btn-ghost btn-sm" onclick="tpImportPick()" id="tp-import-btn" style="margin-left:12px" title="Read an existing VENIA tech pack out of Google Drive — style fields and the full POM sheet, with a preview before anything is written">↑ Import from Drive</button>
           <button class="btn btn-ghost btn-sm" onclick="tpShareOpen()" id="tp-share-btn" style="margin-left:12px" title="Live read-only link for your factory — always shows the latest saved tech pack">⇱ Share</button>
           <button class="btn btn-ghost btn-sm" onclick="saveTpEdits()" id="tp-save-btn" style="display:none;margin-left:12px">↓ Save</button>
           <button class="btn btn-gold btn-sm" onclick="printTechPack()" id="tp-print-btn" style="display:none;margin-left:12px">↓ PDF</button>
@@ -15553,6 +15554,10 @@ window.drivePick = async function(opts){
     let view;
     if (opts && opts.folders){
       view = new google.picker.DocsView(google.picker.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true).setEnableDrives(true);
+    } else if (opts && opts.sheets){
+      // Importing a tech pack means picking a Sheet — showing every PDF and
+      // .ai in the season folder is just a way to pick the wrong one.
+      view = new google.picker.DocsView(google.picker.ViewId.SPREADSHEETS).setIncludeFolders(true).setEnableDrives(true);
     } else {
       view = new google.picker.DocsView().setIncludeFolders(true).setEnableDrives(true);
     }
@@ -15569,6 +15574,357 @@ window.drivePick = async function(opts){
       .setVisible(true);
   });
 };
+// ── IMPORTING A TECH PACK FROM DRIVE ─────────────────────────────────────────
+//
+// Eight years of packs live in Google Sheets — S10 Whisper on Winds alone has
+// twenty. Retyping a POM sheet by hand is how a 13 3/8 becomes a 13 3/4, so the
+// import reads the sheet directly.
+//
+// One rule runs through all of it: NEVER INVENT. A field that is not found in
+// the sheet is left empty and named in the report; a measurement that does not
+// parse is skipped and named. The preview shows exactly what will be written
+// before anything is written, because an import that quietly guesses is worse
+// than retyping — you would never know which numbers to check.
+//
+// Auth note: drive.file grants access to files the user picks in the Picker,
+// and the Sheets API honours it for exactly those files. No broader scope is
+// requested, so this cannot read anything the founders did not hand it.
+const TPI_LABELS = {
+  season:'SEASON', devStyle:'DEV STYLE', styleNo:'STYLE#', name:'STYLE NAME',
+  description:'STYLE DESCRIPTION', designer:'DESIGNER', techDesigner:'TECH DESIGNER',
+  patternmaker:'PATTERNMAKER', dateCreated:'DATE CREATED', dateRevised:'DATE REVISED',
+  stage:'STAGE', group:'GROUP', sizes:'SIZE RANGE', gender:'GENDER',
+  vendor:'FACTORY', baseSize:'BASE SIZE', prodStatus:'STATUS',
+};
+const TPI_NORM = (v) => String(v == null ? '' : v).replace(/\s+/g,' ').trim();
+const TPI_KEY  = (v) => TPI_NORM(v).toUpperCase().replace(/[:\s]+$/,'');
+
+async function sheetsGet(fileId){
+  const tok = await driveTokenSmart();
+  const meta = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(fileId) +
+    '?fields=properties.title,sheets.properties.title', { headers:{ Authorization:'Bearer '+tok } });
+  if (!meta.ok) {
+    let j={}; try{ j = await meta.json(); }catch(_){}
+    const m = String((j.error && j.error.message) || ('HTTP '+meta.status));
+    if (/has not been used|SERVICE_DISABLED|not enabled/i.test(m))
+      throw new Error('Enable the Google Sheets API for this Cloud project (APIs & Services → Library), then try again.');
+    throw new Error('Google would not open that sheet — ' + m);
+  }
+  const md = await meta.json();
+  const tabs = ((md.sheets||[]).map(x => x.properties && x.properties.title).filter(Boolean));
+  if (!tabs.length) throw new Error('That spreadsheet has no tabs to read.');
+  // One batch call: a pack has a dozen tabs and a request each would be slow
+  // enough that people stop using it.
+  const qs = tabs.map(t => 'ranges=' + encodeURIComponent("'" + t.replace(/'/g,"''") + "'")).join('&');
+  const vr = await fetch('https://sheets.googleapis.com/v4/spreadsheets/' + encodeURIComponent(fileId) +
+    '/values:batchGet?' + qs + '&majorDimension=ROWS&valueRenderOption=FORMATTED_VALUE',
+    { headers:{ Authorization:'Bearer '+tok } });
+  if (!vr.ok) throw new Error('Could not read the sheet values (HTTP ' + vr.status + ').');
+  const vj = await vr.json();
+  return { title: (md.properties && md.properties.title) || '', tabs,
+    grids: (vj.valueRanges||[]).map((r,i) => ({ tab: tabs[i], rows: r.values || [] })) };
+}
+
+// A label cell's value is the first non-empty cell to its right on the same
+// row. The packs merge cells freely, so the value can be two or six columns
+// over — but never on another row, and never before the label.
+const TPI_LABEL_SET = new Set(Object.values(TPI_LABELS).map(TPI_KEY).concat(['SHRINKAGE','LENGTH','WIDTH','SELF','LINING']));
+function tpiIsLabel(v){
+  const k = TPI_KEY(v);
+  if (!k) return false;
+  return TPI_LABEL_SET.has(k) || /:$/.test(TPI_NORM(v));
+}
+function tpiLabelValue(rows, label){
+  const want = TPI_KEY(label);
+  for (let r = 0; r < rows.length; r++){
+    const row = rows[r] || [];
+    for (let c = 0; c < row.length; c++){
+      if (TPI_KEY(row[c]) !== want) continue;
+      for (let k = c+1; k < Math.min(row.length, c+9); k++){
+        const v = TPI_NORM(row[k]);
+        if (!v) continue;
+        // The labels sit side by side across the row: STYLE DESCRIPTION: is
+        // followed by blanks and then DATE REVISED:. Scanning right for "the
+        // first non-empty cell" read the NEXT LABEL as this field's value, so
+        // an empty description imported as "DATE REVISED:". A label ends the
+        // search — an empty field is empty.
+        if (tpiIsLabel(v)) return '';
+        if (/^N\/A$/i.test(v)) return '';
+        return v;
+      }
+      return '';
+    }
+  }
+  return '';
+}
+
+// POM rows: find the header row that carries a TOL column, then read down until
+// the names run out. Works on DEVELOPMENT SPECS (spec + fit rounds) and on
+// GRADED SPECS (a column per size) because both put TOL in the same place.
+function tpiPomBlock(rows){
+  let hr = -1, tolCol = -1;
+  for (let r = 0; r < rows.length && hr < 0; r++){
+    const row = rows[r] || [];
+    for (let c = 0; c < row.length; c++){
+      if (/^TOL\b/i.test(TPI_NORM(row[c]))) { hr = r; tolCol = c; break; }
+    }
+  }
+  if (hr < 0) return null;
+  const header = (rows[hr]||[]).map(TPI_NORM);
+  const out = [];
+  for (let r = hr+1; r < rows.length; r++){
+    const row = rows[r] || [];
+    // The name is the last non-empty cell before TOL — column 0 is the row
+    // number in every VENIA pack.
+    let name = '';
+    for (let c = tolCol-1; c >= 0; c--){
+      const v = TPI_NORM(row[c]);
+      if (v && !/^\d+$/.test(v) && !/^N\/A$/i.test(v)) { name = v; break; }
+    }
+    if (!name) { if (out.length) break; else continue; }
+    if (/^(ALL MESUREMENTS|ALL MEASUREMENTS|POINTS? OF MEASUREMENT)/i.test(name)) continue;
+    out.push({ name, tol: TPI_NORM(row[tolCol]), cells: row.map(TPI_NORM), header, tolCol });
+  }
+  return out.length ? { headerRow: hr, tolCol, header, points: out } : null;
+}
+
+window.tpImportPick = async function(){
+  let doc;
+  try {
+    doc = await drivePick({ sheets: true });
+  } catch(e){ showToast('Could not open the picker — ' + (e.message||e), 'error'); return; }
+  if (!doc) return;
+  showToast('Reading “' + (doc.name||'sheet') + '”…', 'info');
+  let pack;
+  try { pack = await sheetsGet(doc.id); }
+  catch(e){ showToast(String(e.message||e), 'error'); return; }
+  const parsed = tpImportParse(pack, doc);
+  tpImportPreview(parsed);
+};
+
+function tpImportParse(pack, doc){
+  const all = pack.grids;
+  const style = {}, found = {}, missing = [];
+  Object.entries(TPI_LABELS).forEach(([key,label]) => {
+    let v = '';
+    for (const g of all){ v = tpiLabelValue(g.rows, label); if (v) break; }
+    if (v) { style[key] = v; found[key] = v; } else missing.push(label);
+  });
+  // Shrinkage sits in its own little 2x2 under the SHRINKAGE: label, so it is
+  // read by position relative to that label rather than by a label of its own.
+  const shrink = {};
+  for (const g of all){
+    for (let r = 0; r < g.rows.length; r++){
+      const row = g.rows[r] || [];
+      for (let c = 0; c < row.length; c++){
+        if (TPI_KEY(row[c]) !== 'SHRINKAGE') continue;
+        const selfRow = g.rows[r+1] || [], linRow = g.rows[r+2] || [];
+        const pct = (x) => { const n = parseFloat(String(x||'').replace('%','')); return isNaN(n) ? '' : n; };
+        if (TPI_KEY(selfRow[c]) === 'SELF'){ shrink.shrinkSelfL = pct(selfRow[c+1]); shrink.shrinkSelfW = pct(selfRow[c+2]); }
+        if (TPI_KEY(linRow[c]) === 'LINING'){ shrink.shrinkLinL = pct(linRow[c+1]); shrink.shrinkLinW = pct(linRow[c+2]); }
+      }
+    }
+  }
+  Object.entries(shrink).forEach(([k,v]) => { if (v !== '') style[k] = v; });
+
+  // POM: prefer the block with the most size columns (the graded sheet), since
+  // that is the one that fills a size run. Fall back to the development sheet,
+  // which at least carries the point names and tolerances.
+  // Which block to take: the one that fills a SIZE RUN, not the one with the
+  // most rows. The development sheet is longer (it carries every fit round)
+  // but only holds one column of numbers; the graded sheet is what a factory
+  // cuts from. Ranked by named size columns first, row count only as a
+  // tie-break — picking by length alone chose the wrong sheet every time.
+  const SIZE_WORDS = /^(XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|\d{1,2})$/i;
+  const sizeScore = (b) => b.header.filter((h,i) => i > b.tolCol && SIZE_WORDS.test(TPI_KEY(h))).length;
+  let best = null, bestTab = '', bestScore = [-1,-1], skipped = [];
+  all.forEach(g => {
+    const b = tpiPomBlock(g.rows);
+    if (!b) return;
+    const sc = [sizeScore(b), b.points.length];
+    if (sc[0] > bestScore[0] || (sc[0] === bestScore[0] && sc[1] > bestScore[1])) {
+      best = b; bestTab = g.tab; bestScore = sc;
+    }
+  });
+  const pom = [];
+  if (best){
+    // Which header columns are sizes? Anything after TOL that names a size, or
+    // the INITIAL/REVISED/FINAL SPEC columns on a development sheet.
+    const sizeCols = [];
+    best.header.forEach((h,i) => {
+      if (i <= best.tolCol) return;
+      const k = TPI_KEY(h);
+      if (!k || k === 'DIFF' || /^\d+(ST|ND|RD|TH)$/.test(k)) return;
+      sizeCols.push({ i, label: h });
+    });
+    best.points.forEach(p => {
+      const tol = measParse(p.tol);
+      const row = { point: p.name, comment: '' };
+      if (!isNaN(tol)) row.tol = tol;
+      let anyVal = false;
+      sizeCols.forEach(sc => {
+        const raw = p.cells[sc.i];
+        if (!raw) return;
+        const n = measParse(raw);
+        if (isNaN(n)) { if (String(raw).trim()) skipped.push(p.name + ' · ' + sc.label + ' = "' + raw + '"'); return; }
+        row['__' + sc.label] = n; anyVal = true;
+      });
+      row.__cols = sizeCols.map(sc => sc.label);
+      row.__any = anyVal;
+      pom.push(row);
+    });
+  }
+  return { doc, pack, style, found, missing, pom, pomTab: bestTab, skipped,
+    sizeCols: best ? best.header.filter((h,i)=>i>best.tolCol && TPI_NORM(h)) : [] };
+}
+
+// THE PREVIEW IS THE POINT. An import that writes first and reports after is
+// one you have to audit against the original sheet anyway — which is the work
+// you were trying to avoid. Nothing is written until this is confirmed, and it
+// shows what was NOT found as prominently as what was.
+function tpImportPreview(P){
+  window.__tpImport = P;
+  const sizeCols = P.pom.length ? (P.pom[0].__cols || []) : [];
+  const rowsHtml = P.pom.slice(0, 12).map(r => `<tr>
+      <td style="padding:4px 8px;border-bottom:1px solid var(--border);font-size:10px">${String(r.point).replace(/</g,'&lt;')}</td>
+      <td style="padding:4px 8px;border-bottom:1px solid var(--border);font-family:'DM Mono',monospace;font-size:10px;text-align:center">${r.tol!=null?measFmt(r.tol):'—'}</td>
+      ${sizeCols.map(c=>`<td style="padding:4px 8px;border-bottom:1px solid var(--border);font-family:'DM Mono',monospace;font-size:10px;text-align:center">${r['__'+c]!=null?measFmt(r['__'+c]):'—'}</td>`).join('')}
+    </tr>`).join('');
+  const fieldRow = (k,v) => `<div style="display:flex;gap:10px;padding:3px 0;font-size:11px"><span style="width:120px;color:var(--muted);flex-shrink:0">${k}</span><span style="color:var(--ink)">${String(v).replace(/</g,'&lt;')}</span></div>`;
+  const body = `
+    <div style="padding:16px 18px">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:14px">
+        From <strong style="color:var(--ink)">${String(P.doc.name||'').replace(/</g,'&lt;')}</strong>
+        · ${P.pack.tabs.length} tab${P.pack.tabs.length===1?'':'s'} read${P.pomTab?` · measurements from “${String(P.pomTab).replace(/</g,'&lt;')}”`:''}
+      </div>
+
+      <div class="tp-subhead">Style</div>
+      <div style="margin-bottom:16px">
+        ${Object.keys(P.found).length ? Object.entries(P.found).map(([k,v])=>fieldRow(TPI_LABELS[k]||k, v)).join('') 
+          : '<div style="font-size:11px;color:var(--amber)">No style fields recognised — this may not be a VENIA tech pack.</div>'}
+        ${['shrinkSelfL','shrinkSelfW','shrinkLinL','shrinkLinW'].some(k=>P.style[k]!=null&&P.style[k]!=='')
+          ? fieldRow('SHRINKAGE', `self ${P.style.shrinkSelfL||0}% / ${P.style.shrinkSelfW||0}% · lining ${P.style.shrinkLinL||0}% / ${P.style.shrinkLinW||0}%`) : ''}
+      </div>
+
+      <div class="tp-subhead">Measurements — ${P.pom.length} point${P.pom.length===1?'':'s'}</div>
+      ${P.pom.length ? `<div style="overflow-x:auto;border:1px solid var(--border);margin-bottom:6px">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="background:var(--bg-off)">
+            <th style="padding:5px 8px;text-align:left;font-size:9px;letter-spacing:1px;text-transform:uppercase">Point</th>
+            <th style="padding:5px 8px;font-size:9px;letter-spacing:1px;text-transform:uppercase">Tol</th>
+            ${sizeCols.map(c=>`<th style="padding:5px 8px;font-size:9px;letter-spacing:1px;text-transform:uppercase">${String(c).replace(/</g,'&lt;')}</th>`).join('')}
+          </tr></thead><tbody>${rowsHtml}</tbody></table></div>
+        ${P.pom.length>12?`<div style="font-size:10px;color:var(--muted);margin-bottom:12px">…and ${P.pom.length-12} more</div>`:'<div style="margin-bottom:12px"></div>'}`
+        : '<div style="font-size:11px;color:var(--amber);margin-bottom:14px">No measurement block found. The style fields above can still be imported.</div>'}
+
+      ${P.skipped.length ? `<div style="border:1px solid var(--amber);background:var(--amber-dim);padding:10px 12px;margin-bottom:14px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--ink);margin-bottom:5px">${P.skipped.length} value${P.skipped.length===1?'':'s'} not imported</div>
+        <div style="font-size:10px;color:var(--ink);line-height:1.6">${P.skipped.slice(0,8).map(x=>String(x).replace(/</g,'&lt;')).join('<br>')}${P.skipped.length>8?`<br>…and ${P.skipped.length-8} more`:''}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px">These cells are not measurements the app can read. They are left empty rather than guessed — check them against the sheet.</div>
+      </div>` : ''}
+
+      ${P.missing.length ? `<div style="border:1px solid var(--border);padding:10px 12px;margin-bottom:14px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:5px">Blank in the sheet — left blank here</div>
+        <div style="font-size:10px;color:var(--muted)">${P.missing.join(' · ')}</div>
+      </div>` : ''}
+
+      <div class="tp-subhead">Where it lands</div>
+      <div style="margin-bottom:14px">
+        <select id="tpi-target" class="tpi" style="width:100%">
+          <option value="">Create a new style</option>
+          ${(STATE.styles||[]).map(x=>`<option value="${x.id}">Merge into ${String(x.name||x.styleId||x.id).replace(/</g,'&lt;')}</option>`).join('')}
+        </select>
+        <div style="font-size:10px;color:var(--muted);margin-top:5px">Merging fills only the fields this style has left empty — nothing you have already entered is overwritten. Measurement points are matched by name; a point already on the sheet keeps its values.</div>
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('tp-import-modal')">Cancel</button>
+        <button class="btn btn-gold btn-sm" onclick="tpImportApply()">Import${P.pom.length?` ${P.pom.length} point${P.pom.length===1?'':'s'}`:''}</button>
+      </div>
+    </div>`;
+  let m = document.getElementById('tp-import-modal');
+  if (!m){
+    m = document.createElement('div'); m.id='tp-import-modal'; m.className='overlay';
+    m.innerHTML = `<div class="modal modal-lg"><div class="modal-head">
+      <div class="modal-title">Import tech pack</div>
+      <button class="modal-close" aria-label="Close" onclick="closeModal('tp-import-modal')">✕</button>
+      </div><div class="modal-body" id="tp-import-body"></div></div>`;
+    document.body.appendChild(m);
+  }
+  document.getElementById('tp-import-body').innerHTML = body;
+  openModal('tp-import-modal');
+}
+
+window.tpImportApply = function(){
+  const P = window.__tpImport; if (!P) return;
+  const targetId = (document.getElementById('tpi-target')||{}).value || '';
+  const SIZE_KEYS = ['xs','s','m','l','xl','xxl','xxxl'];
+  // Only the app's own fields are written. devStyle/styleNo and stage/status
+  // are the sheet's two-level pair; the app keeps its own coarse lifecycle in
+  // `status`, so the sheet's fine STATUS lands in prodStatus where it belongs.
+  const map = {
+    name:'name', season:'season', devStyle:'devStyle', description:'description',
+    designer:'designer', techDesigner:'techDesigner', patternmaker:'patternmaker',
+    dateCreated:'dateCreated', dateRevised:'dateRevised', group:'group',
+    sizes:'sizes', gender:'gender', vendor:'vendor', baseSize:'baseSize',
+    prodStatus:'prodStatus',
+    shrinkSelfL:'shrinkSelfL', shrinkSelfW:'shrinkSelfW', shrinkLinL:'shrinkLinL', shrinkLinW:'shrinkLinW',
+  };
+  let st, created = false, filled = 0, kept = 0;
+  if (targetId){
+    st = (STATE.styles||[]).find(x=>x.id===targetId);
+    if (!st) { showToast('That style is gone — pick another target','error'); return; }
+  } else {
+    st = { id:'STY'+Date.now(), status:'design', notes:[], colors:'', retail:0 };
+    created = true;
+  }
+  Object.entries(map).forEach(([src,dst])=>{
+    const v = P.style[src];
+    if (v === undefined || v === '' || v === null) return;
+    const cur = st[dst];
+    // Merging never overwrites. An import that silently replaced a value you
+    // typed would make every field suspect afterwards.
+    if (!created && cur !== undefined && cur !== null && String(cur).trim() !== '') { kept++; return; }
+    st[dst] = v; filled++;
+  });
+  if (!st.styleId && (P.style.styleNo || P.style.devStyle)) st.styleId = P.style.styleNo || P.style.devStyle;
+  if (!st.name) st.name = P.style.name || (P.doc && P.doc.name) || 'Imported style';
+  if (created) STATE.styles.unshift(st);
+
+  // Measurements. Sizes are matched to the app's own size keys where the sheet
+  // names a size; a development sheet's INITIAL SPEC column seeds the base size
+  // instead, since that is what it is.
+  let added = 0, merged = 0, cells = 0;
+  if (P.pom.length){
+    if (!STATE.pom) STATE.pom = {};
+    if (!STATE.pom[st.id]) STATE.pom[st.id] = [];
+    const sheet = STATE.pom[st.id];
+    const baseK = (function(){ const b = String(st.baseSize||'').toLowerCase().trim();
+      return SIZE_KEYS.includes(b) ? b : 'm'; })();
+    P.pom.forEach(r => {
+      const key = String(r.point).toLowerCase().replace(/\s+/g,' ').trim();
+      let row = sheet.find(x => String(x.point).toLowerCase().replace(/\s+/g,' ').trim() === key);
+      if (!row){ row = { id:'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point:r.point, comment:'' };
+        sheet.push(row); added++; } else merged++;
+      if (row.tol == null || row.tol === '') { if (r.tol != null) row.tol = r.tol; }
+      (r.__cols||[]).forEach(c => {
+        const v = r['__'+c]; if (v == null) return;
+        const ck = String(c).toLowerCase().replace(/[^a-z0-9]/g,'');
+        let dst = SIZE_KEYS.includes(ck) ? ck : null;
+        if (!dst && /^(initalspec|initialspec|revisedspec|finalspec|basesize)$/.test(ck)) dst = baseK;
+        if (!dst) return;
+        if (row[dst] !== undefined && row[dst] !== null && row[dst] !== '') return;  // never overwrite
+        row[dst] = v; cells++;
+      });
+    });
+  }
+  save(); buildSkus(); populateStyleSelects();
+  closeModal('tp-import-modal');
+  logActivity(`Tech pack imported: ${st.name} — ${added} new measurement points, ${cells} values`);
+  showToast(`✓ ${created?'Created':'Merged into'} ${st.name} — ${filled} field${filled===1?'':'s'}, ${added} new point${added===1?'':'s'}, ${cells} measurement${cells===1?'':'s'}${kept?` · ${kept} existing field${kept===1?'':'s'} kept`:''}`, 'success');
+  try { goTo('techpack', document.querySelector('[data-page=techpack]')); renderTechPack(st.id); } catch(e){}
+};
+
 window.driveChooseFolder = async function(){
   try {
     const doc = await window.drivePick({ folders: true });

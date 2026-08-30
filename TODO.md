@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 379._
+_Last reviewed at Build 380._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -848,3 +848,39 @@ Still to come (Build 380): importing previous styles from the Drive packs.
 
 Invariant: **the unit label on a spec is never allowed to be wrong, and a
 measurement must survive being typed the way the house writes it.**
+
+## Build 380 — importing the eight years already in Drive
+Retyping a POM sheet by hand is exactly how a 13 3/8 becomes a 13 3/4, so
+`↑ Import from Drive` on the tech pack reads the sheet instead.
+
+- Picks a **spreadsheet** (not every PDF and `.ai` in the season folder), reads
+  every tab in one `values:batchGet`, and works on the **`drive.file`** scope the
+  app already holds — which Google grants only for files picked in the Picker,
+  so the import cannot read anything the founders did not hand it.
+- **Nothing is invented.** A field absent from the sheet is left empty and named
+  in the report; a cell that is not a measurement (`TBD`, `SEE PHOTO`) is skipped
+  and named. An import that quietly guesses is worse than retyping — you would
+  never know which numbers to check.
+- **The preview comes before the write.** It shows the style fields found, the
+  measurements as house fractions, the values it could not read, and the fields
+  that were blank, then asks where it should land.
+- **Merging never overwrites.** A field or a measurement you already entered is
+  kept, and the result says how many it left alone.
+
+Two bugs the test caught before this shipped, both from real sheet shape:
+- **A blank field imported the next label as its value.** The labels sit side by
+  side across the row — `STYLE DESCRIPTION:` then blanks then `DATE REVISED:` —
+  and scanning right for "the first non-empty cell" grabbed the wrong one. The
+  scan now stops at a label.
+- **It read the wrong tab.** Ranking blocks by row count picked DEVELOPMENT
+  SPECS (longer, one column of numbers) over GRADED SPECS (the size run a
+  factory cuts from). Ranked by named size columns first now.
+
+Mapping: the sheet's fine `STATUS` → `prodStatus`, never over the app's own
+coarse lifecycle; shrinkage → four numbers; size columns → the app's size keys;
+a development sheet's INITIAL/REVISED/FINAL SPEC column seeds the base size,
+since that is what it is.
+
+Not yet imported: BOM fabric/trim/wash rows, the cost sheet, pattern card pieces
+and fit-comment sessions. The sheet has them; the app models most of them
+already, so this is extension rather than new ground.
