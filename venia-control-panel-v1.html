@@ -1836,7 +1836,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '382';
+  const BUILD = '383';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4100,7 +4100,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <div style="display:flex;align-items:center;flex-shrink:0">
           <button class="pill active" id="tp-mode-work" onclick="setTpMode('work')">✎ Working</button>
           <button class="pill" id="tp-mode-print" onclick="setTpMode('print')">◻ Print</button>
-          <button class="btn btn-ghost btn-sm" onclick="tpImportPick()" id="tp-import-btn" style="margin-left:12px" title="Read an existing VENIA tech pack out of Google Drive — style fields and the full POM sheet, with a preview before anything is written">↑ Import from Drive</button>
+          <button class="btn btn-ghost btn-sm" onclick="tpImportPickAny()" id="tp-import-btn" style="margin-left:12px" title="Read an existing VENIA tech pack — a Sheet or a PDF, from Drive or this device. Preview before anything is written.">↑ Import pack</button>
           <button class="btn btn-ghost btn-sm" onclick="tpShareOpen()" id="tp-share-btn" style="margin-left:12px" title="Live read-only link for your factory — always shows the latest saved tech pack">⇱ Share</button>
           <button class="btn btn-ghost btn-sm" onclick="saveTpEdits()" id="tp-save-btn" style="display:none;margin-left:12px">↓ Save</button>
           <button class="btn btn-gold btn-sm" onclick="printTechPack()" id="tp-print-btn" style="display:none;margin-left:12px">↓ PDF</button>
@@ -15985,6 +15985,10 @@ window.drivePick = async function(opts){
     let view;
     if (opts && opts.folders){
       view = new google.picker.DocsView(google.picker.ViewId.FOLDERS).setIncludeFolders(true).setSelectFolderEnabled(true).setEnableDrives(true);
+    } else if (opts && opts.packs){
+      // Sheets AND PDFs — half the archive is one, half the other.
+      view = new google.picker.DocsView().setIncludeFolders(true).setEnableDrives(true)
+        .setMimeTypes('application/vnd.google-apps.spreadsheet,application/pdf');
     } else if (opts && opts.sheets){
       // Importing a tech pack means picking a Sheet — showing every PDF and
       // .ai in the season folder is just a way to pick the wrong one.
@@ -16118,6 +16122,180 @@ function tpiPomBlock(rows){
   }
   return out.length ? { headerRow: hr, tolCol, header, points: out } : null;
 }
+
+// ── IMPORTING A TECH PACK FROM A PDF ─────────────────────────────────────────
+//
+// Half the packs in Drive are PDFs — ISOLDE 3RD PP, ZEPHYRUS, FLIP WATERFALL —
+// exported from the sheet and never coming back as a sheet. A PDF has no cells,
+// so the layout has to be READ rather than addressed, and that is a job for the
+// model already wired into this app.
+//
+// Which raises the obvious risk: a model asked to pull numbers out of a
+// document will, occasionally, produce a number that is not in the document.
+// On a spec sheet that is the worst possible failure — a plausible 13 1/2 that
+// nobody typed. So NOTHING the model returns is trusted on its own: every
+// measurement must appear VERBATIM in the extracted text, or it is dropped and
+// named in the report. The check is mechanical, not a matter of prompting.
+let _pdfjsLoaded = null;
+function loadPdfJs(){
+  if (_pdfjsLoaded) return _pdfjsLoaded;
+  _pdfjsLoaded = new Promise((resolve, reject) => {
+    if (window.pdfjsLib) return resolve(window.pdfjsLib);
+    const sc = document.createElement('script');
+    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    sc.onload = () => {
+      try { window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'; } catch(e){}
+      resolve(window.pdfjsLib);
+    };
+    sc.onerror = () => { _pdfjsLoaded = null; reject(new Error('Could not load the PDF reader.')); };
+    document.head.appendChild(sc);
+  });
+  return _pdfjsLoaded;
+}
+async function pdfExtractText(buf, onPage){
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let i = 1; i <= doc.numPages; i++){
+    if (onPage) onPage(i, doc.numPages);
+    const pg = await doc.getPage(i);
+    const tc = await pg.getTextContent();
+    // Rebuild rough lines from item positions: a tech pack is a table, and
+    // concatenating every fragment into one stream loses which value belongs to
+    // which point.
+    const rows = {};
+    tc.items.forEach(it => {
+      const y = Math.round((it.transform && it.transform[5]) || 0);
+      (rows[y] = rows[y] || []).push({ x: (it.transform && it.transform[4]) || 0, t: it.str });
+    });
+    const lines = Object.keys(rows).sort((a,b) => b - a)
+      .map(y => rows[y].sort((a,b) => a.x - b.x).map(o => o.t).join(' ').replace(/\s+/g,' ').trim())
+      .filter(Boolean);
+    pages.push(lines.join('\n'));
+  }
+  return pages.join('\n\n');
+}
+
+// A measurement is only accepted if the document actually contains it. Both the
+// text and the value are normalised first, because a PDF may write 13 3/8,
+// 13-3/8, 13 3/8" or the ligature ⅜ for the same number.
+const PDF_FRAC = { '¼':'1/4','½':'1/2','¾':'3/4','⅛':'1/8','⅜':'3/8','⅝':'5/8','⅞':'7/8','⅓':'1/3','⅔':'2/3','⅙':'1/6','⅚':'5/6','⅕':'1/5' };
+function pdfNormText(t){
+  return String(t||'').replace(/[¼½¾⅛⅜⅝⅞⅓⅔⅙⅚⅕]/g, m => ' ' + PDF_FRAC[m])
+    .replace(/[""''″’]/g,'').replace(/[–—]/g,'-').replace(/\s+/g,' ').toUpperCase();
+}
+function pdfHasValue(normText, n){
+  if (!isFinite(n)) return false;
+  const forms = new Set();
+  const f = measFmt(n);                                   // "13 3/8"
+  forms.add(f); forms.add(f.replace(' ','-'));            // "13-3/8"
+  forms.add(String(n));                                   // "13.375"
+  forms.add(String(Math.round(n*1000)/1000));
+  if (Number.isInteger(n)) { forms.add(String(n) + '.0'); forms.add(String(n) + '.00'); }
+  for (const v of forms){ if (v && normText.includes(pdfNormText(v))) return true; }
+  return false;
+}
+
+window.tpImportPdf = async function(file, driveDoc){
+  const name = (driveDoc && driveDoc.name) || (file && file.name) || 'tech pack.pdf';
+  showToast('Reading “' + name + '”…', 'info');
+  let text;
+  try {
+    let buf;
+    if (file) buf = await file.arrayBuffer();
+    else {
+      const tok = await driveTokenSmart();
+      const r = await fetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(driveDoc.id) + '?alt=media&supportsAllDrives=true',
+        { headers: { Authorization: 'Bearer ' + tok } });
+      if (!r.ok) throw new Error('Google would not hand over that file (HTTP ' + r.status + ').');
+      buf = await r.arrayBuffer();
+    }
+    text = await pdfExtractText(buf, (i,n) => { if (i % 3 === 1) showToast('Reading page ' + i + ' of ' + n + '…','info'); });
+  } catch(e){ showToast(String(e.message || e), 'error'); return; }
+
+  if (!String(text||'').trim()){
+    showToast('That PDF has no readable text — it is probably a scan. A scan would have to be re-typed; the app will not guess at pixels.', 'warning');
+    return;
+  }
+  showToast('Reading the pack…', 'info');
+  const sys = 'You extract data from garment tech packs. Reply with ONLY a JSON object, no prose and no code fence. '
+    + 'Schema: {"style":{"name":"","devStyle":"","season":"","group":"","gender":"","sizes":"","baseSize":"","designer":"","techDesigner":"","patternmaker":"","vendor":"","prodStatus":"","dateCreated":"","dateRevised":""},'
+    + '"pom":[{"point":"","tol":"","values":{"<COLUMN LABEL>":"<measurement as written>"}}]}. '
+    + 'COPY values EXACTLY as they appear in the document — keep fractions as fractions ("13 3/8", "1/8"). '
+    + 'NEVER calculate, convert, round or infer a value. If a field is absent, use "". '
+    + 'If a measurement cell is empty or unreadable, omit that key entirely. Do not invent points that are not listed.';
+  let raw;
+  try { raw = await callClaude(sys, 'Tech pack text:\n\n' + String(text).slice(0, 60000)); }
+  catch(e){ showToast('Could not read the pack — ' + (e.message||e), 'error'); return; }
+  let data;
+  try {
+    const m = String(raw).match(/\{[\s\S]*\}/);
+    data = JSON.parse(m ? m[0] : raw);
+  } catch(e){ showToast('The pack came back in a shape the app could not read. Try the spreadsheet version if there is one.', 'error'); return; }
+
+  // ── THE VERIFICATION PASS. Everything above this line is a suggestion.
+  const norm = pdfNormText(text);
+  const style = {}, found = {}, missing = [], skipped = [];
+  Object.entries(TPI_LABELS).forEach(([key,label]) => {
+    const v = String((data.style||{})[key] || '').trim();
+    if (!v) { missing.push(label); return; }
+    // A text field must appear in the document too — the same rule, so a
+    // confidently invented designer name cannot get in either.
+    if (!norm.includes(pdfNormText(v))) { skipped.push(label + ' = "' + v + '" (not found in the PDF)'); missing.push(label); return; }
+    style[key] = v; found[key] = v;
+  });
+  const cols = [];
+  (data.pom||[]).forEach(r => Object.keys(r.values||{}).forEach(c => { if (!cols.includes(c)) cols.push(c); }));
+  const pom = [];
+  (data.pom||[]).forEach(r => {
+    const point = String(r.point||'').trim();
+    if (!point) return;
+    if (!norm.includes(pdfNormText(point).slice(0, 40))) { skipped.push('point "' + point + '" (not found in the PDF)'); return; }
+    const row = { point, comment: '' };
+    const tol = measParse(r.tol);
+    if (!isNaN(tol) && pdfHasValue(norm, tol)) row.tol = tol;
+    let any = false;
+    cols.forEach(c => {
+      const rawV = (r.values||{})[c];
+      if (rawV === undefined || rawV === null || String(rawV).trim() === '') return;
+      const n = measParse(rawV);
+      if (isNaN(n)) { skipped.push(point + ' · ' + c + ' = "' + rawV + '" (not a measurement)'); return; }
+      if (!pdfHasValue(norm, n)) { skipped.push(point + ' · ' + c + ' = "' + rawV + '" (not found in the PDF)'); return; }
+      row['__' + c] = n; any = true;
+    });
+    row.__cols = cols; row.__any = any;
+    pom.push(row);
+  });
+  tpImportPreview({ doc: { id: (driveDoc&&driveDoc.id)||'', name },
+    pack: { tabs: ['PDF'], grids: [] }, style, found, missing, pom,
+    pomTab: 'the PDF', skipped, sizeCols: cols, fromPdf: true });
+};
+
+// One button, two kinds of file. Which one it is decides how it is read; the
+// preview and the merge are the same either way.
+window.tpImportPickAny = async function(){
+  const how = prompt('Import a tech pack from:\n\n1 — Google Drive (Sheet or PDF)\n2 — a PDF on this device\n\nType 1 or 2:', '1');
+  if (how === null) return;
+  if (String(how).trim() === '2'){
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.accept = 'application/pdf,.pdf';
+    inp.onchange = () => { const f = inp.files && inp.files[0]; if (f) tpImportPdf(f, null); };
+    inp.click();
+    return;
+  }
+  let doc;
+  try { doc = await drivePick({ packs: true }); }
+  catch(e){ showToast('Could not open the picker — ' + (e.message||e), 'error'); return; }
+  if (!doc) return;
+  const mt = String(doc.mimeType || '');
+  if (/pdf/i.test(mt) || /\.pdf$/i.test(String(doc.name||''))) return tpImportPdf(null, doc);
+  showToast('Reading “' + (doc.name||'sheet') + '”…', 'info');
+  let pack;
+  try { pack = await sheetsGet(doc.id); }
+  catch(e){ showToast(String(e.message||e), 'error'); return; }
+  tpImportPreview(tpImportParse(pack, doc));
+};
 
 window.tpImportPick = async function(){
   let doc;
