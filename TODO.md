@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 387._
+_Last reviewed at Build 388._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1189,3 +1189,44 @@ cost."*
 Seventh time this session: an explanation written as a comment in the patch
 script rather than inside the replacement string. Every one has been caught by a
 smoke assertion, which is the only reason the count is knowable.
+
+## Build 388 — one pricing model, kept in sync both ways
+*"The cost sheet should be correct, however if I adjust margins and cost in the
+style view, it should still be in sync and vice versa … we can get confirmation
+popup as well."* And: *"when the Update popup shows and I hit update, it says
+updating but never changes or refreshes."*
+
+**There were two pricing models and they disagreed.** The Cost Sheets page
+computed wholesale at landed × 1.45 (a 31% margin); the tech pack used the
+template's 60% markup (× 2.5). The same cost produced two different prices
+depending on which screen you were standing on.
+
+The line settles it. RILEY PANT: landed $58, wholesale $146 — ×2.52. DEAR
+SINCERELY TEE: $20 → $50 — ×2.5. Retail is wholesale × 2.5 in both. The ×1.45
+was simply wrong for this house, and its own comment claimed it *"matches the
+catalog"*. It is gone; markup is a margin percentage, **per style**, stored on
+the cost sheet, and every surface reads it from there. ISOLDE sitting at 71% is a
+decision about one garment, not a second model.
+
+**Sync, in both directions, and nothing moves unasked.** The cost sheet is the
+model; the style carries the prices actually quoted. They are allowed to differ —
+but never to drift apart without someone deciding that.
+
+- **Cost changes** → the popup states the new cost, the prices the markup
+  implies, and what the style says now, noting when those prices came from the
+  old cost. Declining says plainly that the sheet and the style now differ.
+- **A price typed on the style** → it works out the markup that price implies
+  (*"$300 on a cost of $90 is a 70% markup; the sheet says 60%"*) and offers to
+  store it. Declining says the sheet no longer describes the style.
+- A wholesale at or below cost has no markup to store, so it is refused and said
+  rather than written as nonsense.
+- An unpriced style is simply priced — nothing to disturb, no question.
+- Every surface is wired: the tech pack's cost fields, its labour lines, Save on
+  the Cost Sheets page, the margin fields now on that page, and the style editor.
+
+**The Update button.** It said *"Updating…"* and then nothing happened. The
+reload was deferred until the page was backgrounded — right for an automatic
+swap, since nobody wants the page pulled out from under them mid-PO, but wrong
+when the founder has just pressed Update and is watching the button. It now
+reloads as soon as the new worker takes control, and reloads anyway after 3.5s if
+it never does, behind one shared guard so it cannot reload twice.
