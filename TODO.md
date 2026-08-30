@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 359._
+_Last reviewed at Build 376._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -674,3 +674,43 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   follows the signer, distinguishing it from a fixed brand address.
 - The cc keeps both founders on every pull sheet regardless of who sent it, and
   the pull records who actually did.
+
+## Build 376 — "it still says unpaid but Stripe reported that it was"
+Three separate faults, all of them in the same direction: the app treating its
+own old note as the fact.
+
+- **The form did not own the whole pull, but it overwrote it.**
+  `prBuildPullObj` rebuilds a pull from the fields on screen, and both
+  `prSaveDraft` and `prFinalizePull` assigned that object straight over the
+  stored record. Everything the form has no input for — `payment`, `signature`,
+  `emailedAt/From/Cc/Via/Asked` — was discarded on **any** edit, and
+  `createdAt` was reset to today, changing the date printed on the sheet.
+  Supabase confirmed it before anything was changed: both real pulls had
+  `payment: null`. Fixed with `prMergePull(prev, next)` — the stored record is
+  the base, the form is the overlay, and `createdAt` is never rewritten. Both
+  save paths go through it; one alone would have left the bug half-fixed.
+- **Nothing ever asked Stripe again.** The app wrote `invoiced` once and
+  believed itself forever. `prInvoiceCheck(pullId, quiet)` reads the invoice
+  back and maps Stripe's own words (paid / open / void / uncollectible),
+  recording `paidAt`, `amountPaid`, `amountRemaining` and `checkedAt`. It runs
+  quietly when a pull is opened — but only while there is still something to
+  find out — and by hand from a `↻ Check Stripe` button; `Open invoice` goes to
+  the hosted invoice. A Stripe error leaves the stored status alone rather than
+  guessing. The banner now names its source (`confirmed by Stripe`), shows the
+  balance Stripe reports, distinguishes a voided invoice and a write-off from
+  merely unpaid, and stamps when it last asked, so the number has an age.
+  The `invoice_status` action already existed server-side from the wholesale AR
+  work — the browser had simply never called it.
+- **Re-opening a pull dropped the fee and the terms.** `openPrCart` restored the
+  text inputs and nothing else, so editing a pull to fix a typo re-saved it with
+  fee type `none`, `$0`, and every term unticked — after which the signature
+  correctly reported that the terms had changed since signing, which was
+  entirely our doing. Found by testing this build's own fix, not by a report.
+  The radio, the matching amount field and all four term checkboxes are now
+  restored, and `prBuildPullObj` stores `feePct` — the **rate**, not just the
+  dollars it produced — with older pulls falling back to deriving it from the
+  retail it was taken on rather than to zero.
+
+Invariant, again: **a status that records what we did is not a status that
+records what happened.** Anything reporting money must either have asked the
+source or say when it last did.
