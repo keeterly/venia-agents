@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 384._
+_Last reviewed at Build 385._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1064,3 +1064,46 @@ Test note: `addInitScript` runs on **every** navigation, so clearing storage in
 it wiped the very persistence the reload assertion was testing. And headless
 Chromium reports `visibilityState: 'visible'` however many pages are opened over
 a page, so the hidden state has to be driven directly.
+
+## Build 385 — the cost sheet actually costs
+*"The Cost Sheet section doesn't have any way of actually costing. Cost sheets
+normally derive their cost from all aspects of the garment."* And: *"Vendor
+Factory doesn't even use my factories."*
+
+Both true. ⑧ Costing was **COGS, Wholesale and Retail as three numbers you
+typed**, with nothing behind them and nothing connecting them to the BOM sitting
+four sections above. You could put $48 in the COGS box for a style whose fabric
+alone came to $62 and the pack would agree with you.
+
+- **Materials come from the BOM**, itemised — each material named with its
+  quantity, waste allowance, unit cost and extension, through the same
+  `bomExt` the BOM page uses. No BOM says *"No BOM yet"* and points at where to
+  build one, rather than costing it as zero.
+- **Labour is the operations** — cutting, sewing, dyeing, grading, marking, the
+  list the factory quotes against — each with its contractor and price.
+- Overhead, duties and freight roll in. **Total cost is the style's COGS**, and
+  writing it there means every margin, the dashboard and the P&L agree with the
+  sheet. It never zeroes a hand-entered figure.
+- **Derived vs typed is visible and reversible.** Typing over the material cost
+  is allowed and detaches it, and the sheet says so — *"a typed figure of
+  $62.00, not the BOM's $33.32"* — with one tap to follow the BOM again. A
+  number with no visible source means something different from one with.
+- **Pricing is computed, not imposed.** Markup (a margin — 60% means cost is 40%
+  of wholesale, ×2.5) and a retail multiplier, both the template's own defaults.
+  The calculated wholesale and retail sit beside the style's actual ones so the
+  gap is visible, and are applied only by pressing *Use these prices*.
+- **Factory now reads the Vendors library** — the ones typed as factories,
+  falling back to every vendor rather than offering nothing, and saying plainly
+  when the library is empty.
+- **One store.** The tech pack writes the same `venia-cost-sheets` record the
+  Cost Sheets page reads; two places computing a cost differently is how a style
+  ends up with two costs.
+
+A collision worth recording: the Cost Sheets page already owns
+`csLaborAdd/Set/Del` on `window` and defines them **later** in the file, so the
+tech pack's identically-named handlers were silently overwritten and its labour
+rows went nowhere. Renamed `tpCostLabor*`. The browser test caught it — the
+material total was right and the labour total was stubbornly zero.
+
+Fifth time this session: an explanation written as a comment in the patch script
+rather than in the replacement string. smoke82 asserts on it.
