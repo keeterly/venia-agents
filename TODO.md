@@ -630,3 +630,18 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   does nothing to the other.
 - The Google card now says so, names the "Select a project" symptom, and points
   at the Console's own account switcher rather than the app's.
+
+## Build 373 — the From it asked for is not the From it got
+- Setting up a fresh project raised the real question: keeter@ can own the Cloud
+  project while mail comes from info@ — those are separable. But it exposed a
+  claim the app was making without evidence.
+- `gmailSend` returned the address we **asked** to send as, and `prSendEmail`
+  recorded it as fact. **Gmail substitutes an unverified "Send mail as" alias
+  silently and reports success either way**, so a pull could read "emailed from
+  info@" when it left as keeter@.
+- **Invariant: record the account, which is known; never the alias, which is
+  not.** `gmailSend` now returns `verified` (the From equals the authenticated
+  account). When it doesn't, the pull stores `emailedFrom` = the account and
+  `emailedAsked` = the request, the toast states the condition instead of the
+  result, and both point at the cc copy — which carries the real From and is the
+  only way to settle it from the app.
