@@ -603,3 +603,18 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   visible as info@, and `driveFolder` may point at a folder info@ cannot see.
   The Picker API key is unaffected — it is one key, for the Picker only; Drive,
   Gmail and Calendar authenticate with the OAuth token, not the key.
+
+## Build 371 — which Cloud project, answered from the client ID
+- **"How do I know this is the right project?"** The app had no answer, and the
+  Console URL in the screenshot read `project=turnkey-axiom-285601` while
+  Google's Gmail error named project **955725804965**.
+- A Cloud project has three names — display name, id, and number. **Only the
+  number is in the OAuth client ID and in Google's errors**, so the answer is
+  computable: `googleProjectNo()` reads the leading digits of the client ID.
+- The Google card now states that number and links straight into **that**
+  project (`?project=<number>` — the Console honours a number) for Enable Gmail
+  API, Drive API, Picker API and Credentials. A link that carries the number
+  cannot open the wrong project.
+- It also gives the confirmation test — the Credentials page must list this
+  client ID — and names the trap from the screenshot: **Gmail sending uses
+  OAuth, not an API key**; an API key created for the Gmail API does nothing.
