@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 376._
+_Last reviewed at Build 377._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -714,3 +714,36 @@ own old note as the fact.
 Invariant, again: **a status that records what we did is not a status that
 records what happened.** Anything reporting money must either have asked the
 source or say when it last did.
+
+## Build 377 — "where is check stripe"
+It was hidden, and the button was right to hide: `canCheck` is
+`!!pay.stripeInvoiceId`, and PR-2026-002 has no payment record at all. Supabase,
+after 376 shipped, still reads `payment: null` on both real pulls. Build 376
+stopped the erasing; it could not undo what had already been erased. So the
+button was correct and the screen was still a dead end — a paid invoice reading
+"Unpaid" forever, repairable only by someone editing the database by hand.
+
+- **`⌕ Find in Stripe`** appears exactly where `↻ Check Stripe` cannot: a pull
+  with a fee or a client email and no invoice id.
+- **`invoice_find`** (new, gated with the other money actions, **GET only** —
+  it creates and sends nothing) tries two doors, because either alone has a
+  hole: `metadata['venia_ref']` is exact but Stripe's search index lags about a
+  minute behind a fresh invoice, and the customer's invoice list is immediate
+  but only as good as the email on the pull. Results merged, deduped, newest
+  first, amounts in dollars. It reports which doors it tried, so "none found"
+  can be read as an answer rather than a failure of unknown shape.
+- **One match attaches. More than one asks** — a repeat client will have
+  several, and attaching the wrong one puts someone else's money on this pull.
+  The picker shows number, status, what is still owed, and which invoice carries
+  this pull's tag, and says the tagged one is the safest match.
+- **None offers the manual paste**, validated against `^in_[A-Za-z0-9]+$` —
+  the only route that works when the email on the pull is not the email Stripe
+  billed.
+- **The attach is never the answer.** It merges over the payment object (not
+  replaces it — the same mistake that lost these records), stamps `relinkedAt`
+  so a reconnected pull is never mistaken for one tracked all along, and then
+  calls `prInvoiceCheck` so the status comes from Stripe. A search error leaves
+  the pull exactly as it was.
+
+Invariant: **when a button is correctly unavailable, that is a dead end unless
+something else is offered in its place.** "Nothing to check" is true and useless.
