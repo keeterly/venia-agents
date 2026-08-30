@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '373';
+  const BUILD = '374';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17043,31 +17043,60 @@ window.stripeProbe = stripeProbe;
 
 // Paints the Email card the same way the Stripe one is painted, and says which
 // address mail will actually leave from — the point of the whole feature.
+// GREEN MEANS WE CAN VOUCH FOR IT. The card used to print STATE.mailSendAs as
+// though it were fact — "SENDING AS INFO@VENIACOLLECTION.COM" in green while
+// the test email arrived from keeter@, because Gmail substitutes an alias it
+// has not verified and reports success either way. The status now shows the
+// account Google actually authenticated, and an unverified Send-as is amber
+// with the word "unverified" on it, not a claim.
 window.setPaintMail = function(st){
   const dot = document.getElementById('set-conn-mail-dot');
   const lbl = document.getElementById('set-conn-mail-label');
   if (!dot || !lbl) return;
   if (!st) { dot.style.background = 'var(--border-mid)'; lbl.textContent = 'Not tested'; lbl.style.color = 'var(--muted)'; return; }
-  dot.style.background = st.ok ? 'var(--green)' : 'var(--amber)';
-  lbl.textContent = st.ok
-    ? (st.via === 'gmail' ? 'Gmail · ' : '') + 'Sending as ' + (st.from || 'VENIA')
-    : 'Not connected';
-  lbl.style.color = st.ok ? 'var(--green)' : 'var(--amber)';
+  if (!st.ok) { dot.style.background = 'var(--amber)'; lbl.textContent = 'Not connected'; lbl.style.color = 'var(--amber)'; return; }
+  const via = st.via === 'gmail' ? 'Gmail · ' : '';
+  const asked = String(st.asked || '').trim();
+  const acct = String(st.account || st.from || '').trim();
+  const unverified = asked && acct && asked.toLowerCase() !== acct.toLowerCase();
+  dot.style.background = unverified ? 'var(--amber)' : 'var(--green)';
+  lbl.textContent = unverified
+    ? via + acct + ' · ' + asked + ' unverified'
+    : via + 'Sending as ' + (acct || 'VENIA');
+  lbl.style.color = unverified ? 'var(--amber)' : 'var(--green)';
+  // The fix is two clicks away in Gmail, so name it rather than leaving amber
+  // as a mystery.
+  const err = document.getElementById('set-mail-err');
+  if (err && unverified && !(STATE.mailLastError && STATE.mailLastError.why)) {
+    err.style.display = '';
+    err.style.borderColor = 'var(--amber)'; err.style.color = 'var(--amber)';
+    err.innerHTML = '<b>Mail will go out as ' + escHtml(acct) + ', not ' + escHtml(asked) + '.</b><br>'
+      + 'Gmail only honours a different From if it is a verified alias. In ' + escHtml(acct)
+      + '’s Gmail: Settings → See all settings → <b>Accounts and Import</b> → <b>Send mail as</b> → Add another email address → '
+      + escHtml(asked) + ' → click the link in the verification email. Then test again.'
+      + '<br>Or press <b>Switch account</b> above and sign in as ' + escHtml(asked) + ' instead.';
+  } else if (err && !unverified && !(STATE.mailLastError && STATE.mailLastError.why)) {
+    err.style.display = 'none';
+    err.style.borderColor = 'var(--red)'; err.style.color = 'var(--red)';
+  }
 };
 window.setTestMail = async function(){
   // Gmail first, because that is the path that needs no second vendor.
   if (STATE.mailGmail) {
     const g = await gmailProbe(false);
-    setPaintMail(g.ok ? { ok:true, from: STATE.mailSendAs || g.account, via:'gmail', account:g.account } : { ok:false });
+    setPaintMail(g.ok ? { ok:true, account:g.account, asked: STATE.mailSendAs || '', via:'gmail' } : { ok:false });
     if (g.ok) {
+      const mismatch = STATE.mailSendAs && STATE.mailSendAs.toLowerCase() !== String(g.account||'').toLowerCase();
       showToast('Gmail connected as ' + g.account
-        + (STATE.mailSendAs && STATE.mailSendAs !== g.account ? ' — sending as ' + STATE.mailSendAs + ' (must be a verified alias)' : ''), 'success');
+        + (mismatch ? ' — but mail will go out as ' + g.account + ', not ' + STATE.mailSendAs
+                    + ', until that address is a verified “Send mail as” alias in Gmail.' : ''),
+        mismatch ? 'warning' : 'success', mismatch ? 11000 : 4000);
       return;
     }
     showToast('Gmail is connected but would not issue a token — ' + g.why, 'warning');
   }
   const st = await prMailProbe(true);
-  setPaintMail(st.ok ? { ok:true, from: st.from, via:'server' } : { ok:false });
+  setPaintMail(st.ok ? { ok:true, account: st.from, via:'server' } : { ok:false });
   showToast(st.ok
     ? 'Sending through the mail server as ' + (st.from || 'VENIA')
     : 'No sender connected — pull sheets will draft from your own mail account. Connect Gmail above.',
@@ -17085,8 +17114,12 @@ window.setConnectGmail = async function(){
   save();
   setMailPaintFields();
   try { setGooglePaint(); } catch(e){}
-  setPaintMail({ ok:true, from: STATE.mailSendAs || g.account, via:'gmail', account:g.account });
-  showToast('✓ Gmail connected as ' + g.account + ' — Drive and Calendar use the same account', 'success', 5000);
+  setPaintMail({ ok:true, account:g.account, asked: STATE.mailSendAs || '', via:'gmail' });
+  const mism = STATE.mailSendAs && STATE.mailSendAs.toLowerCase() !== String(g.account||'').toLowerCase();
+  showToast('✓ Gmail connected as ' + g.account
+    + (mism ? ' — mail goes out as ' + g.account + ' until ' + STATE.mailSendAs + ' is a verified “Send mail as” alias in Gmail.'
+            : ' — Drive and Calendar use the same account'),
+    mism ? 'warning' : 'success', mism ? 11000 : 5000);
   try { logActivity('Gmail connected for sending — ' + g.account); } catch(e){}
 };
 window.setDisconnectGmail = function(){
@@ -20456,8 +20489,8 @@ function setShowSection(id, navEl) {
     try { setMailPaintFields(); } catch(e){}
     try { setGooglePaint(); googleWho().then(setGooglePaint); } catch(e){}
     try {
-      if (STATE.mailGmail) gmailProbe(false).then(g => setPaintMail(g.ok ? { ok:true, from: STATE.mailSendAs || g.account, via:'gmail', account:g.account } : { ok:false }));
-      else prMailProbe().then(st => setPaintMail(st.ok ? { ok:true, from: st.from, via:'server' } : { ok:false }));
+      if (STATE.mailGmail) gmailProbe(false).then(g => setPaintMail(g.ok ? { ok:true, account:g.account, asked: STATE.mailSendAs || '', via:'gmail' } : { ok:false }));
+      else prMailProbe().then(st => setPaintMail(st.ok ? { ok:true, account: st.from, via:'server' } : { ok:false }));
     } catch(e){}
   }
   if (id==='set-data') setUpdateDataSummary();
