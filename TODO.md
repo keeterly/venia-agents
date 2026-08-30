@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 391._
+_Last reviewed at Build 392._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1389,3 +1389,32 @@ or a character before the label rather than one specific codepoint.
 **Not done:** the in-content glyphs elsewhere — `◫ ⌸ ⊞ ↻ ⇱ ◻` in the tech pack,
 tables and menus — are still Unicode. They are labelled buttons rather than
 chrome, so they are legible; sweeping them is a separate pass.
+
+
+## Build 392 — three counters nobody could read
+Found in a photo of the actual phone: a small black blob beside the brain-dump
+pencil where a number should be.
+
+`--gold` is `#000000` — the VENIA accent went monochrome. Every place that used
+it as a **background** under dark text therefore became black on black, and all
+three such places are unread counters:
+
+| | sits on | was | contrast |
+|---|---|---|---|
+| brain-dump count | the white global bar | `#000` on `#000` | **1.00 : 1** |
+| Eni unread count | the near-black launcher | `#000` on `#0a0a0a`, black ring | **1.06 : 1** |
+| per-agent dot | the `#0a0a0a` dock | `#000` | **1.06 : 1** |
+
+1.00:1 is the same colour. The brain-dump badge drew as a plain black dot with
+the count invisible inside it; both Eni indicators were not visible at all.
+
+The counters now take the light side of whatever they sit on: `var(--ink)` /
+`var(--bg)` on the page chrome, white on the dark launcher and dock. 21:1,
+19.8:1, 19.8:1.
+
+**This is a Build 384 miss.** That build was *"if Eni replies and it hasn't been
+seen yet, put a notification on the chat box"*, and its gauntlet asserted the
+badge appeared and carried the right count — never that it could be read. The
+new `gauntlet/badges.js` **measures** the contrast ratio of each badge against
+its own background and against the surface behind it, and every assertion scores
+1.0x against the live 389.
