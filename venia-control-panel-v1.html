@@ -1836,7 +1836,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '384';
+  const BUILD = '385';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10165,6 +10165,154 @@ function filterGantt(filter, el) {
 // ═══════════════════════════════════════════════
 // Landed cost, one source of truth: the saved cost sheet when it exists
 // (material+labor+overhead+duties+freight), else COGS + legacy extras.
+// ── COSTING ─────────────────────────────────────────────────────────────────
+// A cost sheet derives the cost of a garment from the garment. The tech pack's
+// Costing section had none of that: COGS, wholesale and retail were three
+// numbers you typed, with nothing behind them and nothing connecting them to
+// the BOM sitting four sections above. You could put $48 in the COGS box for a
+// style whose fabric alone came to $62 and the pack would agree with you.
+//
+// One store, shared with the Cost Sheets page — two places that compute a cost
+// differently is how a style ends up with two costs.
+function csRead(styleId){
+  try { return (JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}') || {})[styleId] || {}; }
+  catch(e){ return {}; }
+}
+function csWrite(styleId, d){
+  let all = {};
+  try { all = JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}') || {}; } catch(e){}
+  all[styleId] = d;
+  try { localStorage.setItem('venia-cost-sheets', JSON.stringify(all)); } catch(e){}
+}
+// Factories come from the Vendors library, which is where the founders actually
+// keep them. The tech pack asked for a Vendor / Factory as free text, so it
+// never offered the factories they had already entered.
+function csFactories(){
+  const all = (STATE.vendors||[]).filter(v => v && String(v.name||'').trim());
+  const fac = all.filter(v => String(v.type||'').trim().toLowerCase() === 'factory');
+  return ['', ...new Set((fac.length ? fac : all).map(v => String(v.name).trim()))];
+}
+const CS_MARKUP_DEFAULT = 60;    // the template's MARK UP
+const CS_RETAIL_DEFAULT = 2.5;   // and its RETAIL MARK UP
+// Every number on the sheet, and where each one came from. Nothing here writes.
+function csModel(s){
+  const d = csRead(s.id) || {};
+  const bom = (STATE.bom || {})[s.id] || [];
+  const matLines = bom.map(i => ({
+    name: i.matName || i.material || 'Unnamed material',
+    kind: i.lineType || '',
+    qty: Number(i.qty) || 0,
+    unit: i.unit || '',
+    waste: Number(i.waste) || 0,
+    unitCost: Number(i.costPerUnit) || 0,
+    ext: Math.round((typeof bomExt === 'function' ? bomExt(i) : (Number(i.qty)||0) * (Number(i.costPerUnit)||0)) * 100) / 100,
+  }));
+  const matFromBom = Math.round(matLines.reduce((t,l) => t + l.ext, 0) * 100) / 100;
+  // The BOM is the truth when there is one. A typed material figure is kept as
+  // the fallback for a style whose BOM has not been built yet — and the sheet
+  // says which of the two it is using, because "material: $62" means something
+  // different when nobody can see where it came from.
+  const matAuto = d.materialAuto !== false && matFromBom > 0;
+  const material = matAuto ? matFromBom : (Number(d.material) || 0);
+  const laborLines = Array.isArray(d.laborLines) ? d.laborLines.map(l => ({
+    op: String(l.op||''), contractor: String(l.contractor||''), price: Number(l.price)||0 })) : [];
+  const laborFromLines = Math.round(laborLines.reduce((t,l) => t + l.price, 0) * 100) / 100;
+  const laborAuto = laborLines.length > 0;
+  const labor = laborAuto ? laborFromLines : (Number(d.labor) || 0);
+  const overhead = Number(d.overhead) || 0;
+  const duties   = Number(d.duties)   || 0;
+  const freight  = Number(d.freight)  || 0;
+  const total = Math.round((material + labor + overhead + duties + freight) * 100) / 100;
+  const markup = d.markup != null ? Number(d.markup) : CS_MARKUP_DEFAULT;
+  const retailMult = d.retailMult != null ? Number(d.retailMult) : CS_RETAIL_DEFAULT;
+  // markup is a MARGIN: 60% means the cost is 40% of wholesale, i.e. ×2.5.
+  const wsCalc = (markup > 0 && markup < 100) ? Math.round((total / (1 - markup/100)) * 100) / 100 : 0;
+  const rtCalc = Math.round(wsCalc * (retailMult || 0) * 100) / 100;
+  const ws = Number(s.wholesale) || 0, rt = Number(s.retail) || 0;
+  return { d, matLines, matFromBom, matAuto, material,
+    laborLines, laborFromLines, laborAuto, labor, overhead, duties, freight, total,
+    markup, retailMult, wsCalc, rtCalc,
+    wsActual: ws, rtActual: rt,
+    wsMargin: ws > 0 ? Math.round(((ws - total) / ws) * 100) : null,
+    rtMargin: rt > 0 ? Math.round(((rt - total) / rt) * 100) : null,
+    // "Applied" = the style's own prices already match what the sheet computes.
+    applied: Math.abs(ws - wsCalc) < 0.01 && Math.abs(rt - rtCalc) < 0.01,
+    cogsStale: Number(s.cogs || 0) > 0 && total > 0 && Math.abs(Number(s.cogs) - total) > 0.01,
+  };
+}
+window.csSetField = function(styleId, key, val){
+  const d = csRead(styleId);
+  if (key === 'material' || key === 'labor'){
+    // Typing over a derived figure is allowed, and it detaches from the source
+    // rather than being silently overwritten on the next render.
+    d[key] = Number(val) || 0;
+    if (key === 'material') d.materialAuto = false;
+  } else if (key === 'markup' || key === 'retailMult'){
+    d[key] = Number(val) || 0;
+  } else {
+    d[key] = Number(val) || 0;
+  }
+  csWrite(styleId, d);
+  csSyncCogs(styleId);
+  try { renderTechPack(styleId); } catch(e){}
+};
+window.csUseBom = function(styleId){
+  const d = csRead(styleId); d.materialAuto = true; delete d.material;
+  csWrite(styleId, d); csSyncCogs(styleId);
+  try { renderTechPack(styleId); } catch(e){}
+  showToast('Material cost is following the BOM again','success');
+};
+// NAMED tpCost*, not cs*, deliberately: the Cost Sheets page already owns
+// csLaborAdd/Set/Del on window and defines them LATER in this file, so the
+// short names were silently overwritten and the tech pack's labour rows went
+// nowhere. Both editors write the same store; only the handlers differ.
+window.tpCostLaborAdd = function(styleId){
+  const d = csRead(styleId);
+  d.laborLines = Array.isArray(d.laborLines) ? d.laborLines : [];
+  d.laborLines.push({ op:'', contractor:'', price:0 });
+  csWrite(styleId, d); csSyncCogs(styleId);
+  try { renderTechPack(styleId); } catch(e){}
+};
+window.tpCostLaborSet = function(styleId, idx, field, val){
+  const d = csRead(styleId);
+  if (!Array.isArray(d.laborLines) || !d.laborLines[idx]) return;
+  d.laborLines[idx][field] = field === 'price' ? (Number(val)||0) : String(val||'');
+  csWrite(styleId, d); csSyncCogs(styleId);
+  if (field === 'price') { try { renderTechPack(styleId); } catch(e){} }
+};
+window.tpCostLaborDel = function(styleId, idx){
+  const d = csRead(styleId);
+  if (!Array.isArray(d.laborLines)) return;
+  d.laborLines.splice(idx, 1);
+  csWrite(styleId, d); csSyncCogs(styleId);
+  try { renderTechPack(styleId); } catch(e){}
+};
+// COGS is what every margin, the dashboard and the P&L read. The cost sheet is
+// where it is worked out, so the sheet owns it — but only once there is a real
+// cost, never zeroing a figure someone entered by hand.
+function csSyncCogs(styleId){
+  const s = (STATE.styles||[]).find(x => x.id === styleId);
+  if (!s) return;
+  const m = csModel(s);
+  if (m.total > 0 && Math.abs(Number(s.cogs||0) - m.total) > 0.01){
+    s.cogs = m.total;
+    try { save(); } catch(e){}
+    try { buildSkus(); } catch(e){}
+  }
+}
+// Pricing is a decision, not a calculation — so the computed figures are shown
+// beside the real ones and applied only when asked.
+window.csApplyPricing = function(styleId){
+  const s = (STATE.styles||[]).find(x => x.id === styleId); if (!s) return;
+  const m = csModel(s);
+  if (!(m.wsCalc > 0)) { showToast('Set a markup first','warning'); return; }
+  s.wholesale = m.wsCalc; s.retail = m.rtCalc; s.cogs = m.total;
+  try { save(); buildSkus(); } catch(e){}
+  try { renderTechPack(styleId); } catch(e){}
+  logActivity('Pricing set from the cost sheet — ' + s.name + ': cost $' + m.total + ', wholesale $' + m.wsCalc + ', retail $' + m.rtCalc);
+  showToast('Wholesale $' + m.wsCalc.toLocaleString() + ' · Retail $' + m.rtCalc.toLocaleString(), 'success');
+};
+
 function landedCost(s) {
   try {
     const sheets = JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}');
@@ -14760,18 +14908,110 @@ function renderTechPackWork(s) {
   <div class="tps" data-sec="cost" style="border-left:3px solid var(--border-mid)">
     ${secHead('cost',`⑧ Costing &amp; Sign-off${margin!==null?` — ${margin}% Retail Margin`:''}`,'<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;background:var(--bg-off);border:1px solid var(--border);color:var(--muted);padding:2px 7px;font-weight:700">Internal</span>')}
     ${secBody('cost')}
-      <div class="tpg">
-        ${ef('COGS (USD)','cogs','0.00','number')} ${ef('Wholesale Price','wholesale','0.00','number')} ${ef('Retail Price','retail','0.00','number')}
-        ${efo('Dye / Finish Cost','dyeCost','0.00','number')} ${efo('Freight Per Unit','freight','0.00','number')} ${efo('Duty Rate (%)','duty','0','number')}
-        ${ef('Production Region','prodRegion','',['','domestic-la','domestic-ny','domestic-other','intl-italy','intl-portugal','intl-korea','intl-china','intl-india','intl-peru','intl-other'])}
-        ${ef('Lead Time (wks)','lead','12','number')} ${ef('Vendor / Factory','vendor','')}
-      </div>
-      ${foldFlush('tpg')}
-      ${margin!==null?`<div style="margin-top:14px;padding:12px;background:#f7f7f7;display:flex;gap:24px;flex-wrap:wrap">
-        <div><div class="tpl" style="margin-bottom:4px">Retail Margin</div><div style="font-size:22px;font-weight:700;color:${margin>60?'#27ae60':margin<40?'#c0392b':'#000'}">${margin}%</div></div>
-        ${s.wholesale&&s.cogs?`<div><div class="tpl" style="margin-bottom:4px">WS Margin</div><div style="font-size:22px;font-weight:700">${Math.round(((s.wholesale-s.cogs)/s.wholesale)*100)}%</div></div>`:''}
-        ${landedCost(s)>0?`<div><div class="tpl" style="margin-bottom:4px">Landed Cost${hasCostSheet(s)?'':' <span style="font-weight:400;color:var(--muted)">(est.)</span>'}</div><div style="font-size:22px;font-weight:700">$${landedCost(s).toFixed(2)}</div></div>`:''}
-      </div>`:''}
+      ${(()=>{
+        const m = csModel(s);
+        const money = (n) => '$' + Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+        const num = (label, key, val, step) => `<div class="tpf"><div class="tpl">${label}</div>
+          <input class="tpi" type="number" step="${step||'0.01'}" style="font-family:'DM Mono',monospace" value="${val===0?'':val}" placeholder="0.00"
+            onchange="csSetField('${s.id}','${key}',this.value)"></div>`;
+        const row = (label, val, sub, strong) => `<div style="display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:11px;color:${strong?'var(--ink)':'var(--silver)'};font-weight:${strong?'700':'400'}">${label}${
+            sub?`<span style="display:block;font-size:9px;color:var(--muted);margin-top:2px">${sub}</span>`:''}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:${strong?'13px':'12px'};font-weight:${strong?'700':'500'};color:var(--ink);white-space:nowrap">${money(val)}</div></div>`;
+
+        return `
+        <!-- WHERE THE COST COMES FROM. Materials are the BOM, not a number
+             someone remembered; labour is the operations the factory is
+             actually charging for. -->
+        <div class="tp-subhead">Materials — from the BOM</div>
+        ${m.matLines.length ? `<div style="border:1px solid var(--border);margin-bottom:6px">
+          ${m.matLines.map(l => `<div style="display:grid;grid-template-columns:2fr .9fr .9fr 1fr;gap:0;border-bottom:1px solid var(--border);align-items:center">
+            <div style="padding:7px 10px;font-size:11px;color:var(--ink)">${String(l.name).replace(/</g,'&lt;')}${
+              l.kind?`<span style="font-size:8px;border:1px solid var(--border);padding:1px 5px;margin-left:6px;color:var(--muted);text-transform:uppercase">${l.kind}</span>`:''}</div>
+            <div style="padding:7px 10px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);text-align:right">${l.qty}${l.unit?' '+l.unit:''}${
+              l.waste?`<span title="waste allowance"> +${l.waste}%</span>`:''}</div>
+            <div style="padding:7px 10px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);text-align:right">${money(l.unitCost)}</div>
+            <div style="padding:7px 10px;font-family:'DM Mono',monospace;font-size:11px;text-align:right;color:var(--ink)">${money(l.ext)}</div>
+          </div>`).join('')}
+          <div style="display:flex;justify-content:space-between;padding:7px 10px;background:var(--bg-off)">
+            <span style="font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700">${m.matLines.length} line${m.matLines.length===1?'':'s'}</span>
+            <span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700">${money(m.matFromBom)}</span></div>
+        </div>` : `<div style="font-size:11px;color:var(--amber);margin-bottom:8px">
+          No BOM yet — material cost has to be typed until there is one.
+          <button class="btn btn-ghost btn-sm" style="margin-left:8px" onclick="goTo('bom',document.querySelector('[data-page=bom]'));setTimeout(()=>{const e=document.getElementById('bom-style-select');if(e){e.value='${s.id}';bomSelectStyle('${s.id}');}},50)">Build the BOM →</button></div>`}
+        ${!m.matAuto ? `<div class="tp-hint">Material is a typed figure of <strong style="color:var(--ink)">${money(m.material)}</strong>, not the BOM's ${money(m.matFromBom)}.
+          <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="csUseBom('${s.id}')">Follow the BOM</button></div>`
+          : (m.matLines.length ? '' : `<div class="tpg" style="margin-bottom:10px">${num('Material (typed)','material',m.material)}</div>`)}
+
+        <div class="tp-subhead">Labour &amp; services</div>
+        ${m.laborLines.length ? `<div style="border:1px solid var(--border);margin-bottom:6px">
+          ${m.laborLines.map((l,i) => `<div style="display:grid;grid-template-columns:1.1fr 1.3fr 110px 32px;gap:0;border-bottom:1px solid var(--border);align-items:center">
+            <div style="padding:4px 8px"><select class="tpi" style="font-size:11px" onchange="tpCostLaborSet('${s.id}',${i},'op',this.value)">
+              ${['', ...CS_LABOR_OPS].map(o=>`<option value="${o}" ${l.op===o?'selected':''}>${o||'— operation —'}</option>`).join('')}</select></div>
+            <div style="padding:4px 8px"><select class="tpi" style="font-size:11px" onchange="tpCostLaborSet('${s.id}',${i},'contractor',this.value)">
+              ${[...new Set(['', l.contractor, ...csFactories(), ...TP_CONTRACTORS].filter(x=>x!==undefined))].map(o=>`<option value="${o}" ${l.contractor===o?'selected':''}>${o||'— who —'}</option>`).join('')}</select></div>
+            <div style="padding:4px 8px"><input class="tpi" type="number" step="0.01" style="font-family:'DM Mono',monospace;text-align:right" value="${l.price===0?'':l.price}" placeholder="0.00" onchange="tpCostLaborSet('${s.id}',${i},'price',this.value)"></div>
+            <div style="padding:4px 6px;text-align:center"><button onclick="tpCostLaborDel('${s.id}',${i})" title="Remove this operation" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px">×</button></div>
+          </div>`).join('')}
+          <div style="display:flex;justify-content:space-between;padding:7px 10px;background:var(--bg-off)">
+            <span style="font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted);font-weight:700">${m.laborLines.length} operation${m.laborLines.length===1?'':'s'}</span>
+            <span style="font-family:'DM Mono',monospace;font-size:12px;font-weight:700">${money(m.laborFromLines)}</span></div>
+        </div>` : `<div class="tpg" style="margin-bottom:6px">${num('Labour (typed)','labor',m.labor)}</div>`}
+        <button class="btn btn-ghost btn-sm" onclick="tpCostLaborAdd('${s.id}')" style="margin-bottom:6px">+ Operation</button>
+        <div class="tp-hint">Cutting, sewing, dyeing, grading, marking — the operations on the sheet the factory quotes against. Adding one takes over from the typed figure.</div>
+
+        <div class="tp-subhead">Everything else</div>
+        <div class="tpg" style="margin-bottom:6px">
+          ${num('Overhead','overhead',m.overhead)} ${num('Duties','duties',m.duties)} ${num('Freight per unit','freight',m.freight)}
+        </div>
+
+        <div class="tp-subhead">What it costs</div>
+        <div style="border:1px solid var(--border);padding:0 14px;margin-bottom:16px">
+          ${row('Materials', m.material, m.matAuto ? m.matLines.length + ' BOM line' + (m.matLines.length===1?'':'s') : 'typed')}
+          ${row('Labour', m.labor, m.laborAuto ? m.laborLines.length + ' operation' + (m.laborLines.length===1?'':'s') : 'typed')}
+          ${m.overhead ? row('Overhead', m.overhead) : ''}
+          ${m.duties ? row('Duties', m.duties) : ''}
+          ${m.freight ? row('Freight', m.freight) : ''}
+          ${row('Total cost per unit', m.total, 'This is the style\'s COGS', true)}
+        </div>
+
+        <div class="tp-subhead">What it sells for</div>
+        <div class="tpg" style="margin-bottom:10px">
+          <div class="tpf"><div class="tpl">Markup (margin %)</div>
+            <input class="tpi" type="number" step="1" style="font-family:'DM Mono',monospace" value="${m.markup}" onchange="csSetField('${s.id}','markup',this.value)"></div>
+          <div class="tpf"><div class="tpl">Retail multiplier</div>
+            <input class="tpi" type="number" step="0.1" style="font-family:'DM Mono',monospace" value="${m.retailMult}" onchange="csSetField('${s.id}','retailMult',this.value)"></div>
+          ${ef('Lead time (wks)','lead','12','number')}
+        </div>
+        <div class="tp-hint">A ${m.markup}% markup means cost is ${(100-m.markup)}% of wholesale — ${m.markup>0&&m.markup<100?('×'+(1/(1-m.markup/100)).toFixed(2)):'—'}. Retail is wholesale × ${m.retailMult}.</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);margin-bottom:10px">
+          <div style="padding:11px 14px;border-right:1px solid var(--border)">
+            <div class="tpl">Wholesale — calculated</div>
+            <div style="font-family:'DM Mono',monospace;font-size:19px;font-weight:700;margin-top:3px">${money(m.wsCalc)}</div>
+            ${m.wsActual ? `<div style="font-size:10px;color:${Math.abs(m.wsActual-m.wsCalc)<0.01?'var(--green)':'var(--amber)'};margin-top:3px">on the style: ${money(m.wsActual)}${m.wsMargin!=null?` · ${m.wsMargin}% margin`:''}</div>` : '<div style="font-size:10px;color:var(--muted);margin-top:3px">not set on the style</div>'}
+          </div>
+          <div style="padding:11px 14px">
+            <div class="tpl">Retail — calculated</div>
+            <div style="font-family:'DM Mono',monospace;font-size:19px;font-weight:700;margin-top:3px">${money(m.rtCalc)}</div>
+            ${m.rtActual ? `<div style="font-size:10px;color:${Math.abs(m.rtActual-m.rtCalc)<0.01?'var(--green)':'var(--amber)'};margin-top:3px">on the style: ${money(m.rtActual)}${m.rtMargin!=null?` · ${m.rtMargin}% margin`:''}</div>` : '<div style="font-size:10px;color:var(--muted);margin-top:3px">not set on the style</div>'}
+          </div>
+        </div>
+        <!-- Pricing is a decision. The sheet computes it; it does not impose it. -->
+        ${!m.applied && m.wsCalc > 0 ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+          <button class="btn btn-gold btn-sm" onclick="csApplyPricing('${s.id}')">Use these prices</button>
+          <span style="font-size:10px;color:var(--muted)">Sets the style's wholesale and retail. Nothing changes until you do.</span>
+        </div>` : (m.wsCalc > 0 ? '<div style="font-size:10px;color:var(--green);margin-bottom:6px">✓ The style is priced on this sheet.</div>' : '')}
+
+        <div class="tp-subhead">Where it is made</div>
+        <div class="tpg">
+          ${ef('Factory','vendor','',csFactories())}
+          ${ef('Production region','prodRegion','',['','domestic-la','domestic-ny','domestic-other','intl-italy','intl-portugal','intl-korea','intl-china','intl-india','intl-peru','intl-other'])}
+          ${efo('Dye / finish note','dyeCost','0.00','number')}
+        </div>
+        ${(STATE.vendors||[]).length ? '' : `<div class="tp-hint">No vendors in the library yet, so there are no factories to choose from.
+          <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="goTo('vendors',document.querySelector('[data-page=vendors]'))">Add one →</button></div>`}
+        `;
+      })()}
       <div class="tp-subhead" style="margin-top:24px">Sign-offs &amp; Development Log</div>
       ${(()=>{
         // The 4-role × 4-checkbox matrix was one of the tallest blocks on an
