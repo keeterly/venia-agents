@@ -1925,7 +1925,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '398';
+  const BUILD = '399';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7214,52 +7214,84 @@ function pxRender(){
       ${realWs !== null ? ` · real margin at wholesale <b style="color:${realWs>=40?'var(--green)':realWs>=25?'var(--amber)':'var(--red)'}">${realWs}%</b>` : ''}
       ${planTgt && planAct !== null ? `<br>Season plan wants <b style="color:var(--soft)">${planTgt}%</b> retail-vs-landed; this is <b style="color:${planAct>=planTgt?'var(--green)':'var(--amber)'}">${planAct}%</b>` : ''}
       ${fxIsConverted() ? `<br>You are viewing the line in <b style="color:var(--soft)">${fxView()}</b> at your rate of ${fxRate()} \u2014 this panel edits the stored <b>USD</b>. Wholesale ${fxFmt(ws, {tag:1})}, retail ${fxFmt(retail, {tag:1})}.` : ''}
-      <br>Editing a <b>margin</b> moves the price below it. Editing a <b>price</b> moves what sits below it; a COGS you have entered is never overwritten unless you press <b>Work back</b>.
+      <br>Your <b>prices</b> are the facts here: editing COGS, wholesale or retail leaves the other two alone and re-reads the <b>margins</b> from them. Editing a <b>margin</b> moves the one price it defines. Only <b>Work back</b> rewrites the whole chain.
     </div>`;
 }
 function pxSet(field, val){
   const st = (STATE.styles||[]).find(x => x.id === PX_STYLE); if (!st) return;
   const n = Math.max(0, Math.round(Number(val)||0));
-  const flowDown = () => {
-    st.wholesale = Number(st.cogs) > 0 ? pxWsFromCogs(st.cogs, pxWsMargin(st)) : Number(st.wholesale||0);
-    if (Number(st.wholesale) > 0) st.retail = pxRetailFrom(st.wholesale, pxMargin(st));
+  // A PRICE YOU HAVE SET IS A FACT. A margin is only ever a description of two
+  // prices, so typing a cost must not move the prices — it moves the margins.
+  //
+  //   COGS ──(your margin)──▶ WHOLESALE ──(boutique margin)──▶ RETAIL
+  //
+  // Editing any PRICE leaves the other prices alone and re-derives the margins
+  // that touch it. Editing a MARGIN moves the one price that margin defines,
+  // and the neighbouring margin then re-derives. Work back is the one explicit
+  // way to run the whole chain backwards from retail.
+  //
+  // The one exception is a price that does not exist yet: with nothing to
+  // preserve there is no margin to read either, so a missing downstream price
+  // is GENERATED from the target margin. Preserve what exists; create what
+  // does not.
+  const reWsMargin = () => {   // cogs → wholesale
+    if (Number(st.cogs) > 0 && Number(st.wholesale) > 0) st.wsMarginTarget = pxMarginOf(st.wholesale, st.cogs);
+  };
+  const reRtlMargin = () => {  // wholesale → retail
+    if (Number(st.wholesale) > 0 && Number(st.retail) > 0) st.marginTarget = pxMarginOf(st.retail, st.wholesale);
   };
   let what = '';
   if (field === 'cogs') {
     st.cogs = n;
-    flowDown();
-    what = 'COGS → $' + n;
+    if (Number(st.wholesale) > 0) {
+      // Wholesale and retail stand. Only what you keep over cost has changed.
+      reWsMargin();
+      what = 'COGS → $' + n + ' (prices held, your margin now ' + pxWsMargin(st) + '%)';
+    } else {
+      // No wholesale to protect — build the chain from the cost at target.
+      if (n > 0) {
+        st.wholesale = pxWsFromCogs(n, pxWsMargin(st));
+        if (!(Number(st.retail) > 0)) st.retail = pxRetailFrom(st.wholesale, pxMargin(st));
+        else reRtlMargin();
+      }
+      what = 'COGS → $' + n;
+    }
   } else if (field === 'wsmargin') {
     st.wsMarginTarget = pxClamp(n);
-    flowDown();
+    // This margin defines wholesale, so wholesale is what moves. Retail is a
+    // price you set and stays put; the boutique margin absorbs the change.
+    if (Number(st.cogs) > 0) st.wholesale = pxWsFromCogs(st.cogs, st.wsMarginTarget);
+    if (Number(st.retail) > 0) reRtlMargin();
+    else if (Number(st.wholesale) > 0) st.retail = pxRetailFrom(st.wholesale, pxMargin(st));
     what = 'your margin → ' + st.wsMarginTarget + '%';
   } else if (field === 'wholesale') {
     st.wholesale = n;
-    // You typed a wholesale price, so YOUR margin is now the consequence of it.
-    if (Number(st.cogs) > 0 && n > 0) st.wsMarginTarget = pxMarginOf(n, st.cogs);
-    st.retail = n > 0 ? pxRetailFrom(n, pxMargin(st)) : 0;
+    // Wholesale sits between both margins, so both are re-read from the prices.
+    reWsMargin();
+    if (Number(st.retail) > 0) reRtlMargin();
+    else if (n > 0) st.retail = pxRetailFrom(n, pxMargin(st));
     what = 'wholesale → $' + n;
   } else if (field === 'margin') {
     st.marginTarget = pxClamp(n);
+    // This margin defines retail. Wholesale and COGS are untouched.
     if (Number(st.wholesale) > 0) st.retail = pxRetailFrom(st.wholesale, st.marginTarget);
     else if (Number(st.retail) > 0) st.wholesale = pxWsFrom(st.retail, st.marginTarget);
     what = 'boutique margin → ' + st.marginTarget + '%';
   } else if (field === 'retail') {
     st.retail = n;
-    if (Number(st.cogs) > 0 && n > 0) {
-      // A real COGS is a fact about the garment, so a retail you type must not
-      // rewrite it. The boutique margin becomes the outcome instead, and the
-      // target-cost line shows whether the actual cost still fits.
-      st.wholesale = pxWsFromRetail(n, pxMargin(st));
-      st.marginTarget = pxMargin(st);
+    if (Number(st.wholesale) > 0) {
+      // COGS and wholesale stand; the boutique margin is the consequence.
+      reRtlMargin();
+      what = 'retail → $' + n + ' (prices held, boutique margin now ' + pxMargin(st) + '%)';
     } else if (n > 0) {
-      // Nothing to protect — solve the whole chain backwards from the price.
+      // No wholesale yet — derive it at target, and a COGS you entered stays.
       st.wholesale = pxWsFromRetail(n, pxMargin(st));
-      st.cogs = pxCogsFromWs(st.wholesale, pxWsMargin(st));
+      reWsMargin();
+      if (!(Number(st.cogs) > 0)) st.cogs = pxCogsFromWs(st.wholesale, pxWsMargin(st));
+      what = 'retail → $' + n;
     } else {
-      st.wholesale = 0;
+      what = 'retail → $' + n;
     }
-    what = 'retail → $' + n;
   } else if (field === 'backsolve') {
     // Explicit: work the whole chain back from the retail price, cost included.
     const r = Number(st.retail || 0);

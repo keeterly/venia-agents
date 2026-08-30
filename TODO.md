@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 398._
+_Last reviewed at Build 399._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1629,3 +1629,43 @@ live in one place instead of two, and the bar is down to two icons.
 
 `gauntlet/iconset.js` expected three bar icons and had to be corrected — the app
 was right, the test was describing the old shape.
+
+
+## Build 399 — a price you set is a fact; a margin describes two prices
+*"If I set my retail at 585, but the COGS could be less, if I change the COGS it
+changes the retail. Can we prioritize maintaining COGS/wholesale/retail and have
+the margins adjust first?"*
+
+Reproduced on the shipped build: with retail **$585** and wholesale **$234**,
+typing COGS 60 rewrote them to **$375** and **$150**. `pxSet('cogs')` called
+`flowDown()`, which recomputed wholesale from the *target* margin and then retail
+from wholesale — so a cost estimate silently destroyed prices that were already
+agreed with buyers.
+
+The chain is unchanged; what moves along it is inverted:
+
+```
+COGS ──(your margin)──▶ WHOLESALE ──(boutique margin)──▶ RETAIL
+```
+
+- **Editing a PRICE** (COGS, wholesale or retail) leaves the other two alone and
+  re-reads the margins that touch it. Wholesale sits between both, so editing it
+  re-reads both.
+- **Editing a MARGIN** moves the one price that margin defines — and only that
+  one. Your margin moves wholesale; the boutique margin moves retail. The
+  neighbouring margin then re-derives, so retail is never collateral damage from
+  a cost change.
+- **Work back** stays the single explicit way to run the whole chain backwards
+  from retail, cost included.
+
+**The one exception is a price that does not exist yet.** With nothing to
+preserve there is no margin to read either, so a missing downstream price is
+generated from the target margin — a brand-new style still gets wholesale and
+retail built from a COGS. Preserve what exists; create what does not.
+
+The popover footer now states the rule people actually get, rather than the old
+"editing a price moves what sits below it".
+
+`gauntlet/pricing.js` — 16 assertions walking the exact reported numbers. Against
+the shipped build, eight of them fail, including "typing COGS 60 leaves retail at
+$585" (it produced $375).
