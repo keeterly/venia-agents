@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 392._
+_Last reviewed at Build 393._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1418,3 +1418,44 @@ badge appeared and carried the right count — never that it could be read. The
 new `gauntlet/badges.js` **measures** the contrast ratio of each badge against
 its own background and against the surface behind it, and every assertion scores
 1.0x against the live 389.
+
+
+## Build 393 — "why are my API credentials empty on my phone?"
+They are not missing. Two different things were being confused, and one of them
+was the app lying.
+
+**API keys are device-local, on purpose.** `getKey`/`setKey` write
+`VENIA_API_KEYS` in `localStorage`. That key is in neither `SYNC_KEYS` nor
+`EXTRA_LS_KEYS`, so it never syncs — correctly: a secret must not ride in the
+workspace blob that goes to Supabase. A second device having no local copy is
+the normal state, not a fault.
+
+**The credentials that matter are not in the browser at all.** Anthropic,
+Shopify's Admin token, Stripe and Gmail all live in Netlify env vars and are
+used server-side. That is why the phone already showed Shopify **CONNECTED**
+while its token field read "managed server-side" — that row asks the server
+(`shopifyPing` → `_shopifyServerConfigured`).
+
+**The bug: Claude never got that treatment.** Two indicators still read the
+browser fallback key:
+
+- `setUpdateDots` → `!!getKey('anthropic')` → Settings said **NOT SET**
+- the agent chat header → `const online = !!getKey('anthropic')` → every agent
+  read **Offline**
+
+Meanwhile every agent call goes through `/api/claude`, which uses
+`process.env.ANTHROPIC_API_KEY`. The browser key is only a fallback for when the
+relay itself is down. So on any device where nothing was ever pasted — the phone
+— the app reported all four agents as offline while they were working perfectly.
+
+`claude.js` now answers `{ping:true}` with `{configured:<bool>}` **before** it
+touches Anthropic, so the check is free and spends no tokens; it still sits
+behind the origin check and the access-code gate. The app pings at boot exactly
+as it does for Shopify, and `claudeConnected()` prefers the server's answer but
+still counts a local key, since with one the app really can reach Anthropic
+directly. The Settings field is labelled "set in Netlify, not here", like
+Shopify's.
+
+Locked by `gauntlet/claudeconn.js`, which boots with `VENIA_API_KEYS` removed —
+the phone's exact situation — and stubs the relay both ways. Against live 389,
+four of its six assertions fail.

@@ -1924,7 +1924,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '392';
+  const BUILD = '393';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2470,7 +2470,7 @@ body{padding-top:44px;box-sizing:border-box;}
               </div>
             </div>
             <div style="margin-top:14px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
-              <div class="fg" style="flex:1"><label class="fl" for="set-anthropic-key">Anthropic API Key</label>
+              <div class="fg" style="flex:1"><label class="fl" for="set-anthropic-key">Anthropic API Key — set in Netlify, not here</label>
                 <input class="fi fi-mono" type="password" id="set-anthropic-key" placeholder="sk-ant-api03-…" style="font-size:10px">
               </div>
               <button class="btn btn-gold btn-sm" onclick="setApiKey('anthropic')">Save</button>
@@ -21255,6 +21255,13 @@ document.addEventListener('DOMContentLoaded', function(){
   // never in the browser), then refresh anything that depends on it.
   setTimeout(function(){
     if (typeof shopifyPing !== 'function') return;
+    if (typeof claudePing === 'function') claudePing().then(function(){
+      try { if (typeof setUpdateDots === 'function') setUpdateDots(); } catch(e){}
+      try { document.querySelectorAll('.ag-chat-status').forEach(function(el){
+        var on = claudeConnected();
+        el.innerHTML = '<div class="ag-chat-dot"' + (on ? '' : ' style="background:var(--muted)"') + '></div>' + (on ? 'Online' : 'Offline');
+      }); } catch(e){}
+    });
     shopifyPing().then(function(){
       try { if (typeof setUpdateDots === 'function') setUpdateDots(); } catch(e){}
       try { if (typeof window.updateInventoryNav === 'function') window.updateInventoryNav(); } catch(e){}
@@ -21784,6 +21791,31 @@ async function shopifyProxy(action, params = {}) {
   throw lastErr || new Error('Shopify request failed');
 }
 // Ask the server whether Shopify is configured (never exposes the token).
+// CLAUDE CONNECTION STATE — asked of the server, like Shopify's.
+// The key lives in the ANTHROPIC_API_KEY env var and every agent call goes
+// through /api/claude, so a browser copy is only a fallback for when the relay
+// itself is misbehaving. Reading that fallback to decide what to display was
+// the bug: on a phone where nothing was ever pasted, Settings said NOT SET and
+// every agent header said "Offline" while the agents were working perfectly.
+// API keys live in localStorage (VENIA_API_KEYS) and are deliberately NOT in
+// SYNC_KEYS — a secret should not ride in the workspace blob that syncs to the
+// cloud — so "this device has no local copy" is the normal, correct state and
+// must never be reported as "not connected".
+async function claudePing() {
+  try {
+    const r = await fetch('/api/claude', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ping: true }) });
+    const d = await r.json().catch(function(){ return null; });
+    window._claudeServerConfigured = !!(d && d.configured);
+  } catch (e) { window._claudeServerConfigured = false; }
+  return window._claudeServerConfigured;
+}
+// Server first; the local fallback key still counts, because with one the app
+// can reach Anthropic directly even when the relay is down.
+function claudeConnected() {
+  if (window._claudeServerConfigured === true) return true;
+  try { return !!getKey('anthropic'); } catch (e) { return false; }
+}
 async function shopifyPing() {
   try { const d = await shopifyProxy('ping'); window._shopifyServerConfigured = !!d.configured; }
   catch (e) { window._shopifyServerConfigured = false; }
@@ -22806,7 +22838,9 @@ function setUpdateDots() {
   dots.forEach(({key,dot,lbl,home})=>{
     // Shopify connection is server-side now — reflect the proxy ping, not a
     // browser-held key (there isn't one anymore).
-    const connected = key === 'shopify' ? shopifyConnected() : !!getKey(key);
+    const connected = key === 'shopify' ? shopifyConnected()
+      : key === 'anthropic' ? claudeConnected()
+      : !!getKey(key);
     const dotEl = document.getElementById(dot);
     const lblEl = document.getElementById(lbl);
     const homeEl = home ? document.getElementById(home) : null;
@@ -24334,7 +24368,7 @@ function wireAgent(key, screenKey) {
   // Reflect real connection state (was a hard-coded "Online")
   const statusEl = screen.querySelector('.ag-chat-status');
   if (statusEl) {
-    const online = !!getKey('anthropic');
+    const online = typeof claudeConnected === 'function' ? claudeConnected() : !!getKey('anthropic');
     statusEl.innerHTML = '<div class="ag-chat-dot"' + (online ? '' : ' style="background:var(--muted)"') + '></div>' + (online ? 'Online' : 'Offline');
   }
 
