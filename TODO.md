@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 389._
+_Last reviewed at Build 396._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1267,3 +1267,324 @@ would open with the sheet disagreeing with its own prices and offering to
   the app would have reported the sheet and the style as disagreeing forever
   over that. Markup is stored to two decimals, and `csSamePrice` treats two
   prices that round to the same price as the same price.
+
+
+## Build 390 — the phone views
+*"Fix these mobile views / The image is too large on mobile, maybe it's a small
+icon that can be tapped for larger view, that way we preserve head space and
+have more visibility."*
+
+Two separate faults, both measured in a real browser at 390 × 844 before and
+after.
+
+**The style photo was 220px of a 345px sticky head** — 41% of the screen frozen
+above every fact, leaving 226px of readable panel no matter how far you
+scrolled. RETAIL MARGIN, the six action buttons and LIFECYCLE were all below the
+fold on open.
+
+- On a phone the hero floats at **56 × 72** with a ⤢ corner mark; the badge row
+  and the margin bar sit beside it. Head is now **155px** and the first spec
+  section lands at y=428 instead of y=618 — 79% more content on screen.
+- Tapping the thumb still opens the full-size lightbox (`lbOpenStyle`), which is
+  where the large image belongs.
+- Both `.dp-tags` and `.dp-margin` carry `overflow:hidden` so each establishes
+  its own formatting context and sits *beside* the float. Without it the margin
+  bar draws its 3px rule straight through the photo.
+- Desktop is untouched: full-width hero, overlay Replace button, 220px.
+- **Replace photo moved into ⋯ More** (all sizes) — a legible overlay button
+  does not fit on a 56px tile, and the action still needs a real tap target.
+
+**The dropdowns were drawing on top of the stage pills.** Reproduced exactly:
+`styles-gender-f over All 59`, `over Concept`, `over Design`, `over Sms`.
+
+- **Cause: `.fs{width:100%}` plus the mobile-only `.filters .fs{flex-shrink:0}`.**
+  In a form grid `width:100%` is right. In the filter bar the select is a flex
+  item, and `flex-shrink:0` stops it giving that width back — so each of the
+  three dropdowns claimed **368px inside a 366px group**, and the two that did
+  not fit spilled straight over the pills laid out beside them. On desktop there
+  is no `flex-shrink:0`, so they shrank to fit and nobody saw it.
+- Fixed at the cause: `.filters .fs{width:auto}` with a 44vw cap, so each sizes
+  to its own content (161 / 127 / 110 at 390px). `padding-right` needs
+  `!important` — the selects carry an inline `padding` shorthand that otherwise
+  wins and leaves the ▼ sitting on the text.
+- **The Styles bar is now two rows on a phone**: dropdowns above, stage pills
+  swiping below. Before, the first pill started at **x=401** — you had to swipe
+  past three dropdowns before a single stage filter was visible. It now starts
+  at x=12.
+- `.filt-scroll` is the wrapper that makes the pill row scrollable. It is
+  `display:contents` everywhere but a phone, so desktop layout is byte-identical
+  to before the wrapper existed.
+
+**Swept every `.filters` bar on eleven PLM pages at 390px, before and after.**
+Only the Styles bar overlapped; all eleven are clean now.
+
+Also removed a stray `min-height:48px` sitting at the top level of the
+`max-width:768px` block, where it parsed as an invalid rule and set nothing.
+
+Regression-locked by `gauntlet/mobile.js` (21 assertions across 360/390/430 and
+desktop 1400). Every one of them fails against Build 389.
+
+
+## Build 391 — the icons are drawn now
+*"Icons need refinement on mobile."*
+
+The chrome was Unicode glyphs. Rendered at 3× and looked at rather than read
+from the source, the tab bar was six icons from four different families:
+
+| | was | problem |
+|---|---|---|
+| Today | `◈` U+25C8 | a **filled** diamond beside five hollow marks |
+| Product | `◻` U+25FB | a generic hairline square, much larger optically |
+| Growth | `↗` U+2197 | thin, sitting high in the line box |
+| Sales | `⇄` U+21C4 | widest mark in the row |
+| Money | `$` U+0024 | a **letterform** — cap height, far taller than the rest |
+| More | `⋯` U+22EF | three small dots resting near the **baseline**, well below centre |
+
+And in the global bar, `✎` (U+270E) arrived as a **full-colour emoji pencil**
+next to two flat monochrome marks, while `⌕` (U+2315) is TELEPHONE RECORDER,
+not a magnifier — it is absent from some system fonts entirely.
+
+A glyph is whatever the device's font decides it is. iOS, Chrome and Android
+each decide differently and none of it is ours. So they are **drawn** now: one
+24-unit grid, one stroke, `currentColor`, in `.ico`. Same weight, same optical
+size, same centre line, on every device.
+
+**Replaced:** the six tab-bar icons; the mobile header (menu / search / add);
+the global bar (brain dump / search / settings — desktop too, same elements);
+the Eni launcher's `◐` (a HALF BLACK CIRCLE said nothing about what it opens —
+now a spark); the six style-detail actions, where `◑` for POM was drawing as a
+small dark blob and is now a ruler, and `⊞` for BOM is now layers; the desktop
+search button, the search modal, ⌕ Find in Stripe, and both ⚙ Settings entries;
+and all 29 inline `✎` pencils, including the Today capture link, Edit, and the
+small "this row is editable" hints.
+
+**Two things this taught, both caught by rendering rather than by reading:**
+
+- **A gear needs teeth, not spokes.** The first gear — a circle with eight
+  radial lines — is a *sun*. Thickening the spokes made it a *flower*. Only a
+  toothed ring reads as a gear at 16px. Likewise the first Money icon, a
+  banknote rectangle with a centre circle, read as a **camera**; it is a drawn
+  `$` now — same meaning as the old glyph, but at the set's weight instead of
+  the font's.
+- **Stroke width must scale with the icon.** Pinning it with
+  `vector-effect:non-scaling-stroke` meant a 12px icon carried the same ink as a
+  21px one, so the small ones filled in — the BOM layers went solid black and
+  the ruler became a bar. The stroke is in grid units now and scales like a
+  letterform does with its point size; inline icons get a touch more weight
+  (1.8 vs 1.6) to hold their own beside type.
+
+`dpMoreToggle` rewrote its button with `textContent`, which would have stripped
+the icon on the first tap — it sets `innerHTML` now, and the gauntlet toggles it
+and checks.
+
+Regression-locked by `gauntlet/iconset.js` (13 assertions, including that all
+six tab icons share one size and one centre line, that `currentColor` still
+darkens the active tab, and that no `✎ ⌕ ⚙ ◐` survives in rendered text —
+`SCRIPT`/`STYLE` text nodes excluded, since inline source is not rendered text).
+
+**Three smoke assertions hardcoded the old glyphs** (`smoke60`, `smoke63`,
+`smoke74`). The app was right and the tests were stale; each now matches an icon
+or a character before the label rather than one specific codepoint.
+
+**Not done:** the in-content glyphs elsewhere — `◫ ⌸ ⊞ ↻ ⇱ ◻` in the tech pack,
+tables and menus — are still Unicode. They are labelled buttons rather than
+chrome, so they are legible; sweeping them is a separate pass.
+
+
+## Build 392 — three counters nobody could read
+Found in a photo of the actual phone: a small black blob beside the brain-dump
+pencil where a number should be.
+
+`--gold` is `#000000` — the VENIA accent went monochrome. Every place that used
+it as a **background** under dark text therefore became black on black, and all
+three such places are unread counters:
+
+| | sits on | was | contrast |
+|---|---|---|---|
+| brain-dump count | the white global bar | `#000` on `#000` | **1.00 : 1** |
+| Eni unread count | the near-black launcher | `#000` on `#0a0a0a`, black ring | **1.06 : 1** |
+| per-agent dot | the `#0a0a0a` dock | `#000` | **1.06 : 1** |
+
+1.00:1 is the same colour. The brain-dump badge drew as a plain black dot with
+the count invisible inside it; both Eni indicators were not visible at all.
+
+The counters now take the light side of whatever they sit on: `var(--ink)` /
+`var(--bg)` on the page chrome, white on the dark launcher and dock. 21:1,
+19.8:1, 19.8:1.
+
+**This is a Build 384 miss.** That build was *"if Eni replies and it hasn't been
+seen yet, put a notification on the chat box"*, and its gauntlet asserted the
+badge appeared and carried the right count — never that it could be read. The
+new `gauntlet/badges.js` **measures** the contrast ratio of each badge against
+its own background and against the surface behind it, and every assertion scores
+1.0x against the live 389.
+
+
+## Build 393 — "why are my API credentials empty on my phone?"
+They are not missing. Two different things were being confused, and one of them
+was the app lying.
+
+**API keys are device-local, on purpose.** `getKey`/`setKey` write
+`VENIA_API_KEYS` in `localStorage`. That key is in neither `SYNC_KEYS` nor
+`EXTRA_LS_KEYS`, so it never syncs — correctly: a secret must not ride in the
+workspace blob that goes to Supabase. A second device having no local copy is
+the normal state, not a fault.
+
+**The credentials that matter are not in the browser at all.** Anthropic,
+Shopify's Admin token, Stripe and Gmail all live in Netlify env vars and are
+used server-side. That is why the phone already showed Shopify **CONNECTED**
+while its token field read "managed server-side" — that row asks the server
+(`shopifyPing` → `_shopifyServerConfigured`).
+
+**The bug: Claude never got that treatment.** Two indicators still read the
+browser fallback key:
+
+- `setUpdateDots` → `!!getKey('anthropic')` → Settings said **NOT SET**
+- the agent chat header → `const online = !!getKey('anthropic')` → every agent
+  read **Offline**
+
+Meanwhile every agent call goes through `/api/claude`, which uses
+`process.env.ANTHROPIC_API_KEY`. The browser key is only a fallback for when the
+relay itself is down. So on any device where nothing was ever pasted — the phone
+— the app reported all four agents as offline while they were working perfectly.
+
+`claude.js` now answers `{ping:true}` with `{configured:<bool>}` **before** it
+touches Anthropic, so the check is free and spends no tokens; it still sits
+behind the origin check and the access-code gate. The app pings at boot exactly
+as it does for Shopify, and `claudeConnected()` prefers the server's answer but
+still counts a local key, since with one the app really can reach Anthropic
+directly. The Settings field is labelled "set in Netlify, not here", like
+Shopify's.
+
+Locked by `gauntlet/claudeconn.js`, which boots with `VENIA_API_KEYS` removed —
+the phone's exact situation — and stubs the relay both ways. Against live 389,
+four of its six assertions fail.
+
+
+## Build 394 — forgot password
+*"Can we reset christine@veniacollection.com password?"*
+
+Her sign-in is a **Supabase Auth** password — not Google, and not the shared
+VENIA access code. She has signed in exactly once, on 23 July, 0.3 seconds after
+the account was created, and never since. The app had no recovery path at all:
+`resetPasswordForEmail` and `type=recovery` appeared nowhere in it.
+
+- **"Forgot password?"** on the sign-in screen mails a link, restricted to the
+  two founder addresses — the form is on a public page, and without the guard it
+  would confirm-or-deny arbitrary addresses and spend VENIA's Supabase quota on
+  them.
+- The link is pinned to `VENIA_PUBLIC_BASE`, never `location.origin`: a link
+  built from a `.netlify.app` or `github.io` address 404s for whoever opens it.
+- **The recovery screen comes in above the access-code gate**, exactly as
+  `?share` and `?agent` do. A recovery token proves control of the mailbox, so
+  it is its own credential — and it can *only* set a password. The app stays
+  locked behind the gate afterwards, so letting it past costs nothing. The
+  founder sign-in stands down while it is up.
+- Three link shapes are recognised, because the shape depends on which flow
+  supabase-js is using: `?reset=1` (our own marker, for PKCE), `#type=recovery`
+  (implicit), and `#error=…`. An expired or already-used link shows the reason
+  and a way back, not a form that cannot work.
+- On success it clears the token from the URL and reloads, so she returns
+  through the ordinary front door rather than being dropped into the app by a
+  link that is now spent.
+
+Locked by `gauntlet/pwreset.js` — 14 assertions against a stubbed supabase-js
+that records what the app asks of `auth`, so the test checks the app's calls and
+not a mock's behaviour.
+
+**Two Supabase settings decide whether the mail actually arrives, and neither is
+reachable from here:**
+1. **Authentication → URL Configuration → Redirect URLs** must allow
+   `https://creator.veniacollection.com/*`, or Supabase refuses the redirect.
+2. **Authentication → SMTP.** The built-in sender is rate-limited and meant for
+   testing; production delivery wants custom SMTP.
+
+If the email does not arrive, the fallback stands: her `auth.users` row is
+disposable — **nothing** is keyed to her user id (no FK to `auth.users`, no
+`user_id` / `owner` / `created_by` column in `public`, and all ten RLS policies
+match on `auth.jwt() ->> 'email'`). Delete the row and her next sign-in
+recreates the account with a password she chooses, losing nothing.
+
+
+## Build 395 — an actual forgot-password
+**The finding that decided the design: VENIA has no working mail sender.**
+`/.netlify/functions/mail` with `{"action":"ping"}` answers
+`{"configured":false,"from":""}` — `RESEND_API_KEY` is not set — and no function
+holds a Supabase service-role key. So *no* emailed reset link can be delivered
+today, whether Supabase sends it or we do. Build 394's flow was correct and
+undeliverable. (Separately: this means **"Email — send as VENIA" is dead**, so
+pull sheets are not going out from VENIA either.)
+
+So the reset that works today does not use email. One signed-in founder sets the
+other's password from Settings → Security.
+
+**The guard is in the database, not the page.** `venia_reset_founder_password`
+is `SECURITY DEFINER` — `auth.users` is not writable by `anon`/`authenticated`,
+which is the whole point — so it carries its own checks:
+
+- `set search_path = ''` with every name schema-qualified, so the definer's
+  privileges cannot be turned against it by a caller-controlled search_path
+- the **caller** must be a founder, proven by `auth.jwt() ->> 'email'`
+- the **target** must be a founder, so it can never be aimed elsewhere
+- 8 characters minimum — stricter than the sign-in screen's 6, because this one
+  is typed by someone else and travels by voice before it is used
+- existing refresh tokens for the target are revoked: a password change must end
+  the sessions opened with the old one
+- `EXECUTE` granted to `authenticated` only. Verified:
+  `has_function_privilege` says anon **false**, authenticated **true**
+
+Proven in SQL against the live database before any UI was wired to it:
+
+| case | result |
+|---|---|
+| no JWT at all | blocked |
+| signed-in non-founder | blocked |
+| founder aiming outside VENIA | blocked |
+| password too short | blocked |
+| founder → founder | allowed; the new hash **verifies** under `crypt()`, so GoTrue would accept it |
+
+The happy path ran inside a subtransaction that was then rolled back — both
+password fingerprints are byte-identical to the baseline, so nothing was left
+set. (plpgsql variables outlive the rollback; the write does not — which is why
+the probe records its verdict *after* the handler.)
+
+The UI derives the target rather than offering a field: there is no address to
+mistype and the only account you can act on is your partner's. It is hidden
+entirely unless a founder is signed in. `gauntlet/founderreset.js` — 11
+assertions — covers both directions, the hidden case, and that a short or
+mismatched password never reaches the database at all.
+
+**The security advisor flags this function** under
+`authenticated_security_definer_function_executable`. That is the design, not an
+oversight: signed-in founders are exactly who may call it, and the function
+checks the caller itself. It is deliberately **absent** from the `anon` version
+of that lint.
+
+Still worth doing when there is time: set `RESEND_API_KEY` (and verify the
+domain at resend.com). It revives sending as VENIA *and* makes 394's emailed
+reset work for real.
+
+
+## Build 396 — the account menu, and a sign-out that finishes
+*"Also we need a button for signing out of an account as well."*
+
+There **was** one — buried in Settings → Security → Team sign-in, which nobody
+will find — and it did not finish the job. Two faults:
+
+- **The avatar was a hard-coded `K`.** `<div class="cp-gb-user" title="Keeter">K</div>`
+  — a literal, with no behaviour attached. Christine's phone greeted her as
+  Keeter on every screen.
+- **Signing out left you inside the app.** `veniaSignOut` dropped the session and
+  re-rendered a small status block, nothing more. The database is locked to VENIA
+  accounts, so a signed-out session inside the app means every read and write
+  quietly fails — the worst possible state, because it looks like it is working.
+
+The avatar is now the account button, on every screen, desktop and phone: it
+shows the initial of whoever is *actually* signed in (or `·` and "Not signed in"
+when nobody is), and tapping it gives the full address and Sign out — or Sign in.
+Signing out now brings the sign-in screen back up, so you land somewhere that
+works instead of a workspace that cannot save.
+
+`gauntlet/signout.js` — 11 assertions, including that the avatar reads **C** for
+Christine, that it stops claiming an account after signing out, and that the
+sign-in screen returns.

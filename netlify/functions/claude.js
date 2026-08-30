@@ -64,6 +64,16 @@ export default async (req) => {
     }
   }
   const key = process.env.ANTHROPIC_API_KEY;
+  // ping: does this site hold a key? Answered before any Anthropic call, so the
+  // UI can show a true connection state for free. It reveals only a boolean,
+  // and only to a caller that already passed the origin check and the gate.
+  try {
+    const peek = await req.clone().json();
+    if (peek && peek.ping === true) {
+      return new Response(JSON.stringify({ configured: !!key, build: '2026-08-30a' }),
+        { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+    }
+  } catch (e) { /* not JSON — fall through to the normal path */ }
   if (!key) {
     return new Response(
       JSON.stringify({ error: { message: 'ANTHROPIC_API_KEY is not set on this Netlify site' } }),
