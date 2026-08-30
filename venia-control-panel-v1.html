@@ -743,6 +743,25 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .pom-table td{padding:9px 12px;font-size:11px;color:var(--silver);border:1px solid var(--border);text-align:center}
 .pom-table td:first-child{text-align:left;color:var(--ink);font-size:12px}
 .pom-table tbody tr:hover{background:var(--bg-hover)}
+/* Development specs: dense, because it is a wide sheet read left to right. */
+.pdv th,.pdv td{padding:6px 8px;font-size:10px}
+.pdv .pdv-grp{background:var(--bg-off);color:var(--ink);font-weight:700;letter-spacing:1.2px;border-bottom:2px solid var(--border-mid)}
+.pdv .pdv-sum{font-weight:400;letter-spacing:.5px;text-transform:none;font-family:'DM Mono',monospace}
+.pdv .pdv-h{font-size:9px;letter-spacing:1px}
+.pdv .pdv-spec,.pdv .pdv-fit,.pdv .pdv-diff,.pdv .pdv-tol{font-family:'DM Mono',monospace;text-align:center;white-space:nowrap}
+.pdv .pdv-spec{color:var(--ink)}
+/* The current spec is the one you can act on, so it is the one that looks live. */
+.pdv .pdv-cur{background:var(--bg-off);font-weight:700}
+.pdv .pdv-cur:hover{background:var(--bg-hover)}
+.pdv .pdv-pen{opacity:0;margin-left:5px;font-size:9px;color:var(--muted)}
+.pdv .pdv-cur:hover .pdv-pen{opacity:1}
+.pdv .pdv-note{margin-left:4px;color:var(--gold);cursor:help}
+.pdv .pdv-dash{color:var(--muted)}
+.pdv .pdv-tol{color:var(--muted)}
+.pdv .pdv-act{width:26px;padding:0}
+.pdv .pdv-undo,.pdv .pdv-adopt{background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:9px;padding:1px 5px;letter-spacing:.5px}
+.pdv .pdv-undo:hover,.pdv .pdv-adopt:hover{color:var(--ink);border-color:var(--ink)}
+.pdv .pdv-adopt{margin-left:6px}
 .pom-input{
   background:transparent;border:none;border-bottom:1px solid var(--border-mid);
   padding:4px 0;font-family:'DM Mono',monospace;font-size:10px;
@@ -1785,7 +1804,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '380';
+  const BUILD = '381';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -9118,6 +9137,82 @@ window.pomSeedTemplate = function(styleId, kind){
   toast(n ? ('Seeded ' + n + ' standard points — fill the base size, then grade') : 'All template points already present', n ? 'success' : 'info');
 };
 
+// THE DEVELOPMENT SHEET, laid out the way VENIA's own tab lays it out: one
+// column group per spec revision, each showing what was specced, what the
+// sample measured, and the difference. Reading left to right is reading the
+// history of the garment.
+let POM_VIEW = 'graded';
+window.pomSetView = function(v){ POM_VIEW = v; if (currentPomStyleId) pomSelectStyle(currentPomStyleId); };
+
+function pomDevSheet(style){
+  const styleId = style.id;
+  const { baseK, baseSz } = pomBaseInfo(style);
+  const points = (STATE.pom||{})[styleId] || [];
+  if (!points.length) return `<div class="empty"><div class="empty-icon">◑</div><div class="empty-text">No measurement points yet — add them on the graded sheet first</div></div>`;
+  const groups = pomDevColumns(styleId, baseK);
+
+  const cell = (p, idx, g) => {
+    const specs = pomSpecs(p, baseK);
+    const sp = specs[g.rev];
+    const specTxt = sp ? measFmt(sp.v) : '';
+    // A spec cell is tappable: revising is the action this sheet exists for.
+    const isLast = g.rev === specs.length - 1;
+    const specCell = `<td class="pdv-spec${isLast?' pdv-cur':''}" title="${sp && sp.note ? String(sp.note).replace(/"/g,'&quot;') : (isLast?'Current spec — tap to revise':'')}"
+        ${isLast ? `onclick="pomReviseSpec('${styleId}',${idx})" style="cursor:pointer"` : ''}>${
+      specTxt ? specTxt : '<span class="pdv-dash">—</span>'}${
+      isLast && specTxt ? '<span class="pdv-pen">✎</span>' : ''}${
+      sp && sp.note ? '<span class="pdv-note" title="'+String(sp.note).replace(/"/g,'&quot;')+'">•</span>' : ''}</td>`;
+    if (!g.rounds.length) return specCell + `<td class="pdv-fit"><span class="pdv-dash">not fitted</span></td><td class="pdv-diff"></td>`;
+    return specCell + g.rounds.map(rk => {
+      const e = (p.rounds||{})[rk];
+      if (!e || e.m == null) return `<td class="pdv-fit"><span class="pdv-dash">—</span></td><td class="pdv-diff"></td>`;
+      const tol = measParse(e.tol) || 0;
+      const d = e.spec != null ? Math.round((e.m - e.spec) * 64) / 64 : null;
+      const oot = d != null && Math.abs(d) - tol > 1e-9;
+      return `<td class="pdv-fit">${measFmt(e.m)}</td>`
+        + `<td class="pdv-diff" style="color:${d==null?'var(--muted)':oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'400'}">${
+            d == null ? '' : (measFmtSigned(d) + (oot ? ' ⚠' : ' ✓'))}${
+            oot ? `<button class="pdv-adopt" title="The sample is right and the spec was wrong — move the spec to ${measFmt(e.m)}&quot; as a recorded revision" onclick="event.stopPropagation();pomAdoptMeasured('${styleId}',${idx},'${rk}')">adopt</button>` : ''}</td>`;
+    }).join('');
+  };
+
+  const head1 = groups.map(g => {
+    const span = 1 + Math.max(1, g.rounds.length) * 2;
+    const sm = pomRevSummary(styleId, g, baseK);
+    return `<th class="pdv-grp" colspan="${span}">${g.label}${
+      sm.n ? ` <span class="pdv-sum" style="color:${sm.ok===sm.n?'var(--green)':'var(--amber)'}">${sm.ok}/${sm.n} in tol</span>` : ''}</th>`;
+  }).join('');
+  const head2 = groups.map(g => `<th class="pdv-h">Spec</th>` + (g.rounds.length
+      ? g.rounds.map(rk => `<th class="pdv-h">${rk}</th><th class="pdv-h">Diff</th>`).join('')
+      : `<th class="pdv-h">Fit</th><th class="pdv-h">Diff</th>`)).join('');
+
+  return `
+    <div class="tbl-wrap">
+      <table class="pom-table pdv">
+        <thead>
+          <tr><th class="pdv-grp" colspan="3" style="text-align:left">Point of measure</th>${head1}</tr>
+          <tr><th class="pdv-h" style="text-align:left;min-width:170px">Measurement</th><th class="pdv-h">Tol ±</th><th class="pdv-h"></th>${head2}</tr>
+        </thead>
+        <tbody>
+          ${points.map((p,idx) => {
+            const specs = pomSpecs(p, baseK);
+            return `<tr>
+              <td style="color:var(--ink);font-weight:500">${String(p.point).replace(/</g,'&lt;')}</td>
+              <td class="pdv-tol">${measFmt(p.tol)||'—'}</td>
+              <td class="pdv-act">${specs.length > 1
+                ? `<button class="pdv-undo" title="Remove the last revision on this point" onclick="pomUndoRevise('${styleId}',${idx})">↶</button>` : ''}</td>
+              ${groups.map(g => cell(p, idx, g)).join('')}
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.7">
+      Specs are for the base size <strong style="color:var(--ink)">${baseSz}</strong>. Tap a current spec to revise it — the previous number is kept, because it is what the earlier fits were judged against.
+      <span style="color:var(--green)">✓</span> within tolerance · <span style="color:var(--red)">⚠</span> outside it · <strong style="color:var(--ink)">adopt</strong> moves the spec to what the sample measured, as a recorded revision.
+    </div>`;
+}
+
 function pomSelectStyle(styleId) {
   currentPomStyleId = styleId;
   if (!styleId) { renderPomPage(); return; }
@@ -9150,10 +9245,29 @@ function pomSelectStyle(styleId) {
     return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px" title="${e?'vs '+p.measuredRound+' spec '+measFmt(spec)+'" · tol ±'+measFmt(tol)+'" (frozen at measure time)':'vs current spec'}">${measFmtSigned(d)}${oot?' ⚠':' ✓'}</span>${tag}`;
   };
 
+  // Two sheets, the same two the pack has always had: GRADED SPECS (the size
+  // run a factory cuts from) and DEVELOPMENT SPECS (the history of how the
+  // spec got there).
+  const tabs = `
+    <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">
+      <button class="pill${POM_VIEW==='graded'?' active':''}" onclick="pomSetView('graded')">Graded specs</button>
+      <button class="pill${POM_VIEW==='dev'?' active':''}" onclick="pomSetView('dev')" title="Spec → fit → difference, one column group per revision — the same layout as the DEVELOPMENT SPECS tab">Development specs${
+        (()=>{ const r = pomRoundsUsed(styleId).length; return r ? ' · '+r+' fit'+(r>1?'s':'') : ''; })()}</button>
+    </div>`;
+
+  if (POM_VIEW === 'dev') {
+    document.getElementById('pom-content').innerHTML = `
+      <div class="sec-head" style="margin-bottom:14px">
+        <div class="sec-title">${style.name} <span style="color:var(--muted);font-size:14px">— Development Specs</span></div>
+      </div>${tabs}${pomDevSheet(style)}`;
+    return;
+  }
+
   const html = `
     <div class="sec-head" style="margin-bottom:14px">
       <div class="sec-title">${style.name} <span style="color:var(--muted);font-size:14px">— POM Sheet</span></div>
     </div>
+    ${tabs}
     <div class="tbl-wrap">
       <table class="pom-table">
         <thead><tr>
@@ -9292,7 +9406,8 @@ function updatePom(styleId, idx, field, val) {
       const bk = style ? pomBaseInfo(style).baseK : 'm';
       const spec = measParse(p[bk]);
       if (!p.rounds) p.rounds = {};
-      p.rounds[rk] = { m, spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+      p.rounds[rk] = { m, spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0,
+        at: new Date().toISOString().slice(0,10), rev: Math.max(0, pomSpecs(p, bk).length - 1) };
       pomMirrorMeasured(p);
     }
   }
@@ -11843,6 +11958,155 @@ function pomBaseInfo(style){
   if (bi < 0) bi = Math.floor((sizes.length-1)/2);
   return { sizes, baseSz: sizes[bi], baseK: sizes[bi].toLowerCase() };
 }
+// ── DEVELOPMENT SPECS: THE SPEC HAS A HISTORY TOO ───────────────────────────
+//
+// VENIA's DEVELOPMENT SPECS tab reads across the page:
+//
+//   POM | TOL | INITIAL SPEC | 1ST | DIFF | REVISED SPEC | 2ND | DIFF | FINAL SPEC | 3RD | DIFF
+//
+// The app had half of it. It recorded what each fit sample MEASURED, and it
+// froze the spec at measure time so a later edit could not silently flip a past
+// verdict — but the spec itself had no history. There was one current number
+// and no way to say "we specced 13 3/8, the proto came back 13 5/8, so we moved
+// the spec to 13 1/2 and the SMS hit it." That story is the whole point of a
+// development sheet: it is the record of a decision, not just a measurement.
+//
+// So a point now carries `specs` — an ordered list of revisions — and every
+// round records WHICH revision it was judged against. A diff is meaningless
+// without knowing which spec it is a diff from.
+const POM_SPEC_LABELS = ['Initial spec','Revised spec','Final spec'];
+function pomSpecLabel(i){ return POM_SPEC_LABELS[i] || ('Rev ' + (i+1)); }
+
+// Read-only, and lazy on purpose: a style that has never been revised should
+// not gain a `specs` array just from being looked at. The base-size column is
+// always the CURRENT spec, so revision 0 is derived from it until someone
+// actually revises.
+function pomSpecs(p, baseK){
+  if (Array.isArray(p.specs) && p.specs.length) return p.specs;
+  const v = p[baseK];
+  if (v === undefined || v === null || v === '') return [];
+  return [{ v: measParse(v), tol: measParse(p.tol), at: '', note: '' }];
+}
+// Which revision was a given round judged against? Rounds recorded before this
+// build have no `rev`, so fall back to matching the spec value that was frozen
+// with them — and only then to the first revision.
+function pomRoundRev(p, rk, baseK){
+  const e = (p.rounds || {})[rk];
+  if (!e) return -1;
+  if (typeof e.rev === 'number') return e.rev;
+  const specs = pomSpecs(p, baseK);
+  if (e.spec != null){
+    const i = specs.findIndex(sp => Math.abs(measParse(sp.v) - measParse(e.spec)) < 1e-9);
+    if (i >= 0) return i;
+  }
+  return specs.length ? 0 : -1;
+}
+// The rounds a style has actually measured, in development order.
+const POM_ROUND_ORDER = ['Proto','SMS1','SMS2','TOP','Approved'];
+function pomRoundsUsed(styleId){
+  const rows = (STATE.pom || {})[styleId] || [];
+  const seen = new Set();
+  rows.forEach(p => Object.keys(p.rounds || {}).forEach(r => {
+    if (p.rounds[r] && p.rounds[r].m != null) seen.add(r);
+  }));
+  return [...seen].sort((a,b) => {
+    const ia = POM_ROUND_ORDER.indexOf(a), ib = POM_ROUND_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+}
+// The column groups of the development sheet: one per spec revision, each
+// carrying the rounds measured against it. A revision nobody has fitted yet
+// still gets a column — that is the "we have revised, the sample is not back"
+// state, and it should be visible rather than absent.
+function pomDevColumns(styleId, baseK){
+  const rows = (STATE.pom || {})[styleId] || [];
+  let maxRev = 0;
+  rows.forEach(p => { maxRev = Math.max(maxRev, pomSpecs(p, baseK).length - 1); });
+  const groups = [];
+  for (let i = 0; i <= maxRev; i++) groups.push({ rev: i, label: pomSpecLabel(i), rounds: [] });
+  pomRoundsUsed(styleId).forEach(rk => {
+    // A round belongs to whichever revision most of its points were judged
+    // against — one straggler measured before a revision must not split the
+    // column.
+    const tally = {};
+    rows.forEach(p => { const r = pomRoundRev(p, rk, baseK); if (r >= 0) tally[r] = (tally[r]||0) + 1; });
+    const best = Object.keys(tally).sort((a,b) => tally[b] - tally[a])[0];
+    const g = groups[best != null ? +best : 0];
+    if (g && !g.rounds.includes(rk)) g.rounds.push(rk);
+  });
+  return groups;
+}
+// How a revision performed: of the points measured in its rounds, how many
+// landed inside tolerance.
+function pomRevSummary(styleId, group, baseK){
+  const rows = (STATE.pom || {})[styleId] || [];
+  let n = 0, ok = 0;
+  group.rounds.forEach(rk => rows.forEach(p => {
+    const e = (p.rounds||{})[rk];
+    if (!e || e.m == null || e.spec == null) return;
+    n++;
+    if (Math.abs(e.m - e.spec) - (measParse(e.tol)||0) <= 1e-9) ok++;
+  }));
+  return { n, ok };
+}
+
+// REVISING A SPEC IS A DECISION, SO IT IS RECORDED AS ONE. The previous number
+// is not overwritten — it stays as the revision the earlier fits were judged
+// against, which is the only thing that makes their diffs mean anything.
+window.pomReviseSpec = function(styleId, idx, prefill){
+  const style = (STATE.styles||[]).find(x => x.id === styleId); if (!style) return;
+  const { baseK, baseSz } = pomBaseInfo(style);
+  const p = ((STATE.pom||{})[styleId] || [])[idx]; if (!p) return;
+  const specs = pomSpecs(p, baseK);
+  const cur = specs.length ? specs[specs.length-1].v : null;
+  const nextLabel = pomSpecLabel(specs.length ? specs.length : 1);
+  const typed = prompt(
+    p.point + ' — ' + nextLabel + ' (' + baseSz + ')\n\n' +
+    'Current: ' + (cur != null ? measFmt(cur) + '"' : 'not set') +
+    '\nInches, e.g. 13 1/2',
+    prefill != null ? measFmt(prefill) : (cur != null ? measFmt(cur) : ''));
+  if (typed === null) return;
+  const v = measParse(typed);
+  if (isNaN(v)) { toast('Enter a measurement like 13 1/2', 'warn'); return; }
+  if (cur != null && Math.abs(v - cur) < 1e-9) { toast('That is the same as the current spec — nothing revised', 'warn'); return; }
+  const note = prompt('Why? (optional — this is the record of the decision)', '') || '';
+  // Materialise the history on first revision: revision 0 is whatever the base
+  // column held until now.
+  if (!Array.isArray(p.specs) || !p.specs.length) p.specs = specs.length ? [Object.assign({}, specs[0])] : [];
+  p.specs.push({ v, tol: measParse(p.tol), at: new Date().toISOString().slice(0,10), note });
+  p[baseK] = v;                      // the base column is always the CURRENT spec
+  save();
+  logActivity('Spec revised — ' + style.name + ' · ' + p.point + ': ' + (cur != null ? measFmt(cur) : '—') + '" → ' + measFmt(v) + '"');
+  pomSelectStyle(styleId);
+  toast(pomSpecLabel(p.specs.length-1) + ' set to ' + measFmt(v) + '"');
+};
+// The common case at a fitting: the sample is right and the spec was wrong.
+// One tap moves the spec to what came back, still as a recorded revision.
+window.pomAdoptMeasured = function(styleId, idx, rk){
+  const p = ((STATE.pom||{})[styleId] || [])[idx]; if (!p) return;
+  const e = (p.rounds||{})[rk]; if (!e || e.m == null) return;
+  pomReviseSpec(styleId, idx, e.m);
+};
+// Undo — a revision entered by mistake should not need a database to remove.
+window.pomUndoRevise = function(styleId, idx){
+  const style = (STATE.styles||[]).find(x => x.id === styleId); if (!style) return;
+  const { baseK } = pomBaseInfo(style);
+  const p = ((STATE.pom||{})[styleId] || [])[idx]; if (!p) return;
+  if (!Array.isArray(p.specs) || p.specs.length < 2) { toast('Nothing to undo — this point has one spec', 'warn'); return; }
+  const gone = p.specs.pop();
+  p[baseK] = p.specs[p.specs.length-1].v;
+  // Rounds judged against the removed revision are now judged against nothing.
+  // Their frozen spec stays — the measurement really was taken against that
+  // number — but the pointer is walked back so the column they sit in is real.
+  Object.keys(p.rounds||{}).forEach(rk => {
+    if (p.rounds[rk] && p.rounds[rk].rev >= p.specs.length) p.rounds[rk].rev = p.specs.length - 1;
+  });
+  save();
+  logActivity('Spec revision removed — ' + style.name + ' · ' + p.point + ' (was ' + measFmt(gone.v) + '")');
+  pomSelectStyle(styleId);
+  toast('Reverted to ' + measFmt(p[baseK]) + '"');
+};
+
 function pomMirrorMeasured(p){
   const order = ['Proto','SMS1','SMS2','TOP','Approved'];
   const rs = Object.keys(p.rounds||{}).filter(r => p.rounds[r] && p.rounds[r].m != null)
@@ -11938,7 +12202,8 @@ window.fitSessSaveCurrent = function(){
   } else {
     if (!p.rounds) p.rounds = {};
     const spec = measParse(p[baseK]);
-    p.rounds[S.round] = { m: measParse(v), spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+    p.rounds[S.round] = { m: measParse(v), spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0,
+      at: new Date().toISOString().slice(0,10), rev: Math.max(0, pomSpecs(p, baseK).length - 1) };
   }
   pomMirrorMeasured(p);
 };
@@ -16549,6 +16814,52 @@ function renderTechPackPrint(s) {
            pattern. Their own template says ALL MEASUREMENTS ARE ON THE FLAT;
            that belongs here too. -->
       <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in INCHES and taken ON THE FLAT unless otherwise noted. Tolerance applies to all sizes.</div>
+      <!-- The development history belongs on the pack the factory reads: it is
+           the answer to "why is this number what it is", and a factory that can
+           see the spec moved 1/8 after the proto asks better questions than one
+           that only sees the final figure. Printed only when there is a history
+           — an unfitted style would otherwise carry an empty table. -->
+      ${(()=>{
+        const bi = pomBaseInfo(s);
+        const groups = pomDevColumns(s.id, bi.baseK);
+        const fitted = groups.some(g => g.rounds.length);
+        const revised = pom.some(p => Array.isArray(p.specs) && p.specs.length > 1);
+        if (!fitted && !revised) return '';
+        const cellsFor = (p, g) => {
+          const sp = pomSpecs(p, bi.baseK)[g.rev];
+          const c = [`<td style="padding:7px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;font-weight:700">${sp?measFmt(sp.v):'—'}</td>`];
+          if (!g.rounds.length) return c.join('') + `<td style="padding:7px 6px;text-align:center;font-size:10px;color:#999">—</td><td></td>`;
+          g.rounds.forEach(rk => {
+            const e = (p.rounds||{})[rk];
+            if (!e || e.m == null) { c.push(`<td style="padding:7px 6px;text-align:center;color:#999">—</td><td></td>`); return; }
+            const tol = measParse(e.tol)||0;
+            const d = e.spec != null ? Math.round((e.m - e.spec)*64)/64 : null;
+            const oot = d != null && Math.abs(d) - tol > 1e-9;
+            c.push(`<td style="padding:7px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px">${measFmt(e.m)}</td>`);
+            c.push(`<td style="padding:7px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:${oot?'#c0392b':'#27ae60'}">${d==null?'':measFmtSigned(d)}</td>`);
+          });
+          return c.join('');
+        };
+        return `<div style="margin-top:26px;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Development Specs — base size ${bi.baseSz}</div>
+        <div style="font-size:10px;color:#666;margin:4px 0 8px">How the spec arrived at its current value: what was specced, what the sample measured, and the difference.</div>
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr><th style="text-align:left;padding:7px 8px;border-bottom:2px solid #000;font-size:10px;letter-spacing:1px;text-transform:uppercase">Point</th>
+              <th style="padding:7px 6px;border-bottom:2px solid #000;font-size:10px">Tol</th>
+              ${groups.map(g=>`<th colspan="${1+Math.max(1,g.rounds.length)*2}" style="padding:7px 6px;border-bottom:2px solid #000;font-size:10px;letter-spacing:1px;text-transform:uppercase">${g.label}</th>`).join('')}</tr>
+            <tr><th></th><th></th>${groups.map(g=>`<th style="font-size:9px;color:#666;padding:4px">Spec</th>`+
+              (g.rounds.length?g.rounds.map(rk=>`<th style="font-size:9px;color:#666;padding:4px">${rk}</th><th style="font-size:9px;color:#666;padding:4px">Diff</th>`).join('')
+                              :`<th style="font-size:9px;color:#666;padding:4px">Fit</th><th></th>`)).join('')}</tr>
+          </thead>
+          <tbody>${pom.map((p,i)=>`<tr style="border-bottom:1px solid #e0e0e0;background:${i%2?'#fafafa':'#fff'}">
+            <td style="padding:7px 8px;font-size:10px;font-weight:700">${p.point}</td>
+            <td style="padding:7px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:#666">${measFmt(p.tol)||'—'}</td>
+            ${groups.map(g=>cellsFor(p,g)).join('')}
+          </tr>`).join('')}</tbody>
+        </table>
+        ${pom.some(p=>(p.specs||[]).some(x=>x.note)) ? `<div style="margin-top:8px;font-size:10px;color:#666">
+          <strong>Revision notes:</strong> ${pom.flatMap(p=>(p.specs||[]).map((x,ri)=>x.note?`${p.point} · ${pomSpecLabel(ri)}: ${String(x.note).replace(/</g,'&lt;')}`:'').filter(Boolean)).join(' · ')}</div>` : ''}`;
+      })()}
       ` : '<div style="font-size:10px;color:var(--muted);font-style:italic;padding:8px 0">No measurements added. Go to POM / Measurements to add.</div>'}
     </div>
 
