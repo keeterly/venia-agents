@@ -1841,7 +1841,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '388';
+  const BUILD = '389';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3960,7 +3960,8 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div style="display:flex;align-items:center;gap:20px;border-top:1px solid var(--border);padding-top:10px">
             <div style="font-size:10px;color:var(--muted)">Markup: <span id="cs-markup-out" style="color:var(--ink);font-weight:700"></span></div>
             <div style="font-size:10px;color:var(--muted)">Retail Margin: <span id="cs-retail-margin" style="color:var(--ink);font-weight:700"></span></div>
-            <button class="btn btn-ghost btn-sm" id="cs-delete-btn" style="display:none;margin-left:auto;color:var(--red);border-color:rgba(192,57,43,.35)" onclick="deleteCostSheet()">Delete sheet</button>
+            <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="csAdoptStyleMarginsPrompt()" title="Read each style's markup off the wholesale and retail it is actually priced at. No cost or price is changed.">↺ Markups from style prices</button>
+            <button class="btn btn-ghost btn-sm" id="cs-delete-btn" style="display:none;color:var(--red);border-color:rgba(192,57,43,.35)" onclick="deleteCostSheet()">Delete sheet</button>
             <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="saveCostSheet()" aria-label="Save cost sheet to local storage">↓ Save</button>
           </div>
           <div id="cs-warn" style="display:none;margin-top:10px;padding:8px 10px;background:#fff4f4;border:1px solid #e0a0a0;font-size:10px;color:#b03030;line-height:1.5"></div>
@@ -5127,7 +5128,7 @@ const SYNC_KEYS = [
   // the next save. That is the finCats bug from Build 363, and the inventory
   // sync report would have hit it: the "last asked 4 min ago" line would have
   // vanished the moment anything else was saved.
-  'invSync',
+  'invSync', 'csMarginsAdopted',
   // Finance — the bank feed (linked-account metadata + categorized
   // transactions) and Money Watch (thresholds + the weekly brief).
   // finCats — the spend categories the founders create themselves — was
@@ -10306,20 +10307,26 @@ function csModel(s){
   const total = Math.round((material + labor + overhead + duties + freight) * 100) / 100;
   const markup = d.markup != null ? Number(d.markup) : CS_MARKUP_DEFAULT;
   const retailMult = d.retailMult != null ? Number(d.retailMult) : CS_RETAIL_DEFAULT;
+  // WHAT THIS GARMENT COSTS. The sheet when there is one — but the line was
+  // costed years before this app had a cost sheet, so most styles carry a real
+  // COGS and no sheet at all. Pricing off a $0 sheet for those would say every
+  // one of them should sell for nothing.
+  const basis = total > 0 ? total : (Number(s.cogs) || 0);
+  const basisFrom = total > 0 ? 'sheet' : (Number(s.cogs) > 0 ? 'cogs' : 'none');
   // markup is a MARGIN: 60% means the cost is 40% of wholesale, i.e. ×2.5.
-  const wsCalc = (markup > 0 && markup < 100) ? Math.round((total / (1 - markup/100)) * 100) / 100 : 0;
+  const wsCalc = (markup > 0 && markup < 100) ? Math.round((basis / (1 - markup/100)) * 100) / 100 : 0;
   const rtCalc = Math.round(wsCalc * (retailMult || 0) * 100) / 100;
   const ws = Number(s.wholesale) || 0, rt = Number(s.retail) || 0;
   const est = csEstList(d);
-  return { d, est, estDelta: csRevDelta(d), revisions: csRevisions(d),
+  return { d, est, estDelta: csRevDelta(d), revisions: csRevisions(d), basis, basisFrom,
     matLines, matFromBom, matAuto, material,
     laborLines, laborFromLines, laborAuto, labor, overhead, duties, freight, total,
     markup, retailMult, wsCalc, rtCalc,
     wsActual: ws, rtActual: rt,
-    wsMargin: ws > 0 ? Math.round(((ws - total) / ws) * 100) : null,
-    rtMargin: rt > 0 ? Math.round(((rt - total) / rt) * 100) : null,
+    wsMargin: ws > 0 ? Math.round(((ws - basis) / ws) * 100) : null,
+    rtMargin: rt > 0 ? Math.round(((rt - basis) / rt) * 100) : null,
     // "Applied" = the style's own prices already match what the sheet computes.
-    applied: Math.abs(ws - wsCalc) < 0.01 && Math.abs(rt - rtCalc) < 0.01,
+    applied: csSamePrice(ws, wsCalc) && csSamePrice(rt, rtCalc),
     cogsStale: Number(s.cogs || 0) > 0 && total > 0 && Math.abs(Number(s.cogs) - total) > 0.01,
   };
 }
@@ -10404,13 +10411,100 @@ function csFmt$(n){ return '$' + Number(n||0).toLocaleString('en-US',{minimumFra
 // be written back to the sheet as a markup rather than as an exception.
 function csImpliedMarkup(total, ws){
   if (!(total > 0) || !(ws > 0) || ws <= total) return null;
-  return Math.round(((ws - total) / ws) * 1000) / 10;
+  // Two decimals, not one. ISOLDE's true margin is 70.833…%; rounded to 70.8%
+  // it recomputes to $119.86 against a real $120, and the app would then report
+  // the sheet and the style as disagreeing — forever, over fourteen cents.
+  return Math.round(((ws - total) / ws) * 10000) / 100;
 }
+// Two prices are the same price if they round to it. A cent of floating point,
+// or a rounded markup, is not a disagreement worth telling anyone about.
+function csSamePrice(a, b){
+  a = Number(a)||0; b = Number(b)||0;
+  return Math.abs(a - b) <= Math.max(0.5, Math.abs(b) * 0.002);
+}
+// ── THE PRICES ARE RIGHT; THE MARKUP HAS TO LEARN THEM ──────────────────────
+// The line was priced long before this app had a markup field, so the 60%
+// default is a guess about garments whose real answer is already on the style:
+// ISOLDE is 71%, RILEY 60%, DEAR SINCERELY 60%. Left alone, every one of those
+// styles would open with the sheet disagreeing with its own prices and offering
+// to "correct" prices that were never wrong.
+//
+// So the markup is derived FROM the prices, once, per style. Nothing about a
+// style changes — not its cost, not its wholesale, not its retail. Only the
+// sheet's description of it, which is the thing that was wrong.
+window.csAdoptStyleMargins = function(opts){
+  opts = opts || {};
+  const out = { updated: [], noCost: [], noPrice: [], belowCost: [], already: [] };
+  (STATE.styles||[]).forEach(st => {
+    if (st.status === 'archived') return;
+    const m = csModel(st);
+    const ws = Number(st.wholesale) || 0, rt = Number(st.retail) || 0;
+    const cost = m.basis;
+    if (!(cost > 0)) { if (ws) out.noCost.push(st.name || st.styleId); return; }
+    if (!(ws > 0))   { out.noPrice.push(st.name || st.styleId); return; }
+    const implied = csImpliedMarkup(cost, ws);
+    // A wholesale at or below cost has no markup to read off it — that is a
+    // pricing problem to look at, not a number to invent.
+    if (implied == null) { out.belowCost.push((st.name||st.styleId) + ' — ' + csFmt$(ws) + ' on ' + csFmt$(cost)); return; }
+    const mult = rt > 0 ? Math.round((rt / ws) * 100) / 100 : null;
+    const d = csRead(st.id);
+    const sameMk = d.markup != null && Math.abs(Number(d.markup) - implied) < 0.02;
+    const sameRm = mult == null || (d.retailMult != null && Math.abs(Number(d.retailMult) - mult) < 0.005);
+    if (sameMk && sameRm) { out.already.push(st.name || st.styleId); return; }
+    if (!opts.dry) {
+      d.markup = implied;
+      if (mult != null) d.retailMult = mult;
+      // Say where the number came from, so a 71% markup is never mistaken for
+      // something someone chose on purpose today.
+      d.markupFrom = 'style-prices';
+      d.markupAt = new Date().toISOString();
+      csWrite(st.id, d);
+    }
+    out.updated.push({ name: st.name || st.styleId, markup: implied, mult, ws, rt, cost });
+  });
+  return out;
+};
+// Once, automatically, so the founders do not have to know this happened — and
+// then never again, because after this the markup is theirs to set.
+function csAdoptOnce(){
+  if (STATE.csMarginsAdopted) return;
+  const r = csAdoptStyleMargins({});
+  STATE.csMarginsAdopted = new Date().toISOString();
+  try { save(); } catch(e){}
+  if (r.updated.length){
+    try { logActivity('Cost sheet markups read from style prices — ' + r.updated.length + ' style' + (r.updated.length===1?'':'s')); } catch(e){}
+  }
+}
+// And re-runnable by hand, because prices change and the sheet should be able to
+// catch up on request rather than only at first boot.
+window.csAdoptStyleMarginsPrompt = function(){
+  const dry = csAdoptStyleMargins({ dry: true });
+  if (!dry.updated.length){
+    showToast(dry.already.length
+      ? 'Every priced style already matches its own markup'
+      : 'No styles have both a cost and a wholesale price to read a markup from', 'info');
+    return;
+  }
+  const sample = dry.updated.slice(0, 6).map(u => '· ' + u.name + ' → ' + (Math.round(u.markup*10)/10) + '%' + (u.mult ? ' / ×' + u.mult : '')).join('\n');
+  const msg = 'Read the markup off each style\'s own prices?\n\n'
+    + dry.updated.length + ' style' + (dry.updated.length===1?'':'s') + ' would change:\n' + sample
+    + (dry.updated.length > 6 ? '\n· …and ' + (dry.updated.length-6) + ' more' : '')
+    + '\n\nNo cost or price is touched — only the markup the sheet records.';
+  if (!confirm(msg)) return;
+  const r = csAdoptStyleMargins({});
+  try { save(); } catch(e){}
+  try { if (document.getElementById('cs-style-sel')) loadCostSheet(); } catch(e){}
+  try { renderCosts(); } catch(e){}
+  logActivity('Cost sheet markups re-read from style prices — ' + r.updated.length + ' style' + (r.updated.length===1?'':'s'));
+  showToast('✓ ' + r.updated.length + ' markup' + (r.updated.length===1?'':'s') + ' now match the styles'
+    + (r.belowCost.length ? ' · ' + r.belowCost.length + ' priced at or below cost, left alone' : ''), 'success');
+};
+
 // COST CHANGED → the prices the markup implies have moved. Offer them.
 window.csCostChangedSync = function(styleId, prevTotal){
   const st = (STATE.styles||[]).find(x=>x.id===styleId); if (!st) return;
   const m = csModel(st);
-  if (!(m.total > 0) || !(m.wsCalc > 0)) return;
+  if (!(m.basis > 0) || !(m.wsCalc > 0)) return;
   const ws = Number(st.wholesale)||0, rt = Number(st.retail)||0;
   if (!ws && !rt) {                       // nothing to disturb — just set them
     st.wholesale = m.wsCalc; st.retail = m.rtCalc;
@@ -10418,12 +10512,12 @@ window.csCostChangedSync = function(styleId, prevTotal){
     showToast('Priced from the sheet — wholesale ' + csFmt$(m.wsCalc) + ', retail ' + csFmt$(m.rtCalc), 'success');
     return;
   }
-  if (Math.abs(ws - m.wsCalc) < 0.01 && Math.abs(rt - m.rtCalc) < 0.01) return;   // already agree
+  if (csSamePrice(ws, m.wsCalc) && csSamePrice(rt, m.rtCalc)) return;   // already agree
   // Were the old prices themselves derived from the old cost? If so this is a
   // follow-on, not an override, and the question can say so.
   const wasInSync = prevTotal != null && m.markup > 0 && m.markup < 100
-    && Math.abs(ws - Math.round((prevTotal/(1-m.markup/100))*100)/100) < 0.01;
-  const msg = 'Cost is now ' + csFmt$(m.total) + '.\n\n'
+    && csSamePrice(ws, Math.round((prevTotal/(1-m.markup/100))*100)/100);
+  const msg = 'Cost is now ' + csFmt$(m.basis) + '.\n\n'
     + 'At ' + m.markup + '% markup that is wholesale ' + csFmt$(m.wsCalc) + ' and retail ' + csFmt$(m.rtCalc) + '.\n'
     + 'The style is priced ' + csFmt$(ws) + ' / ' + csFmt$(rt) + '.\n\n'
     + (wasInSync ? 'These prices came from the old cost.\n\n' : '')
@@ -10445,19 +10539,19 @@ window.csPriceChangedSync = function(styleId){
   const d = csRead(styleId);
   if (!Object.keys(d).length) return;           // no sheet to keep in step with
   const m = csModel(st);
-  if (!(m.total > 0)) return;
+  if (!(m.basis > 0)) return;
   const ws = Number(st.wholesale)||0, rt = Number(st.retail)||0;
   if (!ws) return;
-  const implied = csImpliedMarkup(m.total, ws);
+  const implied = csImpliedMarkup(m.basis, ws);
   if (implied == null) {
-    if (ws > 0 && ws <= m.total) showToast('That wholesale is at or below the ' + csFmt$(m.total) + ' cost', 'warning');
+    if (ws > 0 && ws <= m.basis) showToast('That wholesale is at or below the ' + csFmt$(m.basis) + ' cost', 'warning');
     return;
   }
   const impliedMult = rt > 0 ? Math.round((rt / ws) * 100) / 100 : m.retailMult;
-  const sameMk = Math.abs(implied - m.markup) < 0.05;
+  const sameMk = Math.abs(implied - m.markup) < 0.02;
   const sameRm = Math.abs(impliedMult - m.retailMult) < 0.005;
   if (sameMk && sameRm) return;                 // already describes it
-  const msg = 'Wholesale ' + csFmt$(ws) + ' on a cost of ' + csFmt$(m.total) + ' is a ' + implied + '% markup'
+  const msg = 'Wholesale ' + csFmt$(ws) + ' on a cost of ' + csFmt$(m.basis) + ' is a ' + implied + '% markup'
     + (rt > 0 ? ', with retail at ×' + impliedMult : '') + '.\n\n'
     + 'The cost sheet says ' + m.markup + '%' + (rt > 0 ? ' and ×' + m.retailMult : '') + '.\n\n'
     + 'OK — store this markup on the cost sheet\nCancel — leave the sheet as it is';
@@ -32869,7 +32963,17 @@ function filterSkuSearch(val) {
 
 // ── COST SHEET CALCULATOR ───────────────────────────────────
 // Populate style select on page load
+// Run the one-time backfill when the cost page is first opened, not at boot:
+// it has to happen AFTER the cloud pull, or it would read markups off a local
+// copy of the styles that the sync is about to replace.
+function csAdoptWhenReady(){
+  if (STATE.csMarginsAdopted) return;
+  if (window.__sbClient && !window.__sbSyncDone) { setTimeout(csAdoptWhenReady, 800); return; }
+  try { csAdoptOnce(); } catch(e){}
+}
+
 function initCostSheetCalc() {
+  try { csAdoptWhenReady(); } catch(e){}
   const sel = document.getElementById('cs-style-sel');
   if (!sel) return;
   // Reset to the placeholder option before repopulating (was appending 5× on repeat visits)
@@ -32918,6 +33022,16 @@ function loadCostSheetData(d) {
   });
   const mk = document.getElementById('cs-markup');
   if (mk) mk.value = d.markup != null ? d.markup : '';
+  (function(){
+    const host = mk && mk.parentElement; if (!host) return;
+    let n = host.querySelector('.cs-mk-src');
+    const from = d.markupFrom === 'style-prices';
+    if (from){
+      if (!n){ n = document.createElement('div'); n.className='cs-mk-src';
+        n.style.cssText='font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);margin-top:3px'; host.appendChild(n); }
+      n.textContent = "read from this style's prices";
+    } else if (n) n.remove();
+  })();
   const rm = document.getElementById('cs-retailmult');
   if (rm) rm.value = d.retailMult != null ? d.retailMult : '';
   __csLaborLines = Array.isArray(d.laborLines) ? d.laborLines.map(x=>({...x})) : [];
