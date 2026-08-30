@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 386._
+_Last reviewed at Build 387._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1150,3 +1150,42 @@ Test note, twice over now: `addInitScript` runs on **every** navigation, so
 re-seeding storage in it wipes exactly what a reload assertion is testing. And
 the app pings Shopify on load, so the first captured call is never the one under
 test.
+
+## Build 387 — cost sheets: edit, delete, estimate, and a history
+*"Once I set the costs here there is no way to edit or delete it. Also I need to
+be able to set an estimate cost for each section and know that it's an estimate.
+Also how would I track revisions to cost from a previous cost to an updated
+cost."*
+
+- **Delete.** There was none. The button appears once a sheet exists, says how
+  many revisions of history go with it, and then asks what to do with the COGS
+  the sheet wrote — clear it, or keep it as a hand-entered figure. Leaving a COGS
+  behind with no sheet under it is exactly the number-with-no-source this page
+  exists to prevent, so it is asked rather than assumed either way.
+- **Estimates, per section.** A guessed freight figure and a quoted one look
+  identical once they are both a number in a box — and the landed cost, the
+  margin, the P&L and the price quoted to a buyer all inherit that number without
+  ever being told which it was. Each of the five sections carries its own flag,
+  the landed cost reads *"Estimate — freight not quoted"*, and the tech pack
+  repeats it: *"This cost is part estimate… the wholesale and retail below
+  inherit that."* Ticking writes straight through, so the screen and the stored
+  sheet never disagree.
+- **Revisions.** Every save keeps what the numbers were. The page shows
+  `$48.00 → $58.00 · +$10.00 (+20.8%)` with *"What moved: material $20.00 →
+  $30.00"*, and the full list beneath. Saving twice without changing anything is
+  not a revision; history caps at twenty, about a season of quotes. The tech pack
+  carries the last movement too.
+
+**Two bugs found doing it:**
+- `saveCostSheet` did `all[sid] = d` — a **whole-object replace**. The tech
+  pack's cost section keeps markup, the retail multiplier, the BOM link, the
+  estimate flags and the revision history on that same record, so every Save on
+  the Cost Sheets page threw all of it away. Same class as the pull-sheet
+  overwrite in Build 376. It merges now.
+- The history panel was not refreshed after saving, so it said *"1 revision"*
+  while the record held two. A history that is wrong about itself is worse than
+  no history.
+
+Seventh time this session: an explanation written as a comment in the patch
+script rather than inside the replacement string. Every one has been caught by a
+smoke assertion, which is the only reason the count is knowable.
