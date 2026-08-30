@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 377._
+_Last reviewed at Build 378._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -747,3 +747,50 @@ button was correct and the screen was still a dead end — a paid invoice readin
 
 Invariant: **when a button is correctly unavailable, that is a dead end unless
 something else is offered in its place.** "Nothing to check" is true and useless.
+
+## Build 378 — payment should not need asking for
+Both `↻ Check Stripe` and `⌕ Find in Stripe` are repairs: they exist because
+something already went wrong. In normal use nobody should ever press either.
+
+- **The app sweeps for itself** — `prReconcilePayments()` on boot, when the
+  pulls page builds, when the list re-renders, when the tab comes back to the
+  front, and every five minutes while it is open (never against a hidden tab).
+  Four moments because any one alone leaves a gap: boot covers the first look of
+  the day, the render covers walking onto the page, visibility covers a phone
+  coming out of a pocket, the timer covers a screen left open while a client pays.
+- **Bounded, because it runs unattended:** only pulls whose money is still open
+  (paid / void / released / captured are final); never re-asks about the same
+  invoice within 90s; at most 8 per sweep, least-recently-checked first so a long
+  history converges over a few sweeps rather than hammering Stripe in one burst;
+  one sweep a minute; skipped entirely with no access code stored, since every
+  call would 401; never in the share or agent views.
+- **It can never raise a passcode box.** `veniaAC(false)` reads the stored code
+  without prompting — a background sweep must not be able to interrupt anyone.
+- **`force` skips the per-invoice cooldown too.** Without that, `↻ Check now`
+  would silently do nothing whenever an automatic sweep had just run — the worst
+  possible moment for a button to look broken.
+- **It only speaks when something changed.** A sweep reporting "still unpaid"
+  every five minutes is noise that trains you to ignore it. When money lands the
+  toast names who paid and how much.
+- **`$X awaiting payment`** sits on the pulls page itself, with how many pulls,
+  how fresh the number is and that nobody had to ask for it — and renders
+  nothing at all when nothing is outstanding.
+
+Two dead paths found while wiring this, both silent:
+- `prPayRepaint` called **`renderPrPulls()`, which has never existed** — the
+  ReferenceError was swallowed by its `try/catch`, so a payment status could
+  change and the card badge behind the modal kept showing the old one.
+- `prInvoiceCheck` repainted through `renderPR()`, whose container `#pr-content`
+  only exists on the PLM redirect stub. The screen the founders actually use is
+  `agRenderPrPullsList` → `#ag-pr-pulls-list`. Both now go through
+  `prRepaintLists()`, which repaints whichever list is really on screen.
+
+Not covered: this updates while the app is open or on opening it. Instant
+updates with the app closed need a Stripe webhook — a new endpoint in the Stripe
+dashboard plus `STRIPE_WEBHOOK_SECRET` and Supabase service credentials in
+Netlify. Not built, because a half-configured webhook that silently does nothing
+is worse than none.
+
+Invariant: **a button that repairs something should be evidence of a bug, not a
+step in the routine.** If the founders have to press it regularly, the automatic
+path is missing.
