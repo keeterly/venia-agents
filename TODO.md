@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 390._
+_Last reviewed at Build 391._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1323,3 +1323,69 @@ Also removed a stray `min-height:48px` sitting at the top level of the
 
 Regression-locked by `gauntlet/mobile.js` (21 assertions across 360/390/430 and
 desktop 1400). Every one of them fails against Build 389.
+
+
+## Build 391 — the icons are drawn now
+*"Icons need refinement on mobile."*
+
+The chrome was Unicode glyphs. Rendered at 3× and looked at rather than read
+from the source, the tab bar was six icons from four different families:
+
+| | was | problem |
+|---|---|---|
+| Today | `◈` U+25C8 | a **filled** diamond beside five hollow marks |
+| Product | `◻` U+25FB | a generic hairline square, much larger optically |
+| Growth | `↗` U+2197 | thin, sitting high in the line box |
+| Sales | `⇄` U+21C4 | widest mark in the row |
+| Money | `$` U+0024 | a **letterform** — cap height, far taller than the rest |
+| More | `⋯` U+22EF | three small dots resting near the **baseline**, well below centre |
+
+And in the global bar, `✎` (U+270E) arrived as a **full-colour emoji pencil**
+next to two flat monochrome marks, while `⌕` (U+2315) is TELEPHONE RECORDER,
+not a magnifier — it is absent from some system fonts entirely.
+
+A glyph is whatever the device's font decides it is. iOS, Chrome and Android
+each decide differently and none of it is ours. So they are **drawn** now: one
+24-unit grid, one stroke, `currentColor`, in `.ico`. Same weight, same optical
+size, same centre line, on every device.
+
+**Replaced:** the six tab-bar icons; the mobile header (menu / search / add);
+the global bar (brain dump / search / settings — desktop too, same elements);
+the Eni launcher's `◐` (a HALF BLACK CIRCLE said nothing about what it opens —
+now a spark); the six style-detail actions, where `◑` for POM was drawing as a
+small dark blob and is now a ruler, and `⊞` for BOM is now layers; the desktop
+search button, the search modal, ⌕ Find in Stripe, and both ⚙ Settings entries;
+and all 29 inline `✎` pencils, including the Today capture link, Edit, and the
+small "this row is editable" hints.
+
+**Two things this taught, both caught by rendering rather than by reading:**
+
+- **A gear needs teeth, not spokes.** The first gear — a circle with eight
+  radial lines — is a *sun*. Thickening the spokes made it a *flower*. Only a
+  toothed ring reads as a gear at 16px. Likewise the first Money icon, a
+  banknote rectangle with a centre circle, read as a **camera**; it is a drawn
+  `$` now — same meaning as the old glyph, but at the set's weight instead of
+  the font's.
+- **Stroke width must scale with the icon.** Pinning it with
+  `vector-effect:non-scaling-stroke` meant a 12px icon carried the same ink as a
+  21px one, so the small ones filled in — the BOM layers went solid black and
+  the ruler became a bar. The stroke is in grid units now and scales like a
+  letterform does with its point size; inline icons get a touch more weight
+  (1.8 vs 1.6) to hold their own beside type.
+
+`dpMoreToggle` rewrote its button with `textContent`, which would have stripped
+the icon on the first tap — it sets `innerHTML` now, and the gauntlet toggles it
+and checks.
+
+Regression-locked by `gauntlet/iconset.js` (13 assertions, including that all
+six tab icons share one size and one centre line, that `currentColor` still
+darkens the active tab, and that no `✎ ⌕ ⚙ ◐` survives in rendered text —
+`SCRIPT`/`STYLE` text nodes excluded, since inline source is not rendered text).
+
+**Three smoke assertions hardcoded the old glyphs** (`smoke60`, `smoke63`,
+`smoke74`). The app was right and the tests were stale; each now matches an icon
+or a character before the label rather than one specific codepoint.
+
+**Not done:** the in-content glyphs elsewhere — `◫ ⌸ ⊞ ↻ ⇱ ◻` in the tech pack,
+tables and menus — are still Unicode. They are labelled buttons rather than
+chrome, so they are legible; sweeping them is a separate pass.
