@@ -618,3 +618,15 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
 - It also gives the confirmation test — the Credentials page must list this
   client ID — and names the trap from the screenshot: **Gmail sending uses
   OAuth, not an API key**; an API key created for the Gmail API does nothing.
+
+## Build 372 — the Console account is not the sending account
+- The Enable-Gmail-API link opened with the picker reading **"Select a project"**
+  — the Google account signed into the *Console* could not see project
+  955725804965, so the Enable button had nothing to act on. Read as "this is my
+  personal account, it should be info@".
+- Two different accounts, and confusing them costs an evening:
+  the **Console account** administers the project; the account **VENIA signs in
+  as** decides who mail comes from. They need not be the same, and changing one
+  does nothing to the other.
+- The Google card now says so, names the "Select a project" symptom, and points
+  at the Console's own account switcher rather than the app's.
