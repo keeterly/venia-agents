@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 380._
+_Last reviewed at Build 381._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -884,3 +884,55 @@ since that is what it is.
 Not yet imported: BOM fabric/trim/wash rows, the cost sheet, pattern card pieces
 and fit-comment sessions. The sheet has them; the app models most of them
 already, so this is extension rather than new ground.
+
+## Build 381 — the structural gap: DEVELOPMENT SPECS
+The one place the spreadsheet was still better than the app. VENIA's tab reads
+across the page:
+
+    POM | TOL | INITIAL SPEC | 1ST | DIFF | REVISED SPEC | 2ND | DIFF | FINAL SPEC | 3RD | DIFF
+
+The app had half of it. It recorded what each fit sample **measured**, and froze
+the spec at measure time so a later edit could not silently flip a past verdict
+— but **the spec itself had no history**. One current number, and no way to say
+*"we specced 13 3/8, the proto came back 13 5/8, we moved the spec to 13 1/2,
+the SMS hit it."* That story is what a development sheet **is**: the record of a
+decision, not just a measurement.
+
+- **`p.specs`** — an ordered list of revisions, labelled with the sheet's own
+  words (Initial / Revised / Final, then Rev 4 and up, so development is not
+  capped at three rounds). Derived from the base column until someone actually
+  revises: a style that has never been revised gains nothing from being looked at.
+- **Every round records which revision it was judged against.** A diff is
+  meaningless without knowing which spec it is a diff from. Rounds recorded
+  before this build are matched by the spec frozen with them.
+- **Revising keeps the old number** and asks why. The previous value is what the
+  earlier fits were judged against — overwriting it would make their diffs lie.
+  The same number is refused as a revision; so is anything that is not a
+  measurement.
+- **Adopt** — one tap when the sample is right and the spec was wrong, still as
+  a recorded revision. **Undo** removes a mistaken revision and walks the rounds
+  back to a revision that still exists, while leaving the measurements alone:
+  they really were taken.
+- **The sheet**: one column group per revision, each with Spec / Fit / Diff and
+  a `n/m in tol` summary. A revision nobody has fitted yet still gets a column —
+  "revised, sample not back" is a state worth seeing. A round is filed under the
+  revision most of its points used, so one straggler cannot split a column.
+- **Two tabs on the POM page**, the same two the pack has always had: Graded
+  specs (the size run a factory cuts from) and Development specs.
+- **It reaches the factory.** The printed pack carries the history, with the
+  revision notes — a factory that can see the spec moved 1/8" after the proto
+  asks better questions than one that only sees the final figure. Printed only
+  when there is a history, so an unfitted style never carries an empty table.
+
+Three findings worth keeping from the test work:
+- `document.body.innerHTML` matches the **app's own source**, because the whole
+  app is one inline `<script>`. An assertion over it can pass on the code that
+  would have produced the output rather than the output. Read the render
+  container (`#techpack-content`, `#pom-content`) instead.
+- Playwright's `dialog.accept('')` **wipes a prompt's prefilled value**; a person
+  pressing OK keeps it. Use `dialog.defaultValue()` to test the real path.
+- The tech pack renders into a container that is not the visible page, so
+  `innerText` returns nothing for it. Assert on markup, not visible text.
+
+Invariant: **a number that changed should say what it changed from, and every
+judgement should name the number it was judged against.**
