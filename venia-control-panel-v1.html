@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '377';
+  const BUILD = '378';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -16174,6 +16174,10 @@ function prInit() {
 function renderPR(filter) {
   prInit();
   if (filter !== undefined) PR_FILTER = filter;
+  // Walking onto the pulls page is the other moment you want the truth. Fired
+  // and forgotten — it is throttled internally and repaints only if something
+  // actually moved, so it can never make opening the page feel slow.
+  setTimeout(() => { try { prReconcilePayments({ why: 'render' }); } catch(e){} }, 400);
   // page-pr in PLM is a redirect stub — the real PR UI lives in cp-screen-pr
   const el = document.getElementById('pr-content');
   if (!el) return;
@@ -16201,6 +16205,8 @@ function renderPR(filter) {
   const totalItems = activePulls.reduce((s,p) => s + (p.items||[]).length, 0);
   const totalValue = activePulls.reduce((s,p) => s + (p.totalRetail||0), 0);
 
+  const owedBar = prOwedBar();
+
   document.getElementById('pr-content').innerHTML = `
     <!-- Stats -->
     <div class="stats-row stats-4" style="margin-bottom:20px">
@@ -16209,6 +16215,8 @@ function renderPR(filter) {
       <div class="stat-card"><div class="stat-label">Items Out</div><div class="stat-val">${totalItems}</div><div class="stat-sub">Across active pulls</div></div>
       <div class="stat-card"><div class="stat-label">Value Out</div><div class="stat-val" style="font-size:20px">$${(totalValue/1000).toFixed(1)}k</div><div class="stat-sub">Retail value at risk</div></div>
     </div>
+
+    ${owedBar}
 
     <!-- NFC Return Scanner -->
     <div style="background:var(--bg-off);border:1px solid var(--border);padding:14px 18px;margin-bottom:20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
@@ -16228,6 +16236,46 @@ function renderPR(filter) {
         <div class="empty-text">${PR_FILTER==='active'?'No active pulls — create one with + New Pull':'No pulls found'}</div>
       </div>`}
   `;
+}
+
+// MONEY OWED, ON THE PAGE. Payment status lived inside the detail modal, so
+// "who still owes us" meant opening every pull in turn. This is the top-down
+// answer and the sweep's visible half: it states how fresh the numbers are, so
+// the page can be believed without opening anything or pressing anything.
+//
+// Nothing outstanding renders nothing at all — a permanent "$0 owed" banner is
+// one more thing to learn to look past.
+function prRepaintLists() {
+  try { if (document.getElementById('ag-pr-pulls-list')) agRenderPrPullsList(); } catch(e){}
+  try { if (document.getElementById('pr-content')) renderPR(PR_FILTER); } catch(e){}
+}
+
+function prOwedDue(p) {
+  const pay = p.payment || {};
+  if (pay.status === 'paid' || pay.status === 'waived' || pay.status === 'void' || pay.status === 'released' || pay.status === 'captured') return 0;
+  // What Stripe says is left, when Stripe has told us; the fee otherwise.
+  return Number(pay.amountRemaining != null ? pay.amountRemaining : (p.feeAmount || 0)) || 0;
+}
+function prOwedBar() {
+  const pulls = (STATE.prPulls || []).filter(p => p.status !== 'draft' && p.feeType !== 'none');
+  const owing = pulls.filter(p => prOwedDue(p) > 0);
+  if (!owing.length) return '';
+  const owed = owing.reduce((s, p) => s + prOwedDue(p), 0);
+  const lastCheck = (STATE.prPulls || []).reduce((t, p) => {
+    const c = p.payment && p.payment.checkedAt ? Date.parse(p.payment.checkedAt) : 0;
+    return c > t ? c : t;
+  }, 0);
+  const m = lastCheck ? Math.round((Date.now() - lastCheck) / 60000) : -1;
+  const ago = m < 0 ? '' : m < 1 ? 'just now' : m < 60 ? m + ' min ago' : m < 1440 ? Math.round(m/60) + 'h ago' : Math.round(m/1440) + 'd ago';
+  return `<div style="background:var(--amber-dim);border:1px solid rgba(230,160,0,.25);padding:11px 16px;margin:4px 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="font-size:14px">⏳</div>
+      <div style="flex:1;min-width:180px">
+        <div style="font-size:11px;font-weight:700;color:var(--ink)">$${owed.toLocaleString()} awaiting payment</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${owing.length} pull${owing.length>1?'s':''} · ${
+          ago ? 'Stripe checked ' + ago + ', automatically' : 'not yet checked with Stripe'}</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();prReconcilePayments({force:true})">↻ Check now</button>
+    </div>`;
 }
 
 function prPullCard(p, now) {
@@ -16907,7 +16955,7 @@ function prPayRepaint(pullId){
     const d = document.getElementById('pr-detail-modal');
     if (d && d.classList.contains('open')) prOpenDetail(pullId);
   } catch(e){}
-  try { renderPrPulls(); } catch(e){}
+  try { prRepaintLists(); } catch(e){}
 }
 
 // A HOLD IS NOT A CHARGE, and the difference is the whole feature: money is
@@ -17021,10 +17069,10 @@ window.prInvoiceCheck = async function(pullId, quiet){
     save();
     if (was !== pay.status) { try { logActivity('Stripe invoice ' + pay.status + ' — ' + pull.invoiceNo); } catch(e){} }
     try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pullId); } catch(e){}
-    try { renderPR(); } catch(e){}
+    try { prRepaintLists(); } catch(e){}
     if (!quiet || was !== pay.status) {
       showToast(pay.status === 'paid'
-        ? '✓ Paid — $' + Number(res.amount_paid || pay.amount || 0).toLocaleString() + ' confirmed by Stripe'
+        ? '✓ ' + (pull.client || 'Client') + ' paid $' + Number(res.amount_paid || pay.amount || 0).toLocaleString()
         : 'Stripe says: ' + pay.status + (res.amount_remaining ? ' — $' + Number(res.amount_remaining).toLocaleString() + ' outstanding' : ''),
         pay.status === 'paid' ? 'success' : 'info');
     }
@@ -17135,18 +17183,117 @@ window.prInvoiceAttach = async function(pullId, inv){
   await prInvoiceCheck(pullId, false);
 };
 
-window.prStripeCheck = async function(pullId){
+// PAYMENT SHOULD NOT NEED ASKING FOR.
+//
+// "When a person pays, it should automatically update the pull and have it
+// clearly stated without having to check Stripe or look up." Both ↻ Check
+// Stripe and ⌕ Find in Stripe are repairs — they exist because something was
+// already wrong. In normal use nobody should ever press either one.
+//
+// So the app sweeps for itself: on boot, when the pulls page renders, when the
+// tab comes back to the front, and every few minutes while it is open. Anything
+// that changed announces itself; anything unchanged is silent, because a sweep
+// that reports "still unpaid" every five minutes is noise that trains you to
+// ignore it.
+//
+// Deliberately bounded, because this runs unattended:
+//   · only pulls whose money is still open — paid, void and released are final;
+//   · never re-asks about the same invoice within 90 seconds;
+//   · at most 8 per sweep, least-recently-checked first, so a long history
+//     converges over a few sweeps instead of hammering Stripe in one burst;
+//   · skipped entirely with no access code stored, since every call would 401;
+//   · never in the share or agent views, which are strictly read-only.
+let PR_RECON_AT = 0;
+const PR_RECON_GAP = 60 * 1000;          // one sweep a minute, at most
+const PR_RECON_PER_ITEM = 90 * 1000;     // and one question per invoice per 90s
+const PR_RECON_BATCH = 8;
+
+window.prReconcilePayments = async function(opts){
+  opts = opts || {};
+  if (window.VENIA_SHARE || window.VENIA_AGENT) return 0;
+  if (!opts.force && Date.now() - PR_RECON_AT < PR_RECON_GAP) return 0;
+  // veniaAC(false) reads the stored code WITHOUT prompting. A background sweep
+  // must never be able to raise a passcode box on its own.
+  if (!String(window.veniaAC ? (window.veniaAC(false) || '') : '')) return 0;
+  PR_RECON_AT = Date.now();
+
+  const now = Date.now();
+  // A person pressing "Check now" is not a background sweep: force skips the
+  // per-invoice cooldown too, or the button would silently do nothing whenever
+  // an automatic sweep had just run — the worst possible time to look broken.
+  const stale = (pay) => {
+    if (opts.force) return true;
+    const last = pay && pay.checkedAt ? Date.parse(pay.checkedAt) : 0;
+    return !(last && (now - last) < PR_RECON_PER_ITEM);
+  };
+  const OPEN_INVOICE = { invoiced: 1, open: 1, uncollectible: 1 };
+  const OPEN_SESSION = { pending: 1, authorized: 1 };
+
+  const jobs = [];
+  (STATE.prPulls || []).forEach(p => {
+    const pay = p.payment;
+    if (!pay || !stale(pay)) return;
+    if (pay.stripeInvoiceId && OPEN_INVOICE[pay.status]) jobs.push({ id: p.id, kind: 'invoice', at: pay.checkedAt || '' });
+    else if (pay.sessionId && OPEN_SESSION[pay.status]) jobs.push({ id: p.id, kind: 'session', at: pay.checkedAt || '' });
+  });
+  if (!jobs.length) return 0;
+  jobs.sort((a, b) => String(a.at).localeCompare(String(b.at)));   // longest unchecked first
+
+  let changed = 0;
+  for (const j of jobs.slice(0, PR_RECON_BATCH)) {
+    const before = ((STATE.prPulls || []).find(p => p.id === j.id) || {}).payment;
+    const wasStatus = before && before.status;
+    try {
+      if (j.kind === 'invoice') await prInvoiceCheck(j.id, true);
+      else await prStripeCheck(j.id, true);
+    } catch (e) { /* one bad invoice must not stop the sweep */ }
+    const after = ((STATE.prPulls || []).find(p => p.id === j.id) || {}).payment;
+    if (after && after.status !== wasStatus) changed++;
+  }
+  // Only a real change is worth a repaint; a silent sweep should leave the
+  // screen exactly as it was, including scroll position.
+  if (changed) { try { prRepaintLists(); } catch(e){} }
+  return changed;
+};
+
+// Four moments, because any one of them alone leaves a gap: boot covers the
+// first look of the day, the render covers walking onto the page, visibility
+// covers a phone coming out of a pocket, and the timer covers a screen left
+// open while a client pays.
+;(function(){
+  const go = (why) => { try { prReconcilePayments({ why }); } catch(e){} };
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible') setTimeout(() => go('visible'), 1200);
+  });
+  setInterval(() => { if (document.visibilityState === 'visible') go('timer'); }, 5 * 60 * 1000);
+  setTimeout(() => go('boot'), 6000);
+})();
+
+window.prStripeCheck = async function(pullId, quiet){
   const pull = (STATE.prPulls||[]).find(p => p.id === pullId); const pay = pull && pull.payment;
   if (!pay || !pay.sessionId) return;
   try {
     const res = await prStripe('status', { id: pay.sessionId });
     if (res.error) { showToast(res.error,'error'); return; }
     if (res.payment_intent) pay.paymentIntent = res.payment_intent;
+    const was = pay.status;
     if (pay.type === 'hold') pay.status = res.payment_status === 'paid' ? 'captured' : (res.status === 'complete' ? 'authorized' : 'pending');
     else pay.status = res.payment_status === 'paid' ? 'paid' : 'pending';
+    if (pay.status === 'paid' && !pay.paidAt) pay.paidAt = new Date().toISOString();
+    // Stamped on every answer, not only on a change — the sweep uses it to
+    // decide what to ask about next, and without it every pull looks equally
+    // stale forever.
+    pay.checkedAt = new Date().toISOString();
     save(); prPayRepaint(pullId);
-    showToast(pay.status === 'pending' ? 'Not completed yet' : '✓ ' + pay.status, 'info');
-  } catch(e){ showToast('Could not check status','error'); }
+    if (was !== pay.status) {
+      try { logActivity('Stripe ' + pay.status + ' — ' + (pull.invoiceNo || pull.id)); } catch(e){}
+      showToast(pay.status === 'paid'
+        ? '✓ ' + (pull.client || 'Client') + ' paid $' + Number(pay.amount || 0).toLocaleString()
+        : '✓ ' + pay.status, pay.status === 'paid' ? 'success' : 'info');
+    } else if (!quiet) {
+      showToast(pay.status === 'pending' ? 'Not completed yet' : '✓ ' + pay.status, 'info');
+    }
+  } catch(e){ if (!quiet) showToast('Could not check status','error'); }
 };
 
 window.prStripeCapture = async function(pullId){
@@ -21481,7 +21628,8 @@ function agBuildPullsSection() {
 
   const listHtml = agRenderPrPullsList(AG_PR_PULLS_FILTER, true);
 
-  return statsHtml + nfcBar + filters + `<div id="ag-pr-pulls-list" style="margin-top:4px">${listHtml}</div>`;
+  return statsHtml + nfcBar + `<div id="ag-pr-owed">${prOwedBar()}</div>` + filters
+    + `<div id="ag-pr-pulls-list" style="margin-top:4px">${listHtml}</div>`;
 }
 
 function agBuildPullIntelSection() {
@@ -21657,9 +21805,16 @@ function agRenderPrPullsList(filter, returnHtml) {
     ? pulls.map(p => prPullCard(p, now)).join('')
     : `<div class="ag-pulls-empty"><div class="ag-pulls-empty-icon">◎</div><div class="ag-pulls-empty-txt">${emptyMsg}</div></div>`;
 
-  if (returnHtml) return html;
+  if (returnHtml) {
+    // Built as part of the page: sweep after it lands, not while it renders.
+    setTimeout(() => { try { prReconcilePayments({ why: 'pulls-page' }); } catch(e){} }, 500);
+    return html;
+  }
   const el = document.getElementById('ag-pr-pulls-list');
   if (el) el.innerHTML = html;
+  const bar = document.getElementById('ag-pr-owed');
+  if (bar) bar.innerHTML = prOwedBar();
+  setTimeout(() => { try { prReconcilePayments({ why: 'pulls-list' }); } catch(e){} }, 500);
 }
 
 function agPrPullsFilter(filter, el) {
