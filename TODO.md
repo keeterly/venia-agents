@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 396._
+_Last reviewed at Build 398._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1588,3 +1588,44 @@ works instead of a workspace that cannot save.
 `gauntlet/signout.js` — 11 assertions, including that the avatar reads **C** for
 Christine, that it stops claiming an account after signing out, and that the
 sign-in screen returns.
+
+
+## Build 397 — a refresh keeps you where you were
+*"Refreshing the page should keep you on the same screen."*
+
+There was no route persistence at all: every reload dropped you on Today. On a
+phone a reload is not rare — the PWA reloads on update, iOS evicts the tab under
+memory pressure, and pull-to-refresh is one careless thumb away — so the tech
+pack you were reading was gone every time.
+
+`cpGoto` and `goTo` are the only two ways to move, so both now record
+`{space, page}`; `routeRestore()` runs right after `init()`, once STATE is
+loaded.
+
+- **localStorage, deliberately NOT in `SYNC_KEYS`.** Where *you* are looking is a
+  property of this device. Syncing it would mean Christine's phone jumping to
+  Materials because Keeter opened Materials. The gauntlet asserts it never
+  appears in the synced blob.
+- **Unknown values fall back to Today** rather than stranding you on a screen
+  that no longer exists — an old build's space name, a hand-edited store.
+- **Share links, agent portals, the Stripe return and password recovery record
+  nothing.** They are one-shot screens with no route to remember.
+- For PLM, `STATE.currentPage` is set *before* `cpGoto('plm')`, since cpGoto
+  renders that page itself — otherwise you would watch the dashboard flash past
+  on the way to where you actually were.
+
+One thing worth knowing for future tests: **PLM is the base layer.** There is no
+`#cp-screen-plm`; the cp-screens are overlays, so "no active overlay" is what
+being in Product looks like. Two assertions in `gauntlet/route.js` were wrong
+about this before the app was.
+
+## Build 398 — the gear moves into the account menu
+*"Settings gear icon should move into the user icon."*
+
+Settings is an account-shaped thing, and the global bar was the most crowded
+strip in the app — a status pill plus four icons on a 390px phone. The gear is
+now the first row of the avatar menu, so "who am I / my settings / sign out"
+live in one place instead of two, and the bar is down to two icons.
+
+`gauntlet/iconset.js` expected three bar icons and had to be corrected — the app
+was right, the test was describing the old shape.
