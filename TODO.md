@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 389._
+_Last reviewed at Build 390._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1267,3 +1267,59 @@ would open with the sheet disagreeing with its own prices and offering to
   the app would have reported the sheet and the style as disagreeing forever
   over that. Markup is stored to two decimals, and `csSamePrice` treats two
   prices that round to the same price as the same price.
+
+
+## Build 390 — the phone views
+*"Fix these mobile views / The image is too large on mobile, maybe it's a small
+icon that can be tapped for larger view, that way we preserve head space and
+have more visibility."*
+
+Two separate faults, both measured in a real browser at 390 × 844 before and
+after.
+
+**The style photo was 220px of a 345px sticky head** — 41% of the screen frozen
+above every fact, leaving 226px of readable panel no matter how far you
+scrolled. RETAIL MARGIN, the six action buttons and LIFECYCLE were all below the
+fold on open.
+
+- On a phone the hero floats at **56 × 72** with a ⤢ corner mark; the badge row
+  and the margin bar sit beside it. Head is now **155px** and the first spec
+  section lands at y=428 instead of y=618 — 79% more content on screen.
+- Tapping the thumb still opens the full-size lightbox (`lbOpenStyle`), which is
+  where the large image belongs.
+- Both `.dp-tags` and `.dp-margin` carry `overflow:hidden` so each establishes
+  its own formatting context and sits *beside* the float. Without it the margin
+  bar draws its 3px rule straight through the photo.
+- Desktop is untouched: full-width hero, overlay Replace button, 220px.
+- **Replace photo moved into ⋯ More** (all sizes) — a legible overlay button
+  does not fit on a 56px tile, and the action still needs a real tap target.
+
+**The dropdowns were drawing on top of the stage pills.** Reproduced exactly:
+`styles-gender-f over All 59`, `over Concept`, `over Design`, `over Sms`.
+
+- **Cause: `.fs{width:100%}` plus the mobile-only `.filters .fs{flex-shrink:0}`.**
+  In a form grid `width:100%` is right. In the filter bar the select is a flex
+  item, and `flex-shrink:0` stops it giving that width back — so each of the
+  three dropdowns claimed **368px inside a 366px group**, and the two that did
+  not fit spilled straight over the pills laid out beside them. On desktop there
+  is no `flex-shrink:0`, so they shrank to fit and nobody saw it.
+- Fixed at the cause: `.filters .fs{width:auto}` with a 44vw cap, so each sizes
+  to its own content (161 / 127 / 110 at 390px). `padding-right` needs
+  `!important` — the selects carry an inline `padding` shorthand that otherwise
+  wins and leaves the ▼ sitting on the text.
+- **The Styles bar is now two rows on a phone**: dropdowns above, stage pills
+  swiping below. Before, the first pill started at **x=401** — you had to swipe
+  past three dropdowns before a single stage filter was visible. It now starts
+  at x=12.
+- `.filt-scroll` is the wrapper that makes the pill row scrollable. It is
+  `display:contents` everywhere but a phone, so desktop layout is byte-identical
+  to before the wrapper existed.
+
+**Swept every `.filters` bar on eleven PLM pages at 390px, before and after.**
+Only the Styles bar overlapped; all eleven are clean now.
+
+Also removed a stray `min-height:48px` sitting at the top level of the
+`max-width:768px` block, where it parsed as an invalid rule and set nothing.
+
+Regression-locked by `gauntlet/mobile.js` (21 assertions across 360/390/430 and
+desktop 1400). Every one of them fails against Build 389.
