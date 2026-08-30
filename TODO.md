@@ -580,3 +580,26 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
 - A token granted **without** the send scope (GIS lets you untick it and still
   returns a token) is now rejected up front with what to do differently, rather
   than surfacing later as a 403 nobody can act on.
+
+## Build 370 — one Google account for everything
+- **"Could we make Drive, Gmail, Calendar and Picker come from the same
+  account?"** They could not. Each built its own GIS token client with its own
+  scope, so each asked separately and each could land on a **different** account
+  — files under one, the day planned around another's calendar, mail from a
+  third — and nothing on screen could say which.
+- **Invariant: exactly one `initTokenClient` in the app.** `G_SCOPES` requests
+  drive.file + calendar.events + gmail.send + userinfo.email together;
+  `googleTokenFor(scope)` hands out that one token and refuses when the scope
+  was not granted (GIS lets you untick one and still returns a token).
+- The account is **read back**, never assumed (`googleWho`), shown in Settings
+  with a chip per permission, and remembered as a synced key.
+- **Switch account** forces `select_account consent`. The cached email is never
+  carried across a new grant — doing so made switching a no-op on screen.
+- Turning Calendar off no longer revokes the shared token (it would have signed
+  Drive and Gmail out too). A real sign-out revokes with Google and says what it
+  costs first.
+- **Note for the switch to info@:** `drive.file` only ever sees files the app
+  created *under that account*, so Drive attachments made as keeter@ are not
+  visible as info@, and `driveFolder` may point at a folder info@ cannot see.
+  The Picker API key is unaffected — it is one key, for the Picker only; Drive,
+  Gmail and Calendar authenticate with the OAuth token, not the key.
