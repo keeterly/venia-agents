@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 395._
+_Last reviewed at Build 396._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1563,3 +1563,28 @@ of that lint.
 Still worth doing when there is time: set `RESEND_API_KEY` (and verify the
 domain at resend.com). It revives sending as VENIA *and* makes 394's emailed
 reset work for real.
+
+
+## Build 396 — the account menu, and a sign-out that finishes
+*"Also we need a button for signing out of an account as well."*
+
+There **was** one — buried in Settings → Security → Team sign-in, which nobody
+will find — and it did not finish the job. Two faults:
+
+- **The avatar was a hard-coded `K`.** `<div class="cp-gb-user" title="Keeter">K</div>`
+  — a literal, with no behaviour attached. Christine's phone greeted her as
+  Keeter on every screen.
+- **Signing out left you inside the app.** `veniaSignOut` dropped the session and
+  re-rendered a small status block, nothing more. The database is locked to VENIA
+  accounts, so a signed-out session inside the app means every read and write
+  quietly fails — the worst possible state, because it looks like it is working.
+
+The avatar is now the account button, on every screen, desktop and phone: it
+shows the initial of whoever is *actually* signed in (or `·` and "Not signed in"
+when nobody is), and tapping it gives the full address and Sign out — or Sign in.
+Signing out now brings the sign-in screen back up, so you land somewhere that
+works instead of a workspace that cannot save.
+
+`gauntlet/signout.js` — 11 assertions, including that the avatar reads **C** for
+Christine, that it stops claiming an account after signing out, and that the
+sign-in screen returns.
