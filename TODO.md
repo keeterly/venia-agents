@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 388._
+_Last reviewed at Build 389._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1230,3 +1230,40 @@ swap, since nobody wants the page pulled out from under them mid-PO, but wrong
 when the founder has just pressed Update and is watching the button. It now
 reloads as soon as the new worker takes control, and reloads anyway after 3.5s if
 it never does, behind one shared guard so it cannot reload twice.
+
+## Build 389 — the margin on the style is the correct one
+*"Lets have the margin in Styles be the correct one for now."*
+
+The line was priced long before this app had a markup field, so a 60% default is
+a guess about garments whose real answer is already on the style: ISOLDE is
+70.83%, RILEY 60.27%, DEAR SINCERELY exactly 60%. Left alone, every one of them
+would open with the sheet disagreeing with its own prices and offering to
+"correct" prices that were never wrong.
+
+- **The markup is read off the prices**, once per style, at first boot after the
+  cloud pull — reading before the pull would read a local copy the sync is about
+  to replace. Retail multiplier comes off retail ÷ wholesale the same way.
+- **Nothing on the style changes.** Not the cost, not the wholesale, not the
+  retail. Only the sheet's description of it, which is the thing that was wrong.
+- **What it cannot read, it leaves and names**: a price with no cost, a cost with
+  no price, and a wholesale at or below cost — that last is a pricing problem to
+  look at, not a number to invent.
+- **The number says where it came from.** `markupFrom: 'style-prices'`, and the
+  page prints *"read from this style's prices"*, so a 70.83% markup is never
+  mistaken for something someone chose today.
+- **Re-runnable by hand** with a preview of exactly which styles change and by
+  how much, and *"No cost or price is touched"* on the confirm. With nothing to
+  do it says so rather than showing an empty dialog.
+
+**Two things this exposed:**
+
+- **`csModel.total` was the sheet's sum, and most styles have no sheet.** They
+  carry a real COGS from years of costing and nothing else, so pricing off a $0
+  sheet would have said every one of them should sell for nothing. There is now
+  a `basis` — the sheet when there is one, the style's COGS when there is not —
+  and `basisFrom` says which was used.
+- **One decimal of margin loses fourteen cents.** ISOLDE's true margin is
+  70.833…%; stored as 70.8% it recomputes to $119.86 against a real $120, and
+  the app would have reported the sheet and the style as disagreeing forever
+  over that. Markup is stored to two decimals, and `csSamePrice` treats two
+  prices that round to the same price as the same price.
