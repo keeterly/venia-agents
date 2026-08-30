@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 378._
+_Last reviewed at Build 380._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -794,3 +794,93 @@ is worse than none.
 Invariant: **a button that repairs something should be evidence of a bug, not a
 step in the routine.** If the founders have to press it regularly, the automatic
 path is missing.
+
+## Build 379 — the tech pack speaks the factory's units
+Read VENIA TECH PACK TEMPLATE and the real packs in *S10 Whisper on Winds*
+(SPIKE PANTS, ISOLDE TOP, MISTRAL, GALE, ZEPHYRUS, DECKARD, NOTOS, EIJI…).
+Every spec in that book is fractional inches: SPIKE PANTS specs FRONT RISE at
+**13 3/8** with a **1/8"** tolerance and a cargo pocket flap at **0"**.
+
+- **`parseFloat` was destroying every measurement.** `parseFloat("13 3/8")` is
+  `13`; `parseFloat("1/8")` is `1`. So a fraction was truncated off every spec,
+  and a 1/8" tolerance became **1"** — an eightfold error on the most
+  precision-critical number in a tech pack. Five write paths did it: the POM
+  sheet, the tech-pack POM table, a new POM row, grading, and the fit session
+  (the one with a tape measure in hand). All now go through `measParse` /
+  `measFmt`: parse on the way in, store a number, render house fractions on the
+  way out. A value off the sixteenth grid shows as the decimal it really is
+  rather than being quietly rounded — rounding someone's spec is the same class
+  of mistake as truncating it.
+  Confirmed against Supabase first: **0 POM points across 60 styles**, so this
+  landed before the first real spec rather than after.
+- **A blank size became `0`.** Which reads as "this measurement is zero inches"
+  rather than "nobody has specced it yet" — and 0 is a number the deviation
+  check will happily judge against. Blanks stay blank.
+- **Exactly on tolerance was flagged out of tolerance**, and float dust
+  (`3/8 + 1/4` landing a hair over `5/8`) failed real garments. Deltas snap to a
+  64th and the comparison is inclusive.
+- **The printed pack told the factory the numbers were centimetres.** A 13 3/8"
+  front rise read as 13.375 cm is about 5 1/4" — the sheet was instructing a
+  factory to cut a child's pattern. Now "All measurements in INCHES and taken ON
+  THE FLAT", which is the template's own wording. Two other `(cm)` labels fixed;
+  the seam-allowance dropdown keeps its `3/8" (1 cm)` conversions, which are
+  correct and inches-first.
+- **Grading asked for an increment in cm.** A unit that appears nowhere in
+  VENIA's book. It now asks for inches, accepts `1/2` or `1 1/4`, and snaps the
+  graded run to the fraction grid instead of drifting to `12.750000000000002`.
+- **The POM library was missing nine points the sheet has**: side seam length,
+  both armhole-straight readings, high hip, hem height and the whole
+  pocket-placement block. Tolerances were `0.06` and `0.13` — which are not
+  1/16 (.0625) and 1/8 (.125), and print as decimals a factory does not read.
+- **Fields the sheet has always carried and the app never asked for:** Style #
+  (`23B001-2M`), Group (woven tops / knit tops split), Gender, Designer, Tech
+  Designer, Patternmaker, Date Created, Date Revised, and shrinkage as **four**
+  numbers — self and lining × length and width — because one number cannot be
+  applied to a pattern.
+- **Production status.** The sheet offers 22 states (`SMS - CUTTING`,
+  `PP - MARKER`, `PROD - WAITING ON FABRIC`…); the app had seven lifecycle
+  words. That gap is exactly the earlier report *"it says SS7 is in proto stage,
+  but I pushed them to SMS"* — there was nowhere to say it. Stage stays coarse,
+  `prodStatus` carries the sheet's own vocabulary, and the factory dropdown is
+  the sheet's contractor list.
+
+Still to come (Build 380): importing previous styles from the Drive packs.
+
+Invariant: **the unit label on a spec is never allowed to be wrong, and a
+measurement must survive being typed the way the house writes it.**
+
+## Build 380 — importing the eight years already in Drive
+Retyping a POM sheet by hand is exactly how a 13 3/8 becomes a 13 3/4, so
+`↑ Import from Drive` on the tech pack reads the sheet instead.
+
+- Picks a **spreadsheet** (not every PDF and `.ai` in the season folder), reads
+  every tab in one `values:batchGet`, and works on the **`drive.file`** scope the
+  app already holds — which Google grants only for files picked in the Picker,
+  so the import cannot read anything the founders did not hand it.
+- **Nothing is invented.** A field absent from the sheet is left empty and named
+  in the report; a cell that is not a measurement (`TBD`, `SEE PHOTO`) is skipped
+  and named. An import that quietly guesses is worse than retyping — you would
+  never know which numbers to check.
+- **The preview comes before the write.** It shows the style fields found, the
+  measurements as house fractions, the values it could not read, and the fields
+  that were blank, then asks where it should land.
+- **Merging never overwrites.** A field or a measurement you already entered is
+  kept, and the result says how many it left alone.
+
+Two bugs the test caught before this shipped, both from real sheet shape:
+- **A blank field imported the next label as its value.** The labels sit side by
+  side across the row — `STYLE DESCRIPTION:` then blanks then `DATE REVISED:` —
+  and scanning right for "the first non-empty cell" grabbed the wrong one. The
+  scan now stops at a label.
+- **It read the wrong tab.** Ranking blocks by row count picked DEVELOPMENT
+  SPECS (longer, one column of numbers) over GRADED SPECS (the size run a
+  factory cuts from). Ranked by named size columns first now.
+
+Mapping: the sheet's fine `STATUS` → `prodStatus`, never over the app's own
+coarse lifecycle; shrinkage → four numbers; size columns → the app's size keys;
+a development sheet's INITIAL/REVISED/FINAL SPEC column seeds the base size,
+since that is what it is.
+
+Not yet imported: BOM fabric/trim/wash rows, the cost sheet, pattern card pieces
+and fit-comment sessions. The sheet has them; the app models most of them
+already, so this is extension rather than new ground.
