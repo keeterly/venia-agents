@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '369';
+  const BUILD = '370';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2452,13 +2452,21 @@ body{padding-top:44px;box-sizing:border-box;}
             <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
               <div style="width:44px;height:44px;background:#fff;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;flex-shrink:0">G</div>
               <div style="flex:1">
-                <div style="font-size:14px;font-weight:700;color:var(--ink)">Google — Calendar &amp; Sign-in</div>
-                <div style="font-size:10px;color:var(--muted)">Plan your day around real events &amp; sign in with Google</div>
+                <div style="font-size:14px;font-weight:700;color:var(--ink)">Google — one account for everything</div>
+                <div style="font-size:10px;color:var(--muted)">Drive, Calendar and Gmail all sign in once, as the same account</div>
               </div>
               <div style="display:flex;align-items:center;gap:8px">
                 <div id="set-conn-google-dot" style="width:8px;height:8px;border-radius:50%;background:var(--border-mid)"></div>
                 <span id="set-conn-google-label" style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:700">Not set</span>
               </div>
+            </div>
+            <!-- ONE grant, named. Three separate sign-ins could quietly land on
+                 three different accounts, and nothing on screen could tell you. -->
+            <div id="set-google-acct" style="margin-top:14px;padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:11px;line-height:1.7"></div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-gold btn-sm" onclick="setGoogleConnect(false)">Connect Google</button>
+              <button class="btn btn-ghost btn-sm" onclick="setGoogleConnect(true)">Switch account</button>
+              <button class="btn btn-ghost btn-sm" onclick="setGoogleSignOut()" style="color:var(--muted)">Sign out</button>
             </div>
             <div style="margin-top:14px;display:flex;gap:10px;align-items:end;flex-wrap:wrap">
               <div class="fg" style="flex:1"><label class="fl" for="set-google-clientid">OAuth Client ID (ends in .apps.googleusercontent.com)</label>
@@ -5056,7 +5064,7 @@ const SYNC_KEYS = [
   // Sending: which transport is connected, the address to send as, and who
   // every pull sheet is copied to. Same rule as finCats — a setting left out of
   // this list is a setting that vanishes on the next save.
-  'mailGmail', 'mailSendAs', 'pullCc', 'mailLastError',
+  'mailGmail', 'mailSendAs', 'pullCc', 'mailLastError', 'googleAccount',
 ];
 window.SYNC_KEYS = SYNC_KEYS;
 // Feature modules that keep their own top-level localStorage key instead of
@@ -15274,26 +15282,99 @@ window.setDriveApiKey = function(v){
   if (STATE.currentPage === 'gdrive') renderGDrivePage();
 };
 function driveReady(){ return !!(googleClientId() && driveApiKey()); }
-let _driveTok = null;
-function driveToken(interactive){
+
+// ── ONE GOOGLE SIGN-IN FOR THE WHOLE APP ─────────────────────────────────
+// Every Google feature asks through here, so there is one grant, one account,
+// and one place that knows which account that is. The scopes are requested
+// together: three separate consent screens invited three different accounts,
+// and a Drive file created by one is invisible to the others.
+const G_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',        // files this app creates
+  'https://www.googleapis.com/auth/calendar.events',   // plan around the real day
+  'https://www.googleapis.com/auth/gmail.send',        // send pull sheets as VENIA
+  'https://www.googleapis.com/auth/userinfo.email',    // so we can NAME the account
+];
+let _gTok = null;                 // { token, exp, scopes:[], account:'' }
+function googleGranted(scope){
+  return !!(_gTok && _gTok.scopes && _gTok.scopes.some(x => x.indexOf(scope) >= 0));
+}
+window.googleAccount = function(){ return (_gTok && _gTok.account) || ''; };
+window.googleScopesGranted = function(){ return (_gTok && _gTok.scopes) || []; };
+// prompt: '' tries silently (prior consent + a live Google session);
+// 'consent' re-asks; 'select_account consent' lets you change account.
+function googleAuth(prompt){
   return new Promise((resolve, reject) => {
-    if (_driveTok && _driveTok.exp > Date.now() + 30000) return resolve(_driveTok.token);
+    const cid = googleClientId();
+    if (!cid) return reject(new Error('No Google Client ID — add it in Settings → API Keys'));
     if (!window.google || !google.accounts || !google.accounts.oauth2) return reject(new Error('Google library not loaded'));
-    if (!window._driveTC){
-      window._driveTC = google.accounts.oauth2.initTokenClient({
-        client_id: googleClientId(),
-        scope: 'https://www.googleapis.com/auth/drive.file',
-        callback: () => {},
+    if (!window._gTC){
+      window._gTC = google.accounts.oauth2.initTokenClient({
+        client_id: cid, scope: G_SCOPES.join(' '), callback: () => {},
       });
     }
-    const c = window._driveTC;
+    const c = window._gTC;
     c.callback = (r) => {
-      if (r && r.access_token){ _driveTok = { token: r.access_token, exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000 }; resolve(r.access_token); }
-      else reject(new Error((r && r.error) || 'no token'));
+      if (!r || !r.access_token) return reject(new Error((r && r.error_description) || (r && r.error) || 'Google did not return a token'));
+      _gTok = {
+        token: r.access_token,
+        exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000,
+        scopes: String(r.scope || G_SCOPES.join(' ')).split(/\s+/).filter(Boolean),
+        // NEVER carried across a new grant. Keeping the old email here made
+        // "Switch account" a no-op on screen: a different account signed in and
+        // the app went on naming the previous one.
+        account: '',
+      };
+      resolve(r.access_token);
     };
-    try { c.requestAccessToken({ prompt: interactive ? 'consent' : '' }); } catch(e){ reject(e); }
+    try { c.requestAccessToken({ prompt: prompt || '' }); } catch(e){ reject(e); }
   });
 }
+// A token that definitely carries the scope asked for. A grant missing a scope
+// is a permission someone unticked, not a mystery 403 three calls later.
+async function googleTokenFor(scope, interactive){
+  if (_gTok && _gTok.exp > Date.now() + 30000 && googleGranted(scope)) return _gTok.token;
+  try { await googleAuth(''); } catch(e){ if (!interactive) throw e; }
+  if (!(_gTok && _gTok.exp > Date.now() + 30000) || !googleGranted(scope)) {
+    if (!interactive) throw new Error('Google access for ' + scope.split('/').pop() + ' has not been granted on this device');
+    await googleAuth('consent');
+  }
+  // GIS lets someone untick a permission on the consent screen and still
+  // returns a token — one the API then rejects with a 403 the moment it is
+  // used. Caught here, where it can still be explained, instead of surfacing
+  // later as an error nobody can act on.
+  if (!googleGranted(scope)) {
+    throw new Error('The “' + scope.split('/').pop() + '” permission was not granted. Tap Connect Google again and leave every box ticked.');
+  }
+  return _gTok.token;
+}
+window.googleTokenFor = googleTokenFor;
+// Which account is signed in. Asked once per token, never assumed.
+async function googleWho(){
+  if (_gTok && _gTok.account) return _gTok.account;
+  try {
+    const tok = await googleTokenFor('userinfo.email', false);
+    const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers:{ Authorization:'Bearer ' + tok } });
+    const d = await r.json();
+    if (_gTok) _gTok.account = (d && d.email) || '';
+    return (_gTok && _gTok.account) || '';
+  } catch(e){ return ''; }
+}
+window.googleWho = googleWho;
+window.googleConnect = async function(pickAccount){
+  await googleAuth(pickAccount ? 'select_account consent' : 'consent');
+  const who = await googleWho();
+  STATE.googleAccount = who || '';
+  save();
+  return { account: who, scopes: googleScopesGranted() };
+};
+window.googleDisconnect = function(){
+  try { if (_gTok && _gTok.token && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(_gTok.token); } catch(e){}
+  _gTok = null;
+  STATE.googleAccount = '';
+  save();
+};
+
+function driveToken(interactive){ return googleTokenFor('drive.file', !!interactive); }
 async function driveTokenSmart(){ try { return await driveToken(false); } catch(e){ return driveToken(true); } }
 let _pickerLoaded = false;
 function loadPicker(){
@@ -16996,14 +17077,16 @@ window.setTestMail = async function(){
 // and a silent failure here is how mail quietly goes out from the wrong place.
 window.setConnectGmail = async function(){
   const g = await gmailProbe(true);
-  if (!g.ok) { showToast('Gmail did not connect — ' + g.why, 'error'); return; }
+  if (!g.ok) { showToast('Gmail did not connect — ' + g.why, 'error', 9000); return; }
   STATE.mailGmail = true;
+  STATE.googleAccount = g.account || STATE.googleAccount || '';
   if (!STATE.mailSendAs) STATE.mailSendAs = 'info@veniacollection.com';
   if (STATE.pullCc === undefined) STATE.pullCc = PULL_CC_DEFAULT;
   save();
   setMailPaintFields();
+  try { setGooglePaint(); } catch(e){}
   setPaintMail({ ok:true, from: STATE.mailSendAs || g.account, via:'gmail', account:g.account });
-  showToast('✓ Gmail connected as ' + g.account, 'success');
+  showToast('✓ Gmail connected as ' + g.account + ' — Drive and Calendar use the same account', 'success', 5000);
   try { logActivity('Gmail connected for sending — ' + g.account); } catch(e){}
 };
 window.setDisconnectGmail = function(){
@@ -17037,6 +17120,53 @@ function setMailPaintFields(){
 // A send you can trigger deliberately, from a real tap, that goes to the
 // account you are signed in as. The point is the error message: whatever Google
 // says here is the actual reason pull sheets are not going out.
+// What is actually connected, in one sentence, with the account named.
+window.setGooglePaint = function(){
+  const box = document.getElementById('set-google-acct');
+  if (!box) return;
+  const acct = (typeof googleAccount === 'function' && googleAccount()) || STATE.googleAccount || '';
+  const granted = (typeof googleScopesGranted === 'function' ? googleScopesGranted() : []);
+  const has = (x) => granted.some(g => g.indexOf(x) >= 0);
+  const live = !!granted.length;
+  const chip = (on, label) => '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:10px">'
+    + '<span style="width:7px;height:7px;border-radius:50%;background:' + (on ? 'var(--green)' : 'var(--border-mid)') + '"></span>'
+    + '<span style="color:' + (on ? 'var(--ink)' : 'var(--muted)') + '">' + label + '</span></span>';
+  if (!acct && !live) {
+    box.innerHTML = '<span style="color:var(--muted)">No Google account connected on this device. '
+      + (STATE.googleAccount ? 'Last used: <b>' + escHtml(STATE.googleAccount) + '</b> — tap Connect Google to sign back in.' : 'Tap Connect Google — Drive, Calendar and Gmail all come from whichever account you choose.')
+      + '</span>';
+    return;
+  }
+  box.innerHTML = '<b style="color:var(--ink)">' + escHtml(acct || STATE.googleAccount || 'Signed in') + '</b>'
+    + (live ? '' : ' <span style="color:var(--muted)">· not signed in on this device yet</span>')
+    + '<div style="margin-top:6px">'
+    + chip(has('drive.file'), 'Drive') + chip(has('calendar.events'), 'Calendar') + chip(has('gmail.send'), 'Gmail')
+    + '</div>';
+};
+window.setGoogleConnect = async function(pickAccount){
+  if (!googleClientId()) { showToast('Add your Google Client ID above first', 'warning'); return; }
+  try {
+    const res = await googleConnect(!!pickAccount);
+    // Drive's file scope only ever sees files THIS app created under THAT
+    // account — switching accounts does not carry them across, and saying so
+    // afterwards is too late to be useful.
+    setGooglePaint(); setMailPaintFields();
+    const missing = ['drive.file','calendar.events','gmail.send'].filter(x => !res.scopes.some(g => g.indexOf(x) >= 0));
+    showToast('✓ Google connected as ' + (res.account || 'your account')
+      + (missing.length ? ' — but ' + missing.map(m => m.split('/').pop()).join(', ') + ' was not granted' : ' — Drive, Calendar and Gmail'),
+      missing.length ? 'warning' : 'success', missing.length ? 8000 : 4000);
+    try { logActivity('Google connected — ' + (res.account || '') + ' (' + res.scopes.length + ' permissions)'); } catch(e){}
+  } catch(e) {
+    showToast('Google sign-in failed — ' + String((e && e.message) || e), 'error', 8000);
+  }
+};
+window.setGoogleSignOut = function(){
+  if (!confirm('Sign out of Google on this device?\n\nDrive attachments, Calendar and sending pull sheets as VENIA all stop until you connect again. Nothing is deleted.')) return;
+  googleDisconnect();
+  setGooglePaint(); setMailPaintFields();
+  showToast('Signed out of Google on this device', 'info');
+};
+
 window.setSendTestMail = async function(){
   if (!STATE.mailGmail) { showToast('Connect Gmail first', 'warning'); return; }
   const btn = document.getElementById('set-mail-test');
@@ -18147,49 +18277,12 @@ window.setPullCc = function(v){
 // account has to be a listed test user (or the app verified); on an Internal
 // Workspace app it just works. Google's own error is surfaced rather than
 // guessed at, because those two cases need different fixes.
-const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
-let _gmailTok = null, _gmailWho = '';
-function gmailToken(interactive){
-  return new Promise((resolve, reject) => {
-    if (_gmailTok && _gmailTok.exp > Date.now() + 30000) return resolve(_gmailTok.token);
-    if (!googleClientId()) return reject(new Error('No Google Client ID — add it in Settings → API Keys'));
-    if (!window.google || !google.accounts || !google.accounts.oauth2) return reject(new Error('Google library not loaded'));
-    if (!window._gmailTC){
-      window._gmailTC = google.accounts.oauth2.initTokenClient({
-        client_id: googleClientId(), scope: GMAIL_SCOPE, callback: () => {},
-      });
-    }
-    const c = window._gmailTC;
-    // GIS lets someone untick a permission on the consent screen and still
-    // returns a token — one Gmail then rejects with a 403 the moment it is
-    // used. The grant is checked here, where it can still be explained, rather
-    // than surfacing later as an API error nobody can act on.
-    c.callback = (r) => {
-      if (r && r.access_token){
-        const granted = String((r && r.scope) || '');
-        if (granted && granted.indexOf('gmail.send') < 0) {
-          return reject(new Error('You signed in, but the "Send email on your behalf" permission was not granted. Tap Connect Gmail again and leave that box ticked.'));
-        }
-        _gmailTok = { token: r.access_token, exp: Date.now() + ((r.expires_in || 3600) - 60) * 1000 };
-        return resolve(r.access_token);
-      }
-      reject(new Error((r && r.error_description) || (r && r.error) || 'Google did not return a token'));
-    };
-    try { c.requestAccessToken({ prompt: interactive ? 'consent' : '' }); } catch(e){ reject(e); }
-  });
-}
+let _gmailWho = '';
+function gmailToken(interactive){ return googleTokenFor('gmail.send', !!interactive); }
 // Which Google account is actually signed in. The app must never assume the
 // answer — a pull sheet sent from the wrong account is exactly the bug this
 // whole thread is about.
-async function gmailWho(tok){
-  if (_gmailWho) return _gmailWho;
-  try {
-    const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers:{ Authorization:'Bearer ' + tok } });
-    const d = await r.json();
-    _gmailWho = (d && d.email) || '';
-  } catch(e){ _gmailWho = ''; }
-  return _gmailWho;
-}
+async function gmailWho(){ return googleWho(); }
 // RFC 2822 by hand. A subject with an em dash is not ASCII, and an unencoded
 // header is either mangled or rejected — so headers are encoded-word wrapped
 // and both bodies go out base64, which sidesteps line-length rules entirely.
@@ -18232,8 +18325,8 @@ function gmailMime({ from, to, cc, subject, text, html }){
 // app reports the account it actually authenticated as, never the address it
 // asked for.
 async function gmailSend(d, sendAs){
-  const tok = await gmailToken(false).catch(() => gmailToken(true));
-  const who = await gmailWho(tok);
+  const tok = await gmailToken(true);
+  const who = await gmailWho();
   const from = (sendAs && sendAs.trim()) ? sendAs.trim() : (who || '');
   const raw = gmailMime({ from, to: d.to, cc: d.cc, subject: d.subject, text: d.text, html: d.html });
   const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
@@ -18255,9 +18348,8 @@ window.gmailSend = gmailSend;
 // already been given on this device.
 async function gmailProbe(interactive){
   try {
-    const tok = interactive ? await gmailToken(true) : await gmailToken(false);
-    const who = await gmailWho(tok);
-    return { ok: true, account: who };
+    await gmailToken(!!interactive);
+    return { ok: true, account: await gmailWho() };
   } catch(e){ return { ok: false, why: String((e && e.message) || e) }; }
 }
 window.gmailProbe = gmailProbe;
@@ -20310,6 +20402,7 @@ function setShowSection(id, navEl) {
   if (id==='set-connections') {
     try { stripeProbe(); } catch(e){}
     try { setMailPaintFields(); } catch(e){}
+    try { setGooglePaint(); googleWho().then(setGooglePaint); } catch(e){}
     try {
       if (STATE.mailGmail) gmailProbe(false).then(g => setPaintMail(g.ok ? { ok:true, from: STATE.mailSendAs || g.account, via:'gmail', account:g.account } : { ok:false }));
       else prMailProbe().then(st => setPaintMail(st.ok ? { ok:true, from: st.from, via:'server' } : { ok:false }));
@@ -35832,38 +35925,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // first consent, refreshes use prompt:'' (silent, no popup) so the planner
   // "stays connected" — the connected state itself persists in schedPrefs
   // (synced). Access tokens are ~1h and NEVER stored; we just re-mint quietly.
-  var gcalToken = null, gcalTokenExp = 0, gcalClient = null, gcalPending = null;
-  function gcalGetClient(){
-    var clientId = (typeof googleClientId === 'function' ? googleClientId() : '') || '';
-    if (!clientId || typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
-    if (!gcalClient){
-      gcalClient = google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        // events = read (plan around) + write (push the planned day back).
-        scope: 'https://www.googleapis.com/auth/calendar.events',
-        callback: function(resp){
-          if (resp && resp.access_token){
-            gcalToken = resp.access_token;
-            gcalTokenExp = Date.now() + (((resp.expires_in || 3600) - 60) * 1000);   // 1-min safety buffer
-            if (gcalPending){ var p = gcalPending; gcalPending = null; p.resolve(gcalToken); }
-          } else if (gcalPending){ var p2 = gcalPending; gcalPending = null; p2.reject(new Error((resp && resp.error) || 'no_token')); }
-        },
-        error_callback: function(err){ if (gcalPending){ var p3 = gcalPending; gcalPending = null; p3.reject(new Error((err && err.type) || 'auth_error')); } }
-      });
-    }
-    return gcalClient;
-  }
+  // Calendar rides the ONE Google connection (see googleTokenFor). It used to
+  // own a second token client, which meant a second consent screen and the very
+  // real possibility of planning around a different account's calendar than the
+  // one sending mail and holding the files.
+  var gcalToken = null, gcalTokenExp = 0;
   function gcalRequest(prompt){
-    return new Promise(function(resolve, reject){
-      var c = gcalGetClient(); if (!c){ reject(new Error('no_client')); return; }
-      gcalPending = { resolve: resolve, reject: reject };
-      try { c.requestAccessToken({ prompt: prompt }); } catch(e){ gcalPending = null; reject(e); }
-    });
+    return window.googleTokenFor('calendar.events', prompt !== '')
+      .then(function(t){ gcalToken = t; gcalTokenExp = Date.now() + 3000000; return t; });
   }
-  // A valid token, minting one SILENTLY if the current is missing/expired.
   function gcalEnsureToken(){
     if (gcalToken && Date.now() < gcalTokenExp) return Promise.resolve(gcalToken);
-    return gcalRequest('');   // relies on prior consent + an active Google session
+    return gcalRequest('');
   }
   window.schedConnectCal = function(){
     var clientId = (typeof googleClientId === 'function' ? googleClientId() : '') || '';
@@ -35878,7 +35951,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     });
   };
   window.schedDisconnectCal = function(){
-    try { if (gcalToken && google.accounts.oauth2.revoke) google.accounts.oauth2.revoke(gcalToken); } catch(e){}
+    // Only the calendar's USE of the shared grant is switched off here —
+    // revoking the token would sign Drive and Gmail out at the same time.
     gcalToken = null; gcalTokenExp = 0;
     schedPrefs().calSource = 'none'; save(); render();
   };
