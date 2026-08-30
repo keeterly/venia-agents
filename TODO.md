@@ -645,3 +645,15 @@ a number is right; several apparent bugs turned out to be malformed fixtures.
   `emailedAsked` = the request, the toast states the condition instead of the
   result, and both point at the cc copy — which carries the real From and is the
   only way to settle it from the app.
+
+## Build 374 — green means we can vouch for it
+- The test email arrived from **keeter@veniacollection.com** while the Settings
+  card read **"GMAIL · SENDING AS INFO@VENIACOLLECTION.COM" in green.** The card
+  printed `STATE.mailSendAs` — what we *asked* for — as though it were fact.
+- **Invariant: the status shows the account Google authenticated, never the
+  requested alias.** When Send-as differs from the account, the chip goes amber
+  and reads `keeter@… · info@… unverified`, and a box gives the exact fix:
+  Gmail → Settings → Accounts and Import → Send mail as → add + verify — or
+  Switch account and sign in as info@ instead.
+- Connecting says it at that moment too, and a mismatch is a warning, not a
+  success.
