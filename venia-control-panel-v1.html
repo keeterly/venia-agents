@@ -1836,7 +1836,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '383';
+  const BUILD = '384';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30375,6 +30375,7 @@ function cfoChatApply(status, result, job){
     if (!land('<div class="sk-msg-body" style="border-color:#5a2b27"><span style="color:#e07a6f">' + escHtml(shown) + '</span><br>' + btn + '</div>')) {
       showToast(who + '\u2019s cloud run failed \u2014 open the dock and retry', 'error');
     }
+    try { skMarkUnread(agent, false); } catch(e){}
     if (live.workKey) agentEndWork(live.workKey, false);
     return;
   }
@@ -30390,7 +30391,7 @@ function cfoChatApply(status, result, job){
   SK.history[agent].push({ role: 'assistant', content: shown });
   if (SK.history[agent].length > 40) SK.history[agent] = SK.history[agent].slice(-40);
   try { skSaveHistory(); } catch(e){}
-  land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
+  const landed = land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
   if (action && !parseError) {
     // A photo that rode the turn is restored so an action can still keep it —
     // only when this tab sent it, since the blob was never persisted.
@@ -30402,6 +30403,8 @@ function cfoChatApply(status, result, job){
   if (live.workKey) agentEndWork(live.workKey, !!action);
   // A windowed CSV keeps going once its batch lands.
   if (live.nextRows) { try { skOfferNextRows(); } catch(e){} }
+  // landed === false means it went into history but not onto the screen.
+  try { skMarkUnread(agent, landed); } catch(e){}
   showToast(who + ' replied', 'success');
 }
 
@@ -39589,6 +39592,25 @@ function gSignIn() {
 @supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){ #sk-launch{background:#0a0a0a} }
 #sk-launch:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.36)}
 #sk-launch.hidden{display:none}
+/* Unread. The launcher is the only thing on screen when the dock is shut, so
+   the count goes there — a filled counter, not a bare dot, because "Eni
+   replied" and "Eni replied three times" are different situations. */
+.sk-unread{
+  position:absolute;top:-7px;right:-7px;min-width:20px;height:20px;padding:0 5px;
+  border-radius:999px;background:var(--gold,#c9a227);color:#0a0a0a;
+  font-family:'DM Mono',monospace;font-size:11px;font-weight:700;line-height:20px;text-align:center;
+  box-shadow:0 0 0 2px #0a0a0a;pointer-events:none;
+}
+/* One pulse on arrival, then still — a badge that never stops moving is a
+   badge you stop seeing. */
+#sk-launch.sk-has-unread{animation:skPulse .5s ease-out 2}
+@keyframes skPulse{0%{transform:translateY(0)}35%{transform:translateY(-3px)}100%{transform:translateY(0)}}
+@media (prefers-reduced-motion:reduce){ #sk-launch.sk-has-unread{animation:none} }
+/* And which of the two it was, before you open it. */
+.sk-agent-tab.sk-tab-unread::after{
+  content:'';display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:var(--gold,#c9a227);margin-left:6px;vertical-align:middle;
+}
 .sk-launch-mark{font-size:16px}
 /* Brainstorm FAB — mobile only (desktop has the top-bar pill). Stacks above
    the Eni launcher; light so the two circles read as different tools. */
@@ -40128,6 +40150,83 @@ const SK = { agent:'eni', open:false, history:{eni:[],nigma:[]}, greeted:{eni:fa
     clearTimeout(t); t = setTimeout(() => fab.classList.remove('sk-scrolling'), 550);
   }, { capture:true, passive:true });
 })();
+// ── UNREAD ───────────────────────────────────────────────────
+// A reply can land long after the question: callClaude retries for ten seconds,
+// and a cloud job is explicitly built to finish after the app has been closed
+// ("Working in the cloud — you can close the app"). Until now that reply
+// announced itself with a 2.8-second toast and nothing else. Miss the toast and
+// there was no sign anywhere that Eni had answered.
+//
+// Worse, and the reason this needed fixing rather than decorating: when the
+// dock was closed the reply went into SK.history but NEVER into the DOM, and
+// skToggle only re-rendered a body that was still empty. So a founder who did
+// catch the toast, opened the dock, and found nothing there was not confused —
+// the message really was missing.
+SK.unread = { eni: 0, nigma: 0 };
+SK.needsRender = { eni: false, nigma: false };
+try {
+  const u = JSON.parse(localStorage.getItem('venia_sk_unread') || 'null');
+  if (u) SK.unread = { eni: +u.eni || 0, nigma: +u.nigma || 0 };
+} catch(e){}
+function skUnreadSave(){
+  try { localStorage.setItem('venia_sk_unread', JSON.stringify(SK.unread)); } catch(e){}
+}
+// Seen means: the dock is open, on that agent, and this tab is actually in
+// front. A reply that arrives while the window is in the background has not
+// been seen, however open the dock is.
+function skIsWatching(agent){
+  return !!SK.open && SK.agent === agent && document.visibilityState === 'visible';
+}
+window.skMarkUnread = function(agent, delivered){
+  agent = agent === 'nigma' ? 'nigma' : 'eni';
+  if (skIsWatching(agent)) return;
+  SK.unread[agent] = (SK.unread[agent] || 0) + 1;
+  // The reply exists in history but not on screen — remember to rebuild the
+  // thread when the dock is next opened, or it opens missing the answer.
+  if (!delivered) SK.needsRender[agent] = true;
+  skUnreadSave();
+  skPaintUnread();
+};
+window.skClearUnread = function(agent){
+  agent = agent === 'nigma' ? 'nigma' : 'eni';
+  if (!SK.unread[agent]) { skPaintUnread(); return; }
+  SK.unread[agent] = 0;
+  skUnreadSave();
+  skPaintUnread();
+};
+function skPaintUnread(){
+  const total = (SK.unread.eni || 0) + (SK.unread.nigma || 0);
+  const launch = document.getElementById('sk-launch');
+  if (launch){
+    let b = launch.querySelector('.sk-unread');
+    if (total){
+      if (!b){ b = document.createElement('span'); b.className = 'sk-unread'; launch.appendChild(b); }
+      b.textContent = total > 9 ? '9+' : String(total);
+      b.setAttribute('aria-label', total + ' unread ' + (total===1?'reply':'replies') + ' from Eni and Nigma');
+      launch.classList.add('sk-has-unread');
+    } else {
+      if (b) b.remove();
+      launch.classList.remove('sk-has-unread');
+    }
+  }
+  // Which of the two it was, so the right tab is obvious before opening it.
+  ['eni','nigma'].forEach(a => {
+    const tab = document.getElementById('sk-tab-' + a);
+    if (tab) tab.classList.toggle('sk-tab-unread', !!SK.unread[a] && SK.agent !== a);
+  });
+  // The tab title carries it too: a reply that arrives while this window is
+  // behind another one is exactly the case that needs a signal outside the app.
+  const base = document.title.replace(/^\(\d+\+?\)\s*/, '');
+  document.title = total ? '(' + (total > 9 ? '9+' : total) + ') ' + base : base;
+};
+// Coming back to the window with the dock already open counts as seeing it.
+document.addEventListener('visibilitychange', function(){
+  if (document.visibilityState === 'visible' && SK.open) skClearUnread(SK.agent);
+});
+// A reply that landed before the last reload is still unread after it.
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => skPaintUnread());
+else setTimeout(() => { try { skPaintUnread(); } catch(e){} }, 0);
+
 // Conversations survive reloads (device-local; capped like the live history).
 function skSaveHistory(){
   // Never persist image blobs — keep localStorage lean and text-only. The chat
@@ -40321,7 +40420,13 @@ function skToggle(force){
     skUpdateContext();
     // Restore a persisted conversation on first open of the session.
     const body = document.getElementById('sk-body');
-    if (body && !body.childElementCount && (SK.history[SK.agent]||[]).length) skRenderHistory();
+    // Rebuild when the body is empty OR when a reply arrived while the dock was
+    // shut — that reply is in history and nowhere else, and opening onto a
+    // thread that is missing the answer you were told about is worse than no
+    // notification at all.
+    if (body && (!body.childElementCount || SK.needsRender[SK.agent]) && (SK.history[SK.agent]||[]).length) skRenderHistory();
+    SK.needsRender[SK.agent] = false;
+    skClearUnread(SK.agent);
     if (!SK.greeted[SK.agent]) skGreet();
     try { skRestorePending(); } catch(e){}
     const f = document.getElementById('sk-field');
@@ -40335,6 +40440,8 @@ function skToggle(force){
 function skSetAgent(a){
   if (a === SK.agent) return;
   SK.agent = a;
+  SK.needsRender[a] = false;
+  skClearUnread(a);
   document.getElementById('sk-tab-eni').classList.toggle('active', a==='eni');
   document.getElementById('sk-tab-nigma').classList.toggle('active', a==='nigma');
   skRenderHistory();
@@ -40830,6 +40937,9 @@ async function skSend(preset, opts){
     }
     SK.history[SK.agent].push({role:'assistant', content:shown});
     skSaveHistory();
+    // The bubble is already on screen, so this reply IS rendered — it just may
+    // not have been looked at.
+    try { skMarkUnread(SK.agent, true); } catch(e){}
     if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
     const t = think.querySelector('.sk-work'); if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;

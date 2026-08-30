@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 383._
+_Last reviewed at Build 384._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1028,3 +1028,39 @@ real values imported exactly.
 Prerequisite the app cannot do for them: **enable the Google Sheets API** on the
 same Cloud project as the OAuth client (APIs & Services → Library). The error
 message already says this and the Settings link goes to the right project.
+
+## Build 384 — an unread mark on the chat box
+*"If ENI replies and it hasn't been seen yet and the chat isn't open, let's have
+a notification on the chat box."*
+
+A reply can land long after the question: `callClaude` retries for ten seconds,
+and a cloud job is explicitly built to finish after the app has been closed
+("Working in the cloud — you can close the app"). That reply announced itself
+with a **2.8-second toast and nothing else**.
+
+**The bug underneath was worse than the missing badge.** When the dock was
+closed, `cfoChatApply`'s `land()` returned false — the reply went into
+`SK.history` and **never into the DOM** — and `skToggle` only re-rendered a body
+that was still *empty*. So catching the toast, opening the dock and finding
+nothing there was not confusion: the message really was missing. The thread now
+rebuilds when a reply arrived while it was shut, because a notification pointing
+at a message that is not there is worse than no notification.
+
+- **Seen** = dock open, on that agent, and the window in front. A reply that
+  arrives while the window is behind another one has not been seen.
+- A **count**, not a bare dot — "Eni replied" and "Eni replied three times" are
+  different situations. Caps at 9+.
+- **Survives a reload**, because unseen is unseen.
+- The **agent tab** carries a dot when it was the other one, so you know which
+  before opening.
+- The **tab title** carries the count too — that is the whole point of the
+  window-in-the-background case — and does not stack counts on itself.
+- Cleared three ways: opening the dock, switching to that agent, or returning to
+  the window with the dock already open.
+- Pulses twice and stops; a badge that never stops moving is one you stop
+  seeing. No animation at all under `prefers-reduced-motion`.
+
+Test note: `addInitScript` runs on **every** navigation, so clearing storage in
+it wiped the very persistence the reload assertion was testing. And headless
+Chromium reports `visibilityState: 'visible'` however many pages are opened over
+a page, so the hidden state has to be driven directly.
