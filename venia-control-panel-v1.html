@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '372';
+  const BUILD = '373';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -17597,14 +17597,14 @@ function prOpenDetail(pullId) {
       ${(function(){
         const g = pull.signature;
         const emailedLine = pull.emailedAt
-          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}</div>`
+          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}${pull.emailedAsked ? ' <span style="color:var(--amber)">(asked for ' + escHtml(pull.emailedAsked) + ' — only used if it is a verified alias)</span>' : ''}${pull.emailedCc ? ' · cc ' + escHtml(pull.emailedCc) : ''}</div>`
           : '';
         if (!g) return emailedLine + `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
           <span style="flex:1;min-width:160px;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
           <button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')">✎ Get signature</button>
         </div>`;
         const em = pull.emailedAt
-          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}</div>`
+          ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}${pull.emailedAsked ? ' <span style="color:var(--amber)">(asked for ' + escHtml(pull.emailedAsked) + ' — only used if it is a verified alias)</span>' : ''}${pull.emailedCc ? ' · cc ' + escHtml(pull.emailedCc) : ''}</div>`
           : '';
         const drift = prSignDrift(pull);
         return em + `<div style="padding:10px 14px;border:1px solid ${drift ? 'var(--amber)' : 'var(--border)'};background:var(--bg-off);margin-bottom:18px">
@@ -18382,7 +18382,11 @@ async function gmailSend(d, sendAs){
       ? m + ' — the signing account needs the Gmail send permission granted (Settings → API Keys → Email → Connect Gmail).'
       : m);
   }
-  return { id: j.id || '', account: who, from };
+  // What we ASKED Gmail to send as, and what we KNOW it authenticated as. When
+  // the two differ we cannot tell from this response which one went out —
+  // Gmail substitutes an unverified alias silently and reports success either
+  // way — so both travel back and the caller says so rather than claiming.
+  return { id: j.id || '', account: who, from, verified: !from || !who || from === who };
 }
 window.gmailSend = gmailSend;
 // Is Gmail usable right now WITHOUT prompting? A silent token means consent has
@@ -18405,6 +18409,7 @@ async function prSendEmail(pull, opener) {
     pull.emailedFrom = from || '';
     pull.emailedCc = cc || '';
     pull.emailedVia = via;
+    if (via !== 'gmail') delete pull.emailedAsked;
     save();
     try { logActivity('Pull sheet emailed to ' + pull.email + (cc ? ' (cc ' + cc + ')' : '') + ' from ' + (from || 'VENIA')); } catch(e){}
     toast('✓ Sent to ' + pull.email + (cc ? ' · cc ' + cc : '') + ' from ' + (from || 'VENIA'), 'success');
@@ -18425,10 +18430,16 @@ async function prSendEmail(pull, opener) {
     try {
       const res = await gmailSend({ to: pull.email, cc, subject: d.subject, text: d.text, html: d.html },
                                   STATE.mailSendAs || '');
-      // Gmail replaces a From it has not verified, so report the ACCOUNT that
-      // authenticated, plus the alias only if it was asked for and could hold.
       STATE.mailLastError = null; save();
-      done(res.from || res.account, 'gmail');
+      if (res.verified) { done(res.from || res.account, 'gmail'); return; }
+      // An alias we cannot confirm. Record the account — the one fact — keep the
+      // request beside it, and point at the cc copy, which carries the real
+      // From and is the only way to settle it from here.
+      pull.emailedAsked = res.from;
+      done(res.account, 'gmail');
+      toast('Sent. It asked to come from ' + res.from + ', but Gmail only honours that if it is a verified “Send mail as” alias of '
+        + res.account + ' — otherwise it used ' + res.account + '. The copy in ' + (cc || 'your Sent folder') + ' shows which.',
+        'warning', 11000);
       return;
     } catch(e) {
       // Carried, not shouted over. Falling through keeps the email alive.
