@@ -1785,7 +1785,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '378';
+  const BUILD = '379';
   const BUILD_DATE = '2026.08.29';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4074,7 +4074,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
             <div class="fg" style="grid-column:1/-1"><label class="fl" for="tp-q-care">Care Instructions</label><input class="fi" id="tp-q-care" placeholder="Dry clean only. Do not bleach. Store folded." data-autosave="tp-care"></div>
           </div>
           <!-- Measurements table -->
-          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px;margin-top:4px">Measurements (cm)</div>
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px;margin-top:4px">Measurements (inches, on the flat)</div>
           <div class="tbl-wrap" style="margin-bottom:14px">
             <table id="tp-meas-table" style="font-size:11px">
               <thead><tr style="border-bottom:2px solid var(--ink)">
@@ -5439,6 +5439,62 @@ window.mergeSnapshots = mergeSnapshots;
 // Canonical apparel size run + range expander.
 // Turns "XS-XL", "S–XL", "S,M,L", "0-12" into a real list of sizes.
 const SIZE_ORDER = ['XXS','XS','S','M','L','XL','XXL','XXXL'];
+// ── FRACTIONAL INCHES ────────────────────────────────────────────────────────
+// VENIA writes every spec the way the factory reads it: "13 3/8", tolerance
+// 1/8". parseFloat() reads "13 3/8" as 13 and "1/8" as 1 — so the old POM
+// fields silently truncated the fraction off every measurement, and turned a
+// 1/8" tolerance into 1", an eightfold error on the single most
+// precision-critical number in a tech pack. Nothing was lost: Supabase showed
+// zero POM points entered across all 60 styles, so this lands before the first
+// real spec rather than after.
+//
+// The rule from here: parse on the way IN, store a plain number, and format
+// back to house fractions on the way OUT. Anything that touches a measurement
+// goes through these two — never parseFloat.
+function measGcd(a, b){ while (b) { const t = a % b; a = b; b = t; } return a || 1; }
+function measParse(v){
+  if (v === null || v === undefined || v === '') return NaN;
+  if (typeof v === 'number') return isFinite(v) ? v : NaN;
+  let t = String(v).trim().replace(/[""''″’]/g, '').replace(/\s+/g, ' ').trim();
+  if (!t) return NaN;
+  let sign = 1;
+  if (t[0] === '-') { sign = -1; t = t.slice(1).trim(); }
+  // "13 3/8" and "13-3/8" — a whole number plus a fraction, the common case.
+  let m = t.match(/^(\d+)\s*[- ]\s*(\d+)\s*\/\s*(\d+)$/);
+  if (m) { const d = +m[3]; return d ? sign * (+m[1] + (+m[2]) / d) : NaN; }
+  // "3/8" alone — how every tolerance is written.
+  m = t.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (m) { const d = +m[2]; return d ? sign * ((+m[1]) / d) : NaN; }
+  // "13.375", "13", ".375" — decimals still work, nobody has to change habits.
+  if (/^\d*\.?\d+$/.test(t)) return sign * parseFloat(t);
+  return NaN;
+}
+const MEAS_DEN = 16;   // the house grid: specs and tolerances land on sixteenths
+function measFmt(v, den){
+  const n = (typeof v === 'number') ? v : measParse(v);
+  if (!isFinite(n)) return '';
+  den = den || MEAS_DEN;
+  const neg = n < 0, a = Math.abs(n);
+  let whole = Math.floor(a + 1e-9);
+  let num = Math.round((a - whole) * den);
+  if (num === den) { whole++; num = 0; }
+  // A value that does not land on the grid is shown as the decimal it really
+  // is. Quietly rounding someone's spec to the nearest sixteenth would be the
+  // same class of mistake as truncating it.
+  if (Math.abs(a - (whole + num / den)) > 1e-6) return (neg ? '-' : '') + String(Math.round(a * 1000) / 1000);
+  if (!num) return (neg ? '-' : '') + String(whole);
+  const g = measGcd(num, den);
+  return (neg ? '-' : '') + (whole ? whole + ' ' : '') + (num / g) + '/' + (den / g);
+}
+// For a tolerance or a deviation, where 0 is meaningful and should read as 0.
+function measFmtSigned(v){
+  const n = (typeof v === 'number') ? v : measParse(v);
+  if (!isFinite(n)) return '';
+  if (n === 0) return '0';
+  return (n > 0 ? '+' : '') + measFmt(n);
+}
+window.measParse = measParse; window.measFmt = measFmt; window.measFmtSigned = measFmtSigned;
+
 function expandSizes(str){
   if (!str) return [];
   const out = [];
@@ -9001,21 +9057,50 @@ function renderPomPage() {
 // lifted from VENIA's production tech pack, so a new style starts from the
 // standard sheet instead of a blank grid. Seeding only ADDS points whose
 // names aren't already present.
+// The house POM list, transcribed from VENIA TECH PACK TEMPLATE's own POM LIST
+// tab and matched to its TOLERANCE column. Tolerances are exact sixteenths —
+// they used to be typed as 0.06 and 0.13, which are not 1/16 (.0625) and 1/8
+// (.125) and print as decimals a factory does not read.
+//
+// Side-seam length, both armhole readings and the whole pocket-placement block
+// were missing; the real packs use them (SPIKE PANTS specs a cargo pocket flap
+// to 0" tolerance). A template is a seed, not a cage — style-specific points
+// are still added by hand on top.
+const T0 = 0, T16 = 1/16, T8 = 1/8, T4 = 1/4, T2 = 1/2;
+// Transcribed from the dropdown tab of VENIA TECH PACK TEMPLATE — the lists
+// the sheet has always offered. The app had seven lifecycle words against the
+// sheet's twenty-two production states, which is why a style pushed to SMS
+// still read "proto".
+const TP_PROD_STATUS = ['',
+  '1st PROTO','2nd PROTO','PROTO - 1ST FIT','PROTO - 2ND FIT','PROTO - 3RD FIT',
+  'SMS - DESIGN','SMS - PATTERN','SMS - CUTTING','SMS - SEWING','SMS - DYING','SMS - FINISHED',
+  'SMS - 1ST FIT','SMS - 2ND FIT','SMS - 3RD FIT',
+  'PP - 1ST FIT','PP - 2ND FIT','PP - 3RD FIT','PP - GRADING','PP - MARKER',
+  'PROD - WAITING ON FABRIC','PROD - CUTTING','PROD - TOP','PROD - SEWING','PROD - DYING','PROD - FINISH'];
+const TP_GROUPS = ['','WOVEN TOPS','KNIT TOPS','BOTTOMS','DRESSES','JACKETS','OUTERWEAR','ACCESSORIES'];
+const TP_GENDERS = ['','MENS','WOMENS','UNISEX'];
+const TP_CONTRACTORS = ['MANUEL','MAGARITO','RULE','NERY','EXTREME','JUSTO','TOPMODA','PROSTANDARD','VERTICAL AUTHORITY'];
+
 const POM_TEMPLATES = {
   'Tops / Jackets / Dresses': [
-    ['Chest at underarm', 0.06], ['Waist @ seam', 0.13], ['Waist — 7" down from armhole', 0.25],
-    ['Sweep straight across', 0.5], ['Sweep along curve', 0.5],
-    ['HPS to CF hem', 0.25], ['HPS to CB hem', 0.25], ['HPS to waist', 0.25],
-    ['Front neck drop', 0.13], ['Back neck drop', 0.13], ['Across shoulder', 0.25],
-    ['Neck opening', 0.13], ['Collar height', 0.06], ['Shoulder length', 0.13],
-    ['Armhole straight', 0.25], ['Armhole along curve', 0.25], ['Bicep at underarm', 0.25],
-    ['Sleeve length', 0.25], ['Sleeve opening', 0.13], ['Cuff height', 0.06],
+    ['Chest at underarm', T16], ['Waist @ seam', T8], ['Waist — 7" down from armhole', T4],
+    ['Sweep straight across', T2], ['Sweep along curve', T2],
+    ['HPS to CF hem', T4], ['HPS to CB hem', T4], ['HPS to waist', T4], ['Side seam length', T4],
+    ['Front neck drop', T8], ['Back neck drop', T8], ['Across shoulder', T4],
+    ['Neck opening', T8], ['Collar height', T16], ['Shoulder length', T8],
+    ['Armhole straight — front', T4], ['Armhole straight — back', T4], ['Armhole along curve', T4],
+    ['Bicep at underarm', T4], ['Sleeve length', T4], ['Sleeve opening', T8], ['Cuff height', T16],
   ],
   'Bottoms': [
-    ['Waist opening', 0.25], ['Hip — 7" below waist', 0.25], ['Thigh — 1" below crotch', 0.25],
-    ['Front rise — along curve', 0.25], ['Back rise — along curve', 0.25],
-    ['Front crotch depth', 0.25], ['Back crotch depth', 0.25],
-    ['Inseam', 0.25], ['Outseam', 0.5], ['Waistband height', 0.06], ['Hem opening', 0.25],
+    ['Waist opening', T4], ['High hip — 3" below waist', T4], ['Hip — 7" below waist', T4],
+    ['Thigh — 1" below crotch', T4],
+    ['Front rise — along curve', T4], ['Back rise — along curve', T4],
+    ['Front crotch depth', T4], ['Back crotch depth', T4],
+    ['Inseam', T4], ['Outseam', T2], ['Waistband height', T16],
+    ['Hem opening', T4], ['Hem height', T16],
+    ['Frt pocket placement from SS', T8], ['Pocket length along SS', T8],
+    ['Pocket length frm waistband', T8], ['Pocket width', T8],
+    ['Back pocket placement down from WB', T8], ['Back pocket placement from CB', T8],
   ],
 };
 window.pomSeedTemplate = function(styleId, kind){
@@ -9053,13 +9138,15 @@ function pomSelectStyle(styleId) {
     // past round's verdict. Live spec is only the fallback for hand-typed
     // values that predate the round system.
     const e = p.rounds && p.measuredRound && p.rounds[p.measuredRound];
-    const spec = (e && e.spec != null) ? parseFloat(e.spec) : parseFloat(p[baseK]);
-    const tol = (e && e.tol != null) ? (parseFloat(e.tol)||0) : (parseFloat(p.tol)||0);
-    const meas = parseFloat(p.measured);
+    const spec = (e && e.spec != null) ? measParse(e.spec) : measParse(p[baseK]);
+    const tol = (e && e.tol != null) ? (measParse(e.tol)||0) : (measParse(p.tol)||0);
+    const meas = measParse(p.measured);
     if (isNaN(meas) || isNaN(spec)) return `<span style="color:var(--muted)">—</span>`;
-    const d = Math.round((meas-spec)*100)/100, oot = Math.abs(d) > tol;
+    // Round to a 64th before comparing: floating point makes 3/8 + 1/4 land a
+    // hair over 5/8, and a hair over is not out of tolerance.
+    const d = Math.round((meas-spec)*64)/64, oot = Math.abs(d) - tol > 1e-9;
     const tag = e ? `<span style="color:var(--muted);font-size:9px;font-family:'DM Mono',monospace"> ${p.measuredRound}</span>` : '';
-    return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px" title="${e?'vs '+p.measuredRound+' spec '+spec+' · tol ±'+tol+' (frozen at measure time)':'vs current spec'}">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>${tag}`;
+    return `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px" title="${e?'vs '+p.measuredRound+' spec '+measFmt(spec)+'" · tol ±'+measFmt(tol)+'" (frozen at measure time)':'vs current spec'}">${measFmtSigned(d)}${oot?' ⚠':' ✓'}</span>${tag}`;
   };
 
   const html = `
@@ -9081,9 +9168,9 @@ function pomSelectStyle(styleId) {
           ${points.map((p,idx) => `
             <tr>
               <td style="color:var(--ink);font-weight:500">${p.point}</td>
-              ${sizes.map(sz=>`<td><input class="pom-input" value="${p[sz.toLowerCase()]||''}" onchange="updatePom('${styleId}',${idx},'${sz.toLowerCase()}',this.value)"></td>`).join('')}
-              <td><input class="pom-input" style="width:48px" value="${p.tol||''}" onchange="updatePom('${styleId}',${idx},'tol',this.value)"></td>
-              <td><input class="pom-input" style="width:54px" value="${p.measured||''}" placeholder="—" onchange="updatePom('${styleId}',${idx},'measured',this.value)"></td>
+              ${sizes.map(sz=>`<td><input class="pom-input" value="${measFmt(p[sz.toLowerCase()])}" onchange="updatePom('${styleId}',${idx},'${sz.toLowerCase()}',this.value)"></td>`).join('')}
+              <td><input class="pom-input" style="width:48px" value="${measFmt(p.tol)}" onchange="updatePom('${styleId}',${idx},'tol',this.value)"></td>
+              <td><input class="pom-input" style="width:54px" value="${measFmt(p.measured)}" placeholder="—" onchange="updatePom('${styleId}',${idx},'measured',this.value)"></td>
               <td style="text-align:center" id="pom-dev-${idx}">${devCell(p)}</td>
               <td><input class="fi" style="font-size:10px;padding:4px 0;min-height:auto" value="${p.comment||''}" onchange="updatePom('${styleId}',${idx},'comment',this.value)"></td>
               <td style="text-align:center"><button class="btn btn-danger btn-sm" onclick="removePomPoint('${styleId}',${idx})">✕</button></td>
@@ -9124,8 +9211,14 @@ function savePomPoint(styleId) {
   const style = STATE.styles.find(s=>s.id===styleId);
   let sizes = style ? expandSizes(style.sizes) : [];
   if (!sizes.length) sizes = ['XS','S','M','L','XL'];
-  const entry = { id: 'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point, tol: parseFloat(document.getElementById('pom-new-tol').value)||0.25, comment: document.getElementById('pom-new-comment').value };
-  sizes.forEach(sz => { const k=sz.toLowerCase(); const el=document.getElementById('pom-new-'+k); entry[k] = el ? (parseFloat(el.value)||0) : 0; });
+  const tolIn = measParse(document.getElementById('pom-new-tol').value);
+  const entry = { id: 'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point,
+    tol: isNaN(tolIn) ? 0.25 : tolIn, comment: document.getElementById('pom-new-comment').value };
+  // A blank size stays blank. It used to become 0, which reads as "this
+  // measurement is zero inches" rather than "nobody has specced it yet" —
+  // and 0 is a number the deviation check will happily judge against.
+  sizes.forEach(sz => { const k=sz.toLowerCase(); const el=document.getElementById('pom-new-'+k);
+    const n = el ? measParse(el.value) : NaN; entry[k] = isNaN(n) ? '' : n; });
   STATE.pom[styleId].push(entry);
   save();
   pomSelectStyle(styleId);
@@ -9147,49 +9240,58 @@ function pomGrade(styleId) {
   }
   if (bi < 0) bi = Math.floor((sizes.length-1)/2);
   const baseSize = sizes[bi];
-  const incStr = prompt('Grade increment per size up (cm) — graded from base size '+baseSize+':', style.gradeInc!=null ? style.gradeInc : '1');
+  // Inches, and written the way a grade rule is actually written — "1/2",
+  // "1 1/4". It said cm, which is not a unit that appears anywhere in VENIA's
+  // spec book.
+  const incStr = prompt('Grade increment per size up (inches, e.g. 1/2 or 1 1/4) — graded from base size '+baseSize+':',
+    style.gradeInc!=null ? measFmt(style.gradeInc) : '1/2');
   if (incStr === null) return;
-  const inc = parseFloat(incStr);
-  if (isNaN(inc)) { toast('Enter a number','warn'); return; }
+  const inc = measParse(incStr);
+  if (isNaN(inc)) { toast('Enter a measurement like 1/2 or 1 1/4','warn'); return; }
   const pts = STATE.pom[styleId] || [];
   const bk = baseSize.toLowerCase();
   let filled = 0, cells = 0;
   pts.forEach(p => {
-    const bv = parseFloat(p[bk]);
+    const bv = measParse(p[bk]);
     if (isNaN(bv)) return;
     let pf = 0;
     sizes.forEach((sz,i) => {
       const k = sz.toLowerCase();
       if (k === bk) return;                       // never touch the base column
       const cur = p[k];
-      const isEmpty = cur===undefined || cur===null || cur==='' || isNaN(parseFloat(cur));
-      if (isEmpty) { p[k] = Math.round((bv + (i-bi)*inc)*100)/100; pf++; }  // fill blanks only — preserve manual grades
+      const isEmpty = cur===undefined || cur===null || cur==='' || isNaN(measParse(cur));
+      // Snap to a 64th so a graded run stays on the fraction grid instead of
+      // drifting into 12.750000000000002.
+      if (isEmpty) { p[k] = Math.round((bv + (i-bi)*inc)*64)/64; pf++; }    // fill blanks only — preserve manual grades
     });
     if (pf) { filled++; cells += pf; }
   });
   style.gradeInc = inc;
   if (typeof save === 'function') save();
   pomSelectStyle(styleId);
-  toast(filled ? ('Filled '+cells+' blank cell'+(cells>1?'s':'')+' across '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+inc+'cm/size). Existing values kept.') : ('Nothing to fill — enter a value in the '+baseSize+' column, existing grades are preserved'), filled ? 'success' : 'warn');
+  toast(filled ? ('Filled '+cells+' blank cell'+(cells>1?'s':'')+' across '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+measFmt(inc)+'"/size). Existing values kept.') : ('Nothing to fill — enter a value in the '+baseSize+' column, existing grades are preserved'), filled ? 'success' : 'warn');
 }
 
 function updatePom(styleId, idx, field, val) {
   if (!STATE.pom[styleId]) return;
   const p = STATE.pom[styleId][idx];
-  p[field] = isNaN(parseFloat(val)) ? val : parseFloat(val);
+  // point and comment are prose; everything else is a measurement, and a
+  // measurement is parsed as fractional inches, never by parseFloat.
+  if (field === 'point' || field === 'comment') p[field] = val;
+  else { const n = measParse(val); p[field] = isNaN(n) ? (String(val).trim() === '' ? '' : val) : n; }
   // A measurement typed straight into the sheet joins the round system —
   // tagged to the style's current sample round with the spec/tol frozen now.
   // Otherwise it would bypass fitTolSummary and get silently overwritten by
   // pomMirrorMeasured on the next fit session.
   if (field === 'measured') {
-    const m = parseFloat(val);
+    const m = measParse(val);
     if (!isNaN(m)) {
       const style = STATE.styles.find(s => s.id === styleId);
       const rk = style && style.sample ? (style.sample === 'Approved' ? 'TOP' : style.sample) : 'Proto';
       const bk = style ? pomBaseInfo(style).baseK : 'm';
-      const spec = parseFloat(p[bk]);
+      const spec = measParse(p[bk]);
       if (!p.rounds) p.rounds = {};
-      p.rounds[rk] = { m, spec: isNaN(spec) ? null : spec, tol: parseFloat(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+      p.rounds[rk] = { m, spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0, at: new Date().toISOString().slice(0,10) };
       pomMirrorMeasured(p);
     }
   }
@@ -9210,13 +9312,16 @@ function updatePomDev(styleId, idx) {
   // Same frozen-snapshot rule as devCell in pomSelectStyle: a past round's
   // verdict is judged against the spec/tol captured when it was measured.
   const e = p.rounds && p.measuredRound && p.rounds[p.measuredRound];
-  const spec = (e && e.spec != null) ? parseFloat(e.spec) : parseFloat(p[baseK]);
-  const tol = (e && e.tol != null) ? (parseFloat(e.tol)||0) : (parseFloat(p.tol)||0);
-  const meas = parseFloat(p.measured);
+  const spec = (e && e.spec != null) ? measParse(e.spec) : measParse(p[baseK]);
+  const tol = (e && e.tol != null) ? (measParse(e.tol)||0) : (measParse(p.tol)||0);
+  const meas = measParse(p.measured);
   if (isNaN(meas)||isNaN(spec)) { cell.innerHTML='<span style="color:var(--muted)">—</span>'; return; }
-  const d=Math.round((meas-spec)*100)/100, oot=Math.abs(d)>tol;
+  // Same rounding and same inclusive tolerance as devCell — this is the copy
+  // that actually repaints after a keystroke, so a mismatch here would mean the
+  // number changed the moment you looked away.
+  const d=Math.round((meas-spec)*64)/64, oot=Math.abs(d)-tol>1e-9;
   const tag = e ? `<span style="color:var(--muted);font-size:9px;font-family:'DM Mono',monospace"> ${p.measuredRound}</span>` : '';
-  cell.innerHTML=`<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${d>0?'+':''}${d}${oot?' ⚠':' ✓'}</span>${tag}`;
+  cell.innerHTML=`<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:${oot?'700':'500'};font-family:'DM Mono',monospace;font-size:11px">${measFmtSigned(d)}${oot?' ⚠':' ✓'}</span>${tag}`;
 }
 
 function removePomPoint(styleId, idx) {
@@ -11751,7 +11856,7 @@ function fitTolSummary(styleId, round){
     const e = p.rounds && p.rounds[round];
     if (!e || e.m == null || e.spec == null) return;
     n++;
-    if (Math.abs(e.m - e.spec) <= (parseFloat(e.tol)||0)) ok++;
+    if (Math.abs(e.m - e.spec) - (measParse(e.tol)||0) <= 1e-9) ok++;
   });
   return { n, ok };
 }
@@ -11827,12 +11932,12 @@ window.fitSessSaveCurrent = function(){
   const v = el.value.trim();
   const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
   const { baseK } = pomBaseInfo(s);
-  if (v === '' || isNaN(parseFloat(v))) {
+  if (v === '' || isNaN(measParse(v))) {
     if (p.rounds) delete p.rounds[S.round];
   } else {
     if (!p.rounds) p.rounds = {};
-    const spec = parseFloat(p[baseK]);
-    p.rounds[S.round] = { m: parseFloat(v), spec: isNaN(spec) ? null : spec, tol: parseFloat(p.tol)||0, at: new Date().toISOString().slice(0,10) };
+    const spec = measParse(p[baseK]);
+    p.rounds[S.round] = { m: measParse(v), spec: isNaN(spec) ? null : spec, tol: measParse(p.tol)||0, at: new Date().toISOString().slice(0,10) };
   }
   pomMirrorMeasured(p);
 };
@@ -11853,11 +11958,11 @@ window.fitSessDelta = function(v){
   const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
   const p = ((STATE.pom||{})[S.styleId]||[])[S.idx]; if (!p) return;
   const { baseK } = pomBaseInfo(s);
-  const spec = parseFloat(p[baseK]), m = parseFloat(v), tol = parseFloat(p.tol)||0;
+  const spec = measParse(p[baseK]), m = measParse(v), tol = measParse(p.tol)||0;
   const el = document.getElementById('fs-delta'); if (!el) return;
   if (isNaN(m) || isNaN(spec)){ el.innerHTML = '<span style="color:var(--muted)">—</span>'; return; }
-  const d = Math.round((m - spec) * 100) / 100, oot = Math.abs(d) > tol;
-  el.innerHTML = `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:700">${d>0?'+':''}${d} ${oot?'⚠ out of tolerance':'✓ in spec'}</span>`;
+  const d = Math.round((m - spec) * 64) / 64, oot = Math.abs(d) - tol > 1e-9;
+  el.innerHTML = `<span style="color:${oot?'var(--red)':'var(--green)'};font-weight:700">${measFmtSigned(d)}" ${oot?'⚠ out of tolerance':'✓ in spec'}</span>`;
 };
 window.fitSessResult = function(result){
   const S = window.__fitSess; if (!S) return;
@@ -11876,7 +11981,7 @@ window.fitSessFileNote = function(){
   const S = window.__fitSess; if (!S) return;
   const s = STATE.styles.find(x => x.id === S.styleId); if (!s) return;
   const points = (STATE.pom||{})[S.styleId] || [];
-  const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) > (parseFloat(e.tol)||0); });
+  const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) - (measParse(e.tol)||0) > 1e-9; });
   if (!bad.length){ showToast('Everything in tolerance — nothing to file','info'); return; }
   if (!s.fitNotes) s.fitNotes = [];
   const t = fitTolSummary(S.styleId, S.round);
@@ -11911,7 +12016,7 @@ function fitSessRender(){
     <div style="height:3px;background:var(--border);margin:12px 0;flex-shrink:0"><div style="height:100%;width:${Math.round(Math.min(S.idx,points.length)/points.length*100)}%;background:var(--ink)"></div></div>`;
   if (S.idx >= points.length){
     const t = fitTolSummary(S.styleId, S.round);
-    const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) > (parseFloat(e.tol)||0); });
+    const bad = points.filter(p => { const e = p.rounds && p.rounds[S.round]; return e && e.m != null && e.spec != null && Math.abs(e.m - e.spec) - (measParse(e.tol)||0) > 1e-9; });
     ex.innerHTML = head + `
       <div style="flex:1;display:flex;flex-direction:column;justify-content:center;text-align:center;gap:8px">
         <div style="font-family:'DM Mono',monospace;font-size:44px;font-weight:300;color:${t.n && t.ok===t.n ? 'var(--green)' : 'var(--ink)'}">${t.ok}/${t.n}</div>
@@ -11935,15 +12040,15 @@ function fitSessRender(){
   }
   const p = points[S.idx];
   const e = (p.rounds||{})[S.round];
-  const spec = parseFloat(p[baseK]);
+  const spec = measParse(p[baseK]);
   ex.innerHTML = head + `
     <div style="flex:1;display:flex;flex-direction:column;justify-content:center;gap:6px;max-width:420px;margin:0 auto;width:100%">
       <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">Point ${S.idx+1} of ${points.length}</div>
       <div style="font-size:20px;font-weight:700;color:var(--ink)">${p.point||'—'}</div>
       ${p.comment ? `<div style="font-size:11px;color:var(--muted)">${String(p.comment).replace(/</g,'&lt;')}</div>` : ''}
       <div style="display:flex;align-items:baseline;gap:12px;margin-top:14px">
-        <span style="font-family:'DM Mono',monospace;font-size:44px;font-weight:300;color:var(--ink)">${isNaN(spec)?'—':spec}</span>
-        <span style="font-size:12px;color:var(--muted)">spec (${baseSz}) · tol ± ${p.tol||0}</span>
+        <span style="font-family:'DM Mono',monospace;font-size:44px;font-weight:300;color:var(--ink)">${isNaN(spec)?'—':measFmt(spec)+'"'}</span>
+        <span style="font-size:12px;color:var(--muted)">spec (${baseSz}) · tol ± ${measFmt(p.tol)||0}"</span>
       </div>
       <input id="fs-meas" type="number" step="0.1" inputmode="decimal" placeholder="measured" value="${e && e.m != null ? e.m : ''}"
         oninput="fitSessDelta(this.value)"
@@ -13702,14 +13807,37 @@ function renderTechPackWork(s) {
     ${secBody('ov')}
       <div class="tpg" style="margin-bottom:16px">
         ${ef('Style Name','name')} ${ef('Season','season','',[...new Set(STATE.styles.map(x=>x.season))])}
+        ${ef('Style #','devStyle','e.g. 23B001-2M')}
         ${ef('Category','category','',['Tops','Bottoms','Outerwear','Dresses','Accessories'])}
+        ${ef('Group','group','',TP_GROUPS)} ${ef('Gender','gender','',TP_GENDERS)}
         ${ef('Drop Date','drop','','date')} ${ef('Sample Round','sample','',['Proto','SMS1','SMS2','TOP','Approved'])}
-        ${ef('Status','status','',['concept','design','sms','development','production','active','sale'])}
+        ${ef('Stage','status','',['concept','design','sms','development','production','active','sale'])}
+      </div>
+      <!-- The sheet has always carried BOTH a coarse stage and a fine one, and
+           the app only had the coarse one. "It says SS7 is in proto stage but I
+           pushed them to SMS" was this gap: there was nowhere to say
+           SMS - CUTTING, only "sms". -->
+      <div class="tpg" style="margin-bottom:16px">
+        ${ef('Production Status','prodStatus','',TP_PROD_STATUS)}
+        ${ef('Factory','vendor','',[...new Set(STATE.styles.map(x=>x.vendor).filter(Boolean))].concat(TP_CONTRACTORS).filter((v,i,a)=>a.indexOf(v)===i))}
+      </div>
+      <div class="tp-subhead">Who owns it</div>
+      <div class="tpg" style="margin-bottom:16px">
+        ${ef('Designer','designer')} ${ef('Tech Designer','techDesigner')} ${ef('Patternmaker','patternmaker')}
+        ${ef('Date Created','dateCreated','','date')} ${ef('Date Revised','dateRevised','','date')}
       </div>
       <div class="tp-subhead">Fabric &amp; Fit</div>
       <div class="tpg" style="margin-bottom:16px">
         ${ef('Primary Fabric','fabric')} ${ef('Secondary / Lining','fabric2')} ${ef('Colorways','colors')}
         ${ef('Size Range','sizes')} ${ef('Fit','fit','',['','Slim / Body-con','Regular / Straight','Relaxed / Oversized','Boxy','Flared / A-line','Draped / Bias','Tailored / Structured'])}
+      </div>
+      <!-- Shrinkage is four numbers on the sheet, not one: self and lining each
+           shrink differently, and length differently from width. A single
+           number cannot be applied to a pattern. -->
+      <div class="tp-subhead">Shrinkage</div>
+      <div class="tpg" style="margin-bottom:16px">
+        ${ef('Self — length %','shrinkSelfL','0','number')} ${ef('Self — width %','shrinkSelfW','0','number')}
+        ${ef('Lining — length %','shrinkLinL','0','number')} ${ef('Lining — width %','shrinkLinW','0','number')}
       </div>
       <div class="tp-subhead">Files &amp; Links</div>
       <div class="tpg2" style="margin-bottom:12px">
@@ -13915,8 +14043,8 @@ function renderTechPackWork(s) {
           <tbody>${pom.map((p,idx)=>`<tr>
             <td class="tppd">${p.point}</td>
             <td class="tppd"><input class="tpi" style="font-size:10px;width:110px" value="${p.comment||''}" placeholder="How to…" onchange="tpUpdatePom('${s.id}',${idx},'comment',this.value)"></td>
-            ${tpSizes.map(sz=>{const k=sz.toLowerCase();return `<td class="tppd"><input class="tppi" value="${p[k]||''}" onchange="tpUpdatePom('${s.id}',${idx},'${k}',this.value)"></td>`;}).join('')}
-            <td class="tppd"><input class="tppi" style="width:38px" value="${p.tol||''}" onchange="tpUpdatePom('${s.id}',${idx},'tol',this.value)"></td>
+            ${tpSizes.map(sz=>{const k=sz.toLowerCase();return `<td class="tppd"><input class="tppi" value="${measFmt(p[k])}" onchange="tpUpdatePom('${s.id}',${idx},'${k}',this.value)"></td>`;}).join('')}
+            <td class="tppd"><input class="tppi" style="width:38px" value="${measFmt(p.tol)}" onchange="tpUpdatePom('${s.id}',${idx},'tol',this.value)"></td>
           </tr>`).join('')}</tbody>
         </table>
       </div>
@@ -14289,7 +14417,10 @@ function tpUpdatePom(styleId, idx, field, val) {
   if (!STATE.pom[styleId]) return;
   const p = STATE.pom[styleId][idx];
   if (!p) return;
-  p[field] = ['comment','point'].includes(field) ? val : (parseFloat(val)||0);
+  // Same rule as the POM page: prose stays prose, a measurement is parsed as
+  // fractional inches. This path used to run parseFloat, so "13 3/8" became 13.
+  if (['comment','point'].includes(field)) p[field] = val;
+  else { const n = measParse(val); p[field] = isNaN(n) ? (String(val).trim() === '' ? '' : val) : n; }
   save();
 }
 
@@ -16051,12 +16182,17 @@ function renderTechPackPrint(s) {
           ${pom.map((p,i)=>`<tr style="border-bottom:1px solid #e0e0e0;background:${i%2?'#fafafa':'#fff'}">
             <td style="padding:9px 10px;font-size:11px;color:#000;font-weight:700">${p.point}</td>
             <td style="padding:9px 10px;font-size:10px;color:#666;max-width:150px">${p.comment||''}</td>
-            ${tpSizes.map(sz=>`<td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:11px;font-weight:600">${p[sz.toLowerCase()]||'—'}</td>`).join('')}
-            <td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${p.tol||'—'}</td>
+            ${tpSizes.map(sz=>`<td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:11px;font-weight:600">${measFmt(p[sz.toLowerCase()])||'—'}</td>`).join('')}
+            <td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${measFmt(p.tol)||'—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
-      <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in centimeters (cm) unless otherwise noted. Tolerance applies to all sizes.</div>
+      <!-- THIS LINE GOES TO THE FACTORY. It said centimetres. Every VENIA spec
+           is written in inches — a 13 3/8" front rise read as 13.375 cm is
+           about 5 1/4", so the sheet was instructing a factory to cut a child's
+           pattern. Their own template says ALL MEASUREMENTS ARE ON THE FLAT;
+           that belongs here too. -->
+      <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in INCHES and taken ON THE FLAT unless otherwise noted. Tolerance applies to all sizes.</div>
       ` : '<div style="font-size:10px;color:var(--muted);font-style:italic;padding:8px 0">No measurements added. Go to POM / Measurements to add.</div>'}
     </div>
 
@@ -31491,7 +31627,7 @@ function exportTechPackQuick() {
     <div><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:6px">Fabric Content</div><div style="font-size:12px">${fabric||'—'}</div></div>
     <div><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:6px">Care Instructions</div><div style="font-size:12px">${care||'—'}</div></div>
   </div>
-  <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Points of Measure (cm)</div>
+  <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Points of Measure (inches, on the flat)</div>
   <table><thead><tr>
     <th style="text-align:left;padding:8px 12px;border-bottom:2px solid #000">Point of Measure</th>
     ${sizes.map(s=>`<th>${s}</th>`).join('')}
