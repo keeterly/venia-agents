@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '421';
+  const BUILD = '422';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7137,11 +7137,13 @@ function seasonRetroData(season){
   const rows = styles.map(s => {
     const f = parseInt(s.forecastUnits,10)||0;
     const sold = (typeof poSoldUnitsForStyle === 'function') ? poSoldUnitsForStyle(s.id, season) : 0;
+    const _mv = (typeof styleSalesFor === 'function') ? styleSalesFor(s) : null;
+    const movedShared = !!(_mv && _mv.shared);
     const moved = (typeof unitsSoldFor === 'function') ? unitsSoldFor(s) : 0;
     const lc = (typeof landedCost === 'function') ? (landedCost(s)||0) : 0;
     const margin = (s.retail > 0 && lc > 0) ? (s.retail - lc) / s.retail * 100 : null;
     const roundsN = (s.sampleLog||[]).length;
-    return { s, f, sold, moved, margin, roundsN, cat: s.category || 'Other' };
+    return { s, f, sold, moved, movedShared, margin, roundsN, cat: s.category || 'Other' };
   });
   const booked = (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
     .reduce((a,q) => a + (q.total||0), 0);
@@ -7178,8 +7180,17 @@ function seasonRetroText(d){
   if (d.unsold.length) { L.push(''); L.push('FORECAST BUT DIDN\'T SELL (rethink or cut):');
     d.unsold.forEach(r => L.push('• ' + (r.s.styleId||'') + ' ' + (r.s.name||'') + ' — ' + r.f + 'u forecast, 0 sold')); }
   L.push(''); L.push('PER STYLE — forecast / sold to order / units moved / margin:');
+  // "shared" marks a figure that belongs to the NAME, not this fabrication —
+  // otherwise the assistant reads three rows each claiming the same 24 units
+  // and reports the silhouette as three times the winner it is.
   d.rows.forEach(r => L.push('• ' + (r.s.styleId||'') + ' ' + (r.s.name||'') + ': ' + r.f + ' / ' + r.sold + ' / ' + r.moved
+    + (r.movedShared ? ' (shared across fabrications — Shopify cannot say which sold)' : '')
     + ' / ' + (r.margin != null ? r.margin.toFixed(0) + '%' : '—')));
+  if (d.rows.some(r => r.movedShared)) {
+    L.push('NOTE: any line marked "shared" is the total for every fabrication of that '
+      + 'silhouette. Do not add those up, do not call one fabrication a winner on it, '
+      + 'and say the split is unknown if it matters to the answer.');
+  }
   return L.join('\n');
 }
 window.seasonRetroOpen = function(season){
@@ -7737,7 +7748,15 @@ const ST_CELL = {
       : (own ? '' : 'Inherited from the season plan or the house default — ')) + pxMarkup(m).toFixed(2) + 'x markup';
     return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${esc(tip)}" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%${drift!==null?`<span style="color:var(--amber);margin-left:3px">•</span>`:''}</span></td>`;
   },
-  sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{ const ss = styleSalesFor(s); return ss && ss.u ? '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : '—'; })()}</td>`,
+  sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{
+    const ss = styleSalesFor(s); if (!ss || !ss.u) return '—';
+    const fig = '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US');
+    // A shared figure is never printed as if it were this style's. The marker
+    // is part of the number, not a footnote somewhere else on the page.
+    return ss.shared
+      ? `<span style="color:var(--muted)" title="${esc(styleSalesNote(ss,s))}">${fig}<span style="color:var(--amber);margin-left:3px">shared ÷${ss.shared}</span></span>`
+      : fig;
+  })()}</td>`,
   priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
 };
 
@@ -11685,7 +11704,10 @@ function renderCosts(seasonFilter) {
     const wsM = s.wholesale ? Math.round(((s.wholesale-landed)/s.wholesale)*100) : null;
     const below = retM < tgt.ret;
     const sales = (typeof styleSalesFor === 'function') ? styleSalesFor(s) : null;
-    const gp = sales && sales.u ? sales.u * (s.retail - landed) : null;
+    // Gross profit is units × margin, so a shared unit count would multiply one
+    // silhouette's profit by the number of fabrications it comes in. Only an
+    // unambiguous figure earns a number here.
+    const gp = sales && sales.u && !sales.shared ? sales.u * (s.retail - landed) : null;
     const sheet = hasCostSheet(s);
     return `<tr onclick="openDp('${s.id}')" style="${below ? 'box-shadow:inset 3px 0 0 var(--red)' : ''}">
       <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId}${sheet ? ' · <span style="color:var(--green)">sheet ✓</span>' : ''}</div></td>
@@ -13279,7 +13301,13 @@ function renderMobileStyleCards(list, containerId) {
         <div class="mob-style-card-bottom">
           <div class="mob-price">${s.retail ? '$'+s.retail : '—'}</div>
           <div class="mob-margin"${mCol?` style="color:${mCol};font-weight:700"`:''}>${margin !== null ? margin+'% margin'+(tm?' / '+tm+'%':'') : ''}</div>
-          <div class="mob-margin" style="flex:none;text-align:right">${(()=>{ const ss = typeof styleSalesFor === 'function' ? styleSalesFor(s) : null; return ss && ss.u ? 'sold ×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US') : ''; })()}</div>
+          <div class="mob-margin" style="flex:none;text-align:right">${(()=>{
+            const ss = typeof styleSalesFor === 'function' ? styleSalesFor(s) : null;
+            if (!ss || !ss.u) return '';
+            const fig = 'sold ×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US');
+            return ss.shared
+              ? `<span title="${esc(styleSalesNote(ss,s))}">${fig} <span style="color:var(--amber)">shared</span></span>`
+              : fig; })()}</div>
           <div>${priorityDot(s.priority)}</div>
         </div>
       </div>`;
@@ -14313,7 +14341,14 @@ function renderInventory(filter='all') {
       <th>Style</th><th>Season</th><th>Status</th><th>Stock Level</th><th>Edit Stock</th><th>Reorder At</th><th>Units Sold</th><th>Retail</th><th>Stock Value</th><th>Reorder Qty</th>
     </tr></thead><tbody>
     ${styles.map(s=>{
-      const st=invStock(s); const stock=st.units; const reorder=s.reorderPoint||20;const sold=(typeof unitsSoldFor==='function')?unitsSoldFor(s):(s.unitsSold||0);
+      const st=invStock(s); const stock=st.units; const reorder=s.reorderPoint||20;
+      // Sold-through drives a reorder, so it must be THIS style's. A figure
+      // shared across fabrications is shown as shared and never treated as one
+      // version's demand — reordering Jacquard because Viscose sold is exactly
+      // the mistake this column would otherwise cause.
+      const soldRaw=(typeof styleSalesFor==='function')?styleSalesFor(s):null;
+      const sold=(typeof unitsSoldFor==='function')?unitsSoldFor(s):(s.unitsSold||0);
+      const soldShared=!!(soldRaw&&soldRaw.shared);
       const isLow=stock<reorder&&stock>0;const isOut=stock===0;
       const stockVal=(stock*(s.retail||0)).toLocaleString();
       return `<tr onclick="openDp('${s.id}')">
@@ -14333,7 +14368,7 @@ function renderInventory(filter='all') {
           ? `<span style="font-size:10px;color:var(--muted)" title="Change it in Shopify">—</span>`
           : `<input type="number" class="fi fi-mono" style="width:65px;font-size:11px;padding:4px 0;min-height:auto" value="${s.stock||''}" placeholder="0" onchange="setStock('${s.id}',this.value)" onclick="event.stopPropagation()" title="Units in stock">`}</td>
         <td data-label="Reorder at" style="font-family:'DM Mono',monospace;font-size:11px">${reorder}</td>
-        <td data-label="Units sold" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${sold}</td>
+        <td data-label="Units sold" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)"${soldShared?` title="${esc(styleSalesNote(soldRaw,s))}"`:''}>${sold}${soldShared?'<span style="color:var(--amber);margin-left:4px;font-size:9px">shared</span>':''}</td>
         <td data-label="Retail" style="font-family:'DM Mono',monospace;font-size:11px">${s.retail?'$'+s.retail:'—'}</td>
         <td data-label="Stock value" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ink)">$${stockVal}</td>
         <td data-label="Reorder qty"><input type="number" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" placeholder="Qty" value="${s.reorderQty||''}" onchange="setReorderQty('${s.id}',this.value)" onclick="event.stopPropagation()"></td>
@@ -23008,9 +23043,38 @@ async function shopifyFetch(endpoint) {
 // One cached pull (since Jan 1 last year) aggregated per product title,
 // joined to the line plan by normalized name. Refreshes every 12h.
 function plmSalesNorm(t){ return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+// HOW MANY STYLES ANSWER TO THIS NAME.
+// VENIA's own rule is that two fabrications of one silhouette are separate
+// styles that KEEP THE SAME NAME — ANTIGONE SKIRT exists in Viscose, Parchment
+// Viscose and Jacquard. Shopify reports one product TITLE per line item, so the
+// join is the name and the name is not unique on either side: in the live
+// catalogue four products are titled "ANTIGONE SKIRT", and duplicate titles with
+// duplicate (or blank) SKUs are the norm, not the exception. There is no smarter
+// join available — a SKU match cannot separate them either.
+function plmSalesSiblings(name){
+  const k = plmSalesNorm(name); if (!k) return 0;
+  let n = 0;
+  (STATE.styles || []).forEach(x => { if (x && plmSalesNorm(x.name) === k) n++; });
+  return n;
+}
+// Returns the match with `shared` attached: how many styles this figure covers.
+// shared > 1 means the number is the TOTAL FOR THE NAME, not for this style —
+// and every caller has to say so rather than printing it as if it were.
 function styleSalesFor(st){
   const m = (STATE.styleSales && STATE.styleSales.map) || null;
-  return (m && st && m[plmSalesNorm(st.name)]) || null;
+  const hit = (m && st && m[plmSalesNorm(st.name)]) || null;
+  if (!hit) return null;
+  const shared = plmSalesSiblings(st.name);
+  return shared > 1 ? Object.assign({}, hit, { shared: shared }) : hit;
+}
+// One sentence, used everywhere the shared figure appears, so the explanation
+// cannot drift between the table, the card and the tech pack.
+function styleSalesNote(ss, st){
+  if (!ss || !ss.shared) return '';
+  return ss.u + ' units sold under the name "' + (st && st.name || '') + '" — across '
+    + ss.shared + ' fabrications in PLM. Shopify reports one product title per sale, so '
+    + 'which fabrication sold cannot be told apart. Treat this as the total for the '
+    + 'silhouette, not for this version.';
 }
 let _plmSalesBusy = false;
 async function plmSalesRefresh() {
@@ -41006,7 +41070,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           var mg = (lc > 0 && x.retail) ? Math.round(((x.retail - lc) / x.retail) * 100) : null;
           return (x.name || '?') + ' (' + (x.category || '?') + (x.gender ? ', ' + x.gender : '') + (x.retail ? ', $' + x.retail : '')
             + (mg !== null ? ', ' + mg + '% margin' : '')
-            + (ss && ss.u ? ', sold ' + ss.u + ' units / $' + Math.round(ss.r).toLocaleString('en-US') + ' since Jan ' + (new Date().getFullYear() - 1) : '') + ')';
+            + (ss && ss.u ? ', sold ' + ss.u + ' units / $' + Math.round(ss.r).toLocaleString('en-US')
+                 + ' since Jan ' + (new Date().getFullYear() - 1)
+                 // Say it here too: the assistant reads this list to pick winners.
+                 + (ss.shared ? ' — SHARED across ' + ss.shared + ' fabrications of this name, not this one alone' : '') : '') + ')';
         }).join('; ') + (sts.length > 24 ? ' — plus ' + (sts.length - 24) + ' more.' : ''));
       }
       if (bsVeniaOn() && STATE.bizSnap && STATE.bizSnap.txt) lines.push(STATE.bizSnap.txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');

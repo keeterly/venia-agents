@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 421._
+_Last reviewed at Build 422._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2645,3 +2645,63 @@ the Today doors. **It only ever hides when it is certain.** A founder, a failed
 lookup, an offline boot, a share or portal view: every uncertain case shows
 everything, because hiding on a maybe would lock a founder out of their own app
 and the data is protected either way. The gauntlet asserts both directions.
+
+## Build 422 — "sold ×24" was the silhouette's, not the style's
+*"For styles it states that Antigone sold x24 units… the units are based on
+Antigone sales but of a different fabrication."*
+
+Correct, and worse than reported: the number was not misattributed to one
+fabrication — it was shown **in full on every one of them**.
+
+### The mechanism
+`plmSalesRefresh` keys Shopify sales on `plmSalesNorm(li.title)` — the product
+TITLE. `styleSalesFor(st)` looks the style up by `plmSalesNorm(st.name)`. VENIA's
+own rule is that two fabrications of one silhouette are separate styles that
+**keep the same name**. So all three ANTIGONE SKIRTs matched the same aggregate
+and each displayed 24.
+
+**It is not one style.** In the live workspace **21 names are shared across 2–4
+fabrications — about 50 of the 72 styles**: CORA PANT (4), ANTIGONE SKIRT,
+ISOLDE TOP, LEWIS PANT, NOCTURNE SKIRT, RAUL SHIRT, RHIZOPHORA (3 each), and 14
+more with 2.
+
+### There is no smarter join, and I checked before assuming one
+Shopify has **four products titled "ANTIGONE SKIRT"** — BLACK and SULFUR
+colourways from FW20/SS22, two active and two draft. Two of them carry
+**identical SKUs**; the other two have **blank or null SKUs**. Across the
+catalogue the same is true of BUCHANAN BLAZER (×3), SALIX T-SHIRT, DOC SHIRT,
+HEATHCLIFF PANTS, DECKARD JACKET, HAMLET CLOAK, JAVERT PULL OVER — duplicate
+titles, and often one SKU repeated across every size.
+
+So SKU attribution could not rescue this either. And these are 2017–2020
+products while the PLM styles are SS27/SS28: the join is matching a current
+season's fabrications to a legacy catalogue by name alone.
+
+**The honest fix is not a better guess. It is to stop printing a shared number
+as if it were one style's.**
+
+### What changed
+`styleSalesFor()` now returns `shared: N` when N styles answer to the name, and
+`styleSalesNote()` is the one sentence that explains it, so the wording cannot
+drift between places. Then, everywhere it is used:
+
+- **Styles sheet** — `×24 · $7,800 · shared ÷3`, ambered, with the sentence on hover.
+- **Mobile card** — the same marker.
+- **Cost/margin table** — gross profit **refuses** a shared figure. It was
+  `units × margin`, so three fabrications turned one silhouette's profit into three.
+- **Inventory** — marked, and never read as this version's demand. Reordering
+  Jacquard because Viscose sold is exactly what that column would have caused.
+- **The assistant** — every shared line is labelled in the season digest and the
+  line-plan context, with a note telling it not to add them up or call one
+  fabrication a winner on a shared figure.
+
+The finance layer already did this correctly (Build ~380 — "count the units ONCE
+against the average landed cost and tell the CFO the split is unknown"). Nothing
+else had ever been given the same treatment. Now it has.
+
+### What would make it exact
+Nothing in this app — it is a Shopify data question. Either one product per
+fabrication with a distinct title, or genuinely unique SKUs per variant that the
+styles can be linked to (`shopifySkus`, built in Build 400, currently linked on
+**zero** styles). Until one of those is true, "which fabrication sold" is not a
+question the data can answer, and the app now says so instead of guessing.
