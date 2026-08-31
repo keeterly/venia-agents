@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 405._
+_Last reviewed at Build 406._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1836,3 +1836,38 @@ still typeable, since a genuinely new fabric has to be enterable — drawn from
 
 Deduped case-insensitively, which is the point: it is how "Tencel Twill" and
 "tencel twill" stop becoming two materials.
+
+
+## Build 406 — a quote's season is the season of what is on it
+*"Check to make sure this quote page is in sync, like Season."*
+
+The field defaulted to the string `'FW26'` — `q?.season || 'FW26'`, a literal
+written once and never true again — so a quote for an SS27 skirt opened saying
+FW26.
+
+It is read off the line items now: the most common season among the styles on
+the quote, re-read whenever a style is added or swapped. An empty quote falls
+back to the season the line is actually working in (the most common across
+non-archived styles) rather than any fixed string. **A season you type yourself
+is never overwritten**, and an existing quote keeps whatever it was saved with.
+
+`gauntlet/quoteseason.js`, 6 assertions.
+
+### Answering the other half: quote → order already exists
+`slCreateOrderFromQuote` carries the account, items, sizes, units, total,
+currency, terms, ship window and cancel date across, stamps `createdAt` as the
+booking date (deliberately not `updatedAt`, so a later edit cannot re-date the
+revenue), links `quote.orderId` both ways, and refuses to convert twice. Two
+ways in, **both gated on status = Accepted**, which is why a Draft quote looks
+like a dead end:
+- set a quote to **Accepted** and save → it offers to create the order
+- or the quote row's **→ Order** button, shown when accepted and not yet converted
+
+### Still to build: capturing payment on the terms
+`SL_TERMS` is already a parseable schedule — Proforma, 30/70, 50/50, Net 30/60/90,
+2/10 Net 30, card on file — and `netlify/functions/stripe.js` already serves
+`invoice`, `invoice_status`, `invoice_find`, `create`, `capture` and `cancel`
+for the pull sheet. So the wholesale side is a schedule derived from the terms
+(deposit now, balance before ship) driving the same invoice machinery, plus the
+same reconcile loop that Build 378 gave pulls so an order says *paid* without
+anyone checking Stripe.
