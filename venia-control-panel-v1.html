@@ -1965,7 +1965,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '409';
+  const BUILD = '410';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -29119,7 +29119,23 @@ function slLinesheetPrintDoc(subtitle, footNote, rows){
 // GARMENT, so this one is landscape, a few styles to a page, photo first and
 // the numbers under it. It is the same data and the same freeze/price rules —
 // only the shape is different.
-window.SL_VLS = { perPage: 3, genders: [] };   // genders empty === every gender
+window.SL_VLS = { perPage: 3, genders: [], currency: 'USD', photosOnly: false };  // genders empty === every gender
+// The sheet quotes ONE currency, chosen per export, at the season rate the app
+// already holds (fxEnsureRate asks once and keeps it). It is never today's
+// spot: a line sheet has to hold its prices all season.
+function slVlsDate(v){
+  const t = String(v||'').trim(); if (!t) return '';
+  const d = new Date(t + (/^\d{4}-\d{2}-\d{2}$/.test(t) ? 'T00:00:00' : ''));
+  return isNaN(d) ? t : d.toLocaleDateString('en-GB', { day:'numeric', month:'short', year:'numeric' });
+}
+function slVlsMoney(usd, code){
+  const n = Number(usd||0), cur = FX_CUR[code] || FX_CUR.USD;
+  if (code === 'USD') return '$' + Math.round(n).toLocaleString('en-US');
+  const rate = fxRate(code);
+  // No rate means no invented number — quote USD and say so in the footer.
+  if (!rate) return '$' + Math.round(n).toLocaleString('en-US');
+  return cur.sym + Math.round(n * rate).toLocaleString('en-US');
+}
 // Layout per page. Landscape, so 1–4 sit in one row; 6 and 8 take two.
 function slVlsGrid(n){
   const cols = n <= 4 ? n : Math.ceil(n / 2);
@@ -29137,7 +29153,8 @@ function slVlsGenderOf(s){
 // dialog says, so the button and the sheet can never disagree.
 window.slVlsStyles = function(){
   const want = (SL_VLS.genders || []);
-  return slLsStyles().filter(s => !want.length || want.indexOf(slVlsGenderOf(s)) >= 0);
+  return slLsStyles().filter(s => (!want.length || want.indexOf(slVlsGenderOf(s)) >= 0)
+    && (!SL_VLS.photosOnly || !!s.photoUrl));
 };
 window.slVlsOpen = function(){
   const genders = ['womens','mens','unisex','unspecified'];
@@ -29166,6 +29183,18 @@ window.slVlsOpen = function(){
             ${label[g]} <span style="color:var(--muted)">${counts[g]}</span></label>`).join('')}
         </div>
       </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end">
+        <div>
+          <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Currency</div>
+          <select class="fs" id="sl-vls-cur" onchange="slVlsCurrency(this.value)" style="min-height:auto;padding:5px 8px;font-size:11px;width:auto">
+            ${Object.keys(FX_CUR).map(c => `<option value="${c}" ${SL_VLS.currency===c?'selected':''}>${FX_CUR[c].sym} ${c}</option>`).join('')}
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px">
+          <input type="checkbox" id="sl-vls-photos" ${SL_VLS.photosOnly?'checked':''} onchange="SL_VLS.photosOnly=this.checked;slVlsCount()" style="accent-color:var(--ink)">
+          Only styles with a photo
+        </label>
+      </div>
       <div id="sl-vls-count" style="font-size:11px;color:var(--ink)"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
         <button class="btn btn-ghost" onclick="closeModal('sl-vls-modal')">Cancel</button>
@@ -29186,6 +29215,15 @@ window.slVlsPer = function(n){
   });
   slVlsCount();
 };
+window.slVlsCurrency = function(c){
+  // Ask for the rate at the moment it is chosen, not silently at export — so a
+  // missing rate is a decision you make, not a surprise on the printed sheet.
+  if (c !== 'USD' && typeof fxEnsureRate === 'function' && !fxEnsureRate(c)) {
+    const sel = document.getElementById('sl-vls-cur'); if (sel) sel.value = SL_VLS.currency;
+    return;
+  }
+  SL_VLS.currency = c; slVlsCount();
+};
 window.slVlsGenders = function(){
   SL_VLS.genders = [...document.querySelectorAll('.sl-vls-g')].filter(c => c.checked).map(c => c.value);
   slVlsCount();
@@ -29194,8 +29232,14 @@ function slVlsCount(){
   const el = document.getElementById('sl-vls-count'); if (!el) return;
   const n = slVlsStyles().length;
   const pages = Math.max(1, Math.ceil(n / SL_VLS.perPage));
+  const hidden = SL_VLS.photosOnly
+    ? slLsStyles().filter(s => (!SL_VLS.genders.length || SL_VLS.genders.indexOf(slVlsGenderOf(s))>=0) && !s.photoUrl).length : 0;
+  const cur = SL_VLS.currency, rate = cur !== 'USD' ? fxRate(cur) : 1;
   el.innerHTML = n
-    ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${SL_VLS.perPage} per page, landscape.`
+    ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${SL_VLS.perPage} per page, landscape`
+      + (cur !== 'USD' ? (rate ? `, priced in <b>${cur}</b> at ${rate}` : `, <span style="color:var(--red)">no ${cur} rate — prices will print in USD</span>`) : '')
+      + '.'
+      + (hidden ? `<br><span style="color:var(--muted)">${hidden} style${hidden===1?'':'s'} left out for having no photo.</span>` : '')
     : `<span style="color:var(--red)">Nothing matches — every style is filtered out.</span>`;
 }
 window.slVlsPrint = function(){
@@ -29207,27 +29251,66 @@ window.slVlsPrint = function(){
   const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
   const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
   const gLabel = SL_VLS.genders.length ? SL_VLS.genders.join(' · ') : 'all genders';
+  const cur = SL_VLS.currency || 'USD';
+  const rate = cur !== 'USD' ? fxRate(cur) : 1;
+  const money = v => slVlsMoney(v, rate ? cur : 'USD');
+  // What the prices are quoted IN, said on the sheet itself. A converted price
+  // with no rate beside it is a number a buyer cannot check.
+  const curLine = (cur === 'USD' || !rate)
+    ? 'Wholesale prices in USD, FOB. Prices confidential.'
+    : 'Wholesale prices in ' + cur + ', FOB — converted at ' + rate + ' ' + cur
+      + ' to 1 USD, the season rate. Prices confidential.'
+      + (cur !== 'USD' ? '' : '');
+  const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
+  const termsLine = (STATE.slPrefs && STATE.slPrefs.terms) ? 'Terms: ' + STATE.slPrefs.terms + '.' : '';
+  // How to order. A line sheet without a way back to the brand is a catalogue.
+  let contact = '';
+  try { contact = (window.veniaAuthUser && veniaAuthUser.email) || ''; } catch(e){}
+  const footLines = [
+    'VENIA Collection — Trade Only. ' + curLine,
+    (moqDefault ? 'Minimum order ' + String(moqDefault) + ' unless noted per style. ' : '') + termsLine,
+    (delivery ? 'Delivery window: ' + delivery + '.' : ''),
+    'To order: ' + (contact ? contact + ' · ' : '') + 'creator.veniacollection.com',
+  ].filter(x => String(x).trim());
   // Chunked in JS rather than left to flow: a page break that depends on how
   // tall a photo happens to render is how you get four styles on one page and
   // one orphan on the next.
   const pages = [];
   for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
-  const imgH = gridRows === 1 ? 108 : 52;      // mm
+  // THE PAGE HAS 190mm AND THE CARD HAS TO FIT IN IT.
+  // A4 landscape is 210mm tall, less 10mm of margin each side. Adding
+  // composition, origin and delivery pushed a full card past that, and content
+  // that overflows does not get clipped — it flows onto another page, so "3 per
+  // page" quietly became 3, then 1, then 3. Measured with every optional field
+  // filled and long values, then set with room to spare.
+  // Narrower columns wrap long values onto more lines, so a 4-up card is TALLER
+  // than a 3-up one at the same image height — which is how 4 per page
+  // overflowed while 1, 2 and 3 fitted. The height follows the column count,
+  // not just the row count.
+  const imgH = gridRows > 1 ? 40 : (cols >= 4 ? 72 : 88);   // mm
+  // At two rows a card has half the height, so it carries only what a buyer
+  // scans at that density. Composition and origin are compliance detail — they
+  // belong on the roomy layouts and in the list export, not squeezed into a
+  // 46mm card until nothing is legible.
+  const dense = gridRows > 1;
   const card = r => `<div class="c">
-      <div class="ph">${r.photo ? `<img src="${esc(r.photo)}" alt="">` : '<span class="no">No photo</span>'}</div>
+      <div class="ph${r.photo ? '' : ' n'}">${r.photo ? `<img src="${esc(r.photo)}" alt="">` : '<span class="no">Photo to follow</span>'}</div>
       <div class="nm">${esc(r.name)}</div>
       <div class="cd">${esc(r.code)}${r.category?' · '+esc(r.category):''}</div>
       <table class="f">
         ${r.fabric ? `<tr><td>Fabric</td><td>${esc(r.fabric)}</td></tr>` : ''}
+        ${!dense && r.composition ? `<tr><td>Composition</td><td>${esc(r.composition)}</td></tr>` : ''}
         ${r.colors ? `<tr><td>Colours</td><td>${esc(r.colors)}</td></tr>` : ''}
         ${r.sizes  ? `<tr><td>Sizes</td><td>${esc(r.sizes)}</td></tr>` : ''}
-        <tr><td>Wholesale</td><td class="ws">${r.wholesale ? '$'+esc(r.wholesale) : '—'}</td></tr>
-        <tr><td>Retail</td><td>${r.retail ? '$'+esc(r.retail) : '—'}</td></tr>
-        ${r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
+        ${!dense && r.coo ? `<tr><td>Made in</td><td>${esc(r.coo)}</td></tr>` : ''}
+        <tr><td>Wholesale</td><td class="ws">${r.wholesale ? esc(money(r.wholesale)) : '—'}</td></tr>
+        ${!dense ? `<tr><td>Retail</td><td>${r.retail ? esc(money(r.retail)) : '—'}</td></tr>` : ''}
+        ${!dense && r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
+        ${!dense && r.drop ? `<tr><td>Delivery</td><td>${esc(slVlsDate(r.drop))}</td></tr>` : ''}
       </table>
     </div>`;
   const body = pages.map((pg, i) => `<section class="pg">
-      <header><span class="b">VENIA COLLECTION</span><span>${esc(seasonLabel)} · Wholesale · ${esc(gLabel)}${
+      <header><span class="b">VENIA COLLECTION</span><span>${esc(seasonLabel)} · Wholesale ${esc(rate ? cur : 'USD')} · ${esc(gLabel)}${
         // Which categories this page carries — the sheet is grouped now, so the
         // header can say where in the line you are.
         (function(){ const c=[...new Set(pg.map(x=>String(x.category||'').trim()).filter(Boolean))];
@@ -29237,7 +29320,7 @@ window.slVlsPrint = function(){
         // Empty cells on the last page so three styles stay three columns wide
         // instead of stretching to fill the sheet.
         Array.from({length: per - pg.length}, () => '<div class="c e"></div>').join('')}</div>
-      <footer>${slLinesheetFoot('USD', delivery, '')}</footer>
+      <footer>${footLines.map(esc).join('<br>')}</footer>
     </section>`).join('');
   const css = `
     @page { size: A4 landscape; margin: 10mm; }
@@ -29255,9 +29338,15 @@ window.slVlsPrint = function(){
       grid-template-rows:repeat(${gridRows},1fr);gap:6mm;padding:5mm 0}
     .c{display:flex;flex-direction:column;min-width:0}
     .c.e{visibility:hidden}
-    .ph{height:${imgH}mm;background:#f4f4f4;display:flex;align-items:center;justify-content:center;overflow:hidden}
-    .ph img{width:100%;height:100%;object-fit:cover;display:block}
-    .ph .no{font-size:7pt;letter-spacing:1.5px;text-transform:uppercase;color:#aaa}
+    /* CONTAIN, ON WHITE — never cover. A cutout on white is the common VENIA
+       product shot, and cover crops it: a hem or a sleeve simply leaves the
+       page. Contain letterboxes instead, which costs a little white space and
+       never sends a buyer a picture of a garment with its bottom cut off. */
+    .ph{height:${imgH}mm;background:#fff;border:1px solid #ececec;display:flex;
+        align-items:center;justify-content:center;overflow:hidden;padding:2mm}
+    .ph img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
+    .ph.n{background:#fafafa;border-style:dashed}
+    .ph .no{font-size:6.5pt;letter-spacing:1.5px;text-transform:uppercase;color:#c4c4c4}
     .nm{font-size:${gridRows===1?'10.5pt':'9pt'};font-weight:700;letter-spacing:.5px;
       text-transform:uppercase;margin-top:3mm;line-height:1.2}
     .cd{font-family:'DM Mono',monospace;font-size:7pt;color:#777;margin-top:1mm;letter-spacing:.4px}
@@ -29290,7 +29379,7 @@ window.slVlsPrint = function(){
     imgs.forEach(im => im.complete ? tick() : (im.onload = im.onerror = tick));
     setTimeout(() => { if (!done) { done = true; go(); } }, 6000);
   } catch(e){ setTimeout(go, 1200); }
-  try { logActivity('Visual line sheet exported — ' + rows.length + ' styles, ' + per + '/page, ' + gLabel); } catch(e){}
+  try { logActivity('Visual line sheet exported — ' + rows.length + ' styles, ' + per + '/page, ' + gLabel + ', ' + (rate ? cur : 'USD')); } catch(e){}
   closeModal('sl-vls-modal');
 };
 
@@ -29304,7 +29393,15 @@ function slLinesheetFoot(currency, delivery, frozenLine){
 function slLsRowFrom(s){
   return { code:s.styleId||'', name:s.name||'', category:s.category||'', season:s.season||'',
     fabric:s.fabric||'', colors:s.colors||'', sizes:s.sizes||'', wholesale:s.wholesale||0,
-    retail:s.retail||0, moq: slMoqFor(s), photo: s.photoUrl||'' };
+    retail:s.retail||0, moq: slMoqFor(s), photo: s.photoUrl||'',
+    // A line sheet is also a customs and compliance document. Country of origin
+    // decides duty; composition decides the tariff code. Both live on the style
+    // already (the tech pack's care-label check reads the same two fields) and
+    // were simply never carried onto the sheet.
+    coo: s.coo || '', composition: s.fiberContent || '',
+    // When this style ships, per style — the footer only carries the season's
+    // window, and a Delivery 2 piece is the exception that needs saying.
+    drop: s.drop || '' };
 }
 function slPrintLineSheet() {
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
