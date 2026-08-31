@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 399._
+_Last reviewed at Build 401._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1669,3 +1669,59 @@ The popover footer now states the rule people actually get, rather than the old
 `gauntlet/pricing.js` — 16 assertions walking the exact reported numbers. Against
 the shipped build, eight of them fail, including "typing COGS 60 leaves retail at
 $585" (it produced $375).
+
+
+## Build 400 — the PLM and the store were speaking different languages
+Inventory showed **0 units, $0k, an empty table**, and *"252 Shopify variants
+matched no style by SKU"*. Two independent failures, both proven against the
+real workspace and the real store.
+
+**1. The page was hiding every style.** `renderInventory` filtered to
+`active`/`sale`/`production`. Of the 64 real styles: **58 sms, 4 concept, 1
+design, 1 archived — and zero in those three stages.** So even a perfect sync
+would have rendered an empty table. Inventory now shows anything the store has
+counted (or has a store code linked) whatever stage the PLM thinks it is at,
+because stock is stock; with nothing linked yet it shows the line rather than a
+blank page, so there is something to attach a code to.
+
+**2. The SKU match could never have worked.** It compared Shopify SKUs against
+`styleId` — but those are different namespaces:
+
+| | PLM | Shopify |
+|---|---|---|
+| ANTIGONE SKIRT | `VN-SS27-WB08` | `20B001-2W-BLACK-XS` |
+| SALIX T-SHIRT | `VN-SS27-WK03` | `19K003-4U-BLACK-XS` |
+
+`devStyle` is null on every style, so there was no production code stored
+either. Not a near miss — 252 of 252 could not match.
+
+A style now carries `shopifySkus`, the store codes it answers to, tried before
+`devStyle` and `styleId`. The sync collects unmatched **products** (not just
+variants) and the Inventory page offers each one a style picker, pre-selected by
+name, with the SKU's style-identifying prefix worked out as the longest common
+prefix across the product's variants (`20B001-2W-BLACK`, not
+`20B001-2W-BLACK-XS`). Linking is additive — a style selling in two colourways
+answers to two codes.
+
+**A title still never matches anything on its own.** It only pre-selects; a
+person presses Link. Three products are literally named "SALIX T-SHIRT" in that
+store, so a fuzzy rule would attach the wrong stock, which is worse than
+attaching none. The comment that claimed SKUs are built as
+`${styleId}-${COLOR}-${SIZE}` has been corrected — that assumption is what
+failed.
+
+`gauntlet/invlink.js` — 13 assertions built from the real shapes. Five fail
+against the shipped build.
+
+## Build 401 — Save was 1,166px below the fold
+*"Save material is getting cut off here."*
+
+`.modal-head` was sticky; `.modal-foot` was not. On Edit Material the form is
+~1,985px with lot records, so at an 800px viewport **Save sat at y=1966** — you
+had to scroll past every field and every lot to find the way out. Measured, not
+guessed.
+
+Footers are pinned now, for all eight modals, with a safe-area pad so they clear
+the home indicator when a modal runs full height on a phone. `gauntlet/matmodal.js`
+checks Save *and* Cancel are on screen on open and still there halfway down the
+form, at three viewports; six of its assertions fail against the shipped build.
