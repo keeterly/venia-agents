@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 418._
+_Last reviewed at Build 419._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2495,3 +2495,51 @@ The new gauntlet reported the drawer as empty. It was not: `openDrawer()` slides
 the panel in, so reading it immediately reads nothing, and `innerText` comes back
 CSS-uppercased so a mixed-case match found none of it. Both fixed — a test that
 reports a working feature as broken is worse than no test.
+
+## Build 419 — one menu button, and a regression Build 418 shipped
+*"Collapse."*
+
+### ⚠️ Build 418 broke the menu on Today. This fixes it.
+Removing the MORE tab was right — it called `openDrawer()`, the identical
+function the ☰ calls. What was wrong was the check that said it was safe: the
+gauntlet asserted the ☰ was **visible** on every space. Visible is not tappable.
+
+`.cp-screen` is `position:fixed; z-index:400`. `.mob-header` — which holds the
+☰ on Today — is `z-index:300`. So on Today the button was painted, and buried
+under the page. Hit-testing its own centre pixel returned `H1.cpl-title`. With
+MORE gone there was **no way to open the menu on Today at all**.
+
+Found by tapping, not by looking: aim at the button's centre, click the screen,
+require the drawer to open. Today failed; every other space passed.
+
+### The collapse
+There were **three** menu buttons doing one job, and all three called
+`openDrawer()` with no arguments:
+
+| | state |
+|---|---|
+| `.mob-header` ☰ | buried under every `.cp-screen` — reachable only on Product |
+| six `.ag-topbar` ☰ | one per agent screen, each a copy |
+| the MORE tab | removed in 418 |
+
+The global bar is the only chrome above `.cp-screen`, so the button lives there
+now and reaches every screen **including Today**. The other two are off, and the
+duplicate `.mob-header` — which was painting "Dashboard" and a search field
+nobody could reach — is hidden wherever a screen brings its own bar.
+
+Result: one door, in the same place, on all eight screens. The section bar keeps
+its title and its actions and gets the width the ☰ was using.
+
+### A cascade trap worth recording
+The first attempt put `.cp-gb-menu{display:none}` next to the markup and
+`display:flex` in the ≤768 block — and the button never appeared on any screen.
+The media block is at line 1119; the base rule landed at ~1365. Equal
+specificity, later wins, so `display:none` beat the media query. It is declared
+beside `.ag-mob-menu{display:none}` now, above the block, which is the
+convention the file already had for exactly this.
+
+### The lesson in the gauntlet
+`gauntlet/mobnav.js` no longer asks whether a button is visible. It finds the
+button, aims at its centre pixel, clicks the *screen*, and requires the drawer
+to open — on all eight spaces — and asserts there is exactly **one** such button.
+That assertion fails against Build 418.
