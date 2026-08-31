@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 420._
+_Last reviewed at Build 421._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2583,3 +2583,65 @@ away, on Product only. Same shape as MORE and the three hamburgers. Removed.
 The Styles page's own "Search styles — commas for several…" box is a **filter**,
 not the global search, and stays. The gauntlet asserts both: exactly one
 `openSearch()` button on Product, and the filter still present.
+
+## Build 421 — Team & Access, the screen behind venia_members
+*"Build ui."*
+
+Settings → System → **Team & Access**. Grant a person modules, set a role, take
+one away, remove them, and create or reset their login.
+
+### ⚠️ A security decision this quietly reverses — read this
+`agent-portal` says, in its own words:
+
+> *Password login (deliberately NOT Supabase Auth) — An agent must never hold a
+> Supabase JWT: that would make her the `authenticated` Postgres role, and every
+> RLS policy would then be the only thing standing between her and the
+> workspace. Here her credential unlocks exactly one thing — this function — so
+> the blast radius of any mistake is this file, not the database.*
+
+**A team member added here DOES hold a Supabase JWT.** They are `authenticated`,
+and the policies on `venia_module_data` are the only thing between them and the
+rest of the workspace. That is a different trade for a different animal — a
+freelance agent gets four narrow projections; a colleague needs ordinary
+read/write across a whole module, which is what RLS expresses and what
+re-projecting every module through a function could not. The policies are
+tested (a sales editor cannot read money, cannot write money, and cannot grant
+themselves money). But it is a real change of posture, made knowingly, and it
+is written here rather than discovered later.
+
+### The founder check is BY NAME, not by domain
+`agent-portal` gates on `@veniacollection.com`, which is correct there because no
+agent has one. Copying it here would have been **catastrophic**: the first thing
+this screen is used for is giving a colleague a veniacollection.com address, and
+a domain check would hand that colleague the power to grant themselves every
+module. The `team` function lists the two founders explicitly, matching
+`venia_is_founder()` in the database.
+
+Verified against the deployed function: no JWT → 401; the anon key (a valid JWT,
+not a founder) → `founders only`; anon trying to grant itself money, product and
+sales as owner → `founders only`.
+
+### Two things the screen refuses to be vague about
+- **A grant is not a login.** Creating the Supabase Auth account needs the
+  service role, so it happens in the edge function, on demand, from a button.
+  Until then the row grants access to a door that does not exist — so the list
+  says, in red, *"No password yet — they cannot sign in."*
+- **Granting REPLACES the set.** Anything unticked is taken away, so the
+  confirm says exactly that before it happens rather than after.
+
+`legacy` is not offered. It holds a pre-module store spanning sales, growth and
+product in one string, so it stays founders-only.
+
+### The other half: what a member actually sees
+The database already refuses to send a module a person does not hold — so
+hiding the nav is not the security boundary, it is the difference between
+*restricted* and *broken*. Without it a Sales-only member finds Product and
+Money on the nav, opens them, and sees nothing, with no way to tell a permission
+from a bug.
+
+`veniaLoadAccess()` reads the member's own grants at sign-in and hides every
+route into a module they do not hold — desktop nav, phone tab bar, drawer, and
+the Today doors. **It only ever hides when it is certain.** A founder, a failed
+lookup, an offline boot, a share or portal view: every uncertain case shows
+everything, because hiding on a maybe would lock a founder out of their own app
+and the data is protected either way. The gauntlet asserts both directions.
