@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 408._
+_Last reviewed at Build 409._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1962,3 +1962,27 @@ different. **Export list** and **Export visual** now sit side by side.
 `gauntlet/vls.js` — 20 assertions, including the page arithmetic at every
 per-page setting (1→8 pages, 2→4, 3→3, 6→2, 8→1) and that a mens-only sheet
 carries only the mens styles and says so in its header.
+
+
+## Build 409 — the line sheet reads a category at a time
+*"It should be sorted by category as well — tops : bottoms etc."*
+
+A buyer works a sheet one category at a time, so the order is now
+**Tops · Bottoms · Outerwear · Dresses · Accessories** — `RP_CATS`, which is
+already the line's canonical order in the range plan. Reusing that rather than
+writing a second list is what stops the two drifting apart later.
+
+- **Not alphabetical.** Accessories would otherwise lead the sheet and Tops
+  land fourth.
+- Within a category, by name.
+- A category that is not on the canonical list (a one-off like Swimwear) sorts
+  **last, grouped with the others, alphabetically** — never interleaved through
+  the sheet.
+- **Sorted in `slLsStyles()`, not in one exporter**, so the preview, the list
+  export and the visual sheet cannot disagree about the order of the same line.
+- The visual sheet's page header now names the categories that page carries —
+  *"SS27 · Wholesale · all genders · Bottoms / Outerwear / Dresses"* — so a
+  buyer knows where in the line they are.
+
+`gauntlet/lscat.js`, 9 assertions, including that no category ever appears as
+two separate blocks and that both exports produce identical ordering.
