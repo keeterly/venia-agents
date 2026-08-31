@@ -1933,7 +1933,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '402';
+  const BUILD = '403';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8438,6 +8438,10 @@ function stSeasonFilterOptions(){
   if (sel.innerHTML !== want) { const keep = sel.value; sel.innerHTML = want; sel.value = keep; }
 }
 function renderStyles() {
+  // Before anything can return early: deleting the last style leaves the list
+  // empty, and the empty-state branch below returns without ever reaching
+  // updateBulkBar().
+  bulkReconcile();
   // The filter controls must show the filter that is actually applied. A season
   // set from elsewhere (the dashboard's season alerts do exactly this) left the
   // dropdown reading "All Seasons" over a filtered list — the control lying
@@ -8517,7 +8521,7 @@ function renderStyles() {
   if (!tb) return;
   stRenderHead();
   const cols = stColsVisible();
-  if (!list.length) { tb.innerHTML = `<tr><td colspan="${cols.length+1}"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles here — <b>+ New Style</b> starts the line, or clear the search/filter.</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); return; }
+  if (!list.length) { tb.innerHTML = `<tr><td colspan="${cols.length+1}"><div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No styles here — <b>+ New Style</b> starts the line, or clear the search/filter.</div></div></td></tr>`; renderMobileStyleCards([], 'styles-table'); updateBulkBar(); return; }
   tb.innerHTML = list.map(s => `
     <tr onclick="openDp('${s.id}')" style="background:${BULK_SELECTED.has(s.id)?'var(--bg-hover)':''}">
       <td onclick="event.stopPropagation()" style="text-align:center;padding-left:8px;padding-right:8px">
@@ -8575,10 +8579,22 @@ function bulkToggleAll(checked) {
   updateBulkBar();
 }
 
+// A SELECTION OF SOMETHING THAT NO LONGER EXISTS IS NOT A SELECTION.
+// Delete the style you had ticked and its id stayed in the set, so the bar went
+// on claiming "1 style selected" over a list with nothing checked — and every
+// bulk action would then have run against an id that resolves to nothing.
+// Reconciling against STATE rather than patching dpDelete covers every way a
+// style can leave: deleted here, or dropped by a sync from the other device.
+function bulkReconcile() {
+  if (!BULK_SELECTED.size) return;
+  const live = new Set((STATE.styles || []).map(s => s.id));
+  BULK_SELECTED.forEach(id => { if (!live.has(id)) BULK_SELECTED.delete(id); });
+}
 function updateBulkBar() {
   const bar = document.getElementById('bulk-bar');
   const count = document.getElementById('bulk-count');
   if (!bar) return;
+  bulkReconcile();
   const n = BULK_SELECTED.size;
   if (n > 0) {
     bar.style.display = 'flex';
@@ -11392,7 +11408,9 @@ function dpDelete() {
   save();
   toast(s.name+' deleted');
   closeDp();
+  BULK_SELECTED.delete(s.id);
   renderPage(STATE.currentPage);
+  try { updateBulkBar(); } catch(e){}
 }
 
 function addNote() {
