@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 416._
+_Last reviewed at Build 417._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2378,3 +2378,65 @@ localStorage key needs an owner as much as a STATE key does.
 Nothing in the UI grants access yet. `venia_members` is real and enforced, but
 adding a person is currently an INSERT. The screen for it is the next step, and
 it should wait until there is someone to add.
+
+## Build 417 — checking the refactor didn't break what was already there
+*"Ensure that any of the build or refactor doesn't break what we've already built."*
+
+Three real problems, two of them mine and only one of them something a test
+would ever have found on its own.
+
+### 1. The new realtime table was never published
+`venia_module_data` was created but not added to `supabase_realtime`. The app's
+new subscription was listening to a table that emits nothing — and worse, two
+listeners on **one channel share its fate**: a subscription that errors takes
+the working `venia_workspace` listener down with it, and partner live-sync goes
+quiet with nothing on screen to say so.
+
+Fixed both ends: the table is published (`replica identity full`, because
+realtime applies RLS per change and `module` is what every policy keys on), and
+the module listener now has **its own channel** so it can fail alone.
+
+### 2. A module write could abort the whole push
+The per-module upsert sat inside the same `try` as the blob write. A throw —
+dropped connection mid-upsert, a policy rejecting one row — would skip the blob
+entirely and the founder's edit would reach nothing at all. The blob is the
+mirror the workspace can be recovered from; it must be unconditional. Its own
+`try/catch` now.
+
+### 3. A partial read is not a deletion
+With one blob, "the cloud is missing a key" barely happened. With eight rows and
+RLS it is **routine**: a scoped member is returned fewer rows *by design*, and a
+founder can get a short read from a dropped connection. If the merge read absent
+as deleted, one partial read would wipe every module it could not see.
+
+It does not — `mergeSnapshots` already keeps the local value when the cloud has
+none. That was already correct; what changed is that it is now load-bearing, so
+it has an assertion.
+
+### The regression method
+`gauntlet/regress.js` is new and is not a feature test — it is a **behavioural
+fingerprint**. It drives the real app through every space and every major
+surface, records what it finds, and prints a report. Run it against the build
+before the refactor and the build after, and diff.
+
+Before (414) vs after: **one line differed** — the Product screen showing 302
+controls instead of 304. Chased rather than assumed: the two are `sk-tab-eni`
+and `sk-tab-nigma`, with `sk-launch` renamed from "Eni · Nigma" to "Enigma".
+Exactly the intended change and nothing else.
+
+The live Build 416 was then booted with the **real** Supabase library served
+locally, because the sandbox has no route to a CDN and the question was never
+whether jsdelivr is up. It is whether deferring that script still ends with a
+client built — `sbInit`'s failure path does not throw, it just leaves cloud sync
+off. It does: library loaded, client built, eight modules, 64 keys, zero errors.
+
+### Two things the harness itself got wrong
+Worth recording, because both produced a false "this is broken":
+- The probe swept `.overlay` elements with `.remove()` between surfaces.
+  `#search-modal` is a **static element in the document** — deleting it took
+  search out of the DOM for every later probe, and the report said search was
+  broken when it works perfectly. It closes overlays now instead of deleting
+  them.
+- Console errors were counted including `ERR_CONNECTION_RESET` from the
+  sandbox's blocked egress — ten lines of noise that would have hidden a real
+  error. Filtered.
