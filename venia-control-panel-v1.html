@@ -1965,7 +1965,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '407';
+  const BUILD = '408';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -29062,7 +29062,8 @@ function agBuildLineSheetsSection() {
     <div class="ag-sec-head"><h2 class="ag-sec-title">${slEsc(seasonLabel)} Line Sheet Preview</h2>
       <div class="ag-sec-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <select onchange="SL_LS_SEASON=this.value;agNavSl('linesheets')" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${seasonOpts}</select>
-        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLineSheet()">&#x21D3; Export PDF</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLineSheet()">&#x21D3; Export list</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slVlsOpen()" title="Landscape, photo first, a few styles per page">&#x25A6; Export visual</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slFreezeLinesheet()" title="Snapshot this sheet — versioned, immutable, order forms come from it">❄ Freeze</button>
         <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentSend('sl','Generate a full wholesale line sheet for ${slEsc(seasonLabel)}. For each style include: style number, name, description, wholesale price, retail price, available colors, sizes, and estimated delivery date. Format it clearly for a wholesale buyer. VENIA voice.')">&#x25C8; Generate with Agent</button>
       </div>
@@ -29091,6 +29092,183 @@ function slLinesheetPrintDoc(subtitle, footNote, rows){
   // Photos need a beat to load before the print dialog snapshots the page.
   if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), hasPhotos ? 1500 : 400); }
 }
+// ══════════════════════════════════════════════════════════
+//  THE VISUAL LINE SHEET
+// ══════════════════════════════════════════════════════════
+// The table export answers "what does it cost". A buyer decides on the
+// GARMENT, so this one is landscape, a few styles to a page, photo first and
+// the numbers under it. It is the same data and the same freeze/price rules —
+// only the shape is different.
+window.SL_VLS = { perPage: 3, genders: [] };   // genders empty === every gender
+// Layout per page. Landscape, so 1–4 sit in one row; 6 and 8 take two.
+function slVlsGrid(n){
+  const cols = n <= 4 ? n : Math.ceil(n / 2);
+  return { cols, rows: Math.ceil(n / cols) };
+}
+function slVlsGenderOf(s){
+  const g = String((s && s.gender) || '').trim().toLowerCase();
+  if (/^w/.test(g)) return 'womens';
+  if (/^m/.test(g)) return 'mens';
+  if (/^u/.test(g)) return 'unisex';
+  return 'unspecified';
+}
+// The styles this sheet will carry, after the season the preview is on and
+// whatever genders are ticked. No ticks means every gender — the same thing the
+// dialog says, so the button and the sheet can never disagree.
+window.slVlsStyles = function(){
+  const want = (SL_VLS.genders || []);
+  return slLsStyles().filter(s => !want.length || want.indexOf(slVlsGenderOf(s)) >= 0);
+};
+window.slVlsOpen = function(){
+  const genders = ['womens','mens','unisex','unspecified'];
+  const label = { womens:'Womens', mens:'Mens', unisex:'Unisex', unspecified:'Gender not set' };
+  const counts = {}; slLsStyles().forEach(s => { const g = slVlsGenderOf(s); counts[g] = (counts[g]||0)+1; });
+  const ex = document.getElementById('sl-vls-modal'); if (ex) ex.remove();
+  const ov = document.createElement('div');
+  ov.className = 'overlay'; ov.id = 'sl-vls-modal';
+  ov.innerHTML = `<div class="modal" style="width:460px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Visual line sheet</div>
+      <button class="modal-close" aria-label="Close" onclick="closeModal('sl-vls-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px">
+      <div style="font-size:11px;color:var(--muted);line-height:1.6">Landscape, photo first. The table export is unchanged — this is the other way to send the same line.</div>
+      <div>
+        <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Styles per page</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap" id="sl-vls-per">
+          ${[1,2,3,4,6,8].map(n => `<button class="btn btn-ghost btn-sm" data-n="${n}" onclick="slVlsPer(${n})"
+            style="min-width:38px${SL_VLS.perPage===n?';border-color:var(--ink);color:var(--ink);font-weight:700':''}">${n}</button>`).join('')}
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Genders — none ticked means all</div>
+        <div style="display:flex;flex-direction:column;gap:5px">
+          ${genders.filter(g => counts[g]).map(g => `<label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer">
+            <input type="checkbox" class="sl-vls-g" value="${g}" ${SL_VLS.genders.indexOf(g)>=0?'checked':''} onchange="slVlsGenders()" style="accent-color:var(--ink)">
+            ${label[g]} <span style="color:var(--muted)">${counts[g]}</span></label>`).join('')}
+        </div>
+      </div>
+      <div id="sl-vls-count" style="font-size:11px;color:var(--ink)"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-ghost" onclick="closeModal('sl-vls-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="slVlsPrint()">Export</button>
+      </div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  slVlsCount();
+  openModal('sl-vls-modal');
+};
+window.slVlsPer = function(n){
+  SL_VLS.perPage = n;
+  document.querySelectorAll('#sl-vls-per button').forEach(b => {
+    const on = Number(b.dataset.n) === n;
+    b.style.borderColor = on ? 'var(--ink)' : '';
+    b.style.color = on ? 'var(--ink)' : '';
+    b.style.fontWeight = on ? '700' : '';
+  });
+  slVlsCount();
+};
+window.slVlsGenders = function(){
+  SL_VLS.genders = [...document.querySelectorAll('.sl-vls-g')].filter(c => c.checked).map(c => c.value);
+  slVlsCount();
+};
+function slVlsCount(){
+  const el = document.getElementById('sl-vls-count'); if (!el) return;
+  const n = slVlsStyles().length;
+  const pages = Math.max(1, Math.ceil(n / SL_VLS.perPage));
+  el.innerHTML = n
+    ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${SL_VLS.perPage} per page, landscape.`
+    : `<span style="color:var(--red)">Nothing matches — every style is filtered out.</span>`;
+}
+window.slVlsPrint = function(){
+  const rows = slVlsStyles().map(slLsRowFrom);
+  if (!rows.length) { showToast('Nothing to export — no style matches those genders', 'warning'); return; }
+  const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per);
+  const esc = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
+  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
+  const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
+  const gLabel = SL_VLS.genders.length ? SL_VLS.genders.join(' · ') : 'all genders';
+  // Chunked in JS rather than left to flow: a page break that depends on how
+  // tall a photo happens to render is how you get four styles on one page and
+  // one orphan on the next.
+  const pages = [];
+  for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  const imgH = gridRows === 1 ? 108 : 52;      // mm
+  const card = r => `<div class="c">
+      <div class="ph">${r.photo ? `<img src="${esc(r.photo)}" alt="">` : '<span class="no">No photo</span>'}</div>
+      <div class="nm">${esc(r.name)}</div>
+      <div class="cd">${esc(r.code)}${r.category?' · '+esc(r.category):''}</div>
+      <table class="f">
+        ${r.fabric ? `<tr><td>Fabric</td><td>${esc(r.fabric)}</td></tr>` : ''}
+        ${r.colors ? `<tr><td>Colours</td><td>${esc(r.colors)}</td></tr>` : ''}
+        ${r.sizes  ? `<tr><td>Sizes</td><td>${esc(r.sizes)}</td></tr>` : ''}
+        <tr><td>Wholesale</td><td class="ws">${r.wholesale ? '$'+esc(r.wholesale) : '—'}</td></tr>
+        <tr><td>Retail</td><td>${r.retail ? '$'+esc(r.retail) : '—'}</td></tr>
+        ${r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
+      </table>
+    </div>`;
+  const body = pages.map((pg, i) => `<section class="pg">
+      <header><span class="b">VENIA COLLECTION</span><span>${esc(seasonLabel)} · Wholesale · ${esc(gLabel)}</span><span>${i+1} / ${pages.length}</span></header>
+      <div class="grid">${pg.map(card).join('')}${
+        // Empty cells on the last page so three styles stay three columns wide
+        // instead of stretching to fill the sheet.
+        Array.from({length: per - pg.length}, () => '<div class="c e"></div>').join('')}</div>
+      <footer>${slLinesheetFoot('USD', delivery, '')}</footer>
+    </section>`).join('');
+  const css = `
+    @page { size: A4 landscape; margin: 10mm; }
+    *{box-sizing:border-box}
+    body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#111;margin:0}
+    /* A4 landscape less 10mm margins each side is exactly 190mm of content, so
+       the grid fills the sheet. min-height, not height: a long colourway list
+       must be allowed to grow rather than be sliced off at the page edge. */
+    .pg{page-break-after:always;display:flex;flex-direction:column;min-height:190mm}
+    .pg:last-child{page-break-after:auto}
+    header{display:flex;justify-content:space-between;align-items:baseline;font-size:8pt;
+      letter-spacing:1.4px;text-transform:uppercase;color:#666;border-bottom:1.5px solid #111;padding-bottom:4mm}
+    header .b{font-weight:700;letter-spacing:3px;color:#111}
+    .grid{flex:1;display:grid;grid-template-columns:repeat(${cols},1fr);
+      grid-template-rows:repeat(${gridRows},1fr);gap:6mm;padding:5mm 0}
+    .c{display:flex;flex-direction:column;min-width:0}
+    .c.e{visibility:hidden}
+    .ph{height:${imgH}mm;background:#f4f4f4;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .ph img{width:100%;height:100%;object-fit:cover;display:block}
+    .ph .no{font-size:7pt;letter-spacing:1.5px;text-transform:uppercase;color:#aaa}
+    .nm{font-size:${gridRows===1?'10.5pt':'9pt'};font-weight:700;letter-spacing:.5px;
+      text-transform:uppercase;margin-top:3mm;line-height:1.2}
+    .cd{font-family:'DM Mono',monospace;font-size:7pt;color:#777;margin-top:1mm;letter-spacing:.4px}
+    table.f{width:100%;border-collapse:collapse;margin-top:2.5mm;font-size:${gridRows===1?'8pt':'7pt'}}
+    table.f td{padding:0.8mm 0;vertical-align:top;border-bottom:1px solid #eee}
+    table.f td:first-child{color:#888;letter-spacing:.8px;text-transform:uppercase;
+      font-size:${gridRows===1?'6.5pt':'6pt'};width:38%;padding-right:2mm}
+    table.f td.ws{font-weight:700}
+    footer{border-top:1px solid #111;padding-top:3mm;font-size:6.5pt;letter-spacing:.6px;color:#666;line-height:1.6}
+    /* On screen this is a preview, so show it as paper — the margins the print
+       will actually have, and an edge between pages. Print ignores all of it. */
+    @media screen{
+      body{background:#e9e9e9;padding:8mm}
+      .pg{background:#fff;padding:10mm;margin:0 auto 8mm;width:277mm;box-shadow:0 1px 6px rgba(0,0,0,.18)}
+    }`;
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>VENIA Line Sheet — '
+    + esc(seasonLabel) + '</title><style>' + css + '</style></head><body>' + body + '</body></html>';
+  const w = window.open('', '_blank', 'width=1100,height=800');
+  if (!w) { showToast('Allow pop-ups to export the line sheet', 'warning'); return; }
+  w.document.write(html); w.document.close();
+  // Photos have to be decoded before the print dialog snapshots the page —
+  // wait for them rather than guessing at a delay, with a ceiling so a slow
+  // image cannot hang the export.
+  const go = () => { try { w.focus(); w.print(); } catch(e){} };
+  try {
+    const imgs = [...w.document.images];
+    if (!imgs.length) return setTimeout(go, 300);
+    let left = imgs.length, done = false;
+    const tick = () => { if (--left <= 0 && !done) { done = true; go(); } };
+    imgs.forEach(im => im.complete ? tick() : (im.onload = im.onerror = tick));
+    setTimeout(() => { if (!done) { done = true; go(); } }, 6000);
+  } catch(e){ setTimeout(go, 1200); }
+  try { logActivity('Visual line sheet exported — ' + rows.length + ' styles, ' + per + '/page, ' + gLabel); } catch(e){}
+  closeModal('sl-vls-modal');
+};
+
 function slLinesheetFoot(currency, delivery, frozenLine){
   const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
   return 'VENIA Collection — Trade Only. Wholesale prices in ' + (currency||'USD') + ', FOB. Prices confidential.'
