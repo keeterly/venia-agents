@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 414._
+_Last reviewed at Build 415._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2246,3 +2246,68 @@ Build 413.
 The service worker is **network-first** for the app shell, so every refresh
 re-fetches 2.9MB before painting. Stale-while-revalidate would paint instantly
 from cache — but it changes when a deploy lands, so it is a decision, not a fix.
+
+## Build 415 — MODULES, and seven assistants becoming one
+*"Merge them, have one entity named ENIGMA." / "Modules — let's do 1 and 2."*
+
+Step 1 of the module plan and the assistant merge are **the same refactor**: the
+registry is what a single assistant reads to scope itself. So they shipped
+together.
+
+### The registry
+`MODULES` is now the one place that says what this system is made of — seven
+modules (Today, Product, Growth, Sales, Money, Brainstorm, Settings), each with
+its screens, the STATE keys it owns, what it owns in words, and the actions it
+grants.
+
+It is **load-bearing, not documentation**:
+- `SYNC_KEYS` is now *derived* from it. There is no second list to keep in step,
+  and a new key with no module is a key that dies on the next save — which is
+  the finCats bug from Build 363, now impossible to reintroduce by omission.
+- `AGENT_REMIT` is derived from it too. The handoff text and the module map
+  cannot disagree about who owns what, because there is only one of them.
+- **Every STATE key belongs to exactly one module.** Verified: 64 keys, none
+  dropped, none duplicated, none orphaned, against the shipped build. That
+  partition is the whole reason step 2 — per-module storage and per-person
+  access — is later a mechanical change rather than a rewrite.
+
+Marketing and Brand are screens of **Growth**, not modules of their own. You
+cannot sensibly hand someone Marketing but not Brand.
+
+### ENIGMA
+There were **seven** personas, not three: Eni and Nigma in the dock plus PR,
+Marketing, Sales, Brand and CFO. They were never really seven — every one of
+them already funnelled into the same dock and the same `SK.history.eni`. What
+actually differed was the SCOPE. So the personas are gone and the scope is kept:
+
+    ENIGMA_SYS   — who it is. One voice, one set of rules, everywhere.
+    VENIA_CANON  — what is true about VENIA. Every turn, every module.
+    MODULE_FOCUS — the discipline of the work you are currently doing.
+
+**The merge fixed something that was quietly wrong.** The brand's own story —
+positioning, the placement history, what the press angle actually is — lived
+inside the PR agent's persona string and *nothing else could see it*. Ask the
+dock for a caption and it knew none of it. It is `VENIA_CANON` now, and the
+gauntlet asserts it reaches every module.
+
+Migrations, because a merge that loses work is not a merge:
+- The stored two-thread history keeps **Eni's** thread — the one everything
+  funnelled into. Nigma's is used only if Eni's is empty. They are NOT
+  interleaved: stored turns carry no timestamps, so splicing them would produce
+  a transcript that never happened.
+- Two unread counters become one (1 + 2 = 3).
+- A cloud job queued as `eni` or `nigma` before this build still lands. Nothing
+  in flight is stranded by the rename.
+
+### What the suite caught that I had missed
+- **`SK.history[agent]` in `cfoChatApply`** — a local variable, so it survived
+  the pass that rewrote `SK.history[SK.agent]`. Every cloud-queued reply would
+  have thrown on arrival: the answer generated, paid for, and dropped. smoke6.
+- **The CFO's read-capability block** — I folded the persona into the Money
+  focus and dropped "WHAT YOU CAN DO", reasoning the action specs covered it.
+  They don't: the specs cover *writes*. The prose is what tells it it can read
+  the LEDGER, the CASH CALENDAR and OPERATIONS. Restored. smoke14/19/21/22/29.
+
+Twelve smoke suites were pinned to the old structure and were updated to the
+new one with their intent intact — the persistence checks now ask "does a module
+claim this key?", which is a stronger question than "is it in that array?".
