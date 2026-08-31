@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '423';
+  const BUILD = '424';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5960,6 +5960,21 @@ function init() {
 // Every STATE key belongs to EXACTLY ONE module. That partition is asserted by
 // the gauntlet, and it is the whole reason per-module storage and per-person
 // access are later a mechanical change rather than a rewrite.
+// What a style looks like to anyone who is not in Product.
+//
+// This is the same allowlist the freelance sales-agent portal already publishes
+// to people OUTSIDE the company, kept in one place and stated as what it is:
+// everything a line sheet, a quote or a wholesale order needs, and nothing that
+// says what the piece cost to make.
+//
+// Deliberately absent: cogs, marginTarget, wsMarginTarget, vendor, fabricMatId,
+// forecastUnits, bom, pom, techpack, samples, pos. Cost, factory and margin
+// never leave Product.
+const CATALOG_STYLE_FIELDS = [
+  'id', 'name', 'styleId', 'category', 'season', 'fabric', 'fiberContent', 'coo',
+  'colors', 'sizes', 'baseSize', 'wholesale', 'retail', 'wsMoq', 'drop',
+  'photoUrl', 'status', 'stock', 'lead', 'desc', 'updatedAt',
+];
 const MODULES = {
   home: {
     label: 'Today', space: 'cp', nav: true, core: true,
@@ -6028,6 +6043,44 @@ const MODULES = {
     keys: [],
     ls: ['VENIA_CC_DB'],
   },
+  // ── THE CATALOGUE: a projection, not a module ────────────────────────────
+  // Sales cannot do its job without the line. A line sheet, a quote and a
+  // wholesale order all read STATE.styles — and `styles` is owned by Product,
+  // so a Sales-only person would receive no styles at all and open an app that
+  // looks broken. Granting them Product instead hands over cogs, BOM, POM,
+  // vendor and every margin target: the line sheet would cost the factory terms.
+  //
+  // So the line travels as a COST-STRIPPED PROJECTION in its own row. It owns no
+  // STATE key — moduleOfKey('styles') is still 'product' and the partition the
+  // gauntlet asserts is unchanged. It is written by whoever can write Product,
+  // read by anyone with any access at all, and on assemble it is applied FIRST
+  // so a real Product row always overwrites it. A founder therefore never sees
+  // the stripped copy, and a Sales-only member never sees anything else.
+  catalog: {
+    label: 'Catalogue', space: null, nav: false, projection: 'product',
+    owns: 'the sellable line, cost stripped — what Sales needs to quote and build a line sheet',
+    keys: [], ls: [],
+    project(snap){
+      const part = {};
+      // Only when there IS a line. A snapshot without `styles` must publish no
+      // styles key at all, not an empty one — "not included" keeps what the
+      // reader already has; `[]` would tell Sales the line is empty. And this
+      // runs inside the push, so it must never throw on a shape it did not
+      // expect: one exception here takes every module row down with it.
+      if (Array.isArray(snap.styles)) part.styles = snap.styles.map(st => {
+        const out = {};
+        CATALOG_STYLE_FIELDS.forEach(f => { if (st && st[f] !== undefined) out[f] = st[f]; });
+        return out;
+      });
+      // The two other Product keys a line sheet reads: swatch colours (so the
+      // colour chips are the brand's actual colours) and the season calendar
+      // (so the sheet's delivery window is right). Names and dates — neither
+      // says what anything cost.
+      if (snap.colorLib)  part.colorLib  = snap.colorLib;
+      if (snap.seasonCal) part.seasonCal = snap.seasonCal;
+      return part;
+    },
+  },
 };
 window.MODULES = MODULES;
 const MODULE_IDS = Object.keys(MODULES);
@@ -6046,6 +6099,16 @@ function moduleOfKey(key){
 }
 window.moduleOfSpace = moduleOfSpace;
 window.moduleOfKey = moduleOfKey;
+// Which module rows a person may WRITE. `mine` is window.VENIA_MY_MODULES:
+// null means a founder — and also every uncertain case, which shows everything
+// on purpose. A projection is written by whoever owns what it projects FROM.
+function moduleWritable(id, mine){
+  if (!mine) return true;
+  if (MODULES[id].foundersOnly) return false;
+  const m = MODULES[id].projection || id;
+  return mine[m] === 'owner' || mine[m] === 'editor';
+}
+window.moduleWritable = moduleWritable;
 
 // ── the workspace, split and reassembled ───────────────────────────────────
 // The cloud stores one row per module. These two functions are the whole of
@@ -6056,6 +6119,9 @@ window.moduleOfKey = moduleOfKey;
 function moduleSplit(snap){
   const out = {};
   MODULE_IDS.forEach(id => {
+    // A projection row is DERIVED, not owned: it is built from the snapshot by
+    // its own function, because it has no keys of its own to copy.
+    if (MODULES[id].project) { out[id] = MODULES[id].project(snap); return; }
     const part = {};
     MODULES[id].keys.forEach(k => { if (snap[k] !== undefined) part[k] = snap[k]; });
     // A standalone feature's localStorage string travels with its module too.
@@ -6064,13 +6130,44 @@ function moduleSplit(snap){
     if (Object.keys(ls).length) part._ls = ls;
     out[id] = part;
   });
+  // Someone whose styles ARRIVED as the cost-stripped projection must never
+  // write them back: their copy has no cogs, no BOM, no vendor, and publishing
+  // it would delete those fields for everyone. RLS already refuses them the
+  // Product row; this is the belt to that brace, because this is the one shape
+  // of the bug that would be silent and permanent.
+  // Narrow on purpose. A founder must NEVER take this branch: the row is
+  // written whole, so dropping `styles` from it would delete the real line —
+  // cost, BOM and all — from the cloud. One short read that happened to miss
+  // the Product row would have been enough. So this fires only for someone who
+  // could not write Product anyway, which is exactly who it is for.
+  if (window.VENIA_STYLES_PROJECTED
+      && !moduleWritable('product', window.VENIA_MY_MODULES)
+      && out.product) delete out.product.styles;
   return out;
 }
 function moduleAssemble(rows){
   // Meta belongs to the snapshot, not to any one module: take it from whichever
   // row was written last so "who changed this" survives the round trip.
   let snap = { _schemaVersion: 2 }, newest = 0, ls = null;
+  // Projections first, owning rows second. The catalogue carries a cost-stripped
+  // copy of `styles`; anyone who can ALSO read the Product row must end up with
+  // the real one, and that is decided here rather than by whatever order
+  // Postgres happened to return the rows in.
+  let projected = false, owned = false;
   (rows || []).forEach(r => {
+    if (!r || !r.data) return;
+    if (MODULES[r.module] && MODULES[r.module].project) { if (r.data.styles) projected = true; }
+    else if (r.module === 'product') owned = true;
+  });
+  const ordered = (rows || []).slice().sort((a, b) =>
+    (MODULES[(a || {}).module] && MODULES[(a || {}).module].project ? 0 : 1) -
+    (MODULES[(b || {}).module] && MODULES[(b || {}).module].project ? 0 : 1));
+  // One answer the rest of the app turns on: is our line the real one, or the
+  // copy Sales is allowed to see? Sticky once we have seen the real thing — a
+  // dropped connection that returns a short read is not a demotion.
+  if (owned) window.__veniaSawRealLine = true;
+  window.VENIA_STYLES_PROJECTED = projected && !owned && !window.__veniaSawRealLine;
+  ordered.forEach(r => {
     const d = r && r.data; if (!d) return;
     Object.keys(d).forEach(k => { if (k !== '_ls') snap[k] = d[k]; });
     if (d._ls) { ls = ls || {}; Object.assign(ls, d._ls); }
@@ -30026,6 +30123,10 @@ function slMoqFor(s){
   return (s && String(s.wsMoq||'').trim()) || (STATE.slPrefs && String(STATE.slPrefs.moq||'').trim()) || '';
 }
 window.slSetWsMoq = function(id, v){
+  // The MOQ lives on the style, and the style belongs to Product. Someone whose
+  // line arrived as the catalogue projection cannot publish that edit — better
+  // to say so than to accept a change that vanishes on the next pull.
+  if (window.VENIA_STYLES_PROJECTED){ showToast('MOQ is set in Product — ask a founder','warning'); return; }
   const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
   const t = String(v||'').trim();
   if (t) s.wsMoq = t; else delete s.wsMoq;
@@ -36199,7 +36300,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     home:       'the day view — always included',
     product:    'styles, materials, tech packs, costing, POs',
     growth:     'press, marketing, brand — pulls, pitches, the calendar',
-    sales:      'buyers, quotes, orders, line sheets',
+    sales:      'buyers, quotes, orders, line sheets — plus the line itself, prices but no costs',
     money:      'cash, P&L, margins, the bank feed',
     brainstorm: 'the shared scratchpad',
     settings:   'connections and preferences',
@@ -36237,6 +36338,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           + '<input type="checkbox" class="team-mod" value="' + m + '" style="accent-color:var(--ink);margin-top:2px">'
           + '<span><b>' + esc(MOD_LABEL[m]) + '</b><br><span style="color:var(--muted);font-size:10px">' + esc(MOD_WHAT[m]) + '</span></span></label>';
       }).join('');
+      // Say the thing that is easiest to get wrong: Sales works without Product,
+      // because the line travels separately and arrives cost-stripped.
+      picks.insertAdjacentHTML('beforeend',
+        '<div style="width:100%;font-size:10.5px;color:var(--muted);line-height:1.5;'
+        + 'border-top:1px solid var(--line);padding-top:8px;margin-top:2px">'
+        + 'Everyone gets the <b>catalogue</b> automatically — style name, code, season, fabric, '
+        + 'colours, sizes, photo, wholesale and retail. It is what a line sheet, a quote and a '
+        + 'wholesale order are made of, so <b>Sales works on its own</b>. '
+        + 'COGS, margins, BOM, tech packs, POM and factory terms stay in <b>Product</b> and are '
+        + 'never part of it.</div>');
     }
     box.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading…</div>';
     var d;
@@ -36452,28 +36563,46 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // never take the push down with it. Without this the outer catch would
       // skip the blob entirely and the founder's edit would reach nothing.
       var parts = moduleSplit(toPush);
+      // ONLY the modules this person can actually write. The upsert is ONE
+      // statement: a single row RLS refuses takes the whole batch down with it,
+      // so a Sales-only member sending all nine rows would save nothing at all
+      // — every edit lost, silently, forever. A founder (VENIA_MY_MODULES null,
+      // which is also every uncertain case) still sends everything.
+      var mine = window.VENIA_MY_MODULES;
+      var modErr = null;
+      var ids = Object.keys(parts).filter(function(id){ return moduleWritable(id, mine); });
       try {
-        var modRes = await c.from('venia_module_data').upsert(
-          Object.keys(parts).map(function(id){
+        var modRes = ids.length ? await c.from('venia_module_data').upsert(
+          ids.map(function(id){
             var part = parts[id];
             part._who = toPush._who;
             return { workspace_id: WS_ID, module: id, data: part,
                      updated_by: clientId(), updated_at: stamp, rev: rev };
-          }), { onConflict: 'workspace_id,module' });
-        window.__syncStat.modules = modRes && modRes.error
-          ? { t: stamp, ok: false, err: modRes.error.message || modRes.error.code }
-          : { t: stamp, ok: true, rows: MODULE_IDS.length };
+          }), { onConflict: 'workspace_id,module' }) : null;
+        modErr = modRes && modRes.error ? (modRes.error.message || modRes.error.code) : null;
+        window.__syncStat.modules = modErr
+          ? { t: stamp, ok: false, err: modErr }
+          : { t: stamp, ok: true, rows: ids.length, wrote: ids.join(',') };
       } catch (me) {
-        window.__syncStat.modules = { t: stamp, ok: false, err: (me && me.message) || 'threw' };
+        modErr = (me && me.message) || 'threw';
+        window.__syncStat.modules = { t: stamp, ok: false, err: modErr };
       }
       // ── THE BLOB, still written as a mirror ──
       // One build of belt and braces: if anything about the split is wrong, the
       // whole workspace is still sitting in one row exactly as before, and the
       // rollback is deleting six lines. It comes out once the rows are proven.
-      var res = await c.from('venia_workspace').upsert({
-        id: WS_ID, data: toPush, updated_by: clientId(),
-        updated_at: stamp, rev: rev
-      }, { onConflict:'id' });
+      // The blob is founders-only by RLS, and rightly so: it is the WHOLE
+      // workspace in one row, so a scoped member writing it would publish the
+      // thin copy they were given over everyone else's data. Today the policy
+      // refuses them — which means, without this, a Sales member would fail
+      // every push and get an auth toast on every keystroke. Skip it, and let
+      // the module rows be the write that counts.
+      var res = mine
+        ? (modErr ? { error: { message: modErr } } : { skipped: true })
+        : await c.from('venia_workspace').upsert({
+            id: WS_ID, data: toPush, updated_by: clientId(),
+            updated_at: stamp, rev: rev
+          }, { onConflict:'id' });
       if (!res || !res.error) {
         localStorage.setItem('venia-sync-rev', String(rev));
         // Read-modify-WRITE was only doing read-modify: the merged blob (which
@@ -36487,7 +36616,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
         if (adopted) { applySnapshot(toPush); setBase(snapshot()); }
         else { setBase(localSnap); }
-        window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length, via: adopted ? 'adopted cloud records' : 'local only' };
+        window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
+          via: mine ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
       } else {
         syncFail('push', res.error.message || res.error.code);
       }
