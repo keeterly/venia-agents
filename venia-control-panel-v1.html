@@ -561,6 +561,14 @@ td{padding:13px 16px;font-size:12px;color:var(--silver);vertical-align:middle}
 .modal-foot{
   display:flex;justify-content:flex-end;gap:8px;
   padding:16px 24px;border-top:1px solid var(--border);
+  /* PINNED, like .modal-head above it. .modal is the scroll container, so a
+     footer left in normal flow sits at the end of the form — on Edit Material
+     that is 1,149px down, past every field and the lot records, and Save simply
+     is not on screen. The way out of a form should never be something you have
+     to go looking for. */
+  position:sticky;bottom:0;background:var(--bg);z-index:1;
+  /* Clears the home indicator when a modal runs full-height on a phone. */
+  padding-bottom:calc(16px + var(--sab, 0px));
 }
 /* PR pull cart modal: ONE scroll region. The modal is a flex column (head +
    tabbed body + foot); only the body's inner content scrolls, so the sticky
@@ -1925,7 +1933,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '399';
+  const BUILD = '401';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -13168,23 +13176,58 @@ function exportLineSheet() { window.print(); toast('Opening print — save as PD
 // and quantities, and counting them inflates stock with garments no customer
 // can buy.
 //
-// Matching is by SKU, and only by SKU. The app builds SKUs as
-// `${styleId}-${COLOR}-${SIZE}`, so a Shopify variant whose SKU starts with a
-// style's styleId is that style — an exact, checkable rule. Nothing is matched
-// on a title resembling a name: "SPIKE PANTS" and "Spike Pant (Sample)" would
-// pass any fuzzy test, and attaching the wrong stock to a style is worse than
-// attaching none. Everything unmatched is counted and named.
+// Matching is by SKU, and only by SKU — but NOT by the PLM's own style number.
+// That was the original assumption ("SKUs are `${styleId}-${COLOR}-${SIZE}`, so
+// a variant starting with a styleId is that style") and it was simply wrong for
+// a real store: the PLM issues VN-SS27-WB08 while Shopify carries the
+// production code 20B001-2W-BLACK-XS. Different namespaces, so all 252 variants
+// came back unmatched. A style records the store codes it answers to instead.
+// Nothing is matched on a title resembling a name: "SPIKE PANTS" and "Spike
+// Pant (Sample)" would pass any fuzzy test, and attaching the wrong stock to a
+// style is worse than attaching none. A title only ever PRE-SELECTS a style in
+// the linking panel, which a person then confirms. Everything unmatched is
+// counted and named.
+// TWO SYSTEMS, TWO CODES FOR THE SAME GARMENT.
+// The PLM issues its own style numbers (ANTIGONE SKIRT is VN-SS27-WB08), while
+// Shopify carries the production code in the SKU (20B001-2W-BLACK-XS). Matching
+// a Shopify SKU against styleId therefore could never work — it is not a near
+// miss, it is a different namespace, which is why all 252 variants came back
+// unmatched. A style now carries the store codes it answers to, in shopifySkus,
+// and those are tried first.
+function invCodes(s){
+  const out = [];
+  const push = v => { const t = String(v||'').trim().toUpperCase(); if (t && out.indexOf(t) < 0) out.push(t); };
+  (Array.isArray(s && s.shopifySkus) ? s.shopifySkus : []).forEach(push);
+  push(s && s.devStyle);     // the production code, when the tech pack carries one
+  push(s && s.styleId);      // last: works for anyone whose store uses PLM codes
+  return out;
+}
+// Returns the style's id (not its styleId) so a linked code can never be
+// confused with the PLM number it is standing in for.
 function invSkuStyleId(sku){
   const t = String(sku||'').trim().toUpperCase();
   if (!t) return '';
-  // Longest styleId that prefixes this SKU — so VN-1 cannot claim VN-10's SKUs.
-  let best = '';
+  // Longest code wins, so 19K001 cannot claim 19K001-4U's variants.
+  let best = '', bestLen = 0;
   (STATE.styles||[]).forEach(s => {
-    const id = String(s.styleId||'').trim().toUpperCase();
-    if (!id || id.length <= best.length) return;
-    if (t === id || t.startsWith(id + '-')) best = id;
+    invCodes(s).forEach(c => {
+      if (c.length <= bestLen) return;
+      if (t === c || t.startsWith(c + '-')) { best = s.id; bestLen = c.length; }
+    });
   });
   return best;
+}
+// The part of a product's SKUs that identifies the STYLE rather than the size or
+// colourway: the longest common prefix across its variants, trimmed back to a
+// separator so half a word is never stored as a code.
+function invSkuPrefix(variants){
+  const skus = (variants||[]).map(v => String(v.sku||'').trim().toUpperCase()).filter(Boolean);
+  if (!skus.length) return '';
+  let p = skus[0];
+  skus.forEach(s => { let i = 0; while (i < p.length && i < s.length && p[i] === s[i]) i++; p = p.slice(0, i); });
+  p = p.replace(/[-_\s]+$/, '');
+  // One variant, or every variant sharing one SKU: the whole thing is the code.
+  return p || skus[0];
 }
 window.invShopifySync = async function(){
   const btn = document.getElementById('inv-sync-btn');
@@ -13207,14 +13250,26 @@ window.invShopifySync = async function(){
     if (!v.tracked) untracked++;
     const sid = invSkuStyleId(v.sku);
     if (!sid){ if (v.sku) unmatched.push(p.title + ' · ' + v.sku); return; }
+    p.__matched = true;
     const b = byStyle[sid] = byStyle[sid] || { units:0, variants:0, untracked:0 };
     b.units += v.qty; b.variants++; if (!v.tracked) b.untracked++;
   }));
 
+  // Unmatched PRODUCTS (not just variants) — the linking panel needs something
+  // a person can act on: a title they recognise and one code to attach.
+  const orphans = [];
+  (res.products||[]).forEach(p => {
+    if (p.__matched) { delete p.__matched; return; }
+    const pre = invSkuPrefix(p.variants);
+    if (!pre) return;
+    orphans.push({ title: p.title || '(untitled)', code: pre,
+      units: (p.variants||[]).reduce((n,v)=>n+(Number(v.qty)||0),0),
+      variants: (p.variants||[]).length });
+  });
+
   let matched = 0;
   (STATE.styles||[]).forEach(s => {
-    const key = String(s.styleId||'').trim().toUpperCase();
-    const b = key && byStyle[key];
+    const b = byStyle[s.id];
     if (!b) { s.shopifyStock = undefined; s.shopifyAt = undefined; s.shopifyVariants = undefined; return; }
     matched++;
     s.shopifyStock = b.units;
@@ -13224,6 +13279,7 @@ window.invShopifySync = async function(){
   });
   STATE.invSync = { at: res.at || new Date().toISOString(), products: (res.products||[]).length,
     variants, matched, unmatched: unmatched.length, unmatchedSample: unmatched.slice(0,6),
+    orphans: orphans.sort((a,b)=>b.units-a.units).slice(0,60),
     untracked, truncated: !!res.truncated, pages: res.pages || 0 };
   try { save(); } catch(e){}
   renderInventory(INV_FILTER);
@@ -13239,9 +13295,57 @@ function invStock(s){
 }
 let INV_FILTER = 'all';
 
+// Suggest a style for an unmatched Shopify product by name. Exact first, then a
+// containment match, so "SALIX T-SHIRT" finds SALIX T-SHIRT before SALIX VNARCHY
+// T-SHIRT. A suggestion is only ever pre-selected, never applied on its own —
+// several products legitimately share a name across colourways.
+function invSuggestStyle(title){
+  const norm = t => String(t||'').toUpperCase().replace(/[^A-Z0-9]+/g,' ').trim();
+  const t = norm(title); if (!t) return '';
+  const list = STATE.styles || [];
+  let exact = list.find(s => norm(s.name) === t);
+  if (exact) return exact.id;
+  let part = list.find(s => norm(s.name) && (t.indexOf(norm(s.name)) >= 0 || norm(s.name).indexOf(t) >= 0));
+  return part ? part.id : '';
+}
+// Attach a store code to a style. Additive: a style with two colourways in the
+// store answers to two codes, so linking a second one must not drop the first.
+window.invLinkCode = function(styleId, code){
+  const s = (STATE.styles||[]).find(x => x.id === styleId);
+  const c = String(code||'').trim().toUpperCase();
+  if (!s || !c) return;
+  if (!Array.isArray(s.shopifySkus)) s.shopifySkus = [];
+  if (s.shopifySkus.indexOf(c) < 0) s.shopifySkus.push(c);
+  s.updatedAt = new Date().toISOString();
+  save();
+  logActivity(s.name + ': linked to Shopify SKU ' + c);
+  showToast('Linked ' + c + ' → ' + s.name + ' — syncing', 'success');
+  invShopifySync();
+};
+window.invUnlinkCode = function(styleId, code){
+  const s = (STATE.styles||[]).find(x => x.id === styleId);
+  if (!s || !Array.isArray(s.shopifySkus)) return;
+  s.shopifySkus = s.shopifySkus.filter(c => c !== code);
+  s.updatedAt = new Date().toISOString();
+  save(); renderInventory(INV_FILTER);
+};
+window.invLinkPick = function(code, sel){
+  const id = sel && sel.value; if (!id) return;
+  invLinkCode(id, code);
+};
 function renderInventory(filter='all') {
   INV_FILTER = filter;
-  let styles=STATE.styles.filter(s=>['active','sale','production'].includes(s.status));
+  // WHAT COUNTS AS INVENTORY. This used to be styles at active/sale/production
+  // only — and with a line still marked SMS in the PLM while it sells in the
+  // store, that hid all 64 styles behind an empty table reading 0 units. Stock
+  // is stock: anything the store has counted belongs here whatever stage the
+  // PLM thinks it is at, and archived is the only thing worth leaving out.
+  let styles=STATE.styles.filter(s =>
+    ['active','sale','production'].includes(s.status) || s.shopifyStock != null
+    || (Array.isArray(s.shopifySkus) && s.shopifySkus.length));
+  // Nothing linked and nothing live yet: show the line rather than a blank page,
+  // so there is something to attach a store code to.
+  if (!styles.length) styles = STATE.styles.filter(s => s.status !== 'archived');
   // Every count reads through invStock, so a Shopify figure and a typed one are
   // never quietly added together as if they were the same kind of number.
   const U = (s) => invStock(s).units;
@@ -13277,6 +13381,38 @@ function renderInventory(filter='all') {
       </div>
       <button class="btn btn-ghost btn-sm" id="inv-sync-btn" onclick="invShopifySync()">↻ Sync from Shopify</button>
     </div>
+    ${(sy && sy.orphans && sy.orphans.length) ? `
+    <!-- LINKING. The PLM's style numbers and the store's SKUs are different
+         namespaces, so nothing can match them automatically. This is the one
+         place to say "this product IS that style" — once per style, forever. -->
+    <div style="border:1px solid var(--border);background:var(--bg);padding:0;margin-bottom:16px">
+      <div style="padding:11px 14px;border-bottom:1px solid var(--border)">
+        <div style="font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:var(--ink)">Link these Shopify products to a style</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.6">
+          Your store uses production codes (<b style="font-family:'DM Mono',monospace">${(sy.orphans[0]||{}).code||''}</b>) and the PLM uses its own style numbers,
+          so these cannot be matched automatically. Pick the style each product is, once — after that every sync counts it.
+        </div>
+      </div>
+      <div style="max-height:340px;overflow-y:auto">
+      ${sy.orphans.map(o => {
+        const guess = invSuggestStyle(o.title);
+        const opts = (STATE.styles||[]).filter(s=>s.status!=='archived')
+          .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||'')))
+          .map(s=>`<option value="${s.id}"${s.id===guess?' selected':''}>${String(s.name||'').replace(/</g,'&lt;')} · ${String(s.styleId||'').replace(/</g,'&lt;')}</option>`).join('');
+        return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:9px 14px;border-bottom:1px solid var(--border)">
+          <div style="flex:1;min-width:170px">
+            <div style="font-size:12px;color:var(--ink)">${String(o.title).replace(/</g,'&lt;')}</div>
+            <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${String(o.code).replace(/</g,'&lt;')} · ${o.units} unit${o.units===1?'':'s'} · ${o.variants} variant${o.variants===1?'':'s'}</div>
+          </div>
+          <select class="fs" style="flex:1;min-width:200px;max-width:320px;min-height:auto;padding:5px 8px;font-size:11px">
+            <option value="">— choose a style —</option>${opts}
+          </select>
+          <button class="btn btn-ghost btn-sm" style="flex:none"
+            onclick="invLinkPick('${String(o.code).replace(/'/g,'')}', this.previousElementSibling)">Link</button>
+        </div>`;
+      }).join('')}
+      </div>
+    </div>` : ''}
     <div class="stats-row stats-3" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Total Units</div><div class="stat-val">${totalUnits.toLocaleString()}</div></div>
       <div class="stat-card"><div class="stat-label">Stock Value (Retail)</div><div class="stat-val">$${(totalVal/1000).toFixed(0)}k</div></div>
