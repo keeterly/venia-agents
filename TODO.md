@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 403._
+_Last reviewed at Build 405._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1785,3 +1785,54 @@ invisible to anyone running the app from their home screen. The two numbers are
 one decision and nothing but attention was keeping them in step — so
 `smoke87.js` now fails the build if `const BUILD` and `venia-shell-vNNN`
 disagree.
+
+
+## Build 404 — the rail collapses, and zoom was fine
+*"Have a way to compact left column. Also check to make sure that zoom in and
+out scales properly."*
+
+**Zoom checked first, measured on a 1440 screen at 100/110/125/150/175/200%:**
+no page overflow at any level, the global bar never overflows, and at 200% it
+correctly drops to the mobile layout. Zoom is not broken.
+
+What the measurement *did* show is the real complaint. The rail is a fixed
+220px, so its share of the window grows the further you zoom in:
+
+| zoom | CSS width | rail's share of the row |
+|---|---|---|
+| 100% | 1440 | 15% |
+| 150% | 960 | 23% |
+| 175% | 823 | **27%** |
+
+At 175% the navigation was taking a quarter of the screen from the table beside
+it. It collapses now — from either the ‹ in any rail head, the › tab that
+replaces it, or **⌘\ / Ctrl+\**. Per-device like the route, and it survives the
+refresh that Build 397 made routine.
+
+**It collapses to nothing rather than to an icon strip, on purpose.** This rail
+is typographic — `.nav-item .ni{display:none}`, *"SSENSE has no icons in nav"* —
+so a narrow strip would have to invent abbreviations for STYLES, SAMPLES and
+SKUS and ask you to decode them. Hidden, with one tab back, is honest and
+reclaims the whole 220px: at 175% the content went from 603px to 823px.
+
+One rail system, one control: the six Growth/Sales/Money rails collapse with the
+PLM one. `gauntlet/rail.js`, 13 assertions. **The PLM rail's head is indented
+differently from the other six**, so the first pass silently skipped the very
+rail in the screenshot — the gauntlet counted controls and caught it.
+
+## Build 405 — the fabric fields offer what you already use
+*"When adding a style in a diff fabrication, the fabric section doesn't show the
+fabrics already in the library but it should."*
+
+Primary and Secondary Fabric were bare text inputs. They now carry a datalist —
+still typeable, since a genuinely new fabric has to be enterable — drawn from
+**two** sources:
+
+- the Materials library (skipping trims and labels; an *untyped* material is
+  offered rather than hidden, since untyped usually means cloth), and
+- every fabric already typed on a style, which is where most of them actually
+  live — offering only the library would leave "Tencel Twill" missing from the
+  list while sixty styles are made of it.
+
+Deduped case-insensitively, which is the point: it is how "Tencel Twill" and
+"tencel twill" stop becoming two materials.
