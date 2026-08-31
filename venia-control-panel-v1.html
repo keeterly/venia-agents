@@ -2511,7 +2511,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '416';
+  const BUILD = '417';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35823,7 +35823,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 // subscribe; a change on one lands on the other automatically.
 ;(function(){
   var WS_ID = 'main', BUCKET = 'venia-photos';
-  var pushTimer = null, channel = null, applyingRemote = false, started = false;
+  var pushTimer = null, channel = null, modChannel = null, applyingRemote = false, started = false;
   // Captured at parse time — init() seeds localStorage at DOMContentLoaded, so
   // reading later can't tell a truly fresh browser from a seeded one.
   var FRESH_BROWSER = !localStorage.getItem('venia-plm-v2');
@@ -35926,17 +35926,26 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Written first and treated as the write that counts. Only the modules
       // this person can write will land — RLS rejects the rest — which is the
       // whole point: access is a permission now, not an all-or-nothing row.
+      // Its OWN try/catch, deliberately. The blob below is still the mirror the
+      // whole workspace can be recovered from, so a module write that throws —
+      // a dropped connection mid-upsert, a policy that rejects one row — must
+      // never take the push down with it. Without this the outer catch would
+      // skip the blob entirely and the founder's edit would reach nothing.
       var parts = moduleSplit(toPush);
-      var modRes = await c.from('venia_module_data').upsert(
-        Object.keys(parts).map(function(id){
-          var part = parts[id];
-          part._who = toPush._who;
-          return { workspace_id: WS_ID, module: id, data: part,
-                   updated_by: clientId(), updated_at: stamp, rev: rev };
-        }), { onConflict: 'workspace_id,module' });
-      window.__syncStat.modules = modRes && modRes.error
-        ? { t: stamp, ok: false, err: modRes.error.message || modRes.error.code }
-        : { t: stamp, ok: true, rows: MODULE_IDS.length };
+      try {
+        var modRes = await c.from('venia_module_data').upsert(
+          Object.keys(parts).map(function(id){
+            var part = parts[id];
+            part._who = toPush._who;
+            return { workspace_id: WS_ID, module: id, data: part,
+                     updated_by: clientId(), updated_at: stamp, rev: rev };
+          }), { onConflict: 'workspace_id,module' });
+        window.__syncStat.modules = modRes && modRes.error
+          ? { t: stamp, ok: false, err: modRes.error.message || modRes.error.code }
+          : { t: stamp, ok: true, rows: MODULE_IDS.length };
+      } catch (me) {
+        window.__syncStat.modules = { t: stamp, ok: false, err: (me && me.message) || 'threw' };
+      }
       // ── THE BLOB, still written as a mirror ──
       // One build of belt and braces: if anything about the split is wrong, the
       // whole workspace is still sitting in one row exactly as before, and the
@@ -36039,16 +36048,25 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     channel = c.channel('venia_ws_live')
       .on('postgres_changes', { event:'*', schema:'public', table:'venia_workspace', filter:'id=eq.'+WS_ID },
           function(payload){ window.__syncStat.realtime = 'event ' + new Date().toISOString(); onRemote(payload.new); })
-      // A module row changing is the real signal now. One push writes several
-      // rows, so re-read the whole set rather than applying one row's slice —
-      // applying a fragment would look like every other module going empty.
-      .on('postgres_changes', { event:'*', schema:'public', table:'venia_module_data', filter:'workspace_id=eq.'+WS_ID },
-          function(payload){
-            window.__syncStat.realtime = 'module event ' + new Date().toISOString();
-            if (payload && payload.new && payload.new.updated_by === clientId()) return;  // our own echo
-            pullModules().then(function(row){ if (row) onRemote(row); });
-          })
       .subscribe(function(status){ window.__syncStat.realtime = status + ' ' + new Date().toISOString(); });
+    // A SEPARATE channel, on purpose. Two listeners on one channel share its
+    // fate: if the module subscription errors — the table not published, a
+    // policy change, a server that has not caught up with a deploy — it would
+    // take the workspace listener down with it and partner sync would go quiet
+    // with nothing on screen to say so. Its own channel can fail alone.
+    // One push writes several rows, so re-read the whole set rather than
+    // applying one row's slice; applying a fragment would look like every other
+    // module going empty.
+    try {
+      modChannel = c.channel('venia_mod_live')
+        .on('postgres_changes', { event:'*', schema:'public', table:'venia_module_data', filter:'workspace_id=eq.'+WS_ID },
+            function(payload){
+              window.__syncStat.realtimeModules = 'event ' + new Date().toISOString();
+              if (payload && payload.new && payload.new.updated_by === clientId()) return;  // our own echo
+              pullModules().then(function(row){ if (row) onRemote(row); });
+            })
+        .subscribe(function(status){ window.__syncStat.realtimeModules = status + ' ' + new Date().toISOString(); });
+    } catch(e){ window.__syncStat.realtimeModules = 'failed: ' + (e && e.message); }
   }
   // Realtime is best-effort (laptops sleep, sockets drop) — a quiet periodic
   // pull guarantees convergence even when the socket is dead.
