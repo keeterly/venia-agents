@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 410._
+_Last reviewed at Build 411._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2041,3 +2041,62 @@ layouts and in the list export, not squeezed until nothing can be read.
 
 `gauntlet/vls.js` now asserts every density fits A4 with every field filled, so
 the next field someone adds cannot silently break the page count.
+
+## Build 411 — swatches, keystone, and the style's own words
+*"add all, description should also be synced to style as well."*
+
+Three things I'd flagged as missing from the visual line sheet and left for a
+decision. All three are in.
+
+**Colour swatches beside every colourway name.** Painted from the same
+`colorDef` / `colorCssFrom` vocabulary the material cards and the Colorways
+column use — one colour library, so paper and screen can never disagree about
+what *Parchment* looks like, and patterns (melange, pinstripe, check) come
+through as patterns. A colour the library has **no swatch for prints hatched**,
+never as a guessed colour: the buyer is told we don't know it rather than shown
+the wrong one. The hatch is deliberately high-contrast — a pale one at 2.2mm
+reads as a light colour, which defeats the whole point.
+
+**Keystone.** `2.5×` beside the retail price, arithmetic on the two prices
+already on the card rather than a stored field that could disagree with them.
+No extra row: it sits in the Retail cell.
+
+**The style's copy.** `desc` — *the same field* the Styles column, the Edit
+Style modal and the tech pack read. Edit it in PLM and the next export says
+the new thing; there is no second copy to drift. Two lines on a roomy card,
+one at 4-up, none at 6/8 where a card is 34mm tall. Cut on a word boundary in
+JS, not left to the renderer, so the card's height stays something we can
+measure.
+
+**⚠️ That field is also where factory notes go.** `sm-desc` is labelled
+*"design intent, silhouette inspiration, fit references, mood, any notes for
+manufacturer"*. One field synced both ways means internal notes can reach a
+buyer. So the dialog has an **Include style copy** tick — on by default, and
+its tooltip says exactly why you might turn it off. Read the field before
+sending the sheet.
+
+### Two things that would have shipped broken
+**Backgrounds don't print.** Swatches are CSS backgrounds, and browsers drop
+backgrounds from printed output unless told not to — the chips would have been
+perfect on screen and blank on paper. `print-color-adjust: exact` is now set on
+the export document.
+
+**The page budget moved again.** Copy and chips both cost lines, so the photo
+gives room back: image height is now 76mm at 1–3 up (was 88), 60mm at 4-up
+(was 72), 34mm dense (was 40). Re-measured with every field filled, a long
+description and **five** colourways including a long name:
+
+| | 410 | 411 |
+|---|---|---|
+| 1 per page | 182.5mm | **176.2mm** |
+| 2–3 per page | 182.5mm | **183.8mm** |
+| 4 per page | 180.5mm | **178.5mm** |
+| 6 per page | 183.8mm | **178.3mm** |
+| 8 per page | 183.8mm | **184.8mm** |
+
+*(A4 landscape gives 190mm.)* A first pass at 38mm dense came in at 186.3mm
+with only four colourways — inside the page, but not with enough room for a
+fifth. Chips make colourway lists wrap where plain text didn't.
+
+`gauntlet/vls.js` gained 13 assertions for this. Run against Build 410 first:
+11 of them fail, which is what makes them worth having.
