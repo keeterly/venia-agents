@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 411._
+_Last reviewed at Build 412._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2100,3 +2100,61 @@ fifth. Chips make colourway lists wrap where plain text didn't.
 
 `gauntlet/vls.js` gained 13 assertions for this. Run against Build 410 first:
 11 of them fail, which is what makes them worth having.
+
+## Build 412 — the sheet as a showpiece, and what may leave the building
+*"reduce padding on outer edges… keep 1 per column… crop the image inwards…
+description at the bottom… email should be sales@… we should never mention
+creator.veniacollection.com publicly since it's an internal tool."*
+
+**⚠️ The internal host was printing on a buyer's document.** The visual line
+sheet footer said *"To order: keeter@veniacollection.com ·
+creator.veniacollection.com"* — the internal tool's hostname, on a page handed
+to stockists, plus whichever founder happened to run the export. Both are now
+brand constants declared beside `VENIA_PUBLIC_BASE`, with a comment saying which
+is which:
+
+- `VENIA_PUBLIC_BASE` — **internal**. Factory share links, our own NFC/QR tags.
+  Never on a document an outside party reads.
+- `VENIA_PUBLIC_SITE = 'veniacollection.com'` and
+  `VENIA_TRADE_EMAIL = 'sales@veniacollection.com'` — outward-facing.
+
+A gauntlet assertion now fails the build if `creator.` or a personal address
+appears in that footer. The rest of the app was already clean: the press kit,
+the PO signature block, care labels and buyer emails all used
+`veniacollection.com` already.
+
+**Still to decide (not changed):** garment NFC/QR tags encode
+`creator.veniacollection.com/?tag=<styleId>` and travel out on sample garments.
+Anyone scanning one lands on the login gate, so nothing leaks but the hostname —
+but tags already printed cannot be changed, so this is a decision, not a fix.
+
+**Layout.** Margins 10mm → **7mm** (196 × 283mm of content). One style per
+column, always a single row — 6 and 8 per page no longer stack into two rows.
+The photo is scaled up 1.16 inside its frame and the overflow clipped: an even
+crop inwards into the white margin a packshot carries, rather than `cover`,
+which crops to fill and takes hems off. The description moved to the **foot** of
+the card (`margin-top:auto`), so the copy lines up across every card whatever
+the spec above it is, and the dead band under a short card is gone.
+
+Past four across, the two-column spec table stopped working — a 34% label
+column beside "Heavy Washed Cotton Jacquard" wrapped to four lines and no two
+cards lined up. At `dense` the label now sits **above** its value. And `.nm`
+reserves two lines whether or not the name needs them: one long style name used
+to push its whole card down out of line with its neighbour.
+
+### Measurement, again
+Every layout re-measured with every field filled, a long description and five
+colourways. Image heights by column count: `{1:76, 2:68, 3:64, 4:66, 6:84,
+8:76}`. Three passes were needed — the first two overflowed by 7–25mm.
+
+The page-total check had also stopped being informative once every layout sat
+on the 182mm floor: a card can overflow its own grid cell inside a page that
+fits. The gauntlet now measures each card against the cell it was given, as
+well as the page.
+
+**A colour-library check against real data** (72 styles): every colourway in
+the live line resolves to a swatch — `black`, `oxblood`, `parchment` and
+`black pinstripe` from the house library, `ivory` and `natural` from the
+built-in table, and `printed parchment` down-matching to `parchment`. No
+hatched chips. Worth knowing before shipping a feature that would otherwise
+have printed 24 pages of "we don't know this colour".

@@ -1965,7 +1965,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '411';
+  const BUILD = '412';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -1979,6 +1979,11 @@ body{padding-top:44px;box-sizing:border-box;}
   // origin both 404s and leaks a personal account name. The public app always
   // lives at creator.veniacollection.com, so pin outward links to it.
   window.VENIA_PUBLIC_BASE = 'https://creator.veniacollection.com';
+  // ⚠️ VENIA_PUBLIC_BASE above is the INTERNAL tool's host. It goes on links we
+  // hand to a factory or encode in our own tags — never onto a document a buyer,
+  // a stockist or the press reads. Those carry the brand's own two facts:
+  window.VENIA_PUBLIC_SITE  = 'veniacollection.com';
+  window.VENIA_TRADE_EMAIL  = 'sales@veniacollection.com';
   // Factory share link (?share=TOKEN): a read-only live tech-pack view for a
   // manufacturer. No access code — the token IS the credential. The main app
   // never boots interactive features in this mode (see share-mode module).
@@ -29173,10 +29178,11 @@ function slVlsMarkup(wholesale, retail){
   if (!(w > 0) || !(r > 0)) return '';
   return (Math.round((r / w) * 10) / 10).toFixed(1).replace(/\.0$/, '') + '\u00d7';
 }
-// Layout per page. Landscape, so 1–4 sit in one row; 6 and 8 take two.
+// Layout per page: one style per column, always a single row. Stacking two
+// rows halved the card and forced the spec off it; a landscape sheet has width
+// to spare and height it cannot borrow, so the styles go across.
 function slVlsGrid(n){
-  const cols = n <= 4 ? n : Math.ceil(n / 2);
-  return { cols, rows: Math.ceil(n / cols) };
+  return { cols: n, rows: 1 };
 }
 function slVlsGenderOf(s){
   const g = String((s && s.gender) || '').trim().toLowerCase();
@@ -29306,13 +29312,15 @@ window.slVlsPrint = function(){
   const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
   const termsLine = (STATE.slPrefs && STATE.slPrefs.terms) ? 'Terms: ' + STATE.slPrefs.terms + '.' : '';
   // How to order. A line sheet without a way back to the brand is a catalogue.
-  let contact = '';
-  try { contact = (window.veniaAuthUser && veniaAuthUser.email) || ''; } catch(e){}
+  // It is the BRAND's trade address, never the signed-in user's — a buyer
+  // writes to VENIA, not to whoever happened to run the export, and the address
+  // must not change depending on who did.
+  const contact = VENIA_TRADE_EMAIL;
   const footLines = [
     'VENIA Collection — Trade Only. ' + curLine,
     (moqDefault ? 'Minimum order ' + String(moqDefault) + ' unless noted per style. ' : '') + termsLine,
     (delivery ? 'Delivery window: ' + delivery + '.' : ''),
-    'To order: ' + (contact ? contact + ' · ' : '') + 'creator.veniacollection.com',
+    'To order: ' + contact + ' · ' + VENIA_PUBLIC_SITE,
   ].filter(x => String(x).trim());
   // Chunked in JS rather than left to flow: a page break that depends on how
   // tall a photo happens to render is how you get four styles on one page and
@@ -29329,20 +29337,29 @@ window.slVlsPrint = function(){
   // than a 3-up one at the same image height — which is how 4 per page
   // overflowed while 1, 2 and 3 fitted. The height follows the column count,
   // not just the row count.
-  // Style copy and the colourway chips both cost lines, so the photo gives room
-  // back. Re-measured with every optional field filled: the sheet's promise is
-  // "N per page", and content that overflows does not clip, it reflows onto a
-  // page of its own.
-  const imgH = gridRows > 1 ? 34 : (cols >= 4 ? 60 : 76);   // mm
-  // At two rows a card has half the height, so it carries only what a buyer
-  // scans at that density. Composition and origin are compliance detail — they
-  // belong on the roomy layouts and in the list export, not squeezed into a
-  // 46mm card until nothing is legible.
-  const dense = gridRows > 1;
-  // Two lines of copy on a roomy card, one on a 4-up, none when the cards are
-  // 46mm tall. Cut here, not by the renderer, so the height stays measurable.
+  // One row means the whole page height belongs to one card, so the photo can
+  // take most of it — but a narrow column wraps every value onto more lines, so
+  // the taller the text, the shorter the photo. Measured at each width with
+  // every optional field filled: the sheet's promise is "N per page", and
+  // content that overflows does not clip, it reflows onto a page of its own.
+  const IMG_H = { 1: 76, 2: 68, 3: 64, 4: 66, 6: 84, 8: 76 };   // mm, by columns
+  const imgH = IMG_H[cols] || 90;
+  // Width, not height, is what runs out now. Past four across a column is too
+  // narrow to carry compliance detail legibly — composition and origin belong
+  // on the roomy layouts and in the list export, not wrapped to four lines in a
+  // 32mm column.
+  const dense = cols > 4;
+  const roomy = cols <= 3;
+  // One type scale, picked by column width: roomy (1–3 across), the 4-up, and
+  // the narrow ones. Written once so a size can never be tuned in one rule and
+  // forgotten in the next.
+  const sz = (a, b, c) => roomy ? a : (dense ? c : b);
+  // Copy scales with the column, and every layout keeps it: a 3:4 frame in a
+  // narrow column leaves height over, and the style's own words are a better
+  // use of it than white space. Cut here, not by the renderer, so the height
+  // stays measurable.
   const withCopy = SL_VLS.copy !== false;
-  const copyCap = dense ? 0 : (cols >= 4 ? 78 : 140);
+  const copyCap = roomy ? 200 : (dense ? 70 : 90);
   const card = r => {
     const copy = withCopy && copyCap ? slVlsCopy(r.desc, copyCap) : '';
     const chips = slVlsChips(r.colors);
@@ -29351,7 +29368,6 @@ window.slVlsPrint = function(){
       <div class="ph${r.photo ? '' : ' n'}">${r.photo ? `<img src="${esc(r.photo)}" alt="">` : '<span class="no">Photo to follow</span>'}</div>
       <div class="nm">${esc(r.name)}</div>
       <div class="cd">${esc(r.code)}${r.category?' · '+esc(r.category):''}</div>
-      ${copy ? `<div class="dsc">${esc(copy)}</div>` : ''}
       <table class="f">
         ${r.fabric ? `<tr><td>Fabric</td><td>${esc(r.fabric)}</td></tr>` : ''}
         ${!dense && r.composition ? `<tr><td>Composition</td><td>${esc(r.composition)}</td></tr>` : ''}
@@ -29365,6 +29381,7 @@ window.slVlsPrint = function(){
         ${!dense && r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
         ${!dense && r.drop ? `<tr><td>Delivery</td><td>${esc(slVlsDate(r.drop))}</td></tr>` : ''}
       </table>
+      ${copy ? `<div class="dsc">${esc(copy)}</div>` : ''}
     </div>`;
   };
   const body = pages.map((pg, i) => `<section class="pg">
@@ -29381,60 +29398,89 @@ window.slVlsPrint = function(){
       <footer>${footLines.map(esc).join('<br>')}</footer>
     </section>`).join('');
   const css = `
-    @page { size: A4 landscape; margin: 10mm; }
+    /* 7mm, not 10 — a line sheet is a showpiece and the garment should own the
+       page. That is 196 x 283mm of content on A4 landscape. */
+    @page { size: A4 landscape; margin: 7mm; }
     /* Swatches are backgrounds, and browsers drop backgrounds when printing
        unless told otherwise — without this the colourway chips are perfect on
        screen and blank on paper. */
     *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
     body{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#111;margin:0}
-    /* A4 landscape less 10mm margins each side is exactly 190mm of content, so
-       the grid fills the sheet. min-height, not height: a long colourway list
-       must be allowed to grow rather than be sliced off at the page edge. */
-    .pg{page-break-after:always;display:flex;flex-direction:column;min-height:190mm}
+    /* A4 landscape less 7mm margins each side is 196mm of content, so the grid
+       fills the sheet. min-height, not height: a long colourway list must be
+       allowed to grow rather than be sliced off at the page edge. */
+    .pg{page-break-after:always;display:flex;flex-direction:column;min-height:196mm}
     .pg:last-child{page-break-after:auto}
     header{display:flex;justify-content:space-between;align-items:baseline;font-size:8pt;
       letter-spacing:1.4px;text-transform:uppercase;color:#666;border-bottom:1.5px solid #111;padding-bottom:4mm}
     header .b{font-weight:700;letter-spacing:3px;color:#111}
     .grid{flex:1;display:grid;grid-template-columns:repeat(${cols},1fr);
       grid-template-rows:repeat(${gridRows},1fr);gap:6mm;padding:5mm 0}
-    .c{display:flex;flex-direction:column;min-width:0}
+    .c{display:flex;flex-direction:column;min-width:0;height:100%}
     .c.e{visibility:hidden}
     /* CONTAIN, ON WHITE — never cover. A cutout on white is the common VENIA
-       product shot, and cover crops it: a hem or a sleeve simply leaves the
-       page. Contain letterboxes instead, which costs a little white space and
-       never sends a buyer a picture of a garment with its bottom cut off. */
-    .ph{height:${imgH}mm;background:#fff;border:1px solid #ececec;display:flex;
-        align-items:center;justify-content:center;overflow:hidden;padding:2mm}
-    .ph img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
+       product shot, and cover crops to fill: a hem or a sleeve simply leaves
+       the page. Contain fits the whole garment instead.
+       What contain costs is the white margin baked into the shot, which on a
+       tall garment in a wide frame is most of the frame. So the image is scaled
+       up inside the frame and the overflow clipped — an even crop inwards on
+       every edge, into background rather than into the garment. 1.16 trims 7%
+       per edge, less than the margin a packshot carries; it is a constant here
+       so it can be tuned in one place if a shot is ever cropped tight. */
+    /* A FIXED height at every density, measured per column count. Letting the
+       frame flex to fill the page looked right on one card and wrong on six:
+       each one absorbed a different amount of slack, so no two names sat on the
+       same line. A sheet where the type lines up across the page is worth more
+       than a few millimetres of photo. */
+    .ph{height:${imgH}mm;flex:none;
+        background:#fff;border:1px solid #ececec;display:flex;
+        align-items:center;justify-content:center;overflow:hidden;padding:0}
+    .ph img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;
+        display:block;transform:scale(1.16)}
     .ph.n{background:#fafafa;border-style:dashed}
     .ph .no{font-size:6.5pt;letter-spacing:1.5px;text-transform:uppercase;color:#c4c4c4}
-    .nm{font-size:${gridRows===1?'10.5pt':'9pt'};font-weight:700;letter-spacing:.5px;
-      text-transform:uppercase;margin-top:3mm;line-height:1.2}
-    .cd{font-family:'DM Mono',monospace;font-size:7pt;color:#777;margin-top:1mm;letter-spacing:.4px}
-    table.f{width:100%;border-collapse:collapse;margin-top:2.5mm;font-size:${gridRows===1?'8pt':'7pt'}}
+    /* Two lines' worth of room whether the name needs it or not. A name that
+       wraps used to push its whole card down, so one long style name knocked
+       every field out of line with the card beside it. */
+    .nm{font-size:${sz(11,9.5,8)}pt;font-weight:700;letter-spacing:.5px;
+      text-transform:uppercase;margin-top:3mm;line-height:1.2;min-height:2.4em}
+    .cd{font-family:'DM Mono',monospace;font-size:${sz(7,6.5,6)}pt;color:#777;
+      margin-top:1mm;letter-spacing:.4px}
+    table.f{width:100%;border-collapse:collapse;margin-top:2.5mm;font-size:${sz(8,7.5,6.5)}pt}
     table.f td{padding:0.8mm 0;vertical-align:top;border-bottom:1px solid #eee}
     table.f td:first-child{color:#888;letter-spacing:.8px;text-transform:uppercase;
-      font-size:${gridRows===1?'6.5pt':'6pt'};width:38%;padding-right:2mm}
+      font-size:${sz(6.5,6,5.5)}pt;width:${dense?34:38}%;padding-right:2mm}
     table.f td.ws{font-weight:700}
-    .mk{color:#777;font-size:${gridRows===1?'7pt':'6.5pt'};letter-spacing:.3px}
+    /* Past four across there is no room for a label column beside a value: a
+       34% label plus "Heavy Washed Cotton Jacquard" wraps to four lines and no
+       two cards line up any more. So the label goes ABOVE the value and the
+       row spans the column. */
+    ${dense ? `table.f,table.f tbody,table.f tr,table.f td{display:block;width:auto}
+    table.f tr{border-bottom:1px solid #eee;padding:1mm 0}
+    table.f td{border:none;padding:0}
+    table.f td:first-child{width:auto;margin-bottom:.5mm}` : ''}
+    .mk{color:#777;font-size:${sz(7,6.5,6)}pt;letter-spacing:.3px}
     /* Chip + name per colourway, wrapping as a set — a swatch must never end a
        line with its name starting the next one. */
     .cws{display:flex;flex-wrap:wrap;gap:.6mm 2.6mm}
     .cw{display:inline-flex;align-items:center;gap:1.1mm;white-space:nowrap}
-    .cw i{width:${gridRows===1?'2.6mm':'2.2mm'};height:${gridRows===1?'2.6mm':'2.2mm'};
+    .cw i{width:${sz(2.6,2.3,2)}mm;height:${sz(2.6,2.3,2)}mm;
       border-radius:50%;border:.18mm solid rgba(0,0,0,.28);flex:none;display:inline-block;
       background-repeat:repeat}
-    /* The style's own words. Italic and grey so it reads as copy, not as spec —
-       the table below it is the spec. */
-    .dsc{margin-top:1.8mm;font-size:${gridRows===1?'7.5pt':'6.5pt'};line-height:1.45;
-      font-style:italic;color:#666;display:-webkit-box;-webkit-box-orient:vertical;
-      -webkit-line-clamp:${cols>=4?1:2};overflow:hidden}
+    /* The style's own words, at the FOOT of the card. margin-top:auto pushes it
+       down to the page's bottom rule, so the copy lines up across every card
+       whatever the spec above it happens to be — and the dead space that used
+       to sit under a short card is gone. */
+    .dsc{margin-top:auto;padding-top:2.5mm;border-top:1px solid #eee;
+      font-size:${sz(7.5,6.5,6)}pt;line-height:1.45;font-style:italic;color:#666;
+      display:-webkit-box;-webkit-box-orient:vertical;
+      -webkit-line-clamp:${roomy?3:2};overflow:hidden}
     footer{border-top:1px solid #111;padding-top:3mm;font-size:6.5pt;letter-spacing:.6px;color:#666;line-height:1.6}
     /* On screen this is a preview, so show it as paper — the margins the print
        will actually have, and an edge between pages. Print ignores all of it. */
     @media screen{
       body{background:#e9e9e9;padding:8mm}
-      .pg{background:#fff;padding:10mm;margin:0 auto 8mm;width:277mm;box-shadow:0 1px 6px rgba(0,0,0,.18)}
+      .pg{background:#fff;padding:7mm;margin:0 auto 8mm;width:283mm;box-shadow:0 1px 6px rgba(0,0,0,.18)}
     }`;
   const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>VENIA Line Sheet — '
     + esc(seasonLabel) + '</title><style>' + css + '</style></head><body>' + body + '</body></html>';
