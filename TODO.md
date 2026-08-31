@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 412._
+_Last reviewed at Build 413._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2158,3 +2158,29 @@ the live line resolves to a swatch — `black`, `oxblood`, `parchment` and
 built-in table, and `printed parchment` down-matching to `parchment`. No
 hatched chips. Worth knowing before shipping a feature that would otherwise
 have printed 24 pages of "we don't know this colour".
+
+## Build 413 — the block sits on the page, and the keystone comes off
+*"lets vertically center align the content / we also dont need the 2.5x"*
+
+**Keystone removed.** `slVlsMarkup` and the `.mk` rule are gone rather than
+left unused — a retail price says what it says.
+
+**The page is balanced.** On the real line the cards used about 110mm of the
+182mm page and every spare millimetre piled up underneath them: no country of
+origin on any of the 72 styles, no composition, and a description on 19 of them.
+
+The fix is in the grid, not the card. The row track is **auto** (as tall as the
+tallest card) and `align-content:center` puts that track in the middle of the
+page. Both halves matter:
+
+- an auto track means every card stretches to the same height, so the type stays
+  level across the sheet and the copy still pins to a shared bottom edge;
+- centring the *track* splits the leftover page above and below the block.
+
+Centring each card instead (`justify-content:center` on `.c`) would have done
+the opposite — a card with one fewer colourway rides up out of line with the one
+beside it. The gauntlet asserts both halves: the free space above and below is
+within 2mm, **and** every card on a page still starts on the same line.
+
+One harness bug found writing that: the level check first read `.c` across the
+whole document, so cards on page two counted as misaligned. Scoped to one grid.
