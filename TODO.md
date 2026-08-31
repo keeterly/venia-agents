@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 422._
+_Last reviewed at Build 423._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2705,3 +2705,46 @@ fabrication with a distinct title, or genuinely unique SKUs per variant that the
 styles can be linked to (`shopifySkus`, built in Build 400, currently linked on
 **zero** styles). Until one of those is true, "which fabrication sold" is not a
 question the data can answer, and the app now says so instead of guessing.
+
+## Build 423 — say which Shopify product it is, once, and the number is right
+*"The black Isolde top does match the one in store but the other variations do
+not."*
+
+Exactly right, and it sharpens Build 422. Marking the figure "shared ÷3" was
+honest about the ambiguity but still overstated two of the three: the correct
+answer for ISOLDE TOP in Jacquard is not "24, shared" — it is **0**. That
+fabrication has never been sold online.
+
+### What the orders actually say
+Checked, not assumed. Every ISOLDE TOP sale in the window is Shopify product
+**5030216204427** — the black one, SKU `20W006-2W-BLK-*`. Shopify has a second
+ISOLDE TOP (white, created Jan 2026) which has sold **nothing**. Both are
+Viscose; neither is Jacquard or Parchment Viscose. Same for ANTIGONE: every sale
+is product 4982620356747, the black one.
+
+And the decisive detail: **`product_id` is on every line item.** The title is
+ambiguous; the product is not. One order even carries two HAMLET CLOAKs from
+two different products.
+
+### The fix
+`plmSalesRefresh` now keeps sales **per product** as well as per title, and a
+style can carry `shopifyProductIds`. Then:
+
+| state | what the style shows |
+|---|---|
+| linked | exactly its own products' sales — `linked`, green |
+| unlinked, a sibling is linked | what is **left** after the linked ones take theirs — usually 0 |
+| linked to a product that never sold | **0**, which is an answer, not a blank |
+| nothing linked anywhere | the title total, `shared ÷N`, as in 422 |
+
+So linking the one version that IS sold online is a single action per silhouette,
+and it drops its siblings to zero without touching them. Reversible: unlink and
+it goes back to the shared figure.
+
+The picker opens **from the Sold cell** — where the wrong number is — and lists
+every product that has sold under that name with its units and last sale date,
+so the choice is made on evidence. Ticking none and saving means "this
+fabrication is not sold online" and shows 0.
+
+A line item with no `product_id` (a custom sale, a deleted product) stays in the
+title total and cannot be linked, which is the truth about it.
