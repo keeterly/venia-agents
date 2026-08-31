@@ -2511,7 +2511,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '415';
+  const BUILD = '416';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5858,6 +5858,7 @@ const MODULES = {
     // Always granted: every person with any access at all sees Today, so the
     // cross-cutting keys (the log, the assistant's memory) live here.
     keys: ['todayAssign', 'activityLog', 'eniMemory'],
+    ls: [],
   },
   product: {
     label: 'Product', space: 'plm', nav: true,
@@ -5865,6 +5866,7 @@ const MODULES = {
     keys: ['styles', 'materials', 'vendors', 'bom', 'pom', 'careDefaults', 'samples',
            'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'seasonCal',
            'invSync', 'csMarginsAdopted', 'pos'],
+    ls: ['venia-cost-sheets', 'venia-tp-quick-meas', 'venia_fitnotes', 'venia_styleboard'],
   },
   growth: {
     label: 'Growth', space: 'pr', spaces: ['pr', 'mk', 'br'], nav: true,
@@ -5872,17 +5874,21 @@ const MODULES = {
         + 'campaigns and the content calendar, brand voice, guidelines and references',
     keys: ['prPulls', 'workingPullId', 'prPitches', 'prCoverage', 'prEditors', 'prPrefs',
            'mkCaptions', 'mkCalendar', 'mkPrefs', 'brTone', 'brPrefs', 'brandDocs', 'growthSeen'],
+    ls: ['VENIA_BOILERPLATE', 'VENIA_OE_DRAFTS', 'VENIA_PRESSKIT', 'venia-brand-watch',
+           'venia_campaigns', 'venia-launch-checklist'],
   },
   sales: {
     label: 'Sales', space: 'sl', nav: true,
     owns: 'wholesale — the buyers CRM, stockist outreach, quotes, orders, line sheets, account health',
     keys: ['slBuyers', 'slQuotes', 'slOrders', 'slLinesheets', 'slPrefs'],
+    ls: [],
   },
   money: {
     label: 'Money', space: 'cmd', nav: true,
     owns: 'money — cash, P&L, margins, AR, the bank feed, factory payment schedules, budgets, pricing',
     keys: ['finBank', 'finTxns', 'finWatch', 'finWatchBrief', 'finPlan', 'finPlanJob',
            'finCats', 'bizSnap'],
+    ls: ['VENIA_REV_GOALS', 'venia_budget'],
   },
   brainstorm: {
     label: 'Brainstorm', space: null, nav: true,
@@ -5890,12 +5896,28 @@ const MODULES = {
     keys: ['dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed',
            'dumpMasterTitle', 'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed',
            'board', 'bsVenia'],
+    ls: [],
   },
   settings: {
     label: 'Settings', space: 'set', nav: false, core: true,
     owns: 'connections and preferences — Google, mail, and how things are sent',
     keys: ['googleClientId', 'googleApiKey', 'driveFolder', 'mailGmail', 'mailSendAs',
            'pullCc', 'mailLastError', 'googleAccount'],
+    ls: [],
+  },
+  // ⚠️ NOT GRANTED TO ANYONE BUT THE FOUNDERS, on purpose.
+  // VENIA_CC_DB is a legacy multi-table localStorage store that predates all of
+  // this: it holds slBuyers, slQuotes, slOrders, leads, mediaContacts, brTone,
+  // mkPrefs and pos — sales, growth and product, in one string. It cannot be
+  // split by the registry, so putting it in an always-granted module would hand
+  // a Product-only person the buyer list. It lives here instead: a founder has
+  // it, a scoped member simply never receives it, and the features it backs are
+  // empty for them until it is broken up properly.
+  legacy: {
+    label: 'Legacy store', space: null, nav: false, foundersOnly: true,
+    owns: 'a pre-module localStorage store that spans sales, growth and product',
+    keys: [],
+    ls: ['VENIA_CC_DB'],
   },
 };
 window.MODULES = MODULES;
@@ -5916,6 +5938,42 @@ function moduleOfKey(key){
 window.moduleOfSpace = moduleOfSpace;
 window.moduleOfKey = moduleOfKey;
 
+// ── the workspace, split and reassembled ───────────────────────────────────
+// The cloud stores one row per module. These two functions are the whole of
+// that change: everything downstream — the 3-way merge, save(), the realtime
+// apply — keeps working on ONE snapshot object, because splitting happens on
+// the way out and assembling on the way in. A merge that had to reason about
+// seven rows would be seven times the places to lose an edit.
+function moduleSplit(snap){
+  const out = {};
+  MODULE_IDS.forEach(id => {
+    const part = {};
+    MODULES[id].keys.forEach(k => { if (snap[k] !== undefined) part[k] = snap[k]; });
+    // A standalone feature's localStorage string travels with its module too.
+    const ls = {};
+    (MODULES[id].ls || []).forEach(k => { if (snap._ls && snap._ls[k] != null) ls[k] = snap._ls[k]; });
+    if (Object.keys(ls).length) part._ls = ls;
+    out[id] = part;
+  });
+  return out;
+}
+function moduleAssemble(rows){
+  // Meta belongs to the snapshot, not to any one module: take it from whichever
+  // row was written last so "who changed this" survives the round trip.
+  let snap = { _schemaVersion: 2 }, newest = 0, ls = null;
+  (rows || []).forEach(r => {
+    const d = r && r.data; if (!d) return;
+    Object.keys(d).forEach(k => { if (k !== '_ls') snap[k] = d[k]; });
+    if (d._ls) { ls = ls || {}; Object.assign(ls, d._ls); }
+    const t = Date.parse(r.updated_at || '') || 0;
+    if (t >= newest) { newest = t; if (d._who) snap._who = d._who; }
+  });
+  if (ls) snap._ls = ls;
+  return snap;
+}
+window.moduleSplit = moduleSplit;
+window.moduleAssemble = moduleAssemble;
+
 // save() persists ONLY these keys — and they now come from the registry above,
 // so the list cannot fall behind the modules it is supposed to describe.
 const SYNC_KEYS = MODULE_IDS.reduce((all, id) => all.concat(MODULES[id].keys), []);
@@ -5928,11 +5986,9 @@ window.SYNC_KEYS = SYNC_KEYS;
 // cloud snapshot carries so they also sync between the two phones. Device-only
 // keys (Supabase config, google auth, client id, dismissed nags, autosave
 // drafts, view state) are intentionally left out.
-const EXTRA_LS_KEYS = [
-  'VENIA_CC_DB', 'VENIA_BOILERPLATE', 'VENIA_OE_DRAFTS', 'VENIA_PRESSKIT', 'VENIA_REV_GOALS',
-  'venia-brand-watch', 'venia-cost-sheets', 'venia-launch-checklist', 'venia-tp-quick-meas',
-  'venia_budget', 'venia_campaigns', 'venia_fitnotes', 'venia_styleboard',
-];
+// Derived from MODULES like SYNC_KEYS, and for the same reason: a standalone
+// feature's localStorage key needs an owner as much as a STATE key does.
+const EXTRA_LS_KEYS = MODULE_IDS.reduce((all, id) => all.concat(MODULES[id].ls || []), []);
 window.EXTRA_LS_KEYS = EXTRA_LS_KEYS;
 // Central concurrent-edit stamp. Every SYNC_KEYS array of {id} records is
 // content-hashed (excluding updatedAt); when a record's content changes locally
@@ -35865,9 +35921,29 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // read fails (offline), fall back to pushing local as-is.
       var cloudRow = await pullRow();
       var toPush = (cloudRow && cloudRow.data) ? mergeSnapshots(getBase(), localSnap, cloudRow.data) : localSnap;
+      var stamp = new Date().toISOString();
+      // ── PER-MODULE ROWS: the new home of the workspace ──
+      // Written first and treated as the write that counts. Only the modules
+      // this person can write will land — RLS rejects the rest — which is the
+      // whole point: access is a permission now, not an all-or-nothing row.
+      var parts = moduleSplit(toPush);
+      var modRes = await c.from('venia_module_data').upsert(
+        Object.keys(parts).map(function(id){
+          var part = parts[id];
+          part._who = toPush._who;
+          return { workspace_id: WS_ID, module: id, data: part,
+                   updated_by: clientId(), updated_at: stamp, rev: rev };
+        }), { onConflict: 'workspace_id,module' });
+      window.__syncStat.modules = modRes && modRes.error
+        ? { t: stamp, ok: false, err: modRes.error.message || modRes.error.code }
+        : { t: stamp, ok: true, rows: MODULE_IDS.length };
+      // ── THE BLOB, still written as a mirror ──
+      // One build of belt and braces: if anything about the split is wrong, the
+      // whole workspace is still sitting in one row exactly as before, and the
+      // rollback is deleting six lines. It comes out once the rows are proven.
       var res = await c.from('venia_workspace').upsert({
         id: WS_ID, data: toPush, updated_by: clientId(),
-        updated_at: new Date().toISOString(), rev: rev
+        updated_at: stamp, rev: rev
       }, { onConflict:'id' });
       if (!res || !res.error) {
         localStorage.setItem('venia-sync-rev', String(rev));
@@ -35895,8 +35971,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   window.sbFlushNow = pushNow;                  // share links flush before handing out a URL
 
+  // Read the per-module rows and hand back something shaped exactly like the
+  // old single row, so every caller is unchanged. Returns null when there is
+  // nothing there yet — the first boot after this build, before the first push.
+  async function pullModules(){
+    var c = sb(); if (!c) return null;
+    try {
+      var res = await c.from('venia_module_data').select('*').eq('workspace_id', WS_ID);
+      if (res.error){ window.__syncStat.modulePull = { ok:false, err: res.error.message }; return null; }
+      var rows = res.data || [];
+      if (!rows.length) return null;
+      var newest = rows.reduce(function(a,b){
+        return (Date.parse(b.updated_at||'')||0) > (Date.parse(a.updated_at||'')||0) ? b : a; });
+      window.__syncStat.modulePull = { ok:true, rows: rows.length,
+        modules: rows.map(function(r){ return r.module; }).join(','), cloudAt: newest.updated_at };
+      return { data: moduleAssemble(rows), updated_at: newest.updated_at,
+               updated_by: newest.updated_by, rev: newest.rev, _fromModules: true };
+    } catch(e){ window.__syncStat.modulePull = { ok:false, err: e && e.message }; return null; }
+  }
   async function pullRow(){
     var c = sb(); if (!c) return null;
+    // The module rows are the source of truth. The blob is only reached when
+    // they are empty — a workspace that has not been pushed since this build.
+    var mods = await pullModules();
+    if (mods) return mods;
     try {
       var res = await c.from('venia_workspace').select('*').eq('id', WS_ID).maybeSingle();
       if (res.error){ syncFail('pull', res.error.message || res.error.code); return null; }
@@ -35941,6 +36039,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     channel = c.channel('venia_ws_live')
       .on('postgres_changes', { event:'*', schema:'public', table:'venia_workspace', filter:'id=eq.'+WS_ID },
           function(payload){ window.__syncStat.realtime = 'event ' + new Date().toISOString(); onRemote(payload.new); })
+      // A module row changing is the real signal now. One push writes several
+      // rows, so re-read the whole set rather than applying one row's slice —
+      // applying a fragment would look like every other module going empty.
+      .on('postgres_changes', { event:'*', schema:'public', table:'venia_module_data', filter:'workspace_id=eq.'+WS_ID },
+          function(payload){
+            window.__syncStat.realtime = 'module event ' + new Date().toISOString();
+            if (payload && payload.new && payload.new.updated_by === clientId()) return;  // our own echo
+            pullModules().then(function(row){ if (row) onRemote(row); });
+          })
       .subscribe(function(status){ window.__syncStat.realtime = status + ' ' + new Date().toISOString(); });
   }
   // Realtime is best-effort (laptops sleep, sockets drop) — a quiet periodic

@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 415._
+_Last reviewed at Build 416._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2311,3 +2311,70 @@ Migrations, because a merge that loses work is not a merge:
 Twelve smoke suites were pinned to the old structure and were updated to the
 new one with their intent intact — the persistence checks now ask "does a module
 claim this key?", which is a stronger question than "is it in that array?".
+
+## Build 416 — the workspace splits, and access becomes a permission
+*Step 2 of the module plan.*
+
+**The constraint this removes.** `venia_workspace.data` was the entire STATE in
+one jsonb blob, and RLS is per-row — so access was all-or-nothing. You could not
+give someone Sales without also giving them cost, margin and factory terms.
+That is *why* the sales-agent portal had to be built as a separate surface
+rather than a permission.
+
+Two new tables (`supabase/migrations/20260831_venia_modules.sql`, applied):
+- **`venia_members`** — `(email, module, role)` where role is owner / editor /
+  viewer. Both founders own all eight modules.
+- **`venia_module_data`** — the workspace, one row per module.
+
+The policies ask two questions, through SECURITY DEFINER helpers so the
+membership lookup is not itself subject to RLS (without that, the policy on the
+data table recurses into the policy on the members table and denies everything);
+`search_path = ''` on both, and `anon` cannot execute either.
+
+**Verified against the live database, not reasoned about** — a throwaway
+workspace, three scoped identities, then cleaned up:
+
+| | result |
+|---|---|
+| sales editor reads | **only the sales row** — not money, not product |
+| sales editor writes sales | allowed |
+| sales editor writes money | blocked, the row is invisible |
+| **sales editor grants themselves money** | **blocked by RLS** — no self-escalation |
+| viewer reads sales | 1 row |
+| viewer writes sales | blocked |
+| stranger | 0 module rows, 0 membership rows |
+| founder | everything |
+
+### The app side is two functions
+`moduleSplit()` on the way out, `moduleAssemble()` on the way in. Everything
+downstream — the 3-way merge, `save()`, the realtime apply — still works on ONE
+snapshot object. A merge that had to reason about eight rows would be eight
+times the places to lose an edit.
+
+The gauntlet asserts the round trip is **lossless**: all 64 STATE keys and all
+13 standalone localStorage stores come back identical, `_who` included.
+
+**The blob is still written, as a mirror.** One build of belt and braces: if
+anything about the split is wrong the whole workspace is still in one row
+exactly as before, and the rollback is deleting six lines. Pull prefers the
+module rows and falls back to the blob only when they are empty — which is
+every boot until the first push after this build.
+
+### An eighth module, and why
+`VENIA_CC_DB` is a legacy multi-table localStorage store that predates all of
+this. It holds `slBuyers`, `slQuotes`, `slOrders`, `leads`, `mediaContacts`,
+`brTone`, `mkPrefs` and `pos` — sales, growth AND product, in one string. It
+cannot be split by the registry. Putting it in an always-granted module would
+have handed a Product-only person the buyer list, so it lives in a **`legacy`
+module that is founders-only and deliberately never granted**. A scoped member
+simply never receives it, and the features it backs are empty for them until it
+is broken up properly. That is a known limitation, written down rather than
+discovered later.
+
+`EXTRA_LS_KEYS` is now derived from the registry too — a standalone feature's
+localStorage key needs an owner as much as a STATE key does.
+
+### What is NOT done
+Nothing in the UI grants access yet. `venia_members` is real and enforced, but
+adding a person is currently an INSERT. The screen for it is the next step, and
+it should wait until there is someone to add.
