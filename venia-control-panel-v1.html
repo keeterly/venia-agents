@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '424';
+  const BUILD = '425';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26019,6 +26019,84 @@ function escHtml(str) {
 //  paths the manual UI uses, so it syncs and behaves identically. Everything an
 //  action creates is reversible (drafts + an Undo button). Scoped per agent.
 // ══════════════════════════════════════════════════════════
+
+// ── WHAT THE AGENT MAY DO, AND FOR WHOM ────────────────────────────────────
+// The rule is one sentence: THE AGENT INHERITS THE PERSON. Enigma can never
+// change something its user could not change by hand, and it is not told about
+// actions it would only have to refuse.
+//
+// That is a real boundary, not a prompt instruction, because it is enforced
+// where the action RUNS. Without it the failure is the worst kind: the action
+// executes against local STATE, save() writes it to this one device, the card
+// says it landed — and then the push drops the row RLS refuses. The person is
+// told the work is done and it exists nowhere else.
+//
+// Three questions, in order:
+//   1. May the agent act at all for this person?  (one switch, per person)
+//   2. Do they hold the module the action WRITES?  (their module grants)
+//   3. Are they more than a viewer in it?          (their role)
+// A founder — and every uncertain case, including "we have not looked yet" —
+// answers yes to all three. Hiding on a maybe would lock a founder out of
+// their own app, and the data is protected by RLS either way.
+
+// Which module each action WRITES. The ground truth is where the data LANDS,
+// not what the action is about: record_payment reads like finance and writes
+// slOrders (Sales); set_cost_sheet reads like finance and writes styles and
+// the cost sheets (Product). Deriving this from the topic instead of the data
+// is how you build a permission that lets someone change a row they will never
+// be allowed to save.
+const ACTION_MODULE = {
+  add_buyers: 'sales', update_buyers: 'sales', record_payment: 'sales',
+  add_vendors: 'product', update_vendors: 'product', add_material: 'product',
+  add_styles: 'product', update_styles: 'product', apply_style_specs: 'product',
+  generate_care_label: 'product', log_sample_round: 'product', set_forecast: 'product',
+  save_season_calendar: 'product', set_po_terms: 'product', set_cost_sheet: 'product',
+  price_from_retail: 'product',
+  create_pull: 'growth', log_coverage: 'growth', add_pitch: 'growth', save_brand_doc: 'growth',
+  set_budget: 'money', set_revenue_goal: 'money', set_txn_category: 'money',
+  set_money_watch: 'money',
+  add_to_brainstorm: 'brainstorm',
+  // Writes nothing — it opens a screen and asks a colleague. Always allowed,
+  // because the colleague it opens is bound by exactly these same rules.
+  handoff: null,
+};
+window.ACTION_MODULE = ACTION_MODULE;
+// One switch per person: may Enigma make changes on their behalf at all?
+// undefined/null = yes. It is deliberately not a fourth kind of permission —
+// it can only ever take away, never add, because every write still has to pass
+// the module and role checks below and then RLS.
+window.VENIA_AGENT_WRITE = null;
+function agentCanWriteModule(m){
+  if (!m) return true;
+  if (window.VENIA_AGENT_WRITE === false) return false;
+  const roles = window.VENIA_MY_ROLES;
+  if (!roles) return true;                      // founder, or not known yet
+  return roles[m] === 'owner' || roles[m] === 'editor';
+}
+function agentCanAct(type){
+  const m = ACTION_MODULE[type];
+  // An unknown type is allowed through on purpose: agentRunAction already has
+  // the honest message for "I reached for an action this app does not have",
+  // and that is a better answer than a permission error for a made-up name.
+  if (m === null || m === undefined) return true;
+  return agentCanWriteModule(m);
+}
+window.agentCanAct = agentCanAct;
+window.agentCanWriteModule = agentCanWriteModule;
+// Assemble a group from its module-tagged chunks. For anyone who can write all
+// of them this is byte-identical to the single string it replaced.
+function agentSpecChunks(chunks){
+  const t = (chunks || []).filter(c => agentCanWriteModule(c.m)).map(c => c.t).join('');
+  return t ? '\n' + t : '';
+}
+// What to say when someone's agent may change nothing at all. Without this the
+// header still promises "you can take REAL actions" and the model invents
+// blocks that are then refused — which reads as the app being broken.
+const AGENT_NO_ACTIONS = '\n\nYou cannot change records for this user: they have read access, or changes by the assistant are switched off for them. '
+  + 'Do the work anyway — research, analyse, compare, draft, calculate, and write out the finished thing in the conversation so they can paste or act on it. '
+  + 'Never emit a venia:action block, never say you saved, filed or updated anything, and do not apologise repeatedly for it. '
+  + 'If a change genuinely needs to be made in the app, say in one line what should change and that a founder can make it or grant access.';
+
 function agentActionSpec(key) {
   if (key === 'sl') {
     return '\n\nLEAD ACQUISITION — you are VENIA\'s wholesale scout as well as its sales agent.\n'
@@ -26122,7 +26200,12 @@ function agentScopedSpec(key) {
     br:  () => agentBrandDocSpec() + B(),
   };
   if (!map[key]) return agentAllActionSpec();      // unknown key: lose nothing
-  return map[key]() + agentHandoffSpec(key);
+  // The named agents pass through the SAME gate. Their own spec functions
+  // already filter chunk by chunk; this drops the whole-group ones a viewer or
+  // a non-member must not be offered. The handoff always survives — passing
+  // work to someone who CAN do it is the right answer to being unable to.
+  const body = map[key]();
+  return (body || AGENT_NO_ACTIONS) + agentHandoffSpec(key);
 }
 // Passing work along. Without this, scoping an agent would just make it say no.
 function agentHandoffSpec(key) {
@@ -26138,17 +26221,38 @@ function agentHandoffSpec(key) {
     + '```\n'
     + 'Use it when the request needs an action that is NOT in your list above. Say in one sentence who it belongs to and why, emit the block, and let the founder tap to move — never pretend you did the work, and never tell them to go somewhere and retype it. "request" is the whole task in your words, with any specifics you already worked out, so the colleague does not start from nothing. Do NOT hand off something you can answer or do yourself: reading, analysis, drafting and advice are always yours, whatever the subject. If the founder would rather not switch, tell them Enigma in the dock can do it from where they are.\n';
 }
+// Every action the CURRENT PERSON may take, in the order they have always been
+// in. A founder gets exactly the string this returned before any of this
+// existed; everyone else is simply not told about the rest, so the model is
+// never in the position of promising something and then being refused.
+//
+// The groups are listed INSIDE this function on purpose: smoke29 and smoke30
+// read this body to prove no agent is handed a capability the others lost, and
+// hoisting the list to a const would have quietly blinded both.
 function agentAllActionSpec() {
+  const body = [
+    { m:'sales',      t: () => agentActionSpec('sl') },
+    { m:'product',    t: () => agentActionSpec('plm') },
+    { m:'growth',     t: () => agentActionSpec('pr') },
+    { m:'brainstorm', t: () => agentBrainstormActionSpec() },
+    { m:'product',    t: () => agentImageActionSpec() },
+    { m:'growth',     t: () => agentPRRadarSpec() },
+    { m:'growth',     t: () => agentBrandDocSpec() },
+    // These two carry more than one module and filter themselves, chunk by chunk.
+    { m:null,         t: () => agentOpsActionSpec() },
+    { m:null,         t: () => agentFinActionSpec() },
+    { m:'product',    t: () => agentPricingActionSpec() },
+  ].filter(g => agentCanWriteModule(g.m)).map(g => g.t()).join('');
+  if (!body) return AGENT_NO_ACTIONS;
   return '\n\nYou can take REAL actions in VENIA from ANY screen — the user never has to navigate somewhere first. Pick whichever action below fits the request; emit at most ONE action block per reply. After acting, mention where the result lives (Buyers CRM, Vendors library, PR pulls, Materials, Brainstorm, Press coverage).'
-    + agentActionSpec('sl') + agentActionSpec('plm') + agentActionSpec('pr')
-    + agentBrainstormActionSpec() + agentImageActionSpec() + agentPRRadarSpec()
-    + agentBrandDocSpec() + agentOpsActionSpec() + agentFinActionSpec() + agentPricingActionSpec();
+    + body;
 }
 
 // Money writes: the Budget Tracker and Revenue Goals were the last hand-only
 // records. Both are one-tap undoable; neither touches Stripe or moves money.
-function agentFinActionSpec() {
-  return '\n\nACTION — set_budget: update the marketing Budget Tracker (Money → Budget).\n'
+function agentFinActionSpec() { return agentSpecChunks([
+  { m:'money', t: ''
+    + '\nACTION — set_budget: update the marketing Budget Tracker (Money → Budget).\n'
     + '```venia:action\n'
     + '{"type":"set_budget","items":[{"item":"photoshoots","budget":5000,"spent":1200}]}\n'
     + '```\n'
@@ -26165,32 +26269,47 @@ function agentFinActionSpec() {
     + 'Prefer the real transaction id from the ledger in the FINANCE SNAPSHOT — every row there carries one, so you almost never need anything else. When you genuinely lack an id, use "match" with the description exactly as it appears (optionally narrowed by "amount" and/or "date") and it will be resolved against the ledger; a match hitting more than 8 rows is refused rather than mis-filed. NEVER invent an id. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | rnd (R&D — experiments, prototypes, research subscriptions) | fees | taxes | transfer | other'
     + (finCustomCats().length ? ' | ' + finCustomCats().join(' | ') + ' (categories the founders added themselves \u2014 use these where they fit)' : '')
     + '. Movements between VENIA\'s own accounts are "transfer" (excluded from burn). Up to 40 per block; when a line is genuinely ambiguous, leave it out and ask instead of guessing.'
+  },
+  // Reads like finance, WRITES slOrders. The order book is Sales', so this is
+  // Sales' action — the permission has to follow the data or it lets someone
+  // change a record they will never be allowed to save.
+  { m:'sales', t: ''
     + '\nACTION — record_payment: record that a wholesale customer PAID (Money → P&L). Wholesale here settles mostly by bank wire against a proforma, and only Stripe-issued invoices update themselves — so without this an order that was paid stays in AR forever and never reaches "wholesale collected".\n'
     + '```venia:action\n'
     + '{"type":"record_payment","items":[{"order":"ORD-XYZ","amount":71200,"date":"2026-08-20","method":"wire","note":"Antonioli AW26 balance"}]}\n'
     + '```\n'
     + 'Identify the order by "order" (its id, from the ORDER BOOK in context) or by "account" (the buyer name); with several open orders for one account, amount must match one exactly or you must give the id. "amount" is what ARRIVED, in dollars — a partial payment is fine and leaves the balance open, ageing against the order terms. "date" is when the money landed (defaults to today). This RECORDS a payment that already happened; it never moves money and never sends anything. Only record what the founder tells you arrived, or what you can see landed in the bank ledger — never infer a payment from an order simply being old.\n'
+  },
+  // Same again: the payment schedule lives on the PO, and POs are Product's.
+  { m:'product', t: ''
     + '\nACTION — set_po_terms: set the PAYMENT SCHEDULE on a factory or fabric purchase order (Money → Plan drives the 90-day cash calendar from exactly these fields). Placing the order is production\'s call; the deposit split, the dates it falls due, and recording what has been paid are yours.\n'
     + '```venia:action\n'
     + '{"type":"set_po_terms","items":[{"po":"PO-ABC","depositPct":50,"depositDue":"2026-09-15","balanceDue":"2026-11-30","exFactory":"2026-11-15","depositPaid":"2026-09-14","units":[{"style":"VN-101","qty":60}]}]}\n'
     + '```\n'
     + 'The PO id comes from the FACTORY OBLIGATIONS block in context — never invent one. All dates are YYYY-MM-DD; pass "" to clear one. depositPaid / balancePaid RECORD that a payment already went out — they never send one. "units" sets how many of each style the factory is making, which is what sell-through is measured against; a season with no PO units can only report sell-through as unknown. Omit any field you are not changing.\n'
+  },
+  { m:'money', t: ''
     + '\nACTION — set_money_watch: tune your own alert thresholds (Money → Plan). They ship as generic placeholders, so calibrate them to this business once you understand its cash rhythm — and say why you chose each number.\n'
     + '```venia:action\n'
     + '{"type":"set_money_watch","cashFloor":15000,"runwayMo":4,"burnSpike":40,"marginFloor":45,"uncatMax":10}\n'
     + '```\n'
     + 'cashFloor is dollars of cash on hand below which it is urgent; runwayMo months of runway; burnSpike the % the last 30 days may exceed the 90-day average; marginFloor the wholesale margin % floor per style; uncatMax how many uncategorized bank rows before burn stops being trustworthy. "on" and "weekly" are booleans. Only change a threshold you can justify from the numbers — never quietly widen one to silence an alert that is telling the truth.\n'
+  },
+  // And again: cost sheets and the COGS they write back are Product's data.
+  { m:'product', t: ''
     + '\nACTION — set_cost_sheet: change what a style COSTS to make (Product → Costs). Landed cost is material + labor + overhead + duties + freight, and it feeds every margin, the P&L, and the season roll-up — so this is the action behind any real answer to "the mill raised prices, what does that do to us".\n'
     + '```venia:action\n'
     + '{"type":"set_cost_sheet","items":[{"style":"VN-101","material":201.60,"freight":44}]}\n'
     + '```\n'
-    + 'Identify the style by its code, exact name, or id. Give only the components you are CHANGING — anything you omit keeps its current value, so you never have to restate labor you were not told about. Figures are dollars per unit and must be ≥ 0; a change leaving a landed cost of zero is refused. The new landed total is written back to the style as its COGS, which is what every margin reads. Never invent a cost the founder has not given you or that you cannot derive from one they did — an estimated landed cost silently becomes the number the whole P&L is built on.\n';}
+    + 'Identify the style by its code, exact name, or id. Give only the components you are CHANGING — anything you omit keeps its current value, so you never have to restate labor you were not told about. Figures are dollars per unit and must be ≥ 0; a change leaving a landed cost of zero is refused. The new landed total is written back to the style as its COGS, which is what every margin reads. Never invent a cost the founder has not given you or that you cannot derive from one they did — an estimated landed cost silently becomes the number the whole P&L is built on.\n' },
+]); }
 
 // Ops writes (Backbone E3): the production/press verbs the founders kept
 // having to do by hand after telling Enigma about them. Every one is undoable
 // and confirms with a card; none of them invents data.
-function agentOpsActionSpec() {
-  return '\n\nACTION — log_sample_round: record a sample round on a style (a proto/SMS/TOP arrived, was sent, approved, needs revision…).\n'
+function agentOpsActionSpec() { return agentSpecChunks([
+  { m:'product', t: ''
+    + '\nACTION — log_sample_round: record a sample round on a style (a proto/SMS/TOP arrived, was sent, approved, needs revision…).\n'
     + '```venia:action\n'
     + '{"type":"log_sample_round","style":"Exact style name or code from the PLM list","round":"Proto","eta":"YYYY-MM-DD","result":"","note":"What changed / was requested"}\n'
     + '```\n'
@@ -26205,12 +26324,14 @@ function agentOpsActionSpec() {
     + '{"type":"save_season_calendar","season":"FW26","dates":{"marketStart":"","marketEnd":"","orderClose":"","linesheetFreeze":"","factoryCommit":"","deliveryStart":"","deliveryEnd":""},"notes":""}\n'
     + '```\n'
     + 'Include ONLY the dates the user gave, ISO (YYYY-MM-DD); blanks leave existing dates untouched (this never clears a date).\n'
+  },
+  { m:'growth', t: ''
     + '\nACTION — add_pitch: file a press pitch into the PR pitch tracker.\n'
     + '```venia:action\n'
     + '{"type":"add_pitch","publication":"Outlet","subject":"The angle / subject line","contact":"","email":"","celebRef":"","pitchType":"celebrity","status":"draft","followUpDate":"","body":"The pitch text if you drafted one","notes":""}\n'
     + '```\n'
-    + '"status" ∈ draft | sent (draft unless the user says it already went out). NEVER invent a contact email. One pitch per block.';
-}
+    + '"status" ∈ draft | sent (draft unless the user says it already went out). NEVER invent a contact email. One pitch per block.' },
+]); }
 
 // Brand/creative output used to evaporate into chat history — guidelines, shot
 // lists, briefs the Brand agent wrote had nowhere to live. save_brand_doc
@@ -26517,6 +26638,19 @@ function agentBuildPull(action) {
 // through the same paths the manual UI uses, and is reversible.
 function agentRunAction(key, action, chatBody) {
   if (!action || !action.type) return;
+  // THE BOUNDARY. The spec above is a hint — this is the check. An action that
+  // ran here and could not be pushed would be the worst outcome in the app:
+  // saved on one device, confirmed in a card, and gone.
+  if (!agentCanAct(action.type)) {
+    const mod = ACTION_MODULE[action.type];
+    const label = (window.MODULES && MODULES[mod] && MODULES[mod].label) || 'that part of VENIA';
+    try {
+      appendAgentNote(chatBody, '⚠ Nothing was saved — that change belongs to ' + label
+        + ', and you have read access there, not edit. Everything above still stands; '
+        + 'a founder can make the change or give you access.');
+    } catch (e) {}
+    return { denied: true, type: action.type, module: mod };
+  }
   // Dispatch on the action itself, not the screen it was asked from — "add a
   // store" works from Today just as well as from Sales.
   if (action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
@@ -36280,7 +36414,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // there is nothing to hide from them.
       var all = Object.keys(SPACE_OF).every(function(m){ return !!mine[m]; });
       window.VENIA_MY_MODULES = all ? null : mine;
+      // Roles are kept EVEN WHEN nothing is hidden: the nav can stop hiding
+      // things without the assistant losing track of what this person may
+      // change. Conflating the two is how a viewer ends up with a writing agent.
       window.VENIA_MY_ROLES = mine;
+      // May the assistant act for them at all? One row, read once. A missing
+      // row, an error or an offline boot all mean YES — the switch can only
+      // ever subtract, so failing open here grants nothing they did not have.
+      try {
+        var pol = await c.from('venia_agent_policy').select('can_write').eq('email', em).maybeSingle();
+        window.VENIA_AGENT_WRITE = (pol && pol.data && pol.data.can_write === false) ? false : null;
+      } catch(e){ window.VENIA_AGENT_WRITE = null; }
       apply();
     } catch(e){ window.VENIA_MY_MODULES = null; apply(); }
   };
@@ -36347,7 +36491,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         + 'colours, sizes, photo, wholesale and retail. It is what a line sheet, a quote and a '
         + 'wholesale order are made of, so <b>Sales works on its own</b>. '
         + 'COGS, margins, BOM, tech packs, POM and factory terms stay in <b>Product</b> and are '
-        + 'never part of it.</div>');
+        + 'never part of it.</div>'
+        + '<div style="width:100%;font-size:10.5px;color:var(--muted);line-height:1.5">'
+        + 'The role applies to Enigma too, because <b>the assistant inherits the person</b>. '
+        + 'An <b>editor</b>’s Enigma can add and update records in their modules; a '
+        + '<b>viewer</b>’s Enigma reads, researches, analyses and drafts but writes nothing. '
+        + 'It is never told about actions it would only have to refuse, and it can never '
+        + 'reach a module they were not given — not because it is asked not to, but because '
+        + 'that data never arrives on their device.</div>');
     }
     box.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading…</div>';
     var d;
@@ -36386,7 +36537,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             + '<button class="btn btn-ghost btn-sm" onclick="teamSetPw(\'' + esc(pn.email) + '\')">'
             + (pn.hasLogin ? 'Reset password' : 'Set password') + '</button>'
             + '<button class="btn btn-ghost btn-sm" onclick="teamRemove(\'' + esc(pn.email) + '\')">Remove</button>'
-            + '</div>')
+            + '</div>'
+            // The one agent dial, said in the words that describe what actually
+            // happens — not "agentic permissions".
+            + '<label style="display:flex;align-items:flex-start;gap:7px;margin-top:10px;'
+            + 'font-size:11px;color:var(--ink);cursor:pointer;line-height:1.5">'
+            + '<input type="checkbox" ' + (pn.agentWrite === false ? '' : 'checked')
+            + ' onchange="teamSetAgent(\'' + esc(pn.email) + '\', this.checked)" '
+            + 'style="accent-color:var(--ink);margin-top:2px">'
+            + '<span>Enigma may make changes for them'
+            + '<br><span style="color:var(--muted);font-size:10px">'
+            + 'Off: it still answers, researches and drafts — it just never writes. '
+            + 'On: it can only change what they could change by hand.</span></span></label>')
         + '</div>';
     }).join('') + (others.length ? '' :
         '<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:10px">'
@@ -36411,6 +36573,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       document.querySelectorAll('.team-mod:checked').forEach(function(x){ x.checked = false; });
       teamRender();
     } catch(e){ showToast(e.message || 'Could not grant access', 'error'); }
+  };
+  window.teamSetAgent = async function(email, canWrite){
+    try {
+      await teamCall({ action:'setagent', email: email, canWrite: !!canWrite });
+      showToast(canWrite ? 'Enigma can make changes for ' + email + ' — within their modules'
+                         : 'Enigma will answer and draft for ' + email + ', but change nothing', 'success');
+      try { logActivity('Assistant writes ' + (canWrite ? 'enabled' : 'disabled') + ' for ' + email); } catch(e){}
+    } catch(e){ showToast(e.message || 'Could not change that', 'error'); teamRender(); }
   };
   window.teamRevoke = async function(email, module){
     if (!confirm('Take ' + (MOD_LABEL[module] || module) + ' away from ' + email + '?')) return;
