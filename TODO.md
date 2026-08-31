@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 407._
+_Last reviewed at Build 408._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1918,3 +1918,47 @@ the order's own status follows the money.
 
 `gauntlet/wholesalepay.js` — 22 assertions against a stubbed Stripe that records
 what the app asks for, so it checks our calls rather than a mock's behaviour.
+
+
+## Build 408 — the visual line sheet
+*"Export a visual line sheet that is landscape and has several styles per page…
+image at the top and then the style information beneath it. Customizable based
+on the amount of styles I want per page. And be able to export all genders or
+men's or women's or unisex or a combination of any of them."*
+
+The table export answers *what does it cost*. A buyer decides on the **garment**,
+so this one is landscape, a few styles to a page, photo first and the numbers
+under it. Same data, same season filter, same trade footer — only the shape is
+different. **Export list** and **Export visual** now sit side by side.
+
+- **1, 2, 3, 4, 6 or 8 per page**, three by default. Landscape, so 1–4 sit in one
+  row and 6 and 8 take two; the photo grows when there are fewer to a page
+  (108mm in a single row, 52mm in two).
+- **Genders as a combination, not a choice** — tick any of Womens / Mens /
+  Unisex, and *Gender not set* appears only when the line actually contains
+  styles with none. Nothing ticked means all, which is what the dialog says and
+  what the sheet does.
+- The dialog states the outcome before you commit: *"8 styles over 3 pages — 3
+  per page, landscape."*
+
+**Details that decide whether it reads as a real line sheet:**
+
+- **Pages are chunked in JavaScript, not left to flow.** A page break that
+  depends on how tall a photo happens to render is how you get four styles on
+  one page and a lone orphan on the next.
+- **A short last page keeps its column width** using hidden filler cells —
+  otherwise two styles stretch across the whole sheet and the last page looks
+  like a different document.
+- **`min-height`, not `height`**, on the page: 190mm fills A4 landscape less its
+  margins, but a long colourway list has to be able to grow rather than be
+  sliced off at the page edge.
+- **The export waits for the images to decode** — every `<img>`, with a 6s
+  ceiling so one slow photo cannot hang it — rather than guessing at a delay.
+  The old table export guesses 1500ms.
+- A style with no photo says so instead of collapsing its card.
+- On screen it is shown as paper: page margins, a grey ground, an edge between
+  pages. Print ignores all of it.
+
+`gauntlet/vls.js` — 20 assertions, including the page arithmetic at every
+per-page setting (1→8 pages, 2→4, 3→3, 6→2, 8→1) and that a mens-only sheet
+carries only the mens styles and says so in its header.
