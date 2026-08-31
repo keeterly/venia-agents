@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 417._
+_Last reviewed at Build 418._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2440,3 +2440,58 @@ Worth recording, because both produced a false "this is broken":
 - Console errors were counted including `ERR_CONNECTION_RESET` from the
   sandbox's blocked egress — ten lines of noise that would have hidden a real
   error. Filtered.
+
+## Build 418 — the Enigma bubble, and MORE
+*"The enigma notification bubble should be clearer… we also need to trim the
+extra functions or pathways from MORE. More and hamburger top left do the same.
+In that case is More necessary."*
+
+### The bubble had a real bug, and it was the notification that caused it
+The launcher is icon-only on phones because of one rule:
+`#sk-launch span:last-child { display:none }` — hide the label, keep the
+sparkle. But `skPaintUnread()` **appends** the count badge to the launcher. So
+the moment Enigma had a reply waiting, the badge became the last child:
+
+- the rule hid **the count** instead of the label, and
+- **the label came back** — "ENIGMA" spilling out of a 46px circle and off the
+  right edge of the screen.
+
+Which is exactly the screenshot. The one state where the bubble most needed to
+be readable was the only state that broke it, and it broke *because* of the
+notification.
+
+Reproduced at a real phone viewport before touching anything: with three unread,
+`sk-launch-label` was `display:block` and `.sk-unread` was `display:none`. The
+label is hidden **by class** now, so nothing appended can steal the rule.
+
+### What it does now
+A circle with the AI sparkle inside, the count on it, and two signals at
+deliberately different speeds:
+
+- **the button hops twice on arrival** and stops — "it just landed". A button
+  that keeps hopping is one you stop seeing.
+- **a ring keeps breathing** (2.6s, soft) for as long as the reply is unread —
+  "still waiting". That is what makes it readable across the room without
+  turning the corner of the screen into an alarm.
+
+The ring is **ink, not white**: it floats on the app's white page, so a white
+ring expanding off a dark button is a ring nobody can see — which was the whole
+point of adding it. With `prefers-reduced-motion` the ring stops moving and
+stays visible: the message is not the animation.
+
+### MORE: no, it was not necessary
+Checked rather than assumed. The MORE tab called `openDrawer()` — **the identical
+function, with no arguments**, that the ☰ in the header calls. And the ☰ is on
+every space (verified at a phone viewport: 1 on Today and Product, 2 on Growth,
+Sales and Money — all wired to `openDrawer`). So MORE was a sixth of the tab bar
+spent on a second door into a room already one tap away.
+
+Removed. Five tabs now, each an actual place, with more room per target. The
+drawer still carries everything the bar does not — Brainstorm, Settings, and the
+section list for whichever space you are in — which is what MORE was for.
+
+### Two harness faults, again worth recording
+The new gauntlet reported the drawer as empty. It was not: `openDrawer()` slides
+the panel in, so reading it immediately reads nothing, and `innerText` comes back
+CSS-uppercased so a mixed-case match found none of it. Both fixed — a test that
+reports a working feature as broken is worse than no test.
