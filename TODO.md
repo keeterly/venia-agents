@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 409._
+_Last reviewed at Build 410._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1986,3 +1986,58 @@ writing a second list is what stops the two drifting apart later.
 
 `gauntlet/lscat.js`, 9 assertions, including that no category ever appears as
 two separate blocks and that both exports produce identical ordering.
+
+
+## Build 410 — the line sheet as a trade document
+*"We can improve this formatting… include Country of Origin… other line sheet
+relevant information… and export in various currencies."*
+
+**The image was cropping garments.** `object-fit: cover` on a full-length
+cutout takes the hem off the page. It is `contain` on white now, inside a
+hairline frame — a little white space, and never a picture of a garment with
+its bottom cut off. Empty frames are dashed and quiet, and say *"Photo to
+follow"* rather than "No photo".
+
+**What a line sheet owes a buyer, added:**
+- **Country of origin** and **composition** — both already on the style (the
+  tech pack's care-label check reads the same two fields) and never carried
+  onto the sheet. A line sheet is a customs document too: origin decides duty,
+  composition decides the tariff code.
+- **Delivery, per style** — the footer only ever carried the season window, and
+  a Delivery 2 piece is exactly the exception that needs saying. Formatted
+  *15 Jan 2027*, not an ISO stamp.
+- **A way to order.** The footer now carries terms, MOQ, delivery window and a
+  contact. A line sheet with no way back to the brand is a catalogue.
+
+**Currency.** Chosen per export from the ten the app knows, converted at the
+**season rate** `fxEnsureRate` already holds — asked for at the moment you pick
+the currency, not silently at export. With no rate it prints USD and says so
+rather than inventing a number. The sheet states the conversion on every page:
+*"Wholesale prices in EUR, FOB — converted at 0.92 EUR to 1 USD, the season
+rate."*
+
+Also: **only styles with a photo**, optional, since 24 pages of grey frames is
+not a document you send a buyer. The dialog says how many that leaves out.
+
+### The bug this nearly shipped with
+Adding three fields and a four-line footer pushed a full card **past the page**.
+Content that overflows is not clipped — it flows onto another sheet, so *"3 per
+page"* quietly becomes 3, then 1, then 3. Measured with every optional field
+filled and long values:
+
+| | before | after |
+|---|---|---|
+| 1–3 per page | 202.5mm | **182.5mm** |
+| 4 per page | 196.5mm | **180.5mm** |
+| 6 / 8 per page | 252.9 / 258.2mm | **183.8mm** |
+
+*(A4 landscape gives 190mm.)* The image height now follows the **column** count
+as well as the row count — narrower columns wrap long values onto more lines, so
+a 4-up card is taller than a 3-up one at the same image height, which is how
+4 per page overflowed while 1, 2 and 3 fitted. **The gauntlet found that one**:
+I had measured 1, 2, 3, 6 and 8 by hand and never 4. At two rows a card carries
+only what stays legible at 40mm — composition and origin belong on the roomy
+layouts and in the list export, not squeezed until nothing can be read.
+
+`gauntlet/vls.js` now asserts every density fits A4 with every field filled, so
+the next field someone adds cannot silently break the page count.
