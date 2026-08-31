@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '422';
+  const BUILD = '423';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7748,14 +7748,23 @@ const ST_CELL = {
       : (own ? '' : 'Inherited from the season plan or the house default — ')) + pxMarkup(m).toFixed(2) + 'x markup';
     return `<td class="cell-edit" style="font-family:'DM Mono',monospace;font-size:10px" title="${esc(tip)}" onclick="pxOpen('${s.id}',this,event)"><span style="color:${own?'var(--ink)':'var(--muted)'}">${m}%${drift!==null?`<span style="color:var(--amber);margin-left:3px">•</span>`:''}</span></td>`;
   },
-  sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${(()=>{
-    const ss = styleSalesFor(s); if (!ss || !ss.u) return '—';
+  sold:     (s) => `<td style="font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap"
+      onclick="stShopifyPick('${s.id}',this,event)" title="${esc(styleSalesNote(styleSalesFor(s), s) || 'Say which Shopify product this version is')}"
+      >${(()=>{
+    const ss = styleSalesFor(s);
+    const linked = styleShopifyIds(s).length;
+    if (!ss) return '<span style="color:var(--muted)">—</span>';
+    if (!ss.u) return linked
+      ? '<span style="color:var(--muted)">0 <span style="color:var(--green)">linked</span></span>'
+      : '<span style="color:var(--muted)">—</span>';
     const fig = '×'+ss.u+' · $'+Math.round(ss.r).toLocaleString('en-US');
-    // A shared figure is never printed as if it were this style's. The marker
-    // is part of the number, not a footnote somewhere else on the page.
-    return ss.shared
-      ? `<span style="color:var(--muted)" title="${esc(styleSalesNote(ss,s))}">${fig}<span style="color:var(--amber);margin-left:3px">shared ÷${ss.shared}</span></span>`
-      : fig;
+    // A figure that is not this style's own is never printed as if it were. The
+    // marker is part of the number, not a footnote elsewhere on the page — and
+    // it is the button that fixes it.
+    if (linked) return fig + '<span style="color:var(--green);margin-left:3px">linked</span>';
+    if (ss.shared) return `<span style="color:var(--muted)">${fig}<span style="color:var(--amber);margin-left:3px">shared ÷${ss.shared}</span></span>`;
+    if (ss.unclaimed) return `<span style="color:var(--muted)">${fig}<span style="color:var(--amber);margin-left:3px">unlinked</span></span>`;
+    return fig;
   })()}</td>`,
   priority: (s) => `<td>${priorityDot(s.priority)}</td>`,
 };
@@ -8606,6 +8615,80 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 
 function cwList(st){ return String(st.colors||'').split(',').map(x=>x.trim()).filter(Boolean); }
+
+// ── SAY WHICH SHOPIFY PRODUCT THIS VERSION IS ─────────────────────────────
+// Opened from the Sold cell, because that is where the wrong number is. One
+// choice per silhouette is enough: linking the version that IS sold online
+// leaves the others with the remainder, which is zero — so ISOLDE TOP in
+// Jacquard stops claiming ten units it never sold.
+function stShopifyClose(){
+  const p = document.getElementById('sfy-pop'); if (p) p.remove();
+  document.removeEventListener('click', stShopifyAway);
+}
+function stShopifyAway(e){ const p = document.getElementById('sfy-pop'); if (p && !p.contains(e.target)) stShopifyClose(); }
+window.stShopifyPick = function(styleId, anchorEl, ev){
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  const open = document.getElementById('sfy-pop');
+  stShopifyClose(); if (open && open.dataset.style === styleId) return;
+  const st = (STATE.styles||[]).find(x => x.id === styleId); if (!st) return;
+  const cands = styleSalesCandidates(st.name);
+  const mine = styleShopifyIds(st);
+  const pop = document.createElement('div');
+  pop.id = 'sfy-pop'; pop.dataset.style = styleId;
+  pop.onclick = e => e.stopPropagation();
+  pop.style.cssText = 'position:absolute;z-index:9600;background:var(--bg);border:1px solid var(--ink);'
+    + 'box-shadow:0 12px 34px rgba(0,0,0,.18);width:330px;max-width:calc(100vw - 20px);padding:12px 13px;'
+    + "font-family:'Helvetica Neue',Helvetica,Arial,sans-serif";
+  const rect = (anchorEl && anchorEl.getBoundingClientRect) ? anchorEl.getBoundingClientRect() : { bottom:80, left:40 };
+  pop.style.top = Math.min(rect.bottom + window.scrollY + 6, window.scrollY + window.innerHeight - 300) + 'px';
+  pop.style.left = Math.max(8, Math.min(rect.left + window.scrollX - 120, window.innerWidth - 340)) + 'px';
+  pop.innerHTML =
+    '<div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Which Shopify product is this?</div>'
+    + '<div style="font-size:11px;font-weight:600;margin-bottom:8px">' + esc(st.name) + (st.fabric ? ' · <span style="font-weight:400;color:var(--muted)">' + esc(st.fabric) + '</span>' : '') + '</div>'
+    + (cands.length
+      ? '<div style="font-size:10.5px;color:var(--muted);line-height:1.6;margin-bottom:9px">'
+        + cands.length + ' product' + (cands.length===1?'':'s') + ' sold under this name. Pick the one this fabrication is — '
+        + 'the others keep their own sales.</div>'
+        + cands.map(function(c){
+            const on = mine.indexOf(c.id) >= 0;
+            return '<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--border);cursor:pointer">'
+              + '<input type="checkbox" class="sfy-c" value="' + esc(c.id) + '"' + (on ? ' checked' : '') + ' style="accent-color:var(--ink);margin-top:3px">'
+              + '<span style="font-size:11px;line-height:1.5"><b>' + esc(c.title) + '</b><br>'
+              + '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">×' + c.u
+              + ' · $' + Math.round(c.r).toLocaleString('en-US')
+              + (c.last ? ' · last ' + esc(String(c.last).slice(0,10)) : '') + '</span></span></label>';
+          }).join('')
+        + '<div style="display:flex;gap:6px;margin-top:11px">'
+        + '<button class="btn btn-gold btn-sm" onclick="stShopifySave(\'' + styleId + '\')">Save</button>'
+        + (mine.length ? '<button class="btn btn-ghost btn-sm" onclick="stShopifyClear(\'' + styleId + '\')">Unlink</button>' : '')
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:9px">'
+        + 'Tick none and Save to say this fabrication is not sold online — it will show 0 instead of the silhouette&rsquo;s total.</div>'
+      : '<div style="font-size:11px;color:var(--muted);line-height:1.6">Nothing has sold under this name since '
+        + esc(((STATE.styleSales||{}).since)||'the sync window') + ', so there is no product to link. '
+        + 'The figure stays blank rather than borrowing another version&rsquo;s.</div>');
+  document.body.appendChild(pop);
+  setTimeout(function(){ document.addEventListener('click', stShopifyAway); }, 0);
+};
+window.stShopifySave = function(styleId){
+  const st = (STATE.styles||[]).find(x => x.id === styleId); if (!st) return;
+  const ids = [].slice.call(document.querySelectorAll('.sfy-c:checked')).map(function(x){ return x.value; });
+  st.shopifyProductIds = ids;
+  st.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Shopify link: ' + st.name + (st.fabric ? ' (' + st.fabric + ')' : '') + ' → ' + (ids.length ? ids.length + ' product(s)' : 'not sold online')); } catch(e){}
+  stShopifyClose();
+  showToast(ids.length ? 'Linked — this version now shows its own sales' : 'Marked as not sold online', 'success');
+  try { renderStyles(); } catch(e){}
+};
+window.stShopifyClear = function(styleId){
+  const st = (STATE.styles||[]).find(x => x.id === styleId); if (!st) return;
+  delete st.shopifyProductIds;
+  st.updatedAt = new Date().toISOString();
+  save(); stShopifyClose();
+  showToast('Unlinked — back to the shared figure', 'info');
+  try { renderStyles(); } catch(e){}
+};
 
 function cwOpen(styleId, anchor, ev){
   if (ev) { ev.stopPropagation(); ev.preventDefault(); }
@@ -23057,24 +23140,74 @@ function plmSalesSiblings(name){
   (STATE.styles || []).forEach(x => { if (x && plmSalesNorm(x.name) === k) n++; });
   return n;
 }
-// Returns the match with `shared` attached: how many styles this figure covers.
-// shared > 1 means the number is the TOTAL FOR THE NAME, not for this style —
-// and every caller has to say so rather than printing it as if it were.
+// Which Shopify products a style has been linked to. One style can legitimately
+// be two products — ISOLDE TOP in Viscose exists in Shopify as a black one and a
+// white one — so it is a list, not a field.
+function styleShopifyIds(st){
+  const v = st && st.shopifyProductIds;
+  return Array.isArray(v) ? v.map(String).filter(Boolean) : [];
+}
+// Every product that has sold under a name, for the picker to offer.
+function styleSalesCandidates(name){
+  const bp = (STATE.styleSales && STATE.styleSales.byProd) || {};
+  const k = plmSalesNorm(name); if (!k) return [];
+  return Object.keys(bp).filter(id => bp[id].key === k)
+    .map(id => Object.assign({ id: id }, bp[id]))
+    .sort((a,b) => b.u - a.u);
+}
+// THE NUMBER FOR THIS STYLE.
+//
+// Linked  → exactly its own products' sales. Nothing shared, nothing guessed.
+// Unlinked, with a linked sibling → what is LEFT after the linked ones take
+//   theirs. When every sale under the name belongs to a linked sibling that
+//   remainder is zero, which is the correct answer: ISOLDE TOP in Jacquard has
+//   never been sold online, and saying "10" was simply wrong.
+// Unlinked, no sibling linked → the title total, marked `shared`, as before.
 function styleSalesFor(st){
-  const m = (STATE.styleSales && STATE.styleSales.map) || null;
-  const hit = (m && st && m[plmSalesNorm(st.name)]) || null;
-  if (!hit) return null;
-  const shared = plmSalesSiblings(st.name);
+  const ss = STATE.styleSales || {};
+  const m = ss.map || null, bp = ss.byProd || {};
+  if (!m || !st) return null;
+  const mine = styleShopifyIds(st);
+  if (mine.length) {
+    let hit = null;
+    mine.forEach(id => { const r = bp[id]; if (!r) return;
+      hit = hit || { u:0, r:0, uY:0, rY:0, last:'' };
+      hit.u += r.u; hit.r += r.r; hit.uY += r.uY||0; hit.rY += r.rY||0;
+      if ((r.last||'') > hit.last) hit.last = r.last; });
+    // Linked to a product that has never sold is a real answer: zero.
+    return hit || { u:0, r:0, uY:0, rY:0, last:'', exact:true, linked:mine.length };
+    }
+  const key = plmSalesNorm(st.name);
+  const hit = m[key]; if (!hit) return null;
+  const sibs = (STATE.styles || []).filter(x => x && plmSalesNorm(x.name) === key);
+  const claimed = sibs.reduce((ids, x) => ids.concat(styleShopifyIds(x)), []);
+  if (claimed.length) {
+    // Someone has said which product is theirs, so this style can only have what
+    // is left — not the whole silhouette's total.
+    let u = hit.u, r = hit.r, uY = hit.uY||0, rY = hit.rY||0;
+    claimed.forEach(id => { const c = bp[id]; if (!c) return;
+      u -= c.u; r -= c.r; uY -= c.uY||0; rY -= c.rY||0; });
+    const left = sibs.filter(x => !styleShopifyIds(x).length).length;
+    const rest = { u: Math.max(0,u), r: Math.max(0,r), uY: Math.max(0,uY), rY: Math.max(0,rY),
+                   last: hit.last, unclaimed: true };
+    if (left > 1 && rest.u) rest.shared = left;
+    return rest;
+  }
+  const shared = sibs.length;
   return shared > 1 ? Object.assign({}, hit, { shared: shared }) : hit;
 }
 // One sentence, used everywhere the shared figure appears, so the explanation
 // cannot drift between the table, the card and the tech pack.
 function styleSalesNote(ss, st){
-  if (!ss || !ss.shared) return '';
+  if (!ss) return '';
+  if (styleShopifyIds(st).length) return 'Linked to Shopify — this is this version\'s own figure.';
+  if (ss.unclaimed) return 'What is left under the name "' + (st && st.name || '') + '" once the '
+    + 'linked versions take their own sales. Link this one too if it is sold online.';
+  if (!ss.shared) return '';
   return ss.u + ' units sold under the name "' + (st && st.name || '') + '" — across '
     + ss.shared + ' fabrications in PLM. Shopify reports one product title per sale, so '
-    + 'which fabrication sold cannot be told apart. Treat this as the total for the '
-    + 'silhouette, not for this version.';
+    + 'which fabrication sold cannot be told apart. Click to say which Shopify product '
+    + 'this version is, and the number becomes exact.';
 }
 let _plmSalesBusy = false;
 async function plmSalesRefresh() {
@@ -23090,20 +23223,34 @@ async function plmSalesRefresh() {
     if (!r.ok) return;
     const d = await r.json();
     const map = {};
+    // ALSO keep it per Shopify PRODUCT. The title is not unique — four products
+    // are called "ANTIGONE SKIRT", two "ISOLDE TOP", and one order can carry two
+    // HAMLET CLOAKs from different products — so the title alone can never say
+    // which garment sold. product_id can. A style linked to its product then
+    // gets its own number instead of the whole silhouette's.
+    const byProd = {};
     (d.orders || []).filter(o => !o.cancelled_at && o.test !== true).forEach(o => {
       (o.line_items || []).forEach(li => {
         const k = plmSalesNorm(li.title);
         if (!k) return;
-        if (!map[k]) map[k] = { u: 0, r: 0, uY: 0, rY: 0, last: '' };
         var liQty = li.quantity || 0, liRev = (parseFloat(li.price || 0) || 0) * liQty;
-        map[k].u += liQty;
-        map[k].r += liRev;
         var y0 = new Date(new Date().getFullYear(), 0, 1).getTime();
-        if (new Date(o.created_at).getTime() >= y0) { map[k].uY = (map[k].uY || 0) + liQty; map[k].rY = (map[k].rY || 0) + liRev; }
+        var isY = new Date(o.created_at).getTime() >= y0;
+        if (!map[k]) map[k] = { u: 0, r: 0, uY: 0, rY: 0, last: '' };
+        map[k].u += liQty; map[k].r += liRev;
+        if (isY) { map[k].uY = (map[k].uY || 0) + liQty; map[k].rY = (map[k].rY || 0) + liRev; }
         if ((o.created_at || '') > map[k].last) map[k].last = o.created_at;
+        // A custom sale or a deleted product has no product_id — it stays in the
+        // title total and simply cannot be linked, which is the truth about it.
+        var pid = li.product_id != null ? String(li.product_id) : '';
+        if (!pid) return;
+        if (!byProd[pid]) byProd[pid] = { u: 0, r: 0, uY: 0, rY: 0, last: '', title: li.title || '', key: k };
+        byProd[pid].u += liQty; byProd[pid].r += liRev;
+        if (isY) { byProd[pid].uY += liQty; byProd[pid].rY += liRev; }
+        if ((o.created_at || '') > byProd[pid].last) byProd[pid].last = o.created_at;
       });
     });
-    STATE.styleSales = { at: new Date().toISOString(), since: min, map: map };
+    STATE.styleSales = { at: new Date().toISOString(), since: min, map: map, byProd: byProd };
     // Business pulse from the same orders: performance vs baseline, not raw counts.
     const live = (d.orders || []).filter(o => !o.cancelled_at && o.test !== true);
     const now = Date.now(), d30 = now - 30 * 864e5, d60 = now - 60 * 864e5;
