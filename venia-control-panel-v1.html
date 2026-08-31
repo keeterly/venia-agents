@@ -1965,7 +1965,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '406';
+  const BUILD = '407';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30163,6 +30163,40 @@ function slOpenOrderDetail(id) {
   if (o.shipStart || o.cancelDate) termsBits.push('Delivery: ' + slEsc(o.shipStart||'TBD') + (o.cancelDate?' → cancel '+slEsc(o.cancelDate):''));
   if (o.discountPct) termsBits.push(o.discountPct + '% discount applied');
   const termsHtml = termsBits.length ? `<div><div style="${lbl}">Terms &amp; delivery</div><div style="font-size:11px;color:var(--ink);line-height:1.7">${termsBits.join('<br>')}</div></div>` : '';
+  // WHAT THE TERMS SAY YOU ARE OWED, AND WHERE EACH PART IS.
+  const schedHtml = (function(){
+    const sched = slTermsSchedule(o.terms, o.total);
+    slOrderPayments(o);
+    const paidSum = slOrderPaidTotal(o);
+    const rows = sched.map(l => {
+      const p = slOrderPayFor(o, l.key);
+      const st = p ? p.status : '';
+      const paid = st === 'paid';
+      const bad = st === 'void' || st === 'uncollectible';
+      const col = paid ? 'var(--green)' : bad ? 'var(--red)' : st ? 'var(--amber)' : 'var(--muted)';
+      const word = paid ? '✓ paid'
+        : st === 'invoiced' ? 'invoiced' + (p.amountRemaining ? ' · $' + Math.round(p.amountRemaining).toLocaleString() + ' open' : '')
+        : st === 'link' ? 'card link sent'
+        : st ? slEsc(st) : 'not billed';
+      return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border)">
+        <div style="flex:1;min-width:150px">
+          <div style="font-size:11px;color:var(--ink)">${slEsc(l.label)}${l.pct<100?` <span style="color:var(--muted)">${l.pct}%</span>`:''}
+            <span style="font-family:'DM Mono',monospace">· ${slMoneyC(cur, l.amount)}</span></div>
+          <div style="font-size:9.5px;color:var(--muted)">${slEsc(l.when||'')}${l.note?' · '+slEsc(l.note):''}
+            <span style="color:${col}">${word}</span>${p&&p.url?` · <a href="${slEsc(p.url)}" target="_blank" rel="noopener" style="color:var(--ink)">open</a>`:''}</div>
+        </div>
+        ${!p ? `<button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderInvoice('${o.id}','${l.key}')">Invoice</button>
+                <button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderCardLink('${o.id}','${l.key}')">Card link</button>` : ''}
+      </div>`;
+    }).join('');
+    const owed = Math.max(0, (Number(o.total)||0) - paidSum);
+    return `<div><div style="${lbl}">Payment schedule${o.terms?' — '+slEsc(o.terms):' — no terms set'}</div>
+      ${rows}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px">
+        <span style="font-size:11px">${paidSum>0?`<b style="color:var(--green)">${slMoneyC(cur,paidSum)} paid</b> · `:''}<span style="color:${owed>0?'var(--amber)':'var(--green)'}">${slMoneyC(cur,owed)} outstanding</span></span>
+        <button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderPayCheck('${o.id}')">↻ Check Stripe</button>
+      </div></div>`;
+  })();
   const pay = o.payment && o.payment.status
     ? (function(){
         const p = o.payment;
@@ -30199,11 +30233,12 @@ function slOpenOrderDetail(id) {
       </div>
       ${itemsHtml}
       ${termsHtml}
+      ${schedHtml}
       ${pay}
       <div id="sl-ord-inv-status" style="display:none;font-size:11px;color:var(--muted)"></div>
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
         <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');slOpenOrderModal('${o.id}')">&#x270E; Edit</button>
-        ${!(o.payment&&o.payment.status)?`<button class="btn btn-gold btn-sm" id="sl-ord-inv-btn" onclick="slSendOrderInvoice('${o.id}')">Send Stripe invoice</button>`:''}
+
         <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');agentSend('sl','Order #${slEsc(o.id)} for ${slEsc(o.account||'')} — status ${slEsc(o.status||'')}, $${o.total||0}, delivery ${slEsc(o.deliveryDate||'TBD')}. What should I do next?')">&#x2726; Ask the agent</button>
       </div>
     </div>
@@ -30212,8 +30247,168 @@ function slOpenOrderDetail(id) {
   openModal('sl-ord-modal');
 }
 
+// ══════════════════════════════════════════════════════════
+//  WHOLESALE MONEY — THE TERMS ARE THE SCHEDULE
+// ══════════════════════════════════════════════════════════
+// The order carried terms like "30% deposit / 70% before ship" and then billed
+// the FULL total, due in 14 days, every time: `amount: o.total, days: 14`. The
+// terms were decoration. They are a payment schedule, so they are read as one.
+//
+// SL_TERMS is a closed list, so this is a lookup and not a guess. Anything
+// unrecognised bills once, in full, and SAYS it is doing that rather than
+// inventing a split nobody agreed to.
+function slTermsSchedule(terms, total){
+  const t = String(terms||'').trim();
+  const amt = pct => Math.round((Number(total)||0) * pct) / 100;
+  // The BALANCE is the remainder, not its own percentage: rounding each share
+  // independently can leave the two adding up to a cent more or less than the
+  // order, and an invoice pair that does not reconcile to the total is an
+  // argument with a buyer waiting to happen.
+  const split = (dep) => {
+    const d = amt(dep);
+    return [
+      { key:'deposit', label:'Deposit', pct:dep,     amount:d,                              when:'on order',    days:7  },
+      { key:'balance', label:'Balance', pct:100-dep, amount:Math.round(((Number(total)||0)-d)*100)/100, when:'before ship', days:30 },
+    ];
+  };
+  if (/^30% deposit/.test(t)) return split(30);
+  if (/^50% deposit/.test(t)) return split(50);
+  if (/^Proforma/i.test(t))
+    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'before ship', days:14 }];
+  if (/^Credit card on file/i.test(t))
+    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'on order', days:1, card:true }];
+  const net = t.match(/Net\s*(\d+)/i);
+  if (net) return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100),
+    when:'net ' + net[1], days:parseInt(net[1],10),
+    note: /^2\/10/.test(t) ? '2% off if paid within 10 days' : '' }];
+  return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'', days:14,
+            note: t ? '' : 'No terms set on this order — billing once, in full.' }];
+}
+// One payment record per instalment. Orders invoiced before this build carry a
+// single `o.payment`; it is folded in as the first instalment rather than
+// abandoned, so an invoice already sent is never lost or sent twice.
+function slOrderPayments(o){
+  if (!o) return [];
+  if (!Array.isArray(o.payments)) {
+    o.payments = [];
+    if (o.payment && o.payment.status) {
+      const sched = slTermsSchedule(o.terms, o.total);
+      o.payments.push(Object.assign({ key: sched[0].key, label: sched[0].label, pct: sched[0].pct }, o.payment));
+    }
+  }
+  return o.payments;
+}
+function slOrderPayFor(o, key){ return slOrderPayments(o).find(p => p.key === key) || null; }
+function slOrderPaidTotal(o){
+  return slOrderPayments(o).filter(p => p.status === 'paid')
+    .reduce((s,p) => s + (Number(p.amountPaid) || Number(p.amount) || 0), 0);
+}
+// Send ONE instalment as a Stripe invoice — the buyer gets an email with a pay
+// link, which is how a wholesale account expects to be billed.
+window.slOrderInvoice = async function(orderId, key){
+  const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return;
+  const line = slTermsSchedule(o.terms, o.total).find(l => l.key === key); if (!line) return;
+  if (slOrderPayFor(o, key)) { showToast('That instalment already has an invoice', 'info'); return; }
+  const buyer = (STATE.slBuyers||[]).find(x => String(x.name||'').trim().toLowerCase() === String(o.account||'').trim().toLowerCase());
+  let email = (buyer && buyer.email) || '';
+  if (!email) email = prompt('Buyer email for the invoice:') || '';
+  email = email.trim();
+  if (!email) { showToast('An email is needed to invoice', 'info'); return; }
+  showToast('Creating ' + line.label.toLowerCase() + ' invoice…', 'info');
+  // kind:'wholesale' — the server labels the Stripe customer and line item from
+  // it, and every wholesale invoice sent before this build went out labelled as
+  // a stylist pull because the caller never passed it.
+  const inv = await prStripe('invoice', {
+    kind: 'wholesale', amount: line.amount, email, name: o.account || '',
+    description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label
+      + (line.pct < 100 ? ' (' + line.pct + '%)' : ''),
+    days: line.days,
+  });
+  if (!inv || inv.error) { showToast(String((inv && inv.error) || 'Stripe did not answer'), 'error'); return; }
+  slOrderPayments(o).push({ key: line.key, label: line.label, pct: line.pct, amount: line.amount,
+    method: 'invoice', status: 'invoiced', invoiceId: inv.id, url: inv.hosted_invoice_url || '',
+    at: new Date().toISOString() });
+  if (!o.payment) o.payment = { status:'invoiced', method:'stripe', invoiceId: inv.id, url: inv.hosted_invoice_url||'', at:new Date().toISOString() };
+  dbSet('slOrders', STATE.slOrders); save();
+  slTouchAccount(o.account, line.label + ' invoice sent — order #' + o.id + ' · $' + Math.round(line.amount).toLocaleString());
+  try { logActivity('Wholesale ' + line.label.toLowerCase() + ' invoiced — order ' + o.id + ' · $' + Math.round(line.amount).toLocaleString()); } catch(e){}
+  showToast('✓ ' + line.label + ' invoice sent to ' + email, 'success');
+  slOpenOrderDetail(orderId);
+};
+// The other way to be paid: a Stripe Checkout link for this instalment. The
+// buyer enters the card themselves — VENIA never holds card details, which is
+// the same rail the pull sheet uses.
+window.slOrderCardLink = async function(orderId, key){
+  const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return;
+  const line = slTermsSchedule(o.terms, o.total).find(l => l.key === key); if (!line) return;
+  if (slOrderPayFor(o, key)) { showToast('That instalment is already being collected', 'info'); return; }
+  const buyer = (STATE.slBuyers||[]).find(x => String(x.name||'').trim().toLowerCase() === String(o.account||'').trim().toLowerCase());
+  const email = (buyer && buyer.email) || '';
+  showToast('Creating card link…', 'info');
+  const s = await prStripe('create', {
+    amount: line.amount, email,
+    description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label,
+  });
+  if (!s || s.error || !s.url) { showToast(String((s && s.error) || 'Stripe did not answer'), 'error'); return; }
+  slOrderPayments(o).push({ key: line.key, label: line.label, pct: line.pct, amount: line.amount,
+    method: 'card', status: 'link', sessionId: s.id, url: s.url, at: new Date().toISOString() });
+  dbSet('slOrders', STATE.slOrders); save();
+  try { logActivity('Wholesale ' + line.label.toLowerCase() + ' card link created — order ' + o.id); } catch(e){}
+  try { await navigator.clipboard.writeText(s.url); showToast('✓ Card link copied — send it to ' + (o.account||'the buyer'), 'success'); }
+  catch(e){ showToast('✓ Card link ready', 'success'); }
+  slOpenOrderDetail(orderId);
+};
+// Ask Stripe what actually happened, for every instalment. Same idea as the
+// pull reconcile from 378: an order should say "paid" without anyone opening
+// Stripe to find out.
+window.slOrderPayCheck = async function(orderId, quiet){
+  const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return 0;
+  let changed = 0;
+  for (const p of slOrderPayments(o)) {
+    if (p.status === 'paid' || p.status === 'void') continue;
+    try {
+      if (p.method === 'card' && p.sessionId) {
+        const r = await prStripe('status', { id: p.sessionId });
+        if (r && !r.error && r.payment_status === 'paid') {
+          p.status = 'paid'; p.paidAt = new Date().toISOString(); changed++;
+        }
+      } else if (p.invoiceId) {
+        const r = await prStripe('invoice_status', { id: p.invoiceId });
+        if (r && !r.error) {
+          const was = p.status;
+          if (r.status === 'paid') { p.status = 'paid'; p.paidAt = p.paidAt || new Date().toISOString(); }
+          else if (r.status === 'void') p.status = 'void';
+          else if (r.status === 'uncollectible') p.status = 'uncollectible';
+          if (r.amount_paid != null) p.amountPaid = r.amount_paid;
+          if (r.amount_remaining != null) p.amountRemaining = r.amount_remaining;
+          if (r.hosted_invoice_url) p.url = r.hosted_invoice_url;
+          if (was !== p.status) changed++;
+        }
+      }
+    } catch(e){}
+    p.checkedAt = new Date().toISOString();
+  }
+  if (changed) {
+    // The order's own status follows the money: everything paid → paid.
+    const sched = slTermsSchedule(o.terms, o.total);
+    const allPaid = sched.length && sched.every(l => { const p = slOrderPayFor(o, l.key); return p && p.status === 'paid'; });
+    if (allPaid && o.status !== 'cancelled') o.status = 'paid';
+    dbSet('slOrders', STATE.slOrders); save();
+    try { logActivity('Order ' + o.id + ' payment status updated from Stripe'); } catch(e){}
+    if (!quiet) showToast('✓ Payment status updated', 'success');
+    try { if (document.getElementById('sl-ord-modal')) slOpenOrderDetail(orderId); } catch(e){}
+  } else if (!quiet) showToast('No change — Stripe says the same as before', 'info');
+  return changed;
+};
+
 // Wholesale invoicing through the same Stripe rail PR pulls already use.
+// Kept for older call sites: bill the first instalment the terms describe.
 window.slSendOrderInvoice = async function(orderId) {
+  const o = (STATE.slOrders||[]).find(x => x.id === orderId);
+  if (o) { const first = slTermsSchedule(o.terms, o.total)[0]; if (first) return slOrderInvoice(orderId, first.key); }
+  return slSendOrderInvoiceLegacy(orderId);
+};
+window.slSendOrderInvoiceLegacy = async function(orderId) {
   const o = (STATE.slOrders||[]).find(x => x.id === orderId);
   if (!o) return;
   const buyer = (STATE.slBuyers||[]).find(x => String(x.name||'').trim().toLowerCase() === String(o.account||'').trim().toLowerCase());

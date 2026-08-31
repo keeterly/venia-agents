@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 406._
+_Last reviewed at Build 407._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1871,3 +1871,50 @@ for the pull sheet. So the wholesale side is a schedule derived from the terms
 (deposit now, balance before ship) driving the same invoice machinery, plus the
 same reconcile loop that Build 378 gave pulls so an order says *paid* without
 anyone checking Stripe.
+
+
+## Build 407 — the terms are the payment schedule
+*"Need to be able to capture the order based on the terms… same kind of
+processing as the Pull Sheet but set up for wholesale."* — both ways.
+
+**The terms were decoration.** An order carrying *"30% deposit / 70% before
+ship"* billed `amount: o.total, days: 14` — the whole $2,730 due in a fortnight,
+every time, whatever the buyer had agreed to. `SL_TERMS` is a closed list, so
+reading it is a lookup, not a guess:
+
+| terms | schedule |
+|---|---|
+| 30% / 70% | Deposit 30% on order (7d) · Balance 70% before ship (30d) |
+| 50% / 50% | the same, split evenly |
+| Proforma | in full, before ship |
+| Net 30 / 60 / 90 | in full, due in N days |
+| 2/10 Net 30 | in full at 30 days, carrying the 2% early-payment note |
+| Credit card on file | in full, on order |
+| *none set* | once, in full — **and it says so** rather than inventing a split |
+
+**The balance is the remainder, not its own percentage.** Rounding both shares
+independently leaves them a cent off the order at awkward totals, and an invoice
+pair that does not reconcile is an argument with a buyer waiting to happen.
+Checked at 0.05, 1.01, 333.33, 999.99 and 12,345.67.
+
+**Both ways to collect, per instalment:**
+- **Invoice** — a real Stripe invoice, emailed with a pay link, on that
+  instalment's own due window
+- **Card link** — a Stripe Checkout link, copied to the clipboard to send. The
+  buyer enters the card; VENIA never holds card details, the same rail the pull
+  sheet uses.
+
+`order.payments[]` tracks each instalment separately, and **↻ Check Stripe**
+reconciles every one — the pull-sheet idea from Build 378: an order should say
+*paid* without anyone opening Stripe to find out. When every instalment is paid
+the order's own status follows the money.
+
+**Two bugs fixed on the way:**
+- Every wholesale invoice was going to Stripe **labelled as a stylist pull** —
+  the server has supported `kind:'wholesale'` all along and the caller never
+  passed it.
+- An order invoiced before this build keeps that invoice, folded in as its first
+  instalment, so nothing is lost or billed twice.
+
+`gauntlet/wholesalepay.js` — 22 assertions against a stubbed Stripe that records
+what the app asks for, so it checks our calls rather than a mock's behaviour.
