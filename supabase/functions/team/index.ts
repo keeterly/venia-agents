@@ -23,6 +23,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 //   {action:'grant', email, modules[], role} -> add/replace module grants
 //   {action:'revoke', email, module}         -> take one module away
 //   {action:'remove', email}                 -> take every module away
+//   {action:'setagent', email, canWrite}     -> may Enigma change things for them
 //   {action:'setpw', email, password}        -> create the login, or reset it
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -43,6 +44,8 @@ const FOUNDERS = ["keeter@veniacollection.com", "christine@veniacollection.com"]
 const MODULES = ["home", "product", "growth", "sales", "money", "brainstorm", "settings"];
 // 'legacy' is deliberately absent: it holds a pre-module store spanning sales,
 // growth and product in one string, so it is founders-only and not grantable.
+// 'catalog' is absent too, for the opposite reason: it is the cost-stripped
+// line, implied by ANY grant, and never something to tick on its own.
 const ROLES = ["owner", "editor", "viewer"];
 
 Deno.serve(async (req: Request) => {
@@ -91,13 +94,20 @@ Deno.serve(async (req: Request) => {
         .select("email, module, role, created_at").order("email").order("module");
       if (error) return json({ error: "could not read members" }, 500);
       const accounts = await logins();
+      // May the assistant make changes on their behalf? Absent row = yes, which
+      // grants nothing: every write still passes their module grant, their role
+      // and RLS. The switch can only ever take away.
+      const { data: pol } = await admin.from("venia_agent_policy").select("email, can_write");
+      const agentOff = new Set((pol || []).filter((r) => r.can_write === false)
+        .map((r) => String(r.email).toLowerCase()));
       const people: Record<string, Record<string, unknown>> = {};
       for (const r of rows || []) {
         const e = String(r.email).toLowerCase();
         if (!people[e]) {
           const a = accounts.get(e);
           people[e] = { email: e, founder: FOUNDERS.includes(e), modules: {},
-                        hasLogin: !!a, lastSignIn: a?.last || null };
+                        hasLogin: !!a, lastSignIn: a?.last || null,
+                        agentWrite: FOUNDERS.includes(e) ? true : !agentOff.has(e) };
         }
         (people[e].modules as Record<string, string>)[String(r.module)] = String(r.role);
       }
@@ -120,6 +130,20 @@ Deno.serve(async (req: Request) => {
       // about what someone can reach rather than an append-only pile.
       await admin.from("venia_members").delete().eq("email", email).not("module", "in", `(${mods.join(",")})`);
       return json({ ok: true, modules: mods });
+    }
+
+    // Flip the one agent switch. Founders are excluded on purpose: a founder
+    // turning their own assistant off here would be indistinguishable, at the
+    // point of use, from the whole permission system being broken.
+    if (action === "setagent") {
+      if (!okEmail(email)) return json({ error: "bad request" }, 400);
+      if (FOUNDERS.includes(email)) return json({ error: "a founder's assistant is always on" }, 400);
+      const canWrite = b.canWrite !== false;
+      const { error } = await admin.from("venia_agent_policy").upsert(
+        { email, can_write: canWrite, updated_by: founder, updated_at: new Date().toISOString() },
+        { onConflict: "email" });
+      if (error) return json({ error: "could not save that" }, 500);
+      return json({ ok: true, canWrite });
     }
 
     if (action === "revoke") {
