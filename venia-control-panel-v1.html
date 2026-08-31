@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '425';
+  const BUILD = '426';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6099,14 +6099,26 @@ function moduleOfKey(key){
 }
 window.moduleOfSpace = moduleOfSpace;
 window.moduleOfKey = moduleOfKey;
-// Which module rows a person may WRITE. `mine` is window.VENIA_MY_MODULES:
-// null means a founder — and also every uncertain case, which shows everything
-// on purpose. A projection is written by whoever owns what it projects FROM.
-function moduleWritable(id, mine){
-  if (!mine) return true;
-  if (MODULES[id].foundersOnly) return false;
+// Which module rows a person may WRITE.
+//
+// `roles` is window.VENIA_MY_ROLES — what they HOLD — and not
+// window.VENIA_MY_MODULES, which answers a different question: what the nav
+// should hide. veniaLoadAccess deliberately NULLS the second one for anyone
+// holding every module ("hide nothing"), so reading it here made a member
+// granted all seven look exactly like a founder, and the push then sent
+// `legacy` too. RLS refuses that row, the upsert is one statement, and the
+// whole batch dies — every edit lost, silently. Null still means founder or
+// not-yet-known, and both write everything.
+//
+// A projection is written by whoever owns what it projects FROM. There is no
+// special case for the founders-only legacy store: the founders hold it as
+// owner in venia_members and nobody else has a row at all, so the role IS the
+// answer, and a special case could only ever disagree with it.
+function moduleWritable(id, roles){
+  const r = (roles === undefined) ? window.VENIA_MY_ROLES : roles;
+  if (!r) return true;
   const m = MODULES[id].projection || id;
-  return mine[m] === 'owner' || mine[m] === 'editor';
+  return r[m] === 'owner' || r[m] === 'editor';
 }
 window.moduleWritable = moduleWritable;
 
@@ -6141,7 +6153,7 @@ function moduleSplit(snap){
   // the Product row would have been enough. So this fires only for someone who
   // could not write Product anyway, which is exactly who it is for.
   if (window.VENIA_STYLES_PROJECTED
-      && !moduleWritable('product', window.VENIA_MY_MODULES)
+      && !moduleWritable('product')
       && out.product) delete out.product.styles;
   return out;
 }
@@ -26098,6 +26110,9 @@ const AGENT_NO_ACTIONS = '\n\nYou cannot change records for this user: they have
   + 'If a change genuinely needs to be made in the app, say in one line what should change and that a founder can make it or grant access.';
 
 function agentActionSpec(key) {
+  // Every spec function gates ITSELF, so there is no call site that can forget.
+  const owner = { sl: 'sales', plm: 'product', pr: 'growth' }[key];
+  if (owner && !agentCanWriteModule(owner)) return '';
   if (key === 'sl') {
     return '\n\nLEAD ACQUISITION — you are VENIA\'s wholesale scout as well as its sales agent.\n'
       + 'When the user asks you to find, suggest, research, or vet wholesale stockists / accounts, propose REAL, currently-operating stores that genuinely fit VENIA (dark, architectural, elevated design; premium price point; concept stores, avant-garde boutiques, and forward department / online retailers). For each store give a one-line fit rationale and a tier — "dream", "strong", or "reach" — and, when you know it, the city and store type.\n'
@@ -26156,6 +26171,7 @@ function agentActionSpec(key) {
 // Pricing is margin work, so it belongs to the CFO as much as to PLM. Defined
 // once and handed to both — a second copy is how two specs drift apart.
 function agentPricingActionSpec() {
+  if (!agentCanWriteModule('product')) return '';
   return '\n\nACTION — price_from_retail: fill in WHOLESALE and COGS by working BACKWARDS from each style\'s retail price. This is how a line is costed in practice — the retail is the given, the affordable cost is the question — and it is the only action that computes a DIFFERENT value per style, so use it whenever the request is "set wholesale/COGS for the whole season from retail". update_styles cannot do this: it applies one value to many styles.\n'
     + '```venia:action\n'
     + '{"type":"price_from_retail","match":{"season":"SS27"},"retailMargin":60,"wsMargin":60}\n'
@@ -26205,7 +26221,11 @@ function agentScopedSpec(key) {
   // a non-member must not be offered. The handoff always survives — passing
   // work to someone who CAN do it is the right answer to being unable to.
   const body = map[key]();
-  return (body || AGENT_NO_ACTIONS) + agentHandoffSpec(key);
+  // No handoff when there are no actions. The handoff spec IS a venia:action
+  // block, and appending it to a notice that says "never emit a venia:action
+  // block" is a prompt arguing with itself — and handing work to a colleague
+  // whose agent has exactly the same permissions achieves nothing anyway.
+  return body ? body + agentHandoffSpec(key) : AGENT_NO_ACTIONS;
 }
 // Passing work along. Without this, scoping an agent would just make it say no.
 function agentHandoffSpec(key) {
@@ -26337,6 +26357,7 @@ function agentOpsActionSpec() { return agentSpecChunks([
 // lists, briefs the Brand agent wrote had nowhere to live. save_brand_doc
 // persists them into the synced Brand Library (STATE.brandDocs).
 function agentBrandDocSpec() {
+  if (!agentCanWriteModule('growth')) return '';
   return '\n\nACTION — save_brand_doc: persist brand/creative output into the Brand Library so it outlives this chat. Use whenever you produce brand content worth keeping — guidelines, a manifesto draft, a shot list, a mood-board or campaign brief, a template — or the user says save/keep it.\n'
     + '```venia:action\n'
     + '{"type":"save_brand_doc","title":"Short document name","kind":"guideline","body":"The full document text — markdown formatting is fine."}\n'
@@ -26364,6 +26385,7 @@ function agentWatchedPullsHint() {
 // the originating pull when it matches. Works with an attached photo (vision
 // confirm against the styles that are out) or a found press hit.
 function agentPRRadarSpec() {
+  if (!agentCanWriteModule('growth')) return '';
   return '\n\nPR RADAR — turn placements into logged coverage.\n'
     + 'When the user shows you (or you find) that VENIA was worn, featured, credited, or mentioned somewhere — a press hit, a photo of an artist in a VENIA piece, an editorial credit — log it. If a PHOTO is attached, first confirm the garment against the styles listed under SAMPLES OUT (and the PLM styles); only log what you can actually see or verify. Do BOTH:\n'
     + '1) One short sentence naming the placement.\n'
@@ -26463,6 +26485,7 @@ function veniaOpsContext(){
 // Capture into Brainstorm from chat. The founder can say "add this to Brainstorm
 // as a note / a goal" and Enigma parks it — instead of asking "what's the content?".
 function agentBrainstormActionSpec() {
+  if (!agentCanWriteModule('brainstorm')) return '';
   return '\n\nCAPTURE TO BRAINSTORM — the user\'s scratchpad for ideas, notes, and goals.\n'
     + 'When the user asks you to add / capture / save / jot / note / park / remember something "to Brainstorm" (or clearly wants a thought stored rather than acted on), do BOTH:\n'
     + '1) One short sentence confirming what you captured.\n'
@@ -26476,6 +26499,7 @@ function agentBrainstormActionSpec() {
 // Vision: parse an attached photo. Only present as guidance — the specific write
 // (add_material / apply_style_specs / add_vendors) is chosen by what the photo is.
 function agentImageActionSpec() {
+  if (!agentCanWriteModule('product')) return '';
   return '\n\nWHEN THE USER ATTACHES A PHOTO — read it and act on what it shows:\n'
     + '• A FABRIC SWATCH / material → estimate what you can SEE (fiber/content, colour, weave, approx. width) and file it with the add_material action below; if you can identify the mill, also propose it as a "Fabric Supplier" via add_vendors. Never invent a supplier, price, or content you cannot determine — leave those "".\n'
     + '• A PATTERN CARD / SPEC SHEET / tech drawing → read the fields and fill a style with the apply_style_specs action below. Ask which style if it is not obvious.\n'
@@ -36402,12 +36426,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (window.VENIA_SHARE || window.VENIA_AGENT) return;      // other doors entirely
       var u = window.veniaAuthUser;
       var c = window.__sbClient;
-      if (!u || !u.email || !c) { window.VENIA_MY_MODULES = null; apply(); return; }
+      if (!u || !u.email || !c) { window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); return; }
       var em = String(u.email).toLowerCase();
       var r = await c.from('venia_members').select('module, role').eq('email', em);
       // An error, or a workspace with no membership rows at all, means we do
       // not know — and not knowing must never hide anything.
-      if (r.error || !r.data || !r.data.length) { window.VENIA_MY_MODULES = null; apply(); return; }
+      if (r.error || !r.data || !r.data.length) { window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); return; }
       var mine = {};
       r.data.forEach(function(row){ mine[String(row.module)] = String(row.role || 'editor'); });
       // Someone holding every grantable module is running the whole workspace;
@@ -36426,7 +36450,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         window.VENIA_AGENT_WRITE = (pol && pol.data && pol.data.can_write === false) ? false : null;
       } catch(e){ window.VENIA_AGENT_WRITE = null; }
       apply();
-    } catch(e){ window.VENIA_MY_MODULES = null; apply(); }
+    } catch(e){ window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); }
   };
 })();
 
@@ -36736,11 +36760,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // ONLY the modules this person can actually write. The upsert is ONE
       // statement: a single row RLS refuses takes the whole batch down with it,
       // so a Sales-only member sending all nine rows would save nothing at all
-      // — every edit lost, silently, forever. A founder (VENIA_MY_MODULES null,
-      // which is also every uncertain case) still sends everything.
-      var mine = window.VENIA_MY_MODULES;
+      // — every edit lost, silently, forever. A founder (no roles loaded, or
+      // owner of everything) still sends everything.
+      var roles = window.VENIA_MY_ROLES;
+      // Who writes the whole-workspace blob below: RLS says founders only. The
+      // legacy store is granted to nobody else BY CONSTRUCTION — the team
+      // screen cannot offer it and the edge function's allowlist omits it — so
+      // holding it is the client-side answer to "is this a founder". If that
+      // ever stopped being true the cost is a refused blob write, not a leak.
+      var writesBlob = moduleWritable('legacy', roles);
       var modErr = null;
-      var ids = Object.keys(parts).filter(function(id){ return moduleWritable(id, mine); });
+      var ids = Object.keys(parts).filter(function(id){ return moduleWritable(id, roles); });
       try {
         var modRes = ids.length ? await c.from('venia_module_data').upsert(
           ids.map(function(id){
@@ -36767,7 +36797,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // refuses them — which means, without this, a Sales member would fail
       // every push and get an auth toast on every keystroke. Skip it, and let
       // the module rows be the write that counts.
-      var res = mine
+      var res = !writesBlob
         ? (modErr ? { error: { message: modErr } } : { skipped: true })
         : await c.from('venia_workspace').upsert({
             id: WS_ID, data: toPush, updated_by: clientId(),
@@ -36787,7 +36817,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         if (adopted) { applySnapshot(toPush); setBase(snapshot()); }
         else { setBase(localSnap); }
         window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
-          via: mine ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
+          via: !writesBlob ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
       } else {
         syncFail('push', res.error.message || res.error.code);
       }
