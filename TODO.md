@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 401._
+_Last reviewed at Build 402._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1725,3 +1725,32 @@ Footers are pinned now, for all eight modals, with a safe-area pad so they clear
 the home indicator when a modal runs full height on a phone. `gauntlet/matmodal.js`
 checks Save *and* Cancel are on screen on open and still there halfway down the
 form, at three viewports; six of its assertions fail against the shipped build.
+
+
+## Build 402 — the same edit, whichever door you came in by
+*"A lot of this should reflect the info that's on the Styles sheet, but there's
+a dissonance right now."*
+
+Build 399 made the rule in the pricing popover: a price you set is a fact, a
+margin describes two prices. **`saveStyle` never got the memo.** It wrote
+`cogs` / `wholesale` / `retail` straight through and never touched
+`wsMarginTarget` or `marginTarget` — so:
+
+- Change COGS in the **pricing popover** → the margins re-read from the prices.
+- Change the same COGS in **Edit Style** → the margins stay where they were.
+
+The Styles sheet then showed *"Your % 60 · Rtl % 60"* beside prices that produce
+76%. Same style, same number, two answers depending on which door you used.
+
+`pxReadMargins(st)` is now the single implementation, called from `pxSet` and
+from both of `saveStyle`'s branches (existing and new styles). And the Edit
+Style modal shows the two margins under COSTING, live as you type — read-only on
+purpose: they are what the three prices produce, not a fourth number to keep in
+step by hand.
+
+`gauntlet/stylesync.js` walks one edit through both doors and checks they land
+in the same place. Three of its seven assertions fail against the shipped build.
+
+**Worth knowing (not a bug):** fabric, colourways, sizes and base size *are* in
+Edit Style — on the Construction and Pattern tabs, not Identity. Only the
+margins were genuinely absent.

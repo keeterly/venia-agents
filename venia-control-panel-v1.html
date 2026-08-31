@@ -1933,7 +1933,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '401';
+  const BUILD = '402';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4439,13 +4439,17 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="form-section sm-adv-section">
             <div class="form-section-title">Costing</div>
             <div class="form-grid form-grid-3">
-              <div class="fg"><label class="fl" for="sm-cogs">COGS (USD)</label><input class="fi fi-mono" id="sm-cogs" type="number" placeholder="0.00" oninput="updateDyeCost()"></div>
-              <div class="fg"><label class="fl" for="sm-ws">Wholesale Price</label><input class="fi fi-mono" id="sm-ws" type="number" placeholder="0.00"></div>
-              <div class="fg"><label class="fl" for="sm-retail">Retail Price (USD)</label><input class="fi fi-mono" id="sm-retail" type="number" placeholder="0.00"></div>
+              <div class="fg"><label class="fl" for="sm-cogs">COGS (USD)</label><input class="fi fi-mono" id="sm-cogs" type="number" placeholder="0.00" oninput="updateDyeCost();smMargins()"></div>
+              <div class="fg"><label class="fl" for="sm-ws">Wholesale Price</label><input class="fi fi-mono" id="sm-ws" type="number" placeholder="0.00" oninput="smMargins()"></div>
+              <div class="fg"><label class="fl" for="sm-retail">Retail Price (USD)</label><input class="fi fi-mono" id="sm-retail" type="number" placeholder="0.00" oninput="smMargins()"></div>
               <div class="fg"><label class="fl" for="sm-duty">Duty / Import Rate (%)</label><input class="fi fi-mono" id="sm-duty" type="number" placeholder="0" step="0.1" oninput="updateDyeCost()"></div>
               <div class="fg"><label class="fl" for="sm-freight">Freight Cost (per unit)</label><input class="fi fi-mono" id="sm-freight" type="number" placeholder="0.00" oninput="updateDyeCost()"></div>
               <div class="fg"><label class="fl" for="sm-landed">Landed Cost (auto)</label><input class="fi fi-mono" id="sm-landed" placeholder="Calculated" readonly style="color:var(--gold)"></div>
             </div>
+            <!-- The two margins the Styles sheet shows. Read-only on purpose:
+                 they are what these three prices produce, not a fourth number
+                 to keep in step by hand. -->
+            <div id="sm-margins" style="font-size:10px;color:var(--muted);line-height:1.7;margin-top:2px"></div>
           </div>
           <div class="form-section sm-adv-section" style="margin-bottom:0">
             <div class="form-section-title">Dye & Finishing</div>
@@ -7106,6 +7110,19 @@ function pxMarkup(m){ const d = 1 - pxClamp(m)/100; return d > 0 ? (1/d) : 0; }
 function pxMarginOf(price, cost){
   const p = Number(price||0), c = Number(cost||0);
   return p > 0 ? pxClamp(Math.round(((p - c) / p) * 100)) : 0;
+}
+// Re-read BOTH margins from whatever the prices now are. Build 399 made this
+// the rule in the pricing popover — a price you set is a fact, a margin is a
+// description of two prices — but saveStyle wrote cogs/wholesale/retail
+// straight through and never touched the margins. So the same edit followed
+// different rules depending on which door you came in by, and the Styles sheet
+// showed "Your % 60 · Rtl % 60" beside prices that implied something else
+// entirely. One rule, one implementation, used by both.
+function pxReadMargins(st){
+  if (!st) return st;
+  if (Number(st.cogs) > 0 && Number(st.wholesale) > 0) st.wsMarginTarget = pxMarginOf(st.wholesale, st.cogs);
+  if (Number(st.wholesale) > 0 && Number(st.retail) > 0) st.marginTarget = pxMarginOf(st.retail, st.wholesale);
+  return st;
 }
 // THE MARGIN THE PRICES ACTUALLY PRODUCE. pxMargin/pxWsMargin above return the
 // stored TARGET, which is an input to the pricing math and nothing else. It
@@ -11618,9 +11635,23 @@ function openStyleModal(id=null) {
     if (seasonSel) { const d = smDefaultSeason(); if ([...seasonSel.options].some(o=>o.value===d)) seasonSel.value = d; }
     smPreviewSid();
   }
+  try { smMargins(); } catch(e){}   // show what the prices produce, on open as well as on edit
   openModal('style-modal');
 }
 
+// Live readout of what the three prices produce, so the modal and the Styles
+// sheet never disagree about the same style.
+window.smMargins = function(){
+  const el = document.getElementById('sm-margins'); if (!el) return;
+  const num = id => Number((document.getElementById(id)||{}).value) || 0;
+  const c = num('sm-cogs'), w = num('sm-ws'), r = num('sm-retail');
+  const bits = [];
+  if (c > 0 && w > 0) bits.push('You keep <b style="color:var(--ink)">' + pxMarginOf(w, c) + '%</b> over COGS');
+  if (w > 0 && r > 0) bits.push('the boutique keeps <b style="color:var(--ink)">' + pxMarginOf(r, w) + '%</b>');
+  el.innerHTML = bits.length
+    ? bits.join(' · ') + ' — these are what the prices above produce, and they are what the Styles sheet shows.'
+    : '';
+};
 function saveStyle() {
   const name = document.getElementById('sm-name').value.trim().toUpperCase();
   if (!name) { toast('Style name required'); return; }
@@ -11653,6 +11684,9 @@ function saveStyle() {
     retail: parseFloat(g('sm-retail'))||0,
     wholesale: parseFloat(g('sm-ws'))||0,
     cogs, freight, duty, dyeCost, landed: parseFloat(landed),
+    // Filled in below by pxReadMargins, so the sheet's Your % / Rtl % describe
+    // the prices this form just saved rather than a stale target.
+    wsMarginTarget: undefined, marginTarget: undefined,
     fabric: g('sm-fabric'), fabric2: g('sm-fabric2'),
     colors: g('sm-colors'), sizes: g('sm-sizes'),
     sample: g('sm-sample'), vendor: g('sm-vendor'),
@@ -11690,6 +11724,7 @@ function saveStyle() {
     if (idx!==-1) {
       const prevSample = STATE.styles[idx].sample;
       STATE.styles[idx] = {...STATE.styles[idx],...data};
+      pxReadMargins(STATE.styles[idx]);   // one rule, whichever door you came in by
       // The badge is derived from the round log everywhere else — a manual
       // change here must land IN the log, or the badge shows a round that
       // never happened (and the boot reconcile would revert it anyway).
@@ -11729,6 +11764,7 @@ function saveStyle() {
     // Quick-create starts minimal — seed a default size run so the style isn't an
     // empty shell; SKUs generate as soon as a colorway is added. All editable.
     if (!data.sizes) data.sizes = 'XS,S,M,L,XL';
+    pxReadMargins(data);
     STATE.styles.unshift(data);
     logActivity(`New style created: ${name} (${data.styleId})`);
     toast(name+' created');
