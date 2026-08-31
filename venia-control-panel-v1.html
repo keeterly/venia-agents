@@ -15,7 +15,19 @@
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
 <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
 <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@300;400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<!-- This stylesheet is RENDER-BLOCKING and that is deliberate: without the
+     @font-face rules in hand the browser paints in a fallback and then reflows
+     the whole page when the real faces land. So instead of unblocking it, make
+     it cheap — preconnect opens the DNS/TCP/TLS to both font hosts while the
+     HTML is still streaming, which is most of what that request costs. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<!-- display=optional, not swap. swap means: paint in Helvetica now and re-flow
+     the entire page when Archivo arrives — the flash of wrong type on refresh.
+     optional gives the font ~100ms to be ready (it always is once cached, which
+     for a daily-use PWA is every load after the first) and otherwise keeps the
+     fallback for that load and NEVER swaps. No reflow, ever. -->
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@300;400;500;600;700;800&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&display=optional" rel="stylesheet">
 <style>
 
 /* ── TECH PACK measurement cells ── */
@@ -1912,10 +1924,543 @@ body{padding-top:44px;box-sizing:border-box;}
   .kanban-col{min-width:unset;width:100%}
 }
 
+
+/* ── ENI & NIGMA (moved here at Build 414) ──────────────────────────────
+   This lived in a <style> tag ~2.7MB into the document, after the markup it
+   styles. Until the parser reached it, #sk-dock was a plain visible <div> of
+   raw buttons and a textarea sitting in normal flow at the foot of the page —
+   the unstyled block you saw on refresh. Kept LAST inside the head sheet so
+   its position in the cascade is exactly what it was. */
+#sk-launch{position:fixed;right:22px;bottom:22px;z-index:890;height:48px;padding:0 18px;border-radius:0;
+  background:rgba(10,10,10,.74);color:#fff;border:1px solid #2a2a2a;cursor:pointer;display:flex;align-items:center;gap:9px;
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
+  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
+  box-shadow:0 6px 24px rgba(0,0,0,.28);transition:transform .15s,box-shadow .15s}
+/* No backdrop-filter support (older WebViews): fall back to a solid pill so text stays legible. */
+@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){ #sk-launch{background:#0a0a0a} }
+#sk-launch:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.36)}
+#sk-launch.hidden{display:none}
+/* Unread. The launcher is the only thing on screen when the dock is shut, so
+   the count goes there — a filled counter, not a bare dot, because "Eni
+   replied" and "Eni replied three times" are different situations. */
+.sk-unread{
+  position:absolute;top:-7px;right:-7px;min-width:20px;height:20px;padding:0 5px;
+  border-radius:999px;background:#fff;color:#0a0a0a;
+  font-family:'DM Mono',monospace;font-size:11px;font-weight:700;line-height:20px;text-align:center;
+  box-shadow:0 0 0 2px #0a0a0a;pointer-events:none;
+}
+/* One pulse on arrival, then still — a badge that never stops moving is a
+   badge you stop seeing. */
+#sk-launch.sk-has-unread{animation:skPulse .5s ease-out 2}
+@keyframes skPulse{0%{transform:translateY(0)}35%{transform:translateY(-3px)}100%{transform:translateY(0)}}
+@media (prefers-reduced-motion:reduce){ #sk-launch.sk-has-unread{animation:none} }
+/* And which of the two it was, before you open it. */
+.sk-agent-tab.sk-tab-unread::after{
+  content:'';display:inline-block;width:6px;height:6px;border-radius:50%;
+  background:#fff;margin-left:6px;vertical-align:middle;
+}
+.sk-launch-mark{font-size:16px;display:flex;align-items:center}
+/* Brainstorm FAB — mobile only (desktop has the top-bar pill). Stacks above
+   the Eni launcher; light so the two circles read as different tools. */
+/* A fixed 392×624 panel is a letterbox on a 1440 screen: long answers scroll in
+   a thin column and a long question turns the input into a tiny scroll box.
+   It now takes what the viewport can spare, within limits that keep it a dock
+   rather than a window. */
+#sk-dock{position:fixed;right:22px;bottom:22px;z-index:900;
+  width:clamp(392px, 34vw, 620px);max-width:calc(100vw - 24px);
+  height:min(880px, calc(100vh - 64px));max-height:calc(100vh - 64px);
+  background:#0a0a0a;color:#f2f2f2;border:1px solid #232323;border-radius:0;
+  display:none;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.45);
+  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif}
+#sk-dock.open{display:flex;animation:skIn .2s ease-out}
+@keyframes skIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.sk-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #1c1c1c}
+.sk-agents{display:flex;gap:3px;background:#161616;border:1px solid #242424;border-radius:0;padding:3px}
+.sk-agent-tab{background:none;border:none;color:#888;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
+  padding:5px 15px;border-radius:0;cursor:pointer;transition:all .15s}
+.sk-agent-tab.active{background:#fff;color:#0a0a0a}
+.sk-head-actions{display:flex;gap:6px}
+.sk-icon-btn{background:none;border:1px solid #2a2a2a;color:#aaa;font-size:10px;letter-spacing:1px;text-transform:uppercase;
+  padding:5px 9px;border-radius:0;cursor:pointer}
+.sk-icon-btn:hover{border-color:#444;color:#fff}
+.sk-context{padding:9px 16px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:#6a6a6a;
+  border-bottom:1px solid #151515;display:flex;align-items:center;gap:7px}
+.sk-context::before{content:'●';color:#3ba776;font-size:10px}
+.sk-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:13px}
+.sk-msg{max-width:90%;font-size:13px;line-height:1.55}
+.sk-msg.user{align-self:flex-end;background:#fff;color:#0a0a0a;padding:9px 13px;border-radius:0}
+.sk-msg.agent{align-self:flex-start;width:100%}
+.sk-msg-who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#777;margin-bottom:5px;font-weight:700}
+.sk-msg-body{background:#161616;border:1px solid #232323;padding:10px 13px;border-radius:0;color:#e8e8e8}
+.sk-msg-body strong{color:#fff}
+.sk-think{display:inline-flex;gap:4px;padding:13px 14px;background:#161616;border:1px solid #232323;border-radius:0}
+.sk-think span{width:6px;height:6px;border-radius:50%;background:#666;animation:skBlink 1.2s infinite}
+.sk-think span:nth-child(2){animation-delay:.2s}.sk-think span:nth-child(3){animation-delay:.4s}
+@keyframes skBlink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+/* "Working on…" state — a labelled, shimmering progress line that shows what
+   the agent is doing (Sidekick-style), instead of anonymous blinking dots. */
+.sk-work{display:inline-block;min-width:190px;max-width:100%;padding:12px 14px;background:#161616;border:1px solid #232323;border-radius:0}
+.sk-work-bar{height:2px;background:#2b2b2b;overflow:hidden;position:relative;margin-bottom:9px}
+.sk-work-bar i{position:absolute;top:0;height:100%;width:42%;left:-42%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:skWork 1.15s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes skWork{0%{left:-42%}100%{left:100%}}
+.sk-work-label{font-size:11px;color:#c4c4c4;letter-spacing:.3px;line-height:1.4;transition:opacity .18s}
+@media (prefers-reduced-motion: reduce){.sk-work-bar i{animation:none;left:0;width:100%;opacity:.35}.sk-work-label{transition:none}}
+.sk-suggest{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
+.sk-chip{background:#151515;border:1px solid #262626;color:#bbb;font-size:10px;padding:6px 11px;border-radius:0;
+  cursor:pointer;transition:all .15s;text-align:left}
+.sk-chip:hover{border-color:#555;color:#fff}
+.sk-input{display:flex;gap:8px;align-items:flex-end;padding:12px 14px;border-top:1px solid #1c1c1c}
+/* The attach buttons are wrapped only so a narrow dock can move them as a unit;
+   while there is room the wrapper dissolves and the row is what it always was. */
+.sk-tools{display:contents}
+
+/* THE COMPOSER IS SIZED BY THE DOCK, NOT THE SCREEN. Three 38px attach buttons
+   and a send button leave the field under half the width of a ~390px dock — a
+   one-line question wrapped to six lines and the box swallowed the
+   conversation. That dock width happens on a phone (full screen) AND on a
+   tablet or narrow window, where the floating panel bottoms out at 392px, so a
+   screen-width media query fixed the phone and left the tablet broken. Below
+   430px of DOCK the field takes the top row at full width and the buttons sit
+   under it, still one tap each. */
+#sk-dock{container-type:inline-size}
+@container (max-width:430px){
+  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
+             gap:8px; align-items:center; }
+  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
+  #sk-field{ grid-area:field; width:100%; }
+  .sk-send{ grid-area:send; }
+}
+/* 120px was about four lines — a paragraph-length question became a scroll box
+   with its own beginning and end hidden. Kept in step with SK_FIELD_MAX. */
+#sk-field{flex:1;min-width:0;background:#151515;border:1px solid #2a2a2a;border-radius:0;color:#fff;font-size:13px;font-family:inherit;
+  padding:10px 12px;outline:none;resize:none;max-height:300px;line-height:1.45}
+#sk-field:focus{border-color:#555}
+#sk-field::placeholder{color:#666}
+.sk-send{background:#fff;color:#0a0a0a;border:none;width:38px;height:38px;border-radius:0;font-size:16px;cursor:pointer;flex-shrink:0}
+.sk-send:hover{background:#ddd}
+.sk-cam{background:#151515;color:#bbb;border:1px solid #2a2a2a;width:38px;height:38px;border-radius:0;font-size:17px;cursor:pointer;flex-shrink:0;line-height:1}
+.sk-cam:hover{color:#fff;border-color:#555}
+.sk-photo-chip{display:flex;align-items:center;gap:9px;padding:8px 14px 0}
+.sk-photo-chip img{width:44px;height:44px;object-fit:cover;border-radius:0;border:1px solid #2a2a2a}
+.sk-photo-chip .sk-photo-x{background:none;border:none;color:#888;font-size:15px;cursor:pointer;padding:2px 6px}
+.sk-photo-chip .sk-photo-x:hover{color:#fff}
+.sk-photo-chip .sk-photo-label{font-size:11px;color:var(--muted)}
+.sk-msg .sk-msg-photo{max-width:150px;max-height:150px;border-radius:0;border:1px solid rgba(255,255,255,.14);margin-top:6px;display:block}
+.sk-hero{display:flex;align-items:center;gap:var(--sp-3);background:#0a0a0a;border:1px solid #1c1c1c;border-radius:var(--r-lg);
+  padding:var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);margin:var(--sp-5) 0 var(--sp-6);cursor:text;
+  box-shadow:var(--shadow-md);transition:border-color .18s var(--ease-out),box-shadow .18s var(--ease-out)}
+.sk-hero:hover{border-color:#333}
+.sk-hero:focus-within{border-color:#4a4a4a;box-shadow:0 0 0 3px rgba(255,255,255,.08),var(--shadow-md)}
+.sk-hero-mark{font-size:18px;color:#fff;flex-shrink:0}
+.sk-hero-input{flex:1;background:none;border:none;color:#f2f2f2;font-size:15px;font-family:inherit;outline:none}
+.sk-hero-input::placeholder{color:#8a8a8a}
+.sk-hero-go{background:#fff;color:#0a0a0a;border:none;width:36px;height:36px;border-radius:var(--r-pill);font-size:15px;
+  cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:transform .15s var(--ease-out)}
+.sk-hero-go:active{transform:scale(.92)}
+@media(max-width:560px){
+  #sk-dock{right:0;bottom:0;width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border-radius:0;border:none}
+  #sk-launch{right:16px;bottom:16px}
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MOBILE REFINEMENT + PWA SAFE-AREA  (consolidated; last block = wins cascade)
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── iOS notch / home-indicator safe areas on fixed chrome ── */
+body{ padding-top:calc(44px + var(--sat)); }
+.cp-global-bar{ padding-top:var(--sat); height:calc(44px + var(--sat)); padding-left:calc(14px + var(--sal)); padding-right:calc(14px + var(--sar)); }
+.toast{ bottom:calc(24px + var(--sab)) !important; }
+#sk-launch{ bottom:calc(22px + var(--sab)); }
+/* ── Mobile style cards (the table's phone form) ──
+   renderMobileStyleCards() emits these after .tbl-wrap; on phones the card
+   list IS the table, so the wrap hides. Desktop never shows the cards. */
+.mob-card-list{ display:none; }
+@media (max-width:768px){
+  .tbl-wrap.has-mob-cards{ display:none; }
+  .mob-card-list{ display:block; margin:4px 0 14px; }
+  .mob-style-card{ background:var(--bg); border:1px solid var(--border); padding:14px; margin-bottom:10px; cursor:pointer; }
+  .mob-style-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+  .mob-style-card-name{ font-family:'Archivo',Helvetica,Arial,sans-serif; font-size:14px; font-weight:500; letter-spacing:.3px; color:var(--ink); line-height:1.3; word-break:break-word; }
+  .mob-style-card-id{ font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-top:2px; }
+  .mob-style-card-meta{ display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px; }
+  .mob-style-card-bottom{ display:flex; align-items:center; gap:10px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+  .mob-price{ font-family:'DM Mono',monospace; font-size:14px; font-weight:700; color:var(--ink); }
+  .mob-margin{ flex:1; font-size:10px; color:var(--muted); }
+  /* The column picker steers the desktop table; phones render cards instead,
+     so the button would be a no-op control. */
+  #btn-style-cols{ display:none; }
+  .col-grip{ display:none; }
+}
+
+/* Hide the assistant FAB while any modal is open so it can't cover Save/Cancel */
+body:has(.overlay.open) #sk-launch{ display:none !important; }
+.cpl-foot{ padding-bottom:calc(14px + var(--sab)); }
+/* Floating dock (tablet/desktop) lifts above the home bar; full-screen is handled below */
+@media (min-width:561px){ #sk-dock{ bottom:calc(22px + var(--sab)); } }
+
+@media (max-width:768px){
+  /* Bars stack below the (now taller) global bar */
+  .mob-header{ top:calc(44px + var(--sat)) !important; padding-left:calc(6px + var(--sal)); padding-right:calc(8px + var(--sar)); }
+  /* Unified chrome: every space ends above the ONE bottom bar. */
+  .cp-screen{ top:calc(44px + var(--sat)) !important; bottom:calc(54px + var(--sab)) !important; }
+  /* Hamburger drawer slides in below the global bar. It must sit ABOVE the
+     cp-screens (z-400) so "More" works from Today/Growth too — but below
+     modals (600). */
+  .mob-drawer{ top:calc(44px + var(--sat)) !important; padding-bottom:calc(16px + var(--sab)); z-index:590; }
+  .mob-drawer-overlay{ z-index:585; }
+  /* ── Bottom tab bar: primary mobile navigation (markup below the detail
+     panel; hidden on desktop by the global .mob-nav{display:none}). The
+     cp-screens (Today / Growth / Settings) are z-400 fixed overlays, so the
+     bar only shows in the PLM space where it applies. ── */
+  .mob-nav{
+    /* Above the cp-screens (z-400): the bar is the app-wide constant.
+       Near-opaque so base-layer content can't ghost through the blur. */
+    display:flex !important; position:fixed; left:0; right:0; bottom:0; z-index:450;
+    background:rgba(255,255,255,.92);
+    -webkit-backdrop-filter:blur(20px) saturate(1.8);
+    backdrop-filter:blur(20px) saturate(1.8);
+    border-top:1px solid rgba(0,0,0,.07);
+    padding:5px calc(4px + var(--sar)) calc(5px + var(--sab)) calc(4px + var(--sal));
+  }
+  @supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
+    .mob-nav{background:rgba(255,255,255,.97)}
+  }
+  .mob-nav-item{
+    flex:1; background:none; border:none; cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; gap:3px;
+    padding:5px 0 3px; color:var(--muted); min-height:44px;
+    font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+  }
+  .mob-nav-item.active{ color:var(--ink); }
+  .mob-nav-item.active .mob-nav-label{ font-weight:700; }
+  .mob-nav-icon{ display:flex; align-items:center; justify-content:center; height:21px; }
+  .mob-nav-label{ font-size:10px; letter-spacing:1px; text-transform:uppercase; }
+  @media (max-width:430px){ .mob-nav-label{ font-size:9px; letter-spacing:.3px; } }
+  /* Content must clear the home indicator, the tab bar AND the two floating
+     launchers (46px each, stacked to ~190px above the bottom) — 72px left the
+     last button of nearly every list hiding under the Eni ball. */
+  .content{ padding-bottom:calc(196px + var(--sab)) !important; }
+  .ag-content{ padding-bottom:calc(196px + var(--sab)) !important; }
+  .cpl-doors{ padding-bottom:calc(130px + var(--sab)); }
+  #techpack-content{ padding-bottom:calc(196px + var(--sab)) !important; }
+  /* Settings API cards: the two-column input rows (Shopify store URL + token,
+     etc.) overflow a phone, clipping the mono values. Stack them. */
+  #set-connections [style*="grid-template-columns:1fr 1fr"]{ grid-template-columns:1fr !important; }
+  #set-connections .fi, #set-connections .fi-mono{ width:100%; box-sizing:border-box; }
+  /* Relocated panels (Press Tools / Brand Watch / Campaigns) and Command
+     Center sections: stack their two-col form grids on phones. */
+  .agx-section [style*="grid-template-columns:1fr 1fr"],
+  .cmd-section [style*="grid-template-columns:1fr 1fr"]{ grid-template-columns:1fr !important; }
+  .agx-section .fi, .cmd-section .fi{ width:100%; box-sizing:border-box; }
+  /* Assistant launcher: icon-only circle lifted above the tab bar so it stops
+     covering buttons and table rows (it used to be a wide pill at bottom:16). */
+  #sk-launch{
+    width:46px; height:46px; padding:0; justify-content:center; border-radius:50%;
+    right:14px; bottom:calc(66px + var(--sab)) !important;
+    transition:opacity .2s, transform .15s, box-shadow .15s;
+  }
+  /* While the list is moving under the thumb, get out of the way — the bubble
+     was sitting on Notes cells, stat values, and row buttons on every screen. */
+  #sk-launch.sk-scrolling{ opacity:.18; pointer-events:none; }
+  /* Bottom clearance so end-of-list actions are never trapped under the FAB. */
+  .content{ padding-bottom:calc(126px + var(--sab)) !important; }
+  #sk-launch span:last-child{ display:none; }
+  .sk-launch-mark{ font-size:19px; }
+  .sk-launch-mark .ico{ width:20px; height:20px; }
+  /* The second (pencil) FAB is gone: stacked launchers were riding over
+     GEN PO / + NEW / status badges across five screens, and Brainstorm is
+     already one tap away via the global-bar ✎, the Today capture block, and
+     the drawer. One floating circle, one job. */
+
+  /* iOS auto-zooms when a focused input is <16px — force 16px on touch widths */
+  input, select, textarea,
+  .fi, .fs, .ft, .pom-input, .tppi, .tpi, .tpcomment, .tp-m-cell,
+  #sk-field, .sk-hero-input, .vag-input{ font-size:16px !important; }
+
+  /* ONE mobile sub-nav pattern: every space uses the ☰ menu (context-aware
+     drawer). The in-page agent rail is hidden on phones — its sections are
+     mirrored into the drawer — so Product, Growth and Sales all behave the
+     same (☰ opens this space's sections). */
+  .ag-nav{ display:none !important; }
+  /* ☰ button in the agent topbar (mobile only), matching PLM's mob-header ☰. */
+  /* Same ☰ as Product's mob-header — identical box, no extra margin. */
+  .ag-mob-menu{ display:inline-flex; align-items:center; justify-content:center;
+    width:34px; height:34px; flex-shrink:0; background:none;
+    border:1px solid var(--border); border-radius:8px; color:var(--ink);
+    font-size:16px; cursor:pointer; }
+  .ag-mob-menu:active{ background:var(--bg-off); }
+  /* Group ☰ + title on the left; actions pushed right. */
+  .ag-topbar{ justify-content:flex-start; gap:9px; padding:0 16px; }
+  .ag-topbar .ag-actions{ margin-left:auto; }
+  .ag-nav-head .ag-space{ padding:7px 10px; font-size:10px; flex-shrink:0; }
+  .ag-nav-head:not(:has(.ag-spaces)){ display:none !important; }  /* Command Center's head has no pills */
+  /* Topbar on phones: ☰ + the section title on the left, actions on the right.
+     The rail is gone, so the title is what names the current section. */
+  /* Match the Product header's exact gutters (line ~25482): 6px + safe-area on
+     the left, 8px + safe-area on the right. The agent topbar was on a flat 14px,
+     which sat the ☰ 8px further in than Product's — the "hamburger side spacing
+     is different" gap. Same padding now → the ☰ lines up on every tab. */
+  .ag-topbar{ height:auto; min-height:44px; padding:8px calc(8px + var(--sar)) 8px calc(6px + var(--sal)); border-bottom:2px solid var(--ink); justify-content:flex-start; gap:9px; }
+  .ag-topbar .ag-page-title{ display:block; font-size:12px; letter-spacing:2px; }
+  .ag-topbar .ag-actions{ margin-left:auto; gap:6px; }
+  /* Header actions use Product's compact header-button height (34px), NOT the
+     44px body tap-target — so the agent topbar is the SAME height as the
+     Dashboard header instead of standing 10px taller. Overrides the generic
+     .ag-btn{min-height:44px} for topbar actions only. */
+  .ag-topbar .ag-actions .ag-btn{ min-height:34px; height:34px; padding:0 13px; }
+
+  /* Grid-based "tables" (not real <table>): scroll instead of crushing to 390px */
+  #bom-rows-wrap, .tp-bom-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  /* Was min-width:600px — that is what pushed the BOM off the side of a
+     phone. Rows become stacked cards instead, each cell captioned by the
+     column it came from. */
+  .bom-row, .bom-total{ min-width:600px; }
+  .bom-col-head{ display:none; }
+  .bom-back{ display:inline-flex; }
+  .bom-head{ position:sticky; top:0; z-index:5; background:var(--bg); padding:10px 0; margin:0 0 12px; gap:10px; }
+  .bom-head .bom-acts{ width:100%; margin-left:0; }
+  .bom-head .bom-acts .btn{ flex:1 1 auto; min-height:38px; }
+  .bom-row-view{ min-width:0; grid-template-columns:1fr 1fr; padding:4px 0 8px; row-gap:2px; }
+  .bom-row-view>div{ padding:5px 12px !important; min-width:0; overflow-wrap:anywhere; }
+  .bom-row-view>div:first-child{ grid-column:1 / -1; font-size:13px !important; padding-top:10px !important; }
+  .bom-row-view>div[data-l]::before{
+    content:attr(data-l); display:block; font-size:8px; letter-spacing:1.1px;
+    text-transform:uppercase; color:var(--muted); margin-bottom:1px; font-weight:700;
+  }
+  .bom-row-view .bom-pencil{ grid-column:1 / -1; text-align:right; padding-top:0 !important; }
+  .bom-total-row{ flex-direction:column; align-items:flex-start !important; }
+  .tpbr{ min-width:640px; }
+
+  /* Buyers filter bar: search + one "Filters" chip; the rest folds away.
+     Stage chips become a single scrolling row instead of wrapping to three. */
+  .sl-filter-row{ flex-wrap:wrap; }
+  .sl-filter-row .sl-filter-more{ display:none; width:100%; }
+  .sl-filter-row .sl-filter-more.open{ display:flex; flex-wrap:wrap; gap:6px; }
+  .sl-filter-chips{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .sl-filter-chips .sl-chip, .sl-filter-count{ flex-shrink:0; }
+  /* Wide tables: a right-edge fade says "more columns this way" — iOS hides
+     scrollbars, so a cut-off table read as the whole table. */
+  .tbl-wrap{ position:relative; }
+  .tbl-wrap::after{ content:''; position:absolute; top:0; right:0; bottom:0; width:26px;
+    background:linear-gradient(to left, var(--bg), rgba(255,255,255,0)); pointer-events:none; }
+  /* Finger-friendly tap targets — incl. the highest-frequency chrome (☰,
+     search, +) and the destructive line-item ✕ buttons, which sat at 30-34px. */
+  .modal-close, .cp-gb-user, .sk-send, .sk-hero-go, .sk-icon-btn,
+  .mob-menu-btn, .mob-icon-btn, .mob-add-btn, .ag-mob-menu, .sl-qi-del{ min-width:40px; min-height:40px; }
+  .btn-sm{ min-height:40px; }
+  .sl-chip{ min-height:36px; padding:8px 12px; }
+  /* Any 2/3-column field grid inside a modal stacks on a phone — three ~110px
+     columns clip selects and dates in the PO/quote forms (the money forms). */
+  .modal-body [style*="grid-template-columns:"]{ grid-template-columns:1fr !important; }
+
+  /* Dashboard: stack the analytics + pipeline/alerts grids on phones */
+  .dash-grid-3, .dash-grid-2{ grid-template-columns:1fr !important; }
+}
+
+/* Make the assistant Close button unmistakable (esp. the full-screen mobile dock) */
+.sk-close{ color:#fff; border-color:#3a3a3a; font-weight:700; }
+
+/* Keyboard focus is visible everywhere. A 1px border-bottom swap is not a
+   focus state — tab through the app and you can actually see where you are. */
+:focus-visible{ outline:2px solid var(--ink); outline-offset:2px; }
+
+/* ⌘K keyboard walk: the selected result reads like a hover + an ink rail. */
+.search-row-sel{ background:var(--bg-off); box-shadow:inset 2px 0 0 var(--ink); }
+
+/* Today focus rows: clickable lines answer hover with the quiet wash. */
+.focus-row[onclick]:hover{ background:var(--bg-off); }
+
+/* ═══ PAGE-HEAD BAND (desktop) — every content screen opens with a real title
+   in its own padded band: the register between Today's 48px hero and the 11px
+   topbar caption. The topbar keeps breadcrumb/actions; its title yields to the
+   band ≥768px (phones keep the compact topbar title). Bands are created and
+   mirrored from the existing title elements by veniaBandInit — no writer in
+   the app changes. ═══ */
+.page-band{ display:none; }
+@media (min-width:768px){
+  .page-band{
+    display:block;
+    font-family:'Archivo',Helvetica,Arial,sans-serif;
+    font-size:24px;font-weight:600;letter-spacing:3px;text-transform:uppercase;
+    color:var(--ink);background:var(--bg);
+    padding:24px 28px 20px;border-bottom:1px solid var(--border);
+  }
+  .ag-topbar .ag-page-title, .topbar .page-title{ display:none; }
+}
+
+/* PO payments cell (desktop layout; stacks like the rest on phones). */
+.po-pay-cell{ white-space:nowrap; display:flex; gap:8px; padding-top:14px; }
+
+/* Stacked tables on phones (Demand Plan, Purchase Orders): each row becomes a
+   block — name full-width, then label/value pairs — so Gap-to-commit and
+   payment status stop hiding off the right edge. Inputs keep native semantics. */
+@media (max-width:768px){
+  .stack-tbl thead{ display:none; }
+  /* min-width:0 beats the generic mobile "table{min-width:600px}" scroll rule
+     — a stacked table must shrink to the phone, not scroll. */
+  .stack-tbl, .stack-tbl tbody, .stack-tbl tr{ display:block; width:100%; min-width:0; }
+  .stack-tbl tr{ border-bottom:1px solid var(--border); padding:10px 0; }
+  .stack-tbl td{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:3px 0; border:none; }
+  .stack-tbl td::before{ content:attr(data-label); font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); font-weight:700; flex-shrink:0; }
+  .stack-tbl td[data-label=""]{ display:block; padding-bottom:6px; }
+  .stack-tbl td[data-label=""]::before{ content:none; }
+  .stack-tbl .fi{ width:90px !important; text-align:right; }
+  .stack-tbl .po-pay-cell{ padding-top:3px; }
+  /* Stacked rows have no horizontal overflow — the "more columns" fade would
+     just wash out the right-hand values. */
+  .tbl-wrap:has(.stack-tbl)::after{ content:none; }
+  /* Filter/tab rows: swipe instead of silently clipping, with a trailing fade
+     so a thumb can tell there's more (mobile audit gap #4). */
+  .tabs, .filters{
+    overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; scrollbar-width:none;
+    mask-image:linear-gradient(90deg,#000 90%,transparent);
+    -webkit-mask-image:linear-gradient(90deg,#000 90%,transparent);
+  }
+  .tabs::-webkit-scrollbar, .filters::-webkit-scrollbar{ display:none; }
+  .tabs > *{ flex-shrink:0; white-space:nowrap; }
+}
+@media (max-width:560px){
+  .sk-close{ min-width:44px; min-height:44px; font-size:18px; border-color:#666; background:#1c1c1c; }
+  .sk-head{ gap:8px; }
+  .sk-head .sk-icon-btn{ padding:9px 12px; }
+
+  /* Modals become full-screen sheets on phones (used by every add/edit form) */
+  .overlay{ padding:0; align-items:stretch; z-index:600; }
+  .modal, .modal-lg{ max-width:100%; width:100%; max-height:100dvh; min-height:100dvh; border:none; }
+  .modal-head{ padding-top:calc(18px + var(--sat)); padding-left:16px; padding-right:16px; }
+  /* Full-screen sheet: keep real gutters, and clear the home bar. */
+  .modal-body{ padding:18px 16px calc(20px + var(--sab)); }
+  .modal-tabs{ margin:-18px -16px 18px; padding:0 16px; }
+  .modal-foot{ position:sticky; bottom:0; background:var(--bg);
+               padding-left:16px; padding-right:16px;
+               padding-bottom:calc(16px + var(--sab)); }
+  /* Stack the two/three-column form grids */
+  .form-grid, .form-grid-3{ grid-template-columns:1fr; }
+}
+
+@media (max-width:560px){
+  /* Full-screen dock must cover the entire viewport; safe-areas go on inner chrome */
+  #sk-dock{ inset:0; top:0; right:0; bottom:0; left:0; width:100vw; max-width:100vw;
+            height:100dvh; max-height:100dvh; border-radius:0; border:none; }
+  .sk-head{ padding-top:calc(12px + var(--sat)); }
+
+  /* Same two-row composer, restated for a browser with no container queries. */
+  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
+             gap:8px; padding:10px 12px calc(10px + var(--sab)); align-items:center; }
+  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
+  #sk-field{ grid-area:field; width:100%;
+             /* With the keyboard up there is ~500px to work with — a 300px
+                field would leave no conversation to answer about. skViewportFit
+                sets --sk-fmax from the VISIBLE height; the vh value is the
+                fallback before it runs, or without visualViewport. */
+             max-height:var(--sk-fmax, min(300px, 22vh)); }
+  .sk-send{ grid-area:send; }
+  /* 38px is under Apple's 44px minimum target; on a phone these are thumbs. */
+  .sk-cam, .sk-send{ width:44px; height:44px; }
+  /* While the keyboard covers the home indicator, its inset is dead space. */
+  html.sk-kb .sk-input{ padding-bottom:10px; }
+
+}
+
+/* ═══ 3-SPACE NAV + TODAY HOME (Apple-level simplification, stage 1) ═══ */
+.cp-spaces{ display:flex; gap:2px; margin-left:10px; }
+.cp-space{ background:none; border:none; color:var(--muted); font-size:11px; letter-spacing:1.5px;
+  text-transform:uppercase; font-weight:600; padding:6px 13px; cursor:pointer; border-radius:7px;
+  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; transition:all .15s; }
+.cp-space:hover{ color:var(--ink); }
+.cp-space.active{ color:var(--ink); background:rgba(0,0,0,.06); }
+.cp-gb-icon{ background:none; border:none; color:var(--muted); font-size:15px; cursor:pointer;
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:4px 6px; line-height:1; }
+.cp-gb-icon:hover{ color:var(--ink); }
+
+.cpl{ overflow-y:auto; -webkit-overflow-scrolling:touch; }
+.cpl-sub{ font-size:10px; letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-top:8px; }
+.cpl-block{ margin:var(--sp-7) 48px 0; }
+.cpl-block-label{ font-size:var(--fs-label); letter-spacing:2px; text-transform:uppercase; color:var(--muted);
+  font-weight:700; margin-bottom:var(--sp-3); }
+.cpl-pulse{ display:flex; align-items:center; gap:var(--sp-7); flex-wrap:wrap; margin:var(--sp-7) 48px 0;
+  padding:var(--sp-5) 0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+.cpl-pulse-item{ display:flex; flex-direction:column; gap:var(--sp-1); }
+.cpl-pulse-v{ font-size:28px; font-weight:300; font-family:'DM Mono',monospace; color:var(--ink); line-height:1; }
+.cpl-pulse-l{ font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); }
+.cpl-pulse-more{ margin-left:auto; background:none; border:none; color:var(--muted); font-size:10px;
+  letter-spacing:1.2px; text-transform:uppercase; font-weight:700; cursor:pointer; transition:color .15s; }
+.cpl-pulse-more:hover{ color:var(--ink); }
+.cpl .sk-hero{ margin:8px 48px 0; }
+/* Doors — one hover physics app-wide: a clickable tile answers with a 2px ink
+   top border and a quiet lift. Shadow belongs to overlays, not tiles. */
+.cpl-doors{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-3); margin:26px 48px 44px; }
+.cpl-door{ background:var(--card); padding:var(--sp-6) var(--sp-5); cursor:pointer; position:relative;
+  border:1px solid var(--border); border-top:2px solid var(--border); border-radius:var(--r-lg);
+  transition:border-top-color .18s var(--ease-out), transform .18s var(--ease-out); }
+.cpl-door:hover{ border-top-color:var(--ink); transform:translateY(-2px); }
+.cpl-door:active{ transform:translateY(0) scale(.99); }
+.cpl-door-k{ font-family:'Archivo',Helvetica,Arial,sans-serif; font-size:var(--fs-xl); letter-spacing:1px;
+  text-transform:uppercase; margin-bottom:9px; color:var(--ink); }
+.cpl-door-d{ font-size:var(--fs-sm); color:var(--muted); line-height:1.55; max-width:92%; }
+/* 50% not var(--r-pill): the sharp-corner token turns this into a black square
+   that reads as a rendering artifact when the round FABs pass over it — the
+   floating circles are the one sanctioned round family, and this joins it. */
+.cpl-door-go{ position:absolute; top:20px; right:20px; width:26px; height:26px; border-radius:50%;
+  background:var(--ink); color:#fff; font-size:13px; display:flex; align-items:center; justify-content:center;
+  transition:transform .18s var(--ease-out); }
+.cpl-door:hover .cpl-door-go{ transform:translateX(2px); }
+@media (prefers-reduced-motion:reduce){ .cpl-door,.cpl-door:hover,.cpl-door-go{ transition:none; transform:none; } }
+@media (max-width:560px){
+  .cpl .sk-hero{ margin:8px 16px 0; }
+  .cpl-block, .cpl-pulse{ margin-left:16px; margin-right:16px; }
+  .cpl-doors{ grid-template-columns:1fr; margin:24px 16px 96px; gap:var(--sp-3); }
+  .cp-spaces{ margin-left:2px; gap:0; }
+  .cp-space{ padding:6px 9px; font-size:10px; letter-spacing:.5px; }
+  .cp-gb-status{ display:none; }
+}
+
+/* ═══ GROWTH sub-switcher (PR · Sales · Mktg · Brand as one space) ═══ */
+.ag-spaces{ display:flex; flex-wrap:wrap; gap:4px; margin-top:14px; }
+.ag-space{ background:none; border:1px solid var(--border); color:var(--muted); font-size:10px;
+  letter-spacing:1px; text-transform:uppercase; font-weight:600; padding:5px 11px; cursor:pointer;
+  border-radius:0; transition:all .15s; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; }
+.ag-space:hover{ color:var(--ink); border-color:var(--border-mid); }
+.ag-space.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
+
+/* Cost calculator: 5 inputs crush on a phone — collapse to 2 columns */
+@media (max-width:560px){ .cost-calc-grid{ grid-template-columns:1fr 1fr !important; } }
+
+/* Keep the top bar's right cluster (settings + avatar) inside the viewport on phones */
+@media (max-width:560px){
+  .cp-global-bar{ padding-right:12px; overflow:hidden; }
+  .cp-gb-right{ gap:8px; }
+  .cp-gb-user{ flex-shrink:0; }
+}
+
+/* Wholesale line sheet on phones: scroll the print table horizontally inside its
+   own container so Wholesale / Retail / Lead are reachable (was clipped off-screen
+   with the whole page unable to scroll to them). */
+@media (max-width:640px){
+  #linesheet-content{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  #linesheet-print{ min-width:600px; padding:18px !important; }
+  .ls-swipe-hint{ display:block !important; }
+}
+
+/* ── Vendor sourcing badges (domestic vs import + currency/duty/incoterm) ── */
+.vendor-src{ display:flex; gap:5px; flex-wrap:wrap; margin:7px 0 9px; }
+.src-badge{ font-size:10px; letter-spacing:1px; text-transform:uppercase; font-weight:700;
+  padding:3px 8px; border-radius:var(--r-sm); border:1px solid var(--border); }
+.src-dom{ background:var(--green-dim); color:var(--green); border-color:var(--green); }
+.src-int{ background:rgba(0,0,0,.05); color:var(--ink); border-color:var(--border-mid); }
+.src-chip{ font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:var(--muted);
+  padding:3px 8px; border-radius:var(--r-sm); border:1px solid var(--border); background:var(--bg-off); }
 </style>
 <script src="https://apis.google.com/js/api.js" async defer></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- defer, not blocking. Without it the parser stopped dead in <head> until a
+     CDN in another country answered — nothing on the page could paint until
+     then, however fast the app itself loaded. Deferred scripts still run in
+     order, and still before DOMContentLoaded, which is where the client is now
+     built (see sbInit's boot call). -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js" defer></script>
 </head>
 <body>
 
@@ -1965,7 +2510,7 @@ body{padding-top:44px;box-sizing:border-box;}
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '413';
+  const BUILD = '414';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35080,8 +35625,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   })();
 
-  // Restore connection on load from stored credentials
+  // Restore connection on load from stored credentials.
+  // The Supabase library is deferred now, so at parse time window.supabase may
+  // not exist yet. Run as soon as it does — immediately if the library is
+  // already there, otherwise on DOMContentLoaded, which deferred scripts are
+  // guaranteed to have executed before. Getting this wrong would not throw; it
+  // would just quietly leave cloud sync off, which is the worst kind of bug.
   ;(function(){
+    var boot = function(){
     var cfg = sbGetConfig();
     if (cfg.url && cfg.key) {
       var client = sbInit(cfg.url, cfg.key);
@@ -35099,6 +35650,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         });
       }
     }
+    };
+    if (window.supabase) boot();
+    else document.addEventListener('DOMContentLoaded', boot);
   })();
 
 })(); // end Supabase IIFE
@@ -41718,529 +42272,6 @@ function gSignIn() {
 <!-- ══════════════════════════════════════════════════════════
      ENI & NIGMA — persistent context-aware sidekick ("Enigma")
      ══════════════════════════════════════════════════════════ -->
-<style>
-#sk-launch{position:fixed;right:22px;bottom:22px;z-index:890;height:48px;padding:0 18px;border-radius:0;
-  background:rgba(10,10,10,.74);color:#fff;border:1px solid #2a2a2a;cursor:pointer;display:flex;align-items:center;gap:9px;
-  -webkit-backdrop-filter:blur(18px) saturate(1.6);backdrop-filter:blur(18px) saturate(1.6);
-  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
-  box-shadow:0 6px 24px rgba(0,0,0,.28);transition:transform .15s,box-shadow .15s}
-/* No backdrop-filter support (older WebViews): fall back to a solid pill so text stays legible. */
-@supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){ #sk-launch{background:#0a0a0a} }
-#sk-launch:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.36)}
-#sk-launch.hidden{display:none}
-/* Unread. The launcher is the only thing on screen when the dock is shut, so
-   the count goes there — a filled counter, not a bare dot, because "Eni
-   replied" and "Eni replied three times" are different situations. */
-.sk-unread{
-  position:absolute;top:-7px;right:-7px;min-width:20px;height:20px;padding:0 5px;
-  border-radius:999px;background:#fff;color:#0a0a0a;
-  font-family:'DM Mono',monospace;font-size:11px;font-weight:700;line-height:20px;text-align:center;
-  box-shadow:0 0 0 2px #0a0a0a;pointer-events:none;
-}
-/* One pulse on arrival, then still — a badge that never stops moving is a
-   badge you stop seeing. */
-#sk-launch.sk-has-unread{animation:skPulse .5s ease-out 2}
-@keyframes skPulse{0%{transform:translateY(0)}35%{transform:translateY(-3px)}100%{transform:translateY(0)}}
-@media (prefers-reduced-motion:reduce){ #sk-launch.sk-has-unread{animation:none} }
-/* And which of the two it was, before you open it. */
-.sk-agent-tab.sk-tab-unread::after{
-  content:'';display:inline-block;width:6px;height:6px;border-radius:50%;
-  background:#fff;margin-left:6px;vertical-align:middle;
-}
-.sk-launch-mark{font-size:16px;display:flex;align-items:center}
-/* Brainstorm FAB — mobile only (desktop has the top-bar pill). Stacks above
-   the Eni launcher; light so the two circles read as different tools. */
-/* A fixed 392×624 panel is a letterbox on a 1440 screen: long answers scroll in
-   a thin column and a long question turns the input into a tiny scroll box.
-   It now takes what the viewport can spare, within limits that keep it a dock
-   rather than a window. */
-#sk-dock{position:fixed;right:22px;bottom:22px;z-index:900;
-  width:clamp(392px, 34vw, 620px);max-width:calc(100vw - 24px);
-  height:min(880px, calc(100vh - 64px));max-height:calc(100vh - 64px);
-  background:#0a0a0a;color:#f2f2f2;border:1px solid #232323;border-radius:0;
-  display:none;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.45);
-  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif}
-#sk-dock.open{display:flex;animation:skIn .2s ease-out}
-@keyframes skIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-.sk-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #1c1c1c}
-.sk-agents{display:flex;gap:3px;background:#161616;border:1px solid #242424;border-radius:0;padding:3px}
-.sk-agent-tab{background:none;border:none;color:#888;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
-  padding:5px 15px;border-radius:0;cursor:pointer;transition:all .15s}
-.sk-agent-tab.active{background:#fff;color:#0a0a0a}
-.sk-head-actions{display:flex;gap:6px}
-.sk-icon-btn{background:none;border:1px solid #2a2a2a;color:#aaa;font-size:10px;letter-spacing:1px;text-transform:uppercase;
-  padding:5px 9px;border-radius:0;cursor:pointer}
-.sk-icon-btn:hover{border-color:#444;color:#fff}
-.sk-context{padding:9px 16px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:#6a6a6a;
-  border-bottom:1px solid #151515;display:flex;align-items:center;gap:7px}
-.sk-context::before{content:'●';color:#3ba776;font-size:10px}
-.sk-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:13px}
-.sk-msg{max-width:90%;font-size:13px;line-height:1.55}
-.sk-msg.user{align-self:flex-end;background:#fff;color:#0a0a0a;padding:9px 13px;border-radius:0}
-.sk-msg.agent{align-self:flex-start;width:100%}
-.sk-msg-who{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#777;margin-bottom:5px;font-weight:700}
-.sk-msg-body{background:#161616;border:1px solid #232323;padding:10px 13px;border-radius:0;color:#e8e8e8}
-.sk-msg-body strong{color:#fff}
-.sk-think{display:inline-flex;gap:4px;padding:13px 14px;background:#161616;border:1px solid #232323;border-radius:0}
-.sk-think span{width:6px;height:6px;border-radius:50%;background:#666;animation:skBlink 1.2s infinite}
-.sk-think span:nth-child(2){animation-delay:.2s}.sk-think span:nth-child(3){animation-delay:.4s}
-@keyframes skBlink{0%,80%,100%{opacity:.25}40%{opacity:1}}
-/* "Working on…" state — a labelled, shimmering progress line that shows what
-   the agent is doing (Sidekick-style), instead of anonymous blinking dots. */
-.sk-work{display:inline-block;min-width:190px;max-width:100%;padding:12px 14px;background:#161616;border:1px solid #232323;border-radius:0}
-.sk-work-bar{height:2px;background:#2b2b2b;overflow:hidden;position:relative;margin-bottom:9px}
-.sk-work-bar i{position:absolute;top:0;height:100%;width:42%;left:-42%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);animation:skWork 1.15s cubic-bezier(.4,0,.2,1) infinite}
-@keyframes skWork{0%{left:-42%}100%{left:100%}}
-.sk-work-label{font-size:11px;color:#c4c4c4;letter-spacing:.3px;line-height:1.4;transition:opacity .18s}
-@media (prefers-reduced-motion: reduce){.sk-work-bar i{animation:none;left:0;width:100%;opacity:.35}.sk-work-label{transition:none}}
-.sk-suggest{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
-.sk-chip{background:#151515;border:1px solid #262626;color:#bbb;font-size:10px;padding:6px 11px;border-radius:0;
-  cursor:pointer;transition:all .15s;text-align:left}
-.sk-chip:hover{border-color:#555;color:#fff}
-.sk-input{display:flex;gap:8px;align-items:flex-end;padding:12px 14px;border-top:1px solid #1c1c1c}
-/* The attach buttons are wrapped only so a narrow dock can move them as a unit;
-   while there is room the wrapper dissolves and the row is what it always was. */
-.sk-tools{display:contents}
-
-/* THE COMPOSER IS SIZED BY THE DOCK, NOT THE SCREEN. Three 38px attach buttons
-   and a send button leave the field under half the width of a ~390px dock — a
-   one-line question wrapped to six lines and the box swallowed the
-   conversation. That dock width happens on a phone (full screen) AND on a
-   tablet or narrow window, where the floating panel bottoms out at 392px, so a
-   screen-width media query fixed the phone and left the tablet broken. Below
-   430px of DOCK the field takes the top row at full width and the buttons sit
-   under it, still one tap each. */
-#sk-dock{container-type:inline-size}
-@container (max-width:430px){
-  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
-             gap:8px; align-items:center; }
-  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
-  #sk-field{ grid-area:field; width:100%; }
-  .sk-send{ grid-area:send; }
-}
-/* 120px was about four lines — a paragraph-length question became a scroll box
-   with its own beginning and end hidden. Kept in step with SK_FIELD_MAX. */
-#sk-field{flex:1;min-width:0;background:#151515;border:1px solid #2a2a2a;border-radius:0;color:#fff;font-size:13px;font-family:inherit;
-  padding:10px 12px;outline:none;resize:none;max-height:300px;line-height:1.45}
-#sk-field:focus{border-color:#555}
-#sk-field::placeholder{color:#666}
-.sk-send{background:#fff;color:#0a0a0a;border:none;width:38px;height:38px;border-radius:0;font-size:16px;cursor:pointer;flex-shrink:0}
-.sk-send:hover{background:#ddd}
-.sk-cam{background:#151515;color:#bbb;border:1px solid #2a2a2a;width:38px;height:38px;border-radius:0;font-size:17px;cursor:pointer;flex-shrink:0;line-height:1}
-.sk-cam:hover{color:#fff;border-color:#555}
-.sk-photo-chip{display:flex;align-items:center;gap:9px;padding:8px 14px 0}
-.sk-photo-chip img{width:44px;height:44px;object-fit:cover;border-radius:0;border:1px solid #2a2a2a}
-.sk-photo-chip .sk-photo-x{background:none;border:none;color:#888;font-size:15px;cursor:pointer;padding:2px 6px}
-.sk-photo-chip .sk-photo-x:hover{color:#fff}
-.sk-photo-chip .sk-photo-label{font-size:11px;color:var(--muted)}
-.sk-msg .sk-msg-photo{max-width:150px;max-height:150px;border-radius:0;border:1px solid rgba(255,255,255,.14);margin-top:6px;display:block}
-.sk-hero{display:flex;align-items:center;gap:var(--sp-3);background:#0a0a0a;border:1px solid #1c1c1c;border-radius:var(--r-lg);
-  padding:var(--sp-3) var(--sp-3) var(--sp-3) var(--sp-4);margin:var(--sp-5) 0 var(--sp-6);cursor:text;
-  box-shadow:var(--shadow-md);transition:border-color .18s var(--ease-out),box-shadow .18s var(--ease-out)}
-.sk-hero:hover{border-color:#333}
-.sk-hero:focus-within{border-color:#4a4a4a;box-shadow:0 0 0 3px rgba(255,255,255,.08),var(--shadow-md)}
-.sk-hero-mark{font-size:18px;color:#fff;flex-shrink:0}
-.sk-hero-input{flex:1;background:none;border:none;color:#f2f2f2;font-size:15px;font-family:inherit;outline:none}
-.sk-hero-input::placeholder{color:#8a8a8a}
-.sk-hero-go{background:#fff;color:#0a0a0a;border:none;width:36px;height:36px;border-radius:var(--r-pill);font-size:15px;
-  cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:transform .15s var(--ease-out)}
-.sk-hero-go:active{transform:scale(.92)}
-@media(max-width:560px){
-  #sk-dock{right:0;bottom:0;width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border-radius:0;border:none}
-  #sk-launch{right:16px;bottom:16px}
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   MOBILE REFINEMENT + PWA SAFE-AREA  (consolidated; last block = wins cascade)
-   ═══════════════════════════════════════════════════════════════════ */
-
-/* ── iOS notch / home-indicator safe areas on fixed chrome ── */
-body{ padding-top:calc(44px + var(--sat)); }
-.cp-global-bar{ padding-top:var(--sat); height:calc(44px + var(--sat)); padding-left:calc(14px + var(--sal)); padding-right:calc(14px + var(--sar)); }
-.toast{ bottom:calc(24px + var(--sab)) !important; }
-#sk-launch{ bottom:calc(22px + var(--sab)); }
-/* ── Mobile style cards (the table's phone form) ──
-   renderMobileStyleCards() emits these after .tbl-wrap; on phones the card
-   list IS the table, so the wrap hides. Desktop never shows the cards. */
-.mob-card-list{ display:none; }
-@media (max-width:768px){
-  .tbl-wrap.has-mob-cards{ display:none; }
-  .mob-card-list{ display:block; margin:4px 0 14px; }
-  .mob-style-card{ background:var(--bg); border:1px solid var(--border); padding:14px; margin-bottom:10px; cursor:pointer; }
-  .mob-style-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
-  .mob-style-card-name{ font-family:'Archivo',Helvetica,Arial,sans-serif; font-size:14px; font-weight:500; letter-spacing:.3px; color:var(--ink); line-height:1.3; word-break:break-word; }
-  .mob-style-card-id{ font-family:'DM Mono',monospace; font-size:10px; color:var(--muted); margin-top:2px; }
-  .mob-style-card-meta{ display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px; }
-  .mob-style-card-bottom{ display:flex; align-items:center; gap:10px; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
-  .mob-price{ font-family:'DM Mono',monospace; font-size:14px; font-weight:700; color:var(--ink); }
-  .mob-margin{ flex:1; font-size:10px; color:var(--muted); }
-  /* The column picker steers the desktop table; phones render cards instead,
-     so the button would be a no-op control. */
-  #btn-style-cols{ display:none; }
-  .col-grip{ display:none; }
-}
-
-/* Hide the assistant FAB while any modal is open so it can't cover Save/Cancel */
-body:has(.overlay.open) #sk-launch{ display:none !important; }
-.cpl-foot{ padding-bottom:calc(14px + var(--sab)); }
-/* Floating dock (tablet/desktop) lifts above the home bar; full-screen is handled below */
-@media (min-width:561px){ #sk-dock{ bottom:calc(22px + var(--sab)); } }
-
-@media (max-width:768px){
-  /* Bars stack below the (now taller) global bar */
-  .mob-header{ top:calc(44px + var(--sat)) !important; padding-left:calc(6px + var(--sal)); padding-right:calc(8px + var(--sar)); }
-  /* Unified chrome: every space ends above the ONE bottom bar. */
-  .cp-screen{ top:calc(44px + var(--sat)) !important; bottom:calc(54px + var(--sab)) !important; }
-  /* Hamburger drawer slides in below the global bar. It must sit ABOVE the
-     cp-screens (z-400) so "More" works from Today/Growth too — but below
-     modals (600). */
-  .mob-drawer{ top:calc(44px + var(--sat)) !important; padding-bottom:calc(16px + var(--sab)); z-index:590; }
-  .mob-drawer-overlay{ z-index:585; }
-  /* ── Bottom tab bar: primary mobile navigation (markup below the detail
-     panel; hidden on desktop by the global .mob-nav{display:none}). The
-     cp-screens (Today / Growth / Settings) are z-400 fixed overlays, so the
-     bar only shows in the PLM space where it applies. ── */
-  .mob-nav{
-    /* Above the cp-screens (z-400): the bar is the app-wide constant.
-       Near-opaque so base-layer content can't ghost through the blur. */
-    display:flex !important; position:fixed; left:0; right:0; bottom:0; z-index:450;
-    background:rgba(255,255,255,.92);
-    -webkit-backdrop-filter:blur(20px) saturate(1.8);
-    backdrop-filter:blur(20px) saturate(1.8);
-    border-top:1px solid rgba(0,0,0,.07);
-    padding:5px calc(4px + var(--sar)) calc(5px + var(--sab)) calc(4px + var(--sal));
-  }
-  @supports not ((-webkit-backdrop-filter:blur(1px)) or (backdrop-filter:blur(1px))){
-    .mob-nav{background:rgba(255,255,255,.97)}
-  }
-  .mob-nav-item{
-    flex:1; background:none; border:none; cursor:pointer;
-    display:flex; flex-direction:column; align-items:center; gap:3px;
-    padding:5px 0 3px; color:var(--muted); min-height:44px;
-    font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;
-    -webkit-tap-highlight-color:transparent;
-  }
-  .mob-nav-item.active{ color:var(--ink); }
-  .mob-nav-item.active .mob-nav-label{ font-weight:700; }
-  .mob-nav-icon{ display:flex; align-items:center; justify-content:center; height:21px; }
-  .mob-nav-label{ font-size:10px; letter-spacing:1px; text-transform:uppercase; }
-  @media (max-width:430px){ .mob-nav-label{ font-size:9px; letter-spacing:.3px; } }
-  /* Content must clear the home indicator, the tab bar AND the two floating
-     launchers (46px each, stacked to ~190px above the bottom) — 72px left the
-     last button of nearly every list hiding under the Eni ball. */
-  .content{ padding-bottom:calc(196px + var(--sab)) !important; }
-  .ag-content{ padding-bottom:calc(196px + var(--sab)) !important; }
-  .cpl-doors{ padding-bottom:calc(130px + var(--sab)); }
-  #techpack-content{ padding-bottom:calc(196px + var(--sab)) !important; }
-  /* Settings API cards: the two-column input rows (Shopify store URL + token,
-     etc.) overflow a phone, clipping the mono values. Stack them. */
-  #set-connections [style*="grid-template-columns:1fr 1fr"]{ grid-template-columns:1fr !important; }
-  #set-connections .fi, #set-connections .fi-mono{ width:100%; box-sizing:border-box; }
-  /* Relocated panels (Press Tools / Brand Watch / Campaigns) and Command
-     Center sections: stack their two-col form grids on phones. */
-  .agx-section [style*="grid-template-columns:1fr 1fr"],
-  .cmd-section [style*="grid-template-columns:1fr 1fr"]{ grid-template-columns:1fr !important; }
-  .agx-section .fi, .cmd-section .fi{ width:100%; box-sizing:border-box; }
-  /* Assistant launcher: icon-only circle lifted above the tab bar so it stops
-     covering buttons and table rows (it used to be a wide pill at bottom:16). */
-  #sk-launch{
-    width:46px; height:46px; padding:0; justify-content:center; border-radius:50%;
-    right:14px; bottom:calc(66px + var(--sab)) !important;
-    transition:opacity .2s, transform .15s, box-shadow .15s;
-  }
-  /* While the list is moving under the thumb, get out of the way — the bubble
-     was sitting on Notes cells, stat values, and row buttons on every screen. */
-  #sk-launch.sk-scrolling{ opacity:.18; pointer-events:none; }
-  /* Bottom clearance so end-of-list actions are never trapped under the FAB. */
-  .content{ padding-bottom:calc(126px + var(--sab)) !important; }
-  #sk-launch span:last-child{ display:none; }
-  .sk-launch-mark{ font-size:19px; }
-  .sk-launch-mark .ico{ width:20px; height:20px; }
-  /* The second (pencil) FAB is gone: stacked launchers were riding over
-     GEN PO / + NEW / status badges across five screens, and Brainstorm is
-     already one tap away via the global-bar ✎, the Today capture block, and
-     the drawer. One floating circle, one job. */
-
-  /* iOS auto-zooms when a focused input is <16px — force 16px on touch widths */
-  input, select, textarea,
-  .fi, .fs, .ft, .pom-input, .tppi, .tpi, .tpcomment, .tp-m-cell,
-  #sk-field, .sk-hero-input, .vag-input{ font-size:16px !important; }
-
-  /* ONE mobile sub-nav pattern: every space uses the ☰ menu (context-aware
-     drawer). The in-page agent rail is hidden on phones — its sections are
-     mirrored into the drawer — so Product, Growth and Sales all behave the
-     same (☰ opens this space's sections). */
-  .ag-nav{ display:none !important; }
-  /* ☰ button in the agent topbar (mobile only), matching PLM's mob-header ☰. */
-  /* Same ☰ as Product's mob-header — identical box, no extra margin. */
-  .ag-mob-menu{ display:inline-flex; align-items:center; justify-content:center;
-    width:34px; height:34px; flex-shrink:0; background:none;
-    border:1px solid var(--border); border-radius:8px; color:var(--ink);
-    font-size:16px; cursor:pointer; }
-  .ag-mob-menu:active{ background:var(--bg-off); }
-  /* Group ☰ + title on the left; actions pushed right. */
-  .ag-topbar{ justify-content:flex-start; gap:9px; padding:0 16px; }
-  .ag-topbar .ag-actions{ margin-left:auto; }
-  .ag-nav-head .ag-space{ padding:7px 10px; font-size:10px; flex-shrink:0; }
-  .ag-nav-head:not(:has(.ag-spaces)){ display:none !important; }  /* Command Center's head has no pills */
-  /* Topbar on phones: ☰ + the section title on the left, actions on the right.
-     The rail is gone, so the title is what names the current section. */
-  /* Match the Product header's exact gutters (line ~25482): 6px + safe-area on
-     the left, 8px + safe-area on the right. The agent topbar was on a flat 14px,
-     which sat the ☰ 8px further in than Product's — the "hamburger side spacing
-     is different" gap. Same padding now → the ☰ lines up on every tab. */
-  .ag-topbar{ height:auto; min-height:44px; padding:8px calc(8px + var(--sar)) 8px calc(6px + var(--sal)); border-bottom:2px solid var(--ink); justify-content:flex-start; gap:9px; }
-  .ag-topbar .ag-page-title{ display:block; font-size:12px; letter-spacing:2px; }
-  .ag-topbar .ag-actions{ margin-left:auto; gap:6px; }
-  /* Header actions use Product's compact header-button height (34px), NOT the
-     44px body tap-target — so the agent topbar is the SAME height as the
-     Dashboard header instead of standing 10px taller. Overrides the generic
-     .ag-btn{min-height:44px} for topbar actions only. */
-  .ag-topbar .ag-actions .ag-btn{ min-height:34px; height:34px; padding:0 13px; }
-
-  /* Grid-based "tables" (not real <table>): scroll instead of crushing to 390px */
-  #bom-rows-wrap, .tp-bom-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  /* Was min-width:600px — that is what pushed the BOM off the side of a
-     phone. Rows become stacked cards instead, each cell captioned by the
-     column it came from. */
-  .bom-row, .bom-total{ min-width:600px; }
-  .bom-col-head{ display:none; }
-  .bom-back{ display:inline-flex; }
-  .bom-head{ position:sticky; top:0; z-index:5; background:var(--bg); padding:10px 0; margin:0 0 12px; gap:10px; }
-  .bom-head .bom-acts{ width:100%; margin-left:0; }
-  .bom-head .bom-acts .btn{ flex:1 1 auto; min-height:38px; }
-  .bom-row-view{ min-width:0; grid-template-columns:1fr 1fr; padding:4px 0 8px; row-gap:2px; }
-  .bom-row-view>div{ padding:5px 12px !important; min-width:0; overflow-wrap:anywhere; }
-  .bom-row-view>div:first-child{ grid-column:1 / -1; font-size:13px !important; padding-top:10px !important; }
-  .bom-row-view>div[data-l]::before{
-    content:attr(data-l); display:block; font-size:8px; letter-spacing:1.1px;
-    text-transform:uppercase; color:var(--muted); margin-bottom:1px; font-weight:700;
-  }
-  .bom-row-view .bom-pencil{ grid-column:1 / -1; text-align:right; padding-top:0 !important; }
-  .bom-total-row{ flex-direction:column; align-items:flex-start !important; }
-  .tpbr{ min-width:640px; }
-
-  /* Buyers filter bar: search + one "Filters" chip; the rest folds away.
-     Stage chips become a single scrolling row instead of wrapping to three. */
-  .sl-filter-row{ flex-wrap:wrap; }
-  .sl-filter-row .sl-filter-more{ display:none; width:100%; }
-  .sl-filter-row .sl-filter-more.open{ display:flex; flex-wrap:wrap; gap:6px; }
-  .sl-filter-chips{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  .sl-filter-chips .sl-chip, .sl-filter-count{ flex-shrink:0; }
-  /* Wide tables: a right-edge fade says "more columns this way" — iOS hides
-     scrollbars, so a cut-off table read as the whole table. */
-  .tbl-wrap{ position:relative; }
-  .tbl-wrap::after{ content:''; position:absolute; top:0; right:0; bottom:0; width:26px;
-    background:linear-gradient(to left, var(--bg), rgba(255,255,255,0)); pointer-events:none; }
-  /* Finger-friendly tap targets — incl. the highest-frequency chrome (☰,
-     search, +) and the destructive line-item ✕ buttons, which sat at 30-34px. */
-  .modal-close, .cp-gb-user, .sk-send, .sk-hero-go, .sk-icon-btn,
-  .mob-menu-btn, .mob-icon-btn, .mob-add-btn, .ag-mob-menu, .sl-qi-del{ min-width:40px; min-height:40px; }
-  .btn-sm{ min-height:40px; }
-  .sl-chip{ min-height:36px; padding:8px 12px; }
-  /* Any 2/3-column field grid inside a modal stacks on a phone — three ~110px
-     columns clip selects and dates in the PO/quote forms (the money forms). */
-  .modal-body [style*="grid-template-columns:"]{ grid-template-columns:1fr !important; }
-
-  /* Dashboard: stack the analytics + pipeline/alerts grids on phones */
-  .dash-grid-3, .dash-grid-2{ grid-template-columns:1fr !important; }
-}
-
-/* Make the assistant Close button unmistakable (esp. the full-screen mobile dock) */
-.sk-close{ color:#fff; border-color:#3a3a3a; font-weight:700; }
-
-/* Keyboard focus is visible everywhere. A 1px border-bottom swap is not a
-   focus state — tab through the app and you can actually see where you are. */
-:focus-visible{ outline:2px solid var(--ink); outline-offset:2px; }
-
-/* ⌘K keyboard walk: the selected result reads like a hover + an ink rail. */
-.search-row-sel{ background:var(--bg-off); box-shadow:inset 2px 0 0 var(--ink); }
-
-/* Today focus rows: clickable lines answer hover with the quiet wash. */
-.focus-row[onclick]:hover{ background:var(--bg-off); }
-
-/* ═══ PAGE-HEAD BAND (desktop) — every content screen opens with a real title
-   in its own padded band: the register between Today's 48px hero and the 11px
-   topbar caption. The topbar keeps breadcrumb/actions; its title yields to the
-   band ≥768px (phones keep the compact topbar title). Bands are created and
-   mirrored from the existing title elements by veniaBandInit — no writer in
-   the app changes. ═══ */
-.page-band{ display:none; }
-@media (min-width:768px){
-  .page-band{
-    display:block;
-    font-family:'Archivo',Helvetica,Arial,sans-serif;
-    font-size:24px;font-weight:600;letter-spacing:3px;text-transform:uppercase;
-    color:var(--ink);background:var(--bg);
-    padding:24px 28px 20px;border-bottom:1px solid var(--border);
-  }
-  .ag-topbar .ag-page-title, .topbar .page-title{ display:none; }
-}
-
-/* PO payments cell (desktop layout; stacks like the rest on phones). */
-.po-pay-cell{ white-space:nowrap; display:flex; gap:8px; padding-top:14px; }
-
-/* Stacked tables on phones (Demand Plan, Purchase Orders): each row becomes a
-   block — name full-width, then label/value pairs — so Gap-to-commit and
-   payment status stop hiding off the right edge. Inputs keep native semantics. */
-@media (max-width:768px){
-  .stack-tbl thead{ display:none; }
-  /* min-width:0 beats the generic mobile "table{min-width:600px}" scroll rule
-     — a stacked table must shrink to the phone, not scroll. */
-  .stack-tbl, .stack-tbl tbody, .stack-tbl tr{ display:block; width:100%; min-width:0; }
-  .stack-tbl tr{ border-bottom:1px solid var(--border); padding:10px 0; }
-  .stack-tbl td{ display:flex; justify-content:space-between; align-items:center; gap:12px; padding:3px 0; border:none; }
-  .stack-tbl td::before{ content:attr(data-label); font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); font-weight:700; flex-shrink:0; }
-  .stack-tbl td[data-label=""]{ display:block; padding-bottom:6px; }
-  .stack-tbl td[data-label=""]::before{ content:none; }
-  .stack-tbl .fi{ width:90px !important; text-align:right; }
-  .stack-tbl .po-pay-cell{ padding-top:3px; }
-  /* Stacked rows have no horizontal overflow — the "more columns" fade would
-     just wash out the right-hand values. */
-  .tbl-wrap:has(.stack-tbl)::after{ content:none; }
-  /* Filter/tab rows: swipe instead of silently clipping, with a trailing fade
-     so a thumb can tell there's more (mobile audit gap #4). */
-  .tabs, .filters{
-    overflow-x:auto; flex-wrap:nowrap; -webkit-overflow-scrolling:touch; scrollbar-width:none;
-    mask-image:linear-gradient(90deg,#000 90%,transparent);
-    -webkit-mask-image:linear-gradient(90deg,#000 90%,transparent);
-  }
-  .tabs::-webkit-scrollbar, .filters::-webkit-scrollbar{ display:none; }
-  .tabs > *{ flex-shrink:0; white-space:nowrap; }
-}
-@media (max-width:560px){
-  .sk-close{ min-width:44px; min-height:44px; font-size:18px; border-color:#666; background:#1c1c1c; }
-  .sk-head{ gap:8px; }
-  .sk-head .sk-icon-btn{ padding:9px 12px; }
-
-  /* Modals become full-screen sheets on phones (used by every add/edit form) */
-  .overlay{ padding:0; align-items:stretch; z-index:600; }
-  .modal, .modal-lg{ max-width:100%; width:100%; max-height:100dvh; min-height:100dvh; border:none; }
-  .modal-head{ padding-top:calc(18px + var(--sat)); padding-left:16px; padding-right:16px; }
-  /* Full-screen sheet: keep real gutters, and clear the home bar. */
-  .modal-body{ padding:18px 16px calc(20px + var(--sab)); }
-  .modal-tabs{ margin:-18px -16px 18px; padding:0 16px; }
-  .modal-foot{ position:sticky; bottom:0; background:var(--bg);
-               padding-left:16px; padding-right:16px;
-               padding-bottom:calc(16px + var(--sab)); }
-  /* Stack the two/three-column form grids */
-  .form-grid, .form-grid-3{ grid-template-columns:1fr; }
-}
-
-@media (max-width:560px){
-  /* Full-screen dock must cover the entire viewport; safe-areas go on inner chrome */
-  #sk-dock{ inset:0; top:0; right:0; bottom:0; left:0; width:100vw; max-width:100vw;
-            height:100dvh; max-height:100dvh; border-radius:0; border:none; }
-  .sk-head{ padding-top:calc(12px + var(--sat)); }
-
-  /* Same two-row composer, restated for a browser with no container queries. */
-  .sk-input{ display:grid; grid-template-columns:1fr auto; grid-template-areas:"field field" "tools send";
-             gap:8px; padding:10px 12px calc(10px + var(--sab)); align-items:center; }
-  .sk-tools{ display:flex; gap:8px; grid-area:tools; }
-  #sk-field{ grid-area:field; width:100%;
-             /* With the keyboard up there is ~500px to work with — a 300px
-                field would leave no conversation to answer about. skViewportFit
-                sets --sk-fmax from the VISIBLE height; the vh value is the
-                fallback before it runs, or without visualViewport. */
-             max-height:var(--sk-fmax, min(300px, 22vh)); }
-  .sk-send{ grid-area:send; }
-  /* 38px is under Apple's 44px minimum target; on a phone these are thumbs. */
-  .sk-cam, .sk-send{ width:44px; height:44px; }
-  /* While the keyboard covers the home indicator, its inset is dead space. */
-  html.sk-kb .sk-input{ padding-bottom:10px; }
-
-}
-
-/* ═══ 3-SPACE NAV + TODAY HOME (Apple-level simplification, stage 1) ═══ */
-.cp-spaces{ display:flex; gap:2px; margin-left:10px; }
-.cp-space{ background:none; border:none; color:var(--muted); font-size:11px; letter-spacing:1.5px;
-  text-transform:uppercase; font-weight:600; padding:6px 13px; cursor:pointer; border-radius:7px;
-  font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; transition:all .15s; }
-.cp-space:hover{ color:var(--ink); }
-.cp-space.active{ color:var(--ink); background:rgba(0,0,0,.06); }
-.cp-gb-icon{ background:none; border:none; color:var(--muted); font-size:15px; cursor:pointer;
-  display:inline-flex; align-items:center; justify-content:center;
-  padding:4px 6px; line-height:1; }
-.cp-gb-icon:hover{ color:var(--ink); }
-
-.cpl{ overflow-y:auto; -webkit-overflow-scrolling:touch; }
-.cpl-sub{ font-size:10px; letter-spacing:2px; text-transform:uppercase; color:var(--muted); margin-top:8px; }
-.cpl-block{ margin:var(--sp-7) 48px 0; }
-.cpl-block-label{ font-size:var(--fs-label); letter-spacing:2px; text-transform:uppercase; color:var(--muted);
-  font-weight:700; margin-bottom:var(--sp-3); }
-.cpl-pulse{ display:flex; align-items:center; gap:var(--sp-7); flex-wrap:wrap; margin:var(--sp-7) 48px 0;
-  padding:var(--sp-5) 0; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
-.cpl-pulse-item{ display:flex; flex-direction:column; gap:var(--sp-1); }
-.cpl-pulse-v{ font-size:28px; font-weight:300; font-family:'DM Mono',monospace; color:var(--ink); line-height:1; }
-.cpl-pulse-l{ font-size:10px; letter-spacing:1.5px; text-transform:uppercase; color:var(--muted); }
-.cpl-pulse-more{ margin-left:auto; background:none; border:none; color:var(--muted); font-size:10px;
-  letter-spacing:1.2px; text-transform:uppercase; font-weight:700; cursor:pointer; transition:color .15s; }
-.cpl-pulse-more:hover{ color:var(--ink); }
-.cpl .sk-hero{ margin:8px 48px 0; }
-/* Doors — one hover physics app-wide: a clickable tile answers with a 2px ink
-   top border and a quiet lift. Shadow belongs to overlays, not tiles. */
-.cpl-doors{ display:grid; grid-template-columns:1fr 1fr; gap:var(--sp-3); margin:26px 48px 44px; }
-.cpl-door{ background:var(--card); padding:var(--sp-6) var(--sp-5); cursor:pointer; position:relative;
-  border:1px solid var(--border); border-top:2px solid var(--border); border-radius:var(--r-lg);
-  transition:border-top-color .18s var(--ease-out), transform .18s var(--ease-out); }
-.cpl-door:hover{ border-top-color:var(--ink); transform:translateY(-2px); }
-.cpl-door:active{ transform:translateY(0) scale(.99); }
-.cpl-door-k{ font-family:'Archivo',Helvetica,Arial,sans-serif; font-size:var(--fs-xl); letter-spacing:1px;
-  text-transform:uppercase; margin-bottom:9px; color:var(--ink); }
-.cpl-door-d{ font-size:var(--fs-sm); color:var(--muted); line-height:1.55; max-width:92%; }
-/* 50% not var(--r-pill): the sharp-corner token turns this into a black square
-   that reads as a rendering artifact when the round FABs pass over it — the
-   floating circles are the one sanctioned round family, and this joins it. */
-.cpl-door-go{ position:absolute; top:20px; right:20px; width:26px; height:26px; border-radius:50%;
-  background:var(--ink); color:#fff; font-size:13px; display:flex; align-items:center; justify-content:center;
-  transition:transform .18s var(--ease-out); }
-.cpl-door:hover .cpl-door-go{ transform:translateX(2px); }
-@media (prefers-reduced-motion:reduce){ .cpl-door,.cpl-door:hover,.cpl-door-go{ transition:none; transform:none; } }
-@media (max-width:560px){
-  .cpl .sk-hero{ margin:8px 16px 0; }
-  .cpl-block, .cpl-pulse{ margin-left:16px; margin-right:16px; }
-  .cpl-doors{ grid-template-columns:1fr; margin:24px 16px 96px; gap:var(--sp-3); }
-  .cp-spaces{ margin-left:2px; gap:0; }
-  .cp-space{ padding:6px 9px; font-size:10px; letter-spacing:.5px; }
-  .cp-gb-status{ display:none; }
-}
-
-/* ═══ GROWTH sub-switcher (PR · Sales · Mktg · Brand as one space) ═══ */
-.ag-spaces{ display:flex; flex-wrap:wrap; gap:4px; margin-top:14px; }
-.ag-space{ background:none; border:1px solid var(--border); color:var(--muted); font-size:10px;
-  letter-spacing:1px; text-transform:uppercase; font-weight:600; padding:5px 11px; cursor:pointer;
-  border-radius:0; transition:all .15s; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif; }
-.ag-space:hover{ color:var(--ink); border-color:var(--border-mid); }
-.ag-space.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
-
-/* Cost calculator: 5 inputs crush on a phone — collapse to 2 columns */
-@media (max-width:560px){ .cost-calc-grid{ grid-template-columns:1fr 1fr !important; } }
-
-/* Keep the top bar's right cluster (settings + avatar) inside the viewport on phones */
-@media (max-width:560px){
-  .cp-global-bar{ padding-right:12px; overflow:hidden; }
-  .cp-gb-right{ gap:8px; }
-  .cp-gb-user{ flex-shrink:0; }
-}
-
-/* Wholesale line sheet on phones: scroll the print table horizontally inside its
-   own container so Wholesale / Retail / Lead are reachable (was clipped off-screen
-   with the whole page unable to scroll to them). */
-@media (max-width:640px){
-  #linesheet-content{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
-  #linesheet-print{ min-width:600px; padding:18px !important; }
-  .ls-swipe-hint{ display:block !important; }
-}
-
-/* ── Vendor sourcing badges (domestic vs import + currency/duty/incoterm) ── */
-.vendor-src{ display:flex; gap:5px; flex-wrap:wrap; margin:7px 0 9px; }
-.src-badge{ font-size:10px; letter-spacing:1px; text-transform:uppercase; font-weight:700;
-  padding:3px 8px; border-radius:var(--r-sm); border:1px solid var(--border); }
-.src-dom{ background:var(--green-dim); color:var(--green); border-color:var(--green); }
-.src-int{ background:rgba(0,0,0,.05); color:var(--ink); border-color:var(--border-mid); }
-.src-chip{ font-size:10px; letter-spacing:.5px; text-transform:uppercase; color:var(--muted);
-  padding:3px 8px; border-radius:var(--r-sm); border:1px solid var(--border); background:var(--bg-off); }
-</style>
 
 <button id="sk-launch" onclick="skToggle()" aria-label="Open Eni and Nigma assistant" title="Eni & Nigma  (Cmd/Ctrl+J)">
   <span class="sk-launch-mark"><svg class="ico" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path class="fill" d="M12 3.4Q13.3 10.7 20.6 12 13.3 13.3 12 20.6 10.7 13.3 3.4 12 10.7 10.7 12 3.4Z"/></svg></span><span>Eni · Nigma</span>

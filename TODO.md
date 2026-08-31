@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 413._
+_Last reviewed at Build 414._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2184,3 +2184,65 @@ within 2mm, **and** every card on a page still starts on the same line.
 
 One harness bug found writing that: the level check first read `.c` across the
 whole document, so cards on page two counted as misaligned. Scoped to one grid.
+
+## Build 414 — the refresh blip
+*"refreshing the page has a blip that shows unstyled html page."*
+
+**It was real, it was five seconds long, and it was one `<style>` tag in the
+wrong place.**
+
+The app's home screen and nav bar were styled by a `<style>` block **2.7MB into
+a 2.9MB document** — after the markup it styles. `.cp-space` (the nav pills),
+`.cpl-door` (the PRODUCT / SALES / GROWTH / MONEY cards), `.cpl-pulse`,
+`.toast`, `.mob-card-list` and `body` itself all lived there, tucked behind 500
+lines of Eni/Nigma CSS where nobody would look for them. The head sheet carried
+707 rules; that block carried the other 128.
+
+The browser paints as soon as the head sheet is in — about **240ms**. It does
+not see the last 128 rules until the stream finishes, about **5.4 seconds**.
+Everything in between is the app rendered as raw HTML: tab pills as default
+browser buttons, the home screen as a list of unstyled paragraphs.
+
+Measured, at a document streamed at 4 Mbps:
+
+| | Build 413 | Build 414 |
+|---|---|---|
+| nav unstyled for | **5,182ms** | never |
+| home cards raw for | **5,182ms** | never |
+| rules at first paint | 707 of 835 | **835 of 835** |
+
+The block is now at the END of the head sheet — last in the cascade, exactly
+where it was relative to every other rule, so nothing changes but when it
+arrives.
+
+### Two more things were on the critical path
+Both found by measuring what first paint was waiting for, not by reading:
+
+- **The Supabase library was parser-blocking in `<head>`.** `<script src=…>`
+  with no `defer` stops the parser dead until a CDN in another country answers.
+  Deferred now. The catch: `sbInit` was called from an IIFE that runs *during*
+  parse, so a naive `defer` would have left `window.supabase` undefined — and
+  that path doesn't throw, it just quietly leaves cloud sync off. The boot now
+  runs immediately if the library is there and on `DOMContentLoaded` otherwise
+  (deferred scripts are guaranteed to have run by then). The gauntlet asserts
+  the client actually initialises.
+- **The font stylesheet is render-blocking, and stays that way** — without the
+  `@font-face` rules the page paints in Helvetica and reflows when Archivo
+  lands. Instead of unblocking it, it got cheaper: `preconnect` to both font
+  hosts opens DNS/TCP/TLS while the HTML is still streaming. And
+  `display=swap` → **`display=optional`**: swap means "paint in the fallback
+  now and re-flow the whole page later", which is a second flash. `optional`
+  gives the font ~100ms — always met once cached, which for a daily-use PWA is
+  every load after the first — and otherwise keeps the fallback for that load
+  and never swaps.
+
+`gauntlet/fouc.js` is new and had to build its own server: **localhost hands
+over 2.9MB in 200ms**, so no local test could ever have caught this. It streams
+the document in 32KB chunks at 4 Mbps and samples the nav's computed padding
+from the first frame it exists. Seven of its nine assertions fail against
+Build 413.
+
+### Still open
+The service worker is **network-first** for the app shell, so every refresh
+re-fetches 2.9MB before painting. Stale-while-revalidate would paint instantly
+from cache — but it changes when a deploy lands, so it is a decision, not a fix.
