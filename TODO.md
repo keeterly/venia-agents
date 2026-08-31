@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 402._
+_Last reviewed at Build 403._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -1754,3 +1754,34 @@ in the same place. Three of its seven assertions fail against the shipped build.
 **Worth knowing (not a bug):** fabric, colourways, sizes and base size *are* in
 Edit Style — on the Construction and Pattern tabs, not Identity. Only the
 margins were genuinely absent.
+
+
+## Build 403 — a selection of something deleted is not a selection
+*"No style is selected but it still shows that it is. This was because I deleted
+a style but the header didn't disappear."*
+
+`BULK_SELECTED` kept the id of the deleted style, so the bar went on announcing
+*"1 style selected"* over a list with nothing ticked — and worse, **every bulk
+action would have run against an id that resolves to nothing**: Advance Stage,
+Margin, Archive, Export, all silently doing nothing to a style that is gone.
+Confirmed against the shipped build: the set still holds `["s1"]` after the
+delete.
+
+`bulkReconcile()` drops ids that are no longer in `STATE.styles`. Reconciling
+against state rather than patching `dpDelete` covers every way a style can
+leave, including a sync from the other founder's device removing one.
+
+**The edge that made it interesting:** `renderStyles()` returns early when the
+list is empty — which is exactly the case after deleting your last style — so a
+reconcile living only in `updateBulkBar()` never ran. It is called at the top of
+`renderStyles`, before anything can return, and the empty-state branch repaints
+the bar on its way out.
+
+`gauntlet/bulkbar.js` — 7 assertions; four fail against shipped.
+
+**Found while fixing this: Build 402 shipped without a service-worker bump.**
+`sw.js` was still on `venia-shell-v401`, so the fix was live on the URL and
+invisible to anyone running the app from their home screen. The two numbers are
+one decision and nothing but attention was keeping them in step — so
+`smoke87.js` now fails the build if `const BUILD` and `venia-shell-vNNN`
+disagree.
