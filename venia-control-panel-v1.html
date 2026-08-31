@@ -1381,6 +1381,15 @@ body{padding-top:44px;box-sizing:border-box;}
   .cp-global-bar{background:rgba(255,255,255,.96)}
 }
 .cp-gb-left{display:flex;align-items:center;gap:24px}
+/* A module this person does not hold disappears from every route into it —
+   the desktop nav, the phone tab bar, the drawer, and the Today doors. Set by
+   veniaLoadAccess() and ONLY when it is certain (see the comment there). */
+html.no-product   [data-space="product"],   html.no-product   .cpl-door[onclick*="'plm'"],
+html.no-growth    [data-space="growth"],    html.no-growth    .cpl-door[onclick*="'pr'"],
+html.no-sales     [data-space="sales"],     html.no-sales     .cpl-door[onclick*="'sl'"],
+html.no-money     [data-space="money"],     html.no-money     .cpl-door[onclick*="cmdGoMoney"],
+html.no-brainstorm [data-space="brainstorm"],
+html.no-settings  [data-space="settings"]{ display:none !important; }
 .cp-gb-logo{
   font-family:'Archivo',Helvetica,Arial,sans-serif;
   font-size:16px;font-weight:600;letter-spacing:5px;text-transform:uppercase;
@@ -2562,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '420';
+  const BUILD = '421';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3097,6 +3106,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">System</div>
           <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh();window.setPwResetRefresh&&setPwResetRefresh()">Security</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-team',this);teamRender()">Team & Access</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
           <div class="ag-nav-item" onclick="setShowSection('set-about',this)">About</div>
         </div>
@@ -3488,6 +3498,48 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
       </div>
 
       <!-- DATA & BACKUP -->
+      <!-- TEAM & ACCESS -->
+      <div id="set-team" class="set-section" style="display:none">
+        <div class="ag-content">
+          <div style="max-width:720px">
+            <div class="micro-label" style="margin-bottom:6px">Team & access</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:18px">
+              Access is per module and enforced by the database, not by hiding screens: a
+              person is handed the modules you tick and the rest of the workspace is never
+              sent to their browser at all. Only the two of you can grant or revoke.
+            </div>
+            <div id="team-list" style="margin-bottom:22px"><div style="font-size:11px;color:var(--muted)">Loading…</div></div>
+
+            <div style="background:var(--bg-off);border:1px solid var(--border);padding:18px">
+              <div class="micro-label" style="margin-bottom:12px">Give someone access</div>
+              <div class="fg" style="margin-bottom:12px">
+                <label class="fl" for="team-email">Their email</label>
+                <input class="fi" id="team-email" type="email" placeholder="name@example.com" autocomplete="off">
+              </div>
+              <div class="fg" style="margin-bottom:12px">
+                <label class="fl">Modules</label>
+                <div id="team-modules" style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:6px"></div>
+              </div>
+              <div class="fg" style="margin-bottom:14px">
+                <label class="fl" for="team-role">They can</label>
+                <select class="fs" id="team-role" style="min-height:auto;padding:7px 9px;font-size:12px;width:auto">
+                  <option value="editor">Edit — read and change what they hold</option>
+                  <option value="viewer">View only — read, never change</option>
+                  <option value="owner">Own — edit, for a module they run</option>
+                </select>
+              </div>
+              <button class="btn btn-gold" onclick="teamGrant()">Grant access</button>
+              <div style="font-size:10.5px;color:var(--muted);line-height:1.7;margin-top:12px">
+                Granting access does not create a password. After granting, use
+                <strong>Set password</strong> on their row — that makes the login and gives
+                you the details to send them. Today is always included, otherwise they sign
+                in to a screen that cannot load.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="set-data" class="set-section" style="display:none">
         <div class="ag-content">
           <div class="micro-label" style="margin-bottom:16px">Data & Backup</div>
@@ -35872,6 +35924,206 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
 
 })(); // end Supabase IIFE
 
+// ── WHAT THIS PERSON CAN SEE ──────────────────────────────────────────────
+// The database already refuses to send a module a person does not hold, so
+// this is not the security boundary — it is the difference between "restricted"
+// and "broken". Without it a Sales-only member signs in and finds Product and
+// Money on the nav, opens them, and sees nothing, with no way to tell whether
+// that is a permission or a bug.
+//
+// IT ONLY EVER HIDES WHEN IT IS SURE. A founder, a failed lookup, an offline
+// boot, a share/portal view — every uncertain case shows everything, because
+// hiding on a maybe would lock a founder out of their own app, and the data is
+// protected either way.
+;(function(){
+  var SPACE_OF = { home:'today', product:'product', growth:'growth', sales:'sales',
+                   money:'money', brainstorm:'brainstorm', settings:'settings' };
+  window.VENIA_MY_MODULES = null;          // null = unknown, so show everything
+  function apply(){
+    var mine = window.VENIA_MY_MODULES;
+    var html = document.documentElement;
+    if (!mine) {                            // unknown or founder: nothing hidden
+      Object.keys(SPACE_OF).forEach(function(m){ html.classList.remove('no-' + SPACE_OF[m]); });
+      return;
+    }
+    Object.keys(SPACE_OF).forEach(function(m){
+      html.classList.toggle('no-' + SPACE_OF[m], !mine[m]);
+    });
+  }
+  window.veniaApplyAccess = apply;
+  window.veniaLoadAccess = async function(){
+    try {
+      if (window.VENIA_SHARE || window.VENIA_AGENT) return;      // other doors entirely
+      var u = window.veniaAuthUser;
+      var c = window.__sbClient;
+      if (!u || !u.email || !c) { window.VENIA_MY_MODULES = null; apply(); return; }
+      var em = String(u.email).toLowerCase();
+      var r = await c.from('venia_members').select('module, role').eq('email', em);
+      // An error, or a workspace with no membership rows at all, means we do
+      // not know — and not knowing must never hide anything.
+      if (r.error || !r.data || !r.data.length) { window.VENIA_MY_MODULES = null; apply(); return; }
+      var mine = {};
+      r.data.forEach(function(row){ mine[String(row.module)] = String(row.role || 'editor'); });
+      // Someone holding every grantable module is running the whole workspace;
+      // there is nothing to hide from them.
+      var all = Object.keys(SPACE_OF).every(function(m){ return !!mine[m]; });
+      window.VENIA_MY_MODULES = all ? null : mine;
+      window.VENIA_MY_ROLES = mine;
+      apply();
+    } catch(e){ window.VENIA_MY_MODULES = null; apply(); }
+  };
+})();
+
+// ── TEAM & ACCESS ─────────────────────────────────────────────────────────
+// The screen behind venia_members. Everything here goes through the `team`
+// edge function, never the table directly — not because RLS would let it
+// through (it would not), but because CREATING THE LOGIN needs the service
+// role, and a grant with no account is a row that lets nobody in.
+;(function(){
+  var MOD_LABEL = { home:'Today', product:'Product', growth:'Growth', sales:'Sales',
+                    money:'Money', brainstorm:'Brainstorm', settings:'Settings' };
+  // What each module actually hands over, in the words a founder would use to
+  // decide. "Money" is not a screen name here, it is a warning.
+  var MOD_WHAT = {
+    home:       'the day view — always included',
+    product:    'styles, materials, tech packs, costing, POs',
+    growth:     'press, marketing, brand — pulls, pitches, the calendar',
+    sales:      'buyers, quotes, orders, line sheets',
+    money:      'cash, P&L, margins, the bank feed',
+    brainstorm: 'the shared scratchpad',
+    settings:   'connections and preferences',
+  };
+  function esc(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+  async function teamCall(body){
+    var c = (typeof window.__sbClient !== 'undefined' && window.__sbClient) || null;
+    if (!c) throw new Error('Not connected to the cloud — sign in under Settings → Security first.');
+    var r = await c.functions.invoke('team', { body: body });
+    if (r.error) {
+      // functions.invoke collapses every non-2xx into one opaque sentence, so
+      // read the real message out of the body instead of showing "non-2xx".
+      var msg = r.error.message || 'request failed';
+      try { var d = await r.error.context.json(); if (d && d.error) msg = d.error; } catch(e){}
+      throw new Error(msg);
+    }
+    if (r.data && r.data.error) throw new Error(r.data.error);
+    return r.data || {};
+  }
+  // A password a person can actually read out over the phone.
+  function suggest(){
+    var a = ['amber','basalt','cobalt','dune','ember','flint','garnet','harbour','ivory','jade'];
+    var b = ['atlas','brim','cove','drift','ember','forge','grain','haven','inlet','jetty'];
+    var p = function(x){ return x[Math.floor(Math.random()*x.length)]; };
+    return p(a) + '-' + p(b) + '-' + String(Math.floor(1000 + Math.random()*9000));
+  }
+  window.teamRender = async function(){
+    var box = document.getElementById('team-list'); if (!box) return;
+    // The tick boxes are built from the SAME registry the storage split uses,
+    // so a module can never exist in one and not the other.
+    var picks = document.getElementById('team-modules');
+    if (picks && !picks.childElementCount) {
+      picks.innerHTML = Object.keys(MOD_LABEL).filter(function(m){ return m !== 'home'; }).map(function(m){
+        return '<label style="display:flex;align-items:flex-start;gap:7px;font-size:11.5px;color:var(--ink);cursor:pointer;width:210px">'
+          + '<input type="checkbox" class="team-mod" value="' + m + '" style="accent-color:var(--ink);margin-top:2px">'
+          + '<span><b>' + esc(MOD_LABEL[m]) + '</b><br><span style="color:var(--muted);font-size:10px">' + esc(MOD_WHAT[m]) + '</span></span></label>';
+      }).join('');
+    }
+    box.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading…</div>';
+    var d;
+    try { d = await teamCall({ action:'list' }); }
+    catch(e){ box.innerHTML = '<div style="font-size:11px;color:var(--red)">' + esc(e.message) + '</div>'; return; }
+    var people = (d.people || []).slice().sort(function(a,b){
+      return (b.founder?1:0) - (a.founder?1:0) || String(a.email).localeCompare(String(b.email)); });
+    var others = people.filter(function(x){ return !x.founder; });
+    box.innerHTML = people.map(function(pn){
+      var mods = Object.keys(pn.modules || {}).filter(function(m){ return m !== 'home'; });
+      var chips = mods.length ? mods.map(function(m){
+        var role = pn.modules[m];
+        return '<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);'
+          + 'padding:2px 6px;font-size:10px;letter-spacing:.4px;background:var(--bg)">'
+          + esc(MOD_LABEL[m] || m)
+          + '<span style="color:var(--muted)">' + esc(role) + '</span>'
+          + (pn.founder ? '' : '<button onclick="teamRevoke(\'' + esc(pn.email) + '\',\'' + esc(m) + '\')" '
+              + 'title="Take ' + esc(MOD_LABEL[m]||m) + ' away" aria-label="Revoke ' + esc(MOD_LABEL[m]||m) + '" '
+              + 'style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 0 0 2px;font-size:12px;line-height:1">&#215;</button>')
+          + '</span>';
+      }).join(' ') : '<span style="font-size:10.5px;color:var(--muted);font-style:italic">Today only</span>';
+      // A grant with no login is the one state that looks fine and does nothing.
+      var login = pn.founder ? ''
+        : (pn.hasLogin
+            ? '<span style="font-size:10px;color:var(--muted)">Can sign in'
+              + (pn.lastSignIn ? ' · last ' + esc(String(pn.lastSignIn).slice(0,10)) : ' · never used yet') + '</span>'
+            : '<span style="font-size:10px;color:var(--red)">No password yet — they cannot sign in</span>');
+      return '<div style="border:1px solid var(--border);padding:13px 14px;margin-bottom:1px;background:var(--bg)">'
+        + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">'
+        + '<div style="font-size:12.5px;font-weight:600">' + esc(pn.email)
+        + (pn.founder ? ' <span style="font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)">founder</span>' : '')
+        + '</div>' + login + '</div>'
+        + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">' + chips + '</div>'
+        + (pn.founder ? '' :
+            '<div style="display:flex;gap:6px;margin-top:11px">'
+            + '<button class="btn btn-ghost btn-sm" onclick="teamSetPw(\'' + esc(pn.email) + '\')">'
+            + (pn.hasLogin ? 'Reset password' : 'Set password') + '</button>'
+            + '<button class="btn btn-ghost btn-sm" onclick="teamRemove(\'' + esc(pn.email) + '\')">Remove</button>'
+            + '</div>')
+        + '</div>';
+    }).join('') + (others.length ? '' :
+        '<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:10px">'
+        + 'Nobody outside the two of you has access yet.</div>');
+  };
+  window.teamGrant = async function(){
+    var email = (document.getElementById('team-email').value || '').trim().toLowerCase();
+    var role = document.getElementById('team-role').value;
+    var mods = [].slice.call(document.querySelectorAll('.team-mod:checked')).map(function(x){ return x.value; });
+    if (!email) { showToast('Their email, first', 'warning'); return; }
+    if (!mods.length) { showToast('Tick at least one module', 'warning'); return; }
+    // Granting REPLACES the whole set, so an existing person losing modules is
+    // a real change and gets said out loud before it happens.
+    var names = mods.map(function(m){ return MOD_LABEL[m] || m; }).join(', ');
+    if (!confirm('Give ' + email + ' ' + role + ' access to: ' + names + '?\n\n'
+        + 'This replaces whatever they have now — anything not ticked is taken away.')) return;
+    try {
+      await teamCall({ action:'grant', email: email, modules: mods, role: role });
+      showToast('Access granted — now set their password', 'success');
+      try { logActivity('Access granted: ' + email + ' — ' + names + ' (' + role + ')'); } catch(e){}
+      document.getElementById('team-email').value = '';
+      document.querySelectorAll('.team-mod:checked').forEach(function(x){ x.checked = false; });
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not grant access', 'error'); }
+  };
+  window.teamRevoke = async function(email, module){
+    if (!confirm('Take ' + (MOD_LABEL[module] || module) + ' away from ' + email + '?')) return;
+    try { await teamCall({ action:'revoke', email: email, module: module });
+      showToast('Revoked', 'success');
+      try { logActivity('Access revoked: ' + email + ' — ' + (MOD_LABEL[module]||module)); } catch(e){}
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not revoke', 'error'); }
+  };
+  window.teamRemove = async function(email){
+    if (!confirm('Remove every module from ' + email + '?\n\n'
+        + 'Their login is kept but opens nothing. Delete the account itself in Supabase if you want it gone for good.')) return;
+    try { await teamCall({ action:'remove', email: email });
+      showToast('Access removed — the login still exists but opens nothing', 'success');
+      try { logActivity('Access removed: ' + email); } catch(e){}
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not remove', 'error'); }
+  };
+  window.teamSetPw = async function(email){
+    var pw = prompt('Password for ' + email + ' — they can change it later from Settings → Security.\n\n'
+      + 'Edit it or press OK to use this one:', suggest());
+    if (pw === null) return;
+    if (String(pw).length < 10) { showToast('At least 10 characters', 'warning'); return; }
+    try {
+      var r = await teamCall({ action:'setpw', email: email, password: String(pw) });
+      var url = (window.VENIA_PUBLIC_BASE || location.origin);
+      var msg = 'Sign in at ' + url + '\nEmail: ' + email + '\nPassword: ' + pw;
+      try { await navigator.clipboard.writeText(msg); showToast((r.created ? 'Login created' : 'Password reset') + ' — details copied, send them to ' + email, 'success'); }
+      catch(e){ prompt('Send these to ' + email + ':', msg); }
+      try { logActivity((r.created ? 'Login created: ' : 'Password reset: ') + email); } catch(e){}
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not set the password', 'error'); }
+  };
+})();
+
 // ── SUPABASE LIVE SYNC (lossless whole-state blob) + PHOTO UPLOAD ─────────
 // The normalized push above only carries a subset of fields. This module keeps
 // the ENTIRE PLM in one realtime row (tech-pack detail — callouts, sketches,
@@ -37469,6 +37721,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     catch(e){ window.veniaAuthUser = null; }
     render();
     try { veniaAccountPaint(); } catch(e){}
+    // Who this is decides what they can reach, so the two are read together —
+    // signing in, out, or as someone else all land here.
+    try { if (window.veniaLoadAccess) veniaLoadAccess(); } catch(e){}
   }
   window.veniaAuthRefresh = refresh;
 
