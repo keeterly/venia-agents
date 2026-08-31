@@ -1,6 +1,6 @@
 # VENIA OS — Open Items & Architecture Notes
 
-_Last reviewed at Build 419._
+_Last reviewed at Build 420._
 
 ## ✅ Settled (kept here so they are not re-litigated)
 
@@ -2543,3 +2543,43 @@ convention the file already had for exactly this.
 button, aims at its centre pixel, clicks the *screen*, and requires the drawer
 to open — on all eight spaces — and asserts there is exactly **one** such button.
 That assertion fails against Build 418.
+
+## Build 420 — the per-module split, confirmed on real data; one search button
+*"I opened the app. Product has styles header. Growth sales and money have
+Overview header."*
+
+### The split is verified against the live workspace
+The founders opened the app, the first push ran, and all eight module rows
+landed at the same second as the blob mirror:
+
+| module | carries |
+|---|---|
+| product | **72 styles** |
+| sales | **82 buyers** |
+| money | **227 bank transactions** |
+
+- 57 data keys in the blob, **57 in the module rows — none lost**.
+- **No data key appears in two modules.** The only keys in more than one row are
+  `_ls` (4) and `_who` (8), both meta, both by design.
+- Styles exist only in `product`, buyers only in `sales`, transactions only in
+  `money`. The partition holds on the real data, not just the fixture.
+
+### The headers are not inconsistent
+"STYLES" on Product and "OVERVIEW" on Growth/Sales/Money is the **same rule**
+producing different answers — each names the page you are on inside that space.
+Checked by navigating, not by reading:
+
+    Product   Dashboard → Styles → Material Library → Vendors
+    Sales     Overview → Line Sheets → Buyers (CRM) → Quotes → Wholesale Orders
+
+Two different components (`#mob-page-title` set by `goTo()`, `.ag-page-title`
+set by the section navigator) — but one behaviour. Nothing to fix.
+
+### One thing that WAS a duplicate
+Product's header carried a second search button calling **`openSearch()`** — the
+same function opening the same modal as the one in the global bar, two inches
+away, on Product only. Same shape as MORE and the three hamburgers. Removed.
+
+The Styles page's own "Search styles — commas for several…" box is a **filter**,
+not the global search, and stays. The gauntlet asserts both: exactly one
+`openSearch()` button on Product, and the filter still present.
