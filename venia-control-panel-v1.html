@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '426';
+  const BUILD = '427';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2628,6 +2628,15 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
       || /(?:^|[#&])error(?:_code)?=/.test(h);
     if (window.VENIA_RECOVERY) $('venia-auth-gate').classList.add('hidden');
   })();
+  // Remote signing (?sign=TOKEN): a stylist who is not in the room signs the
+  // release on their own phone. Like ?share, the token IS the credential — but
+  // unlike ?share this page reads NOTHING from the workspace: everything it
+  // renders was frozen into its own row when the link was minted.
+  window.VENIA_SIGN = new URLSearchParams(location.search).get('sign') || null;
+  if (window.VENIA_SIGN) {
+    $('venia-auth-gate').classList.add('hidden');
+    document.documentElement.classList.add('share-mode');
+  }
   // Stripe returns the STYLIST here after paying (?pay=success|cancelled) —
   // they should see a branded confirmation, never the app or its gate.
   window.VENIA_PAY = new URLSearchParams(location.search).get('pay') || null;
@@ -20398,7 +20407,7 @@ const PR_RECON_BATCH = 8;
 
 window.prReconcilePayments = async function(opts){
   opts = opts || {};
-  if (window.VENIA_SHARE || window.VENIA_AGENT) return 0;
+  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return 0;
   if (!opts.force && Date.now() - PR_RECON_AT < PR_RECON_GAP) return 0;
   // veniaAC(false) reads the stored code WITHOUT prompting. A background sweep
   // must never be able to raise a passcode box on its own.
@@ -20799,7 +20808,7 @@ window.setTestStripe = async function(){
 // Boot: process ?tag=… once the app is unlocked and STATE is live.
 (function(){
   const t = new URLSearchParams(location.search).get('tag');
-  if (!t || window.VENIA_SHARE) return;
+  if (!t || window.VENIA_SHARE || window.VENIA_SIGN) return;
   let readyTicks = 0;
   const iv = setInterval(() => {
     const gate = document.getElementById('venia-auth-gate');
@@ -21168,10 +21177,24 @@ function prOpenDetail(pullId) {
         const emailedLine = pull.emailedAt
           ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}${pull.emailedAsked ? ' <span style="color:var(--amber)">(asked for ' + escHtml(pull.emailedAsked) + ' — only used if it is a verified alias)</span>' : ''}${pull.emailedCc ? ' · cc ' + escHtml(pull.emailedCc) : ''}</div>`
           : '';
-        if (!g) return emailedLine + `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
-          <span style="flex:1;min-width:160px;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
-          <button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> Get signature</button>
+        if (!g) {
+          // A link that has been sent is a different state from never asked,
+          // and it is the one a founder is actually waiting on. Say when it
+          // went, when it dies, and give them the one button that answers it.
+          const rq = pull.signRequest;
+          const dead = rq && rq.expiresAt && Date.parse(rq.expiresAt) < Date.now();
+          const waiting = rq && !dead
+            ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✍ Signing link ${rq.sentAt ? 'emailed' : 'created'} ${new Date(rq.at).toLocaleString()} — expires ${new Date(rq.expiresAt).toLocaleDateString()}${rq.hold ? ' · the card hold is on the same page' : ''}</div>`
+            : rq && dead
+            ? `<div style="font-size:10px;color:var(--amber);margin-bottom:10px">✍ The signing link expired ${new Date(rq.expiresAt).toLocaleDateString()} without being signed — send a new one.</div>`
+            : '';
+          return emailedLine + waiting + `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
+          <span style="flex:1 1 100%;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
+          <button class="btn btn-gold btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> Sign here</button>
+          <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="prSignSend('${pullId}')" title="Email a link they sign on their own phone">✉ ${rq && !dead ? 'Re-send' : 'Send'} to sign</button>
+          ${rq && !dead ? `<button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="prSignCheck('${pullId}')">↻ Signed yet?</button>` : ''}
         </div>`;
+        }
         const em = pull.emailedAt
           ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✉ Sheet emailed ${new Date(pull.emailedAt).toLocaleString()}${pull.emailedFrom ? ' from ' + escHtml(pull.emailedFrom) : ''}${pull.emailedAsked ? ' <span style="color:var(--amber)">(asked for ' + escHtml(pull.emailedAsked) + ' — only used if it is a verified alias)</span>' : ''}${pull.emailedCc ? ' · cc ' + escHtml(pull.emailedCc) : ''}</div>`
           : '';
@@ -21180,7 +21203,7 @@ function prOpenDetail(pullId) {
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <img src="${escHtml(g.image)}" alt="" style="height:30px;max-width:130px;flex:none;background:var(--bg);border:1px solid var(--border)">
             <span style="flex:1;min-width:150px;font-size:11px;color:var(--ink)">Signed by <b>${escHtml(g.name)}</b>
-              <span style="color:var(--muted)">· ${new Date(g.at).toLocaleString()}</span></span>
+              <span style="color:var(--muted)">· ${new Date(g.at).toLocaleString()}${g.remote ? ' · remotely' + (g.ip ? ' from ' + escHtml(g.ip) : '') : ''}</span></span>
             <button class="btn btn-ghost btn-sm" style="flex-shrink:0" onclick="prSignOpen('${pullId}')">Re-sign</button>
           </div>
           ${drift ? `<div style="font-size:10px;color:var(--amber);margin-top:7px;line-height:1.6">⚠ ${escHtml(drift)}. The signature covers what it covered — re-sign if they have accepted the change.</div>` : ''}
@@ -21258,7 +21281,11 @@ function prOpenDetail(pullId) {
     const isHold = pay.type === 'hold' && pay.url;
     // A card hold has to show even on a fee-free press loan: there is real money
     // reserved on someone's card, and the only thing that ends it is us.
-    if ((!pull.feeAmount || pull.feeType === 'none') && !isHold) return '';
+    // Was: no fee, no payment block. That hid the card hold on precisely the
+    // pulls where it matters most — a comped editorial loan with $4k of samples
+    // out and no fee to hang the button on. Anything with value on loan can
+    // carry a hold, so anything with value on loan gets the block.
+    if ((!pull.feeAmount || pull.feeType === 'none') && !isHold && !(pull.totalRetail > 0)) return '';
     const payStatus = pay.status || 'none';
     const statusBadge = isHold
       ? (payStatus === 'authorized' ? `<span style="color:var(--green);font-weight:700">✓ $${pay.amount} held on their card</span> <span style="color:var(--muted)">— release it when the samples are back</span>`
@@ -21296,6 +21323,10 @@ function prOpenDetail(pullId) {
     // Opening the pull is the moment you want the truth, so ask Stripe then —
     // quietly, and only while there is still something to find out.
     try {
+      if (pull.signRequest && pull.signRequest.token && !pull.signature
+          && typeof window.prSignCheck === 'function') window.prSignCheck(pullId, true);
+    } catch (e) {}
+    try {
       const pay = pull.payment || {};
       if (pay.stripeInvoiceId && pay.status !== 'paid' && pay.status !== 'void') {
         setTimeout(() => { try { prInvoiceCheck(pullId, true); } catch(e){} }, 250);
@@ -21315,10 +21346,13 @@ function prOpenDetail(pullId) {
             : `<button class="btn btn-gold btn-sm" style="flex:1 1 100%" onclick="prMarkAllReturned('${pullId}')">✓ Mark pull complete</button>`)
         : ''}
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="closeModal('pr-detail-modal');openPrCart('${pullId}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> Edit Pull</button>
-      <button class="btn btn-${pull.signature ? 'ghost' : 'gold'} btn-sm" style="flex:1 1 42%" onclick="prSignOpen('${pullId}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> ${pull.signature ? 'Re-sign' : 'Get signature'}</button>
+      <button class="btn btn-${pull.signature ? 'ghost' : 'gold'} btn-sm" style="flex:1 1 42%" onclick="prSignOpen('${pullId}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> ${pull.signature ? 'Re-sign' : 'Sign here'}</button>
+      ${pull.signature ? '' : `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prSignSend('${pullId}')" title="Email a link the stylist signs on their own phone">✉ Send to sign</button>`}
+      ${!pull.signature && pull.signRequest ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prSignCheck('${pullId}')">↻ Signed yet?</button>` : ''}
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prSendEmail(STATE.prPulls.find(p=>p.id==='${pullId}'))">✉ Re-send Sheet</button>
       ${pull.status === 'active' ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prPrintPullSheet('${pullId}')">↓ Pull Sheet PDF</button>` : ''}
-      ${pull.feeAmount && pull.feeType !== 'none' ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prOpenPayment('${pullId}')">◈ Charge Fee</button>` : ''}
+      ${(pull.feeAmount && pull.feeType !== 'none') || pull.totalRetail > 0
+          ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prOpenPayment('${pullId}')">◈ ${pull.feeAmount && pull.feeType !== 'none' ? 'Charge or hold' : 'Hold a card'}</button>` : ''}
       ${pull.status === 'active' && ('NDEFReader' in window) ? `<button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="prScanForReturn('${pullId}')">◎ NFC Return</button>` : ''}
       <button class="btn btn-ghost btn-sm" style="flex:1 1 42%" onclick="closeModal('pr-detail-modal')">Close</button>
       <button class="btn btn-ghost btn-sm" style="flex:1 1 100%;color:var(--red);border-color:var(--red)" onclick="prDeletePull('${pullId}')">Delete Pull</button>
@@ -21450,7 +21484,16 @@ function prOpenPayment(pullId) {
   // A hold is security against the value that walked out of the door, so it is
   // defaulted to the retail on loan — not to the pull fee, which is revenue and
   // belongs on an invoice.
-  document.getElementById('pr-hold-amount').value = Math.round(pull.totalRetail || 0) || fee || '';
+  //
+  // Unless a DEPOSIT was named on the pull. A damage deposit is the same kind
+  // of thing as a hold — security, refundable — so a founder who typed $500
+  // into the wizard, printed it on the release and had it signed for meant
+  // $500, and being handed the retail value instead is the app overruling a
+  // number someone already committed to in writing.
+  document.getElementById('pr-hold-amount').value =
+    (pull.feeType === 'deposit' && pull.feeAmount > 0)
+      ? Math.round(pull.feeAmount)
+      : (Math.round(pull.totalRetail || 0) || fee || '');
   document.getElementById('pr-hold-desc').value = `VENIA sample hold — ${pull.invoiceNo}`;
   prHoldRender();
   document.getElementById('pr-pay-link-result').style.display = 'none';
@@ -21680,6 +21723,135 @@ function prTermsLines(pull){
       + (pull.feeType === 'deposit' ? ', returned in full when the samples come back in good condition.' : '.'));
   return out;
 }
+
+// ── SENDING A PULL OUT TO BE SIGNED ───────────────────────────────────────
+// Everything the stylist will see is FROZEN into the link's own row here, so
+// their browser never touches the workspace — and so what they signed cannot
+// be rewritten by a later edit to the pull. Same guarantee the in-person
+// signature already gave; this one just has to survive leaving the building.
+window.prSignSend = async function(pullId){
+  var pull = (STATE.prPulls || []).find(function(p){ return p.id === pullId; });
+  if (!pull) return;
+  var c = window.__sbClient;
+  if (!c) { toast('Sign in to the cloud first — the link lives on the server, not this device.', 'warn'); return; }
+  if (!pull.email) { toast('No contact email on this pull — add one and try again.', 'warn'); return; }
+  var pay = pull.payment || {};
+  var hold = (pay.type === 'hold' && pay.url && (pay.status || 'pending') === 'pending') ? pay.url : '';
+  if (!hold && pay.type === 'hold' && pay.status === 'authorized') hold = '';   // already held: nothing to ask for
+
+  // 14 days. Long enough for a stylist who reads email on Monday, short enough
+  // that a forwarded link is not a standing invitation to sign as someone else.
+  var expires = new Date(Date.now() + 14 * 864e5).toISOString();
+  var token = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+    .map(function(b){ return b.toString(16).padStart(2, '0'); }).join('');
+
+  var snapshot = {
+    invoiceNo: pull.invoiceNo || pull.id,
+    client: pull.client || '',
+    contact: pull.contact || '',
+    returnDate: pull.returnDate || '',
+    totalRetail: pull.totalRetail || 0,
+    // The allowlist matters: this row is served to someone outside the company,
+    // so it carries what a release needs and not one field more. No style ids,
+    // no cost, no vendor, nothing that could be joined back to the line.
+    items: (pull.items || []).filter(function(i){ return !i.returned; }).map(function(i){
+      return { name: i.styleName || i.name || '', size: i.size || '', color: i.color || '', retail: i.retail || 0 };
+    }),
+    terms: prTermsLines(pull),
+    holdUrl: hold,
+    holdAmount: hold ? (pay.amount || 0) : 0,
+  };
+
+  var ins = await c.from('venia_pull_sign').insert({
+    token: token, pull_id: pull.id, workspace_id: 'main', snapshot: snapshot,
+    expires_at: expires, created_by: (window.veniaAuthUser && window.veniaAuthUser.email) || '',
+  });
+  if (ins.error) { toast('Could not create the signing link — ' + (ins.error.message || 'server refused'), 'warn'); return; }
+
+  // A pull can only have ONE live signing link: two links for one release is
+  // two different documents, and the second signature would silently be the
+  // one that counts. Retire the rest.
+  try {
+    await c.from('venia_pull_sign').update({ revoked: true })
+      .eq('pull_id', pull.id).is('signed_at', null).neq('token', token);
+  } catch(e){}
+
+  var url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?sign=' + token;
+  pull.signRequest = { token: token, url: url, at: new Date().toISOString(), expiresAt: expires,
+                       hold: !!hold, terms: snapshot.terms };
+  save();
+  try { logActivity('Signing link sent — ' + pull.invoiceNo + ' → ' + pull.email); } catch(e){}
+
+  var subj = 'VENIA sample release — ' + snapshot.invoiceNo + ' — please sign';
+  var body = 'Hi ' + (pull.contact || '') + ',\n\n'
+    + 'Please review and sign the release for the VENIA samples going out to you'
+    + (pull.returnDate ? ', due back ' + pull.returnDate : '') + ':\n\n'
+    + url + '\n\n'
+    + (hold ? 'The same page takes a refundable card hold of $' + Number(pay.amount || 0).toLocaleString()
+        + ' at the end — the funds are reserved, not charged, and released in full when the samples come back.\n\n' : '')
+    + 'The link expires in 14 days.\n\nVENIA Collection\n' + (window.VENIA_PUBLIC_SITE || '');
+
+  var sent = false;
+  try {
+    if (STATE.mailGmail && typeof gmailSend === 'function') {
+      await gmailSend({ to: pull.email, cc: (typeof pullCc === 'function' ? pullCc() : ''),
+                        subject: subj, text: body }, STATE.mailSendAs || '');
+      sent = true;
+    }
+  } catch(e){ sent = false; }
+
+  if (sent) {
+    pull.signRequest.sentAt = new Date().toISOString();
+    save();
+    toast('✓ Signing link emailed to ' + pull.email, 'success');
+  } else {
+    // Mail is not connected, or it refused. The link EXISTS either way — say so
+    // and hand it over, rather than leaving a live link nobody knows about.
+    try { await navigator.clipboard.writeText(url); } catch(e){}
+    toast('Link created and copied — mail is not connected, so send it yourself: ' + url, 'warning', 12000);
+  }
+  try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pullId); } catch(e){}
+};
+
+// Did they sign? The signature lives in the link's row, not in the workspace,
+// so it has to be fetched and copied onto the pull — where every existing
+// reader (the sheet, the PDF, the drift check) already knows how to find it.
+window.prSignCheck = async function(pullId, quiet){
+  var pull = (STATE.prPulls || []).find(function(p){ return p.id === pullId; });
+  var req = pull && pull.signRequest;
+  if (!req || !req.token) { if (!quiet) toast('No signing link on this pull yet', 'warn'); return; }
+  var c = window.__sbClient;
+  if (!c) { if (!quiet) toast('Not connected to the cloud', 'warn'); return; }
+  var r;
+  try {
+    r = await c.from('venia_pull_sign').select('signature, signed_at, revoked, expires_at')
+      .eq('token', req.token).maybeSingle();
+  } catch(e){ if (!quiet) toast('Could not reach the server', 'warn'); return; }
+  if (r.error || !r.data) { if (!quiet) toast('That signing link is gone', 'warn'); return; }
+  var g = r.data.signature;
+  if (!r.data.signed_at || !g) {
+    if (!quiet) toast(Date.parse(r.data.expires_at) < Date.now()
+      ? 'Not signed, and the link has expired — send a new one.'
+      : 'Not signed yet.', 'info');
+    return;
+  }
+  var already = pull.signature && pull.signature.at === g.at;
+  pull.signature = {
+    name: g.name, image: g.image, at: g.at,
+    // The terms as the SIGNER saw them, from the frozen snapshot — not as the
+    // pull reads now. prSignDrift compares the two and says if they parted.
+    terms: (req.terms && req.terms.length) ? req.terms : prTermsLines(pull),
+    items: (pull.items || []).length,
+    totalRetail: pull.totalRetail || 0,
+    remote: true, ip: g.ip || '', ua: g.ua || '',
+  };
+  save();
+  if (!already) { try { logActivity('Pull signed remotely: ' + pull.invoiceNo + ' by ' + g.name); } catch(e){} }
+  if (!quiet || !already) toast('✓ Signed by ' + g.name + ' — ' + new Date(g.at).toLocaleString(), 'success');
+  try { if (document.getElementById('pr-detail-modal').classList.contains('open')) prOpenDetail(pullId); } catch(e){}
+  try { renderPR(); } catch(e){}
+};
+
 let PR_SIGN_ID = null, PR_SIGN_DRAWN = false;
 window.prSignOpen = function(pullId){
   const pull = (STATE.prPulls || []).find(p => p.id === pullId);
@@ -22135,7 +22307,7 @@ const ROUTE_SPACES = ['cp','plm','pr','mk','sl','br','cmd','set'];
 function routeSave(space, page) {
   // Outside parties and one-shot screens have no route to remember: a factory
   // share link, an agent portal, the Stripe return, a password recovery link.
-  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_PAY || window.VENIA_RECOVERY) return;
+  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_PAY || window.VENIA_RECOVERY || window.VENIA_SIGN) return;
   try {
     const cur = JSON.parse(localStorage.getItem(ROUTE_KEY) || '{}');
     localStorage.setItem(ROUTE_KEY, JSON.stringify({
@@ -22146,7 +22318,7 @@ function routeSave(space, page) {
   } catch(e){}
 }
 function routeRestore() {
-  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_PAY || window.VENIA_RECOVERY) return;
+  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_PAY || window.VENIA_RECOVERY || window.VENIA_SIGN) return;
   let r = null;
   try { r = JSON.parse(localStorage.getItem(ROUTE_KEY) || 'null'); } catch(e){}
   if (!r || ROUTE_SPACES.indexOf(r.space) < 0) return;
@@ -36423,7 +36595,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.veniaApplyAccess = apply;
   window.veniaLoadAccess = async function(){
     try {
-      if (window.VENIA_SHARE || window.VENIA_AGENT) return;      // other doors entirely
+      if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;      // other doors entirely
       var u = window.veniaAuthUser;
       var c = window.__sbClient;
       if (!u || !u.email || !c) { window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); return; }
@@ -36732,7 +36904,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   }
   async function pushNow(){
-    if (window.VENIA_SHARE || window.VENIA_AGENT) return;   // share/agent views are strictly read-only — never write the workspace
+    if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;   // share/agent/signing views are strictly read-only — never write the workspace
     // Never push before the first pull decision: a fresh browser seeds demo
     // data and save()s during init — pushing that would clobber the real
     // workspace before we've even looked at it.
@@ -36921,7 +37093,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Realtime is best-effort (laptops sleep, sockets drop) — a quiet periodic
   // pull guarantees convergence even when the socket is dead.
   async function pullAndMergeSilent(){
-    if (window.VENIA_SHARE || !window.__sbSyncDone) return;
+    if (window.VENIA_SHARE || window.VENIA_SIGN || !window.__sbSyncDone) return;
     // Never merge mid-edit — but only a VISIBLE field counts. A hidden field
     // (e.g. the auth gate's passcode input after unlock) can hold stale focus
     // forever, and treating it as "editing" would silently kill convergence.
@@ -37024,6 +37196,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // Called by sbInit once the client is ready.
   window.sbLiveStart = function(){
     if (window.VENIA_SHARE) { if (typeof window.shareBoot === 'function') window.shareBoot(); return; }
+    // Signing page: the client exists only to call one edge function. The
+    // workspace is never pulled, so __sbSyncDone stays false and pushNow can
+    // never fire — the same thing that makes share mode safe.
+    if (window.VENIA_SIGN) { if (typeof window.signBoot === 'function') window.signBoot(); return; }
     // Agent portal: boot ONLY the portal. The workspace blob is never pulled,
     // so no VENIA data beyond her own leads ever reaches this browser.
     if (window.VENIA_AGENT) { if (typeof window.agentBoot === 'function') window.agentBoot(); return; }
@@ -37157,6 +37333,208 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // never started (pushes worked via the save() patch; pulls and realtime
   // never ran). Kick it here, now that everything is defined.
   if (window.__sbClient) window.sbLiveStart();
+})();
+
+// ── REMOTE SIGNING (?sign=TOKEN) — the stylist who is not in the room ─────
+// The signature pad was device-only: to sign, the stylist had to be holding
+// the founder's phone. This is the same release on their own phone.
+//
+// The page renders from ONE row it fetches by token — client, items, retail,
+// return date and the terms as they read when the link was minted. It never
+// touches the workspace and has nothing else to reach, which is why it is safe
+// to send to someone outside the company.
+;(function(){
+  if (!window.VENIA_SIGN) return;
+  var TOKEN = window.VENIA_SIGN, DATA = null, DRAWN = false;
+  var esc = function(v){ return String(v==null?'':v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+
+  function shell(inner){
+    document.body.innerHTML =
+      '<div style="min-height:100vh;background:#f4f4f2;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;color:#111">'
+      + '<div style="background:#0a0a0a;color:#fff;padding:20px 22px">'
+      +   '<div style="font-size:17px;letter-spacing:7px">V E N I A</div>'
+      +   '<div style="font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:#8a8a8a;margin-top:5px">Sample release</div>'
+      + '</div>'
+      + '<div style="max-width:560px;margin:0 auto;padding:22px 18px 60px">' + inner + '</div>'
+      + '</div>';
+  }
+  function note(title, msg){
+    shell('<div style="background:#fff;border:1px solid #e2e2de;padding:26px 22px;text-align:center">'
+      + '<div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#8a7a55;margin-bottom:10px">' + esc(title) + '</div>'
+      + '<div style="font-size:13px;line-height:1.7;color:#444">' + esc(msg) + '</div></div>');
+  }
+
+  async function call(action, extra){
+    var c = window.__sbClient;
+    if (!c) throw new Error('offline');
+    var r = await c.functions.invoke('pull-sign',
+      { body: Object.assign({ action: action, token: TOKEN }, extra || {}) });
+    // functions.invoke turns any non-2xx into an opaque error, so read the real
+    // body: "this link expired" is a useful sentence and "non-2xx" is not.
+    if (r.error) {
+      var d = null; try { d = await r.error.context.json(); } catch(e){}
+      return d || { error: 'unavailable' };
+    }
+    return r.data || {};
+  }
+
+  function render(){
+    var p = DATA.pull || {};
+    var items = p.items || [];
+    var terms = p.terms || [];
+    var itemRows = items.length
+      ? items.map(function(i){
+          return '<div style="display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #eee;font-size:12.5px">'
+            + '<span>' + esc(i.name || '') + (i.size ? ' <span style="color:#999">· ' + esc(i.size) + '</span>' : '')
+            + (i.color ? ' <span style="color:#999">· ' + esc(i.color) + '</span>' : '') + '</span>'
+            + '<span style="font-family:\'DM Mono\',monospace;color:#666;white-space:nowrap">'
+            + (i.retail ? '$' + Number(i.retail).toLocaleString() : '') + '</span></div>';
+        }).join('')
+      : '<div style="font-size:12px;color:#888;font-style:italic;padding:6px 0">No pieces listed.</div>';
+
+    shell(
+      '<div style="background:#fff;border:1px solid #e2e2de;padding:20px 20px 24px;margin-bottom:14px">'
+      + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#999">' + esc(p.invoiceNo || '') + '</div>'
+      + '<div style="font-size:19px;font-weight:600;margin:4px 0 2px">' + esc(p.client || '') + '</div>'
+      + '<div style="font-size:12px;color:#666">' + items.length + ' piece' + (items.length === 1 ? '' : 's')
+      +   ' · $' + Number(p.totalRetail || 0).toLocaleString() + ' retail value</div>'
+      + (p.returnDate ? '<div style="font-size:12px;color:#666;margin-top:3px">Due back <b style="color:#111">' + esc(p.returnDate) + '</b></div>' : '')
+      + '<div style="margin-top:16px">' + itemRows + '</div>'
+      + '</div>'
+
+      + '<div style="background:#fff;border:1px solid #e2e2de;padding:20px;margin-bottom:14px">'
+      + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:10px">Terms being accepted</div>'
+      + (terms.length
+          ? '<ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.85;color:#333">'
+            + terms.map(function(t){ return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>'
+          : '<div style="font-size:12.5px;color:#888">No specific terms were set on this pull.</div>')
+      + '</div>'
+
+      + '<div style="background:#fff;border:1px solid #e2e2de;padding:20px">'
+      + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px">Full name of the person signing</div>'
+      + '<input id="vs-name" type="text" autocomplete="name" value="' + esc(p.contact || '') + '" '
+      +   'style="width:100%;box-sizing:border-box;font-size:16px;padding:10px 0;border:none;border-bottom:1px solid #ccc;background:none;outline:none;color:#111">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin:20px 0 8px">'
+      +   '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#999">Sign below</div>'
+      +   '<button id="vs-clear" style="background:none;border:1px solid #ddd;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:6px 12px;cursor:pointer;color:#666">Clear</button>'
+      + '</div>'
+      + '<canvas id="vs-pad" style="width:100%;height:190px;border:1px solid #ddd;background:#fff;touch-action:none;display:block"></canvas>'
+      + '<div id="vs-warn" style="display:none;font-size:11.5px;color:#b4232a;margin-top:10px;line-height:1.6"></div>'
+      + '<button id="vs-go" style="width:100%;margin-top:16px;background:#0a0a0a;color:#fff;border:none;font-size:12px;letter-spacing:2px;'
+      +   'text-transform:uppercase;padding:16px;cursor:pointer">Accept &amp; sign</button>'
+      + '<div style="font-size:10.5px;color:#999;margin-top:12px;line-height:1.6">Signing records your name, the terms above as they read today, and the time. '
+      +   'VENIA keeps a copy with the pull.</div>'
+      + '</div>');
+
+    padInit();
+    document.getElementById('vs-clear').onclick = function(){
+      var c = document.getElementById('vs-pad');
+      c.getContext('2d').clearRect(0, 0, c.width, c.height); DRAWN = false;
+    };
+    document.getElementById('vs-go').onclick = submit;
+  }
+
+  // Sized from the rendered box and scaled to the device pixel ratio, so a
+  // finger signature on a phone is not a blurry smear on the printed sheet.
+  function padInit(){
+    var c = document.getElementById('vs-pad');
+    if (!c) return;
+    var r = c.getBoundingClientRect();
+    var dpr = Math.min(window.devicePixelRatio || 1, 3);
+    c.width = Math.max(1, Math.round(r.width * dpr));
+    c.height = Math.max(1, Math.round(r.height * dpr));
+    var x = c.getContext('2d');
+    x.scale(dpr, dpr);
+    x.lineWidth = 2; x.lineCap = 'round'; x.lineJoin = 'round'; x.strokeStyle = '#111';
+    var drawing = false, last = null;
+    var pt = function(e){ var b = c.getBoundingClientRect(); return { x: e.clientX - b.left, y: e.clientY - b.top }; };
+    c.onpointerdown = function(e){ e.preventDefault(); drawing = true; last = pt(e);
+      try { c.setPointerCapture(e.pointerId); } catch(_){} };
+    c.onpointermove = function(e){
+      if (!drawing) return;
+      e.preventDefault();
+      var p = pt(e);
+      x.beginPath(); x.moveTo(last.x, last.y); x.lineTo(p.x, p.y); x.stroke();
+      last = p; DRAWN = true;
+    };
+    var stop = function(){ drawing = false; last = null; };
+    c.onpointerup = stop; c.onpointercancel = stop; c.onpointerleave = stop;
+  }
+
+  function say(m){
+    var w = document.getElementById('vs-warn');
+    if (w) { w.textContent = m; w.style.display = ''; }
+  }
+
+  async function submit(){
+    var name = (document.getElementById('vs-name') || {}).value || '';
+    if (!name.trim() || name.trim().length < 2) { say('Type the name of the person signing.'); return; }
+    if (!DRAWN) { say('Nothing has been drawn in the box yet.'); return; }
+    var img = '';
+    try { img = document.getElementById('vs-pad').toDataURL('image/png'); }
+    catch(e){ say('This browser would not let us read the signature back.'); return; }
+    var btn = document.getElementById('vs-go');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    var res;
+    try { res = await call('sign', { name: name.trim(), image: img }); }
+    catch(e){ res = { error: 'unavailable' }; }
+    if (!res || !res.ok) {
+      btn.disabled = false; btn.textContent = 'Accept & sign';
+      say(res && res.error === 'expired'
+        ? 'This link expired. Ask VENIA for a fresh one.'
+        : (res && res.error) ? String(res.error) : 'That did not go through. Check your connection and try again.');
+      return;
+    }
+    done(name.trim());
+  }
+
+  // What happens after the signature is the whole reason the link exists: the
+  // card hold is what actually protects the samples, and a stylist who signs
+  // and then never sees the card step has done the half that costs nothing.
+  function done(name){
+    var p = (DATA && DATA.pull) || {};
+    var hold = p.holdUrl || '';
+    shell('<div style="background:#fff;border:1px solid #e2e2de;padding:26px 22px">'
+      + '<div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#1e7a45;margin-bottom:10px">✓ Signed</div>'
+      + '<div style="font-size:13px;line-height:1.7;color:#333">Thank you, ' + esc(name)
+      +   '. VENIA has your acceptance of the terms for ' + esc(p.invoiceNo || 'this pull') + '.</div>'
+      + (hold
+          ? '<div style="margin-top:20px;padding-top:18px;border-top:1px solid #eee">'
+            + '<div style="font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#999;margin-bottom:8px">One more step</div>'
+            + '<div style="font-size:12.5px;line-height:1.7;color:#444">A refundable hold of <b>$'
+            +   esc(Number(p.holdAmount || 0).toLocaleString()) + '</b> goes on your card. '
+            +   'The funds are reserved, not taken — they are released in full when the samples come back.</div>'
+            + '<a href="' + esc(hold) + '" style="display:block;text-align:center;margin-top:16px;background:#0a0a0a;color:#fff;'
+            +   'text-decoration:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;padding:16px">Place the hold →</a>'
+            + '</div>'
+          : '<div style="font-size:12.5px;color:#888;margin-top:16px;line-height:1.7">You can close this page.</div>')
+      + '</div>');
+  }
+
+  window.signBoot = async function(){
+    if (!window.__sbClient) {
+      note('Connection unavailable', 'Could not reach VENIA. Check your connection and reload this page.');
+      return;
+    }
+    var res;
+    try { res = await call('get'); } catch(e){ res = { error: 'unavailable' }; }
+    if (!res || res.error) {
+      if (res && res.error === 'revoked') note('Link no longer active', 'This signing link has been withdrawn or has already been replaced. Ask VENIA for a fresh one.');
+      else note('Unavailable', 'This signing page could not load right now. Try again shortly, or contact VENIA.');
+      return;
+    }
+    DATA = res;
+    // Already signed: show the receipt, not the pad. Someone reopening the link
+    // is checking, not signing again, and a second pad would suggest the first
+    // signature did not take.
+    if (res.signed) { done(res.signedName || 'you'); return; }
+    if (res.expired) {
+      note('This link has expired', 'Signing links are short-lived on purpose. Ask VENIA to send a new one and it will take a moment.');
+      return;
+    }
+    render();
+  };
 })();
 
 // ── FACTORY SHARE LINKS — live read-only tech pack for manufacturers ──────
