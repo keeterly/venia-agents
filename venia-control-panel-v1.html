@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '429';
+  const BUILD = '430';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5998,7 +5998,7 @@ const MODULES = {
     owns: 'the line — styles, materials, BOM, tech packs, POM, samples, costing, purchase orders',
     keys: ['styles', 'materials', 'vendors', 'bom', 'pom', 'careDefaults', 'samples',
            'costPrefs', 'colorLib', 'flagLabels', 'rangePlan', 'seasonCal',
-           'invSync', 'csMarginsAdopted', 'pos'],
+           'invSync', 'invIgnored', 'csMarginsAdopted', 'pos'],
     ls: ['venia-cost-sheets', 'venia-tp-quick-meas', 'venia_fitnotes', 'venia_styleboard'],
   },
   growth: {
@@ -14378,13 +14378,28 @@ window.invShopifySync = async function(){
   // Unmatched PRODUCTS (not just variants) — the linking panel needs something
   // a person can act on: a title they recognise and one code to attach.
   const orphans = [];
+  const ignored = STATE.invIgnored || {};
+  let ignoredNow = 0;
   (res.products||[]).forEach(p => {
     if (p.__matched) { delete p.__matched; return; }
     const pre = invSkuPrefix(p.variants);
     if (!pre) return;
-    orphans.push({ title: p.title || '(untitled)', code: pre,
-      units: (p.variants||[]).reduce((n,v)=>n+(Number(v.qty)||0),0),
-      variants: (p.variants||[]).length });
+    // Old drafts and one-offs that will never be styles. Still counted, so the
+    // panel can say how many are being held back rather than quietly shrinking.
+    if (ignored[pre]) { ignoredNow++; return; }
+    const vs = p.variants || [];
+    orphans.push({
+      title: p.title || '(untitled)', code: pre,
+      units: vs.reduce((n,v)=>n+(Number(v.qty)||0),0),
+      variants: vs.length,
+      // Everything a style could be built FROM, kept as the store said it —
+      // never interpreted here, so the create sheet can show the source value
+      // beside the field it would fill.
+      status: p.status || '', handle: p.handle || '', type: p.type || '',
+      tags: p.tags || '', image: p.image || '', body: p.body || '',
+      options: p.options || [],
+      prices: vs.map(v => parseFloat(v.price)).filter(n => n > 0),
+    });
   });
 
   let matched = 0;
@@ -14400,6 +14415,7 @@ window.invShopifySync = async function(){
   STATE.invSync = { at: res.at || new Date().toISOString(), products: (res.products||[]).length,
     variants, matched, unmatched: unmatched.length, unmatchedSample: unmatched.slice(0,6),
     orphans: orphans.sort((a,b)=>b.units-a.units).slice(0,60),
+    ignoredCount: ignoredNow,
     untracked, truncated: !!res.truncated, pages: res.pages || 0 };
   try { save(); } catch(e){}
   renderInventory(INV_FILTER);
@@ -14449,6 +14465,192 @@ window.invUnlinkCode = function(styleId, code){
   s.updatedAt = new Date().toISOString();
   save(); renderInventory(INV_FILTER);
 };
+
+// ══════════════════════════════════════════════════════════
+//  BUILDING A STYLE FROM A STORE PRODUCT
+// ══════════════════════════════════════════════════════════
+// A product selling on the site with no style behind it is a real hole: its
+// units are not counted, its revenue has no cost against it, and the only way
+// out was to type the whole style in by hand from another tab.
+//
+// So it can be built from here — but the sheet SHOWS ITS WORKING before it
+// does. Every field says where its value came from, and every field it cannot
+// fill says so and says what that costs. The one that matters is COGS: a store
+// knows what a garment SELLS for and has no idea what it cost to make, so a
+// style built from Shopify has revenue and no cost, and anything that divides
+// one by the other will read as pure profit until somebody costs it.
+//
+// It is left EMPTY rather than zero, deliberately. A zero is a number, and a
+// number gets multiplied: 0 × units sold is a COGS of nothing and a margin of
+// 100%. Empty is the truth and it is what "Missing COGS" already looks for.
+
+// What one store product would become. Pure — it computes the mapping and
+// decides nothing, so the sheet and the create both read the same answer.
+function invStyleFromProduct(o){
+  const opt = (name) => {
+    const m = (o.options || []).find(x => new RegExp(name, 'i').test(String(x.name || '')));
+    return m && m.values && m.values.length ? m.values : null;
+  };
+  const colors = opt('colou?r');
+  const sizes  = opt('size');
+  const prices = (o.prices || []).filter(n => n > 0);
+  // The lowest price a variant sells at. Variants priced differently is a real
+  // thing (a longer length costs more), so the sheet says when they disagree
+  // rather than picking silently.
+  const retail = prices.length ? Math.min.apply(null, prices) : 0;
+  const priceSpread = prices.length > 1 && Math.min.apply(null, prices) !== Math.max.apply(null, prices);
+
+  const carried = [
+    { field: 'Name',        value: o.title || '',                       from: 'product title' },
+    { field: 'Store code',  value: o.code || '',                        from: 'shared SKU prefix — this is what links it' },
+    { field: 'Category',    value: o.type || '',                        from: o.type ? 'Shopify product type' : '' },
+    { field: 'Colours',     value: colors ? colors.join(', ') : '',     from: colors ? 'variant option' : '' },
+    { field: 'Sizes',       value: sizes ? sizes.join(', ') : '',       from: sizes ? 'variant option' : '' },
+    { field: 'Retail',      value: retail ? '$' + retail : '',          from: retail ? (priceSpread ? 'lowest variant price — variants are NOT all the same price' : 'variant price') : '' },
+    { field: 'Photo',       value: o.image ? 'yes' : '',                from: o.image ? 'product image' : '' },
+    { field: 'Description', value: o.body ? (o.body.slice(0, 90) + (o.body.length > 90 ? '…' : '')) : '', from: o.body ? 'store copy — check it reads as a line sheet line' : '' },
+    { field: 'Stock',       value: o.units != null ? String(o.units) + ' units' : '', from: 'live from the store once linked' },
+  ];
+
+  // Named, not silently absent. Each one says what goes wrong while it is empty.
+  const missing = [
+    { field: 'COGS / cost sheet', why: 'A store knows the selling price and nothing about what it cost to make. '
+        + 'Until this is costed its margin is unknown, and the P&L counts NO cost against anything it sells — '
+        + 'which overstates gross profit.' },
+    { field: 'Wholesale price', why: 'Not a thing the store holds. Needed before this can go on a line sheet or a quote.' },
+    { field: 'Fabric & composition', why: 'Needed for the care label, the customs code and the tech pack.' },
+    { field: 'Season', why: 'Decides which season roll-up it belongs to. Set it or it sits outside all of them.' },
+    { field: 'BOM, POM, tech pack', why: 'Nothing to import — these are made here, not in the store.' },
+  ];
+
+  return {
+    carried, missing, priceSpread,
+    draft: String(o.status || '').toLowerCase() === 'draft',
+    style: {
+      name: o.title || 'Untitled',
+      // A store product is on sale, so it is an active style unless the store
+      // itself says draft.
+      status: String(o.status || '').toLowerCase() === 'draft' ? 'concept' : 'active',
+      category: o.type || '',
+      colors: colors ? colors.join(', ') : '',
+      sizes: sizes ? sizes.join(', ') : '',
+      retail: retail || 0,
+      photoUrl: o.image || '',
+      desc: o.body || '',
+      shopifySkus: [o.code],
+      // NOT set: cogs, wholesale, fabric, season. See the note above — an empty
+      // cost is the honest one, and a zero would read as free.
+      fromShopify: { handle: o.handle || '', at: new Date().toISOString(), tags: o.tags || '' },
+    },
+  };
+}
+window.invStyleFromProduct = invStyleFromProduct;
+
+window.invBuildStyleOpen = function(code){
+  const sy = STATE.invSync || {};
+  const o = (sy.orphans || []).find(x => x.code === code);
+  if (!o) { showToast('That product is not in the last sync — re-sync and try again', 'warning'); return; }
+  const plan = invStyleFromProduct(o);
+  const esc = (v) => String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
+  window.__invBuildCode = code;
+
+  const row = (c) => `<div style="display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11.5px">
+      <div style="width:104px;flex:none;color:var(--muted)">${esc(c.field)}</div>
+      <div style="flex:1;min-width:0">${c.value
+        ? '<b style="color:var(--ink)">' + esc(c.value) + '</b>'
+          + (c.from ? '<div style="font-size:10px;color:var(--muted);margin-top:2px">' + esc(c.from) + '</div>' : '')
+        : '<span style="color:var(--amber)">the store did not say</span>'}</div>
+    </div>`;
+
+  const old = document.getElementById('inv-build-modal'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'inv-build-modal'; ov.className = 'modal-overlay';
+  ov.onclick = (e) => { if (e.target === ov) closeModal('inv-build-modal'); };
+  ov.innerHTML = `
+    <div class="modal-box" style="max-width:600px">
+      <div class="modal-hdr"><span class="modal-title">Build a style from ${esc(o.title)}</span>
+        <button class="modal-close" aria-label="Close" onclick="closeModal('inv-build-modal')">✕</button></div>
+      <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+        ${plan.draft ? `<div style="border:1px solid var(--amber);padding:9px 12px;margin-bottom:14px;font-size:11px;color:var(--amber);line-height:1.6">
+          This product is a <b>DRAFT</b> in Shopify — nobody can buy it. It will be created at
+          <b>concept</b>, not active, so it does not read as a live style. If it is an old draft you will
+          never sell, don’t import it at all.</div>` : ''}
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">What carries over</div>
+        ${plan.carried.map(row).join('')}
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:20px 0 6px">What the store cannot give it</div>
+        ${plan.missing.map(mm => `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+          <div style="font-size:11.5px;color:var(--ink)"><b>${esc(mm.field)}</b></div>
+          <div style="font-size:10.5px;color:var(--muted);line-height:1.6;margin-top:3px">${esc(mm.why)}</div>
+        </div>`).join('')}
+        <div style="border:1px solid var(--amber);padding:10px 12px;margin-top:16px;font-size:10.5px;color:var(--ink);line-height:1.7">
+          <b style="color:var(--amber)">Costing it is the next job, not an optional one.</b> Until this style
+          has a cost sheet it sells with no cost against it: its margin reads as 100%, and the P&amp;L counts
+          its revenue in full and none of its cost. It will show under <b>Missing COGS</b> until you fix that.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('inv-build-modal')">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="invBuildStyleGo()">Create the style &amp; link it</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  openModal('inv-build-modal');
+};
+
+window.invBuildStyleGo = function(){
+  const code = window.__invBuildCode; if (!code) return;
+  const sy = STATE.invSync || {};
+  const o = (sy.orphans || []).find(x => x.code === code); if (!o) return;
+  const plan = invStyleFromProduct(o);
+  if (!STATE.styles) STATE.styles = [];
+  // A second style answering to the same store code would split one product's
+  // stock and sales across two rows.
+  const clash = STATE.styles.find(x => Array.isArray(x.shopifySkus) && x.shopifySkus.indexOf(code) >= 0);
+  if (clash) { showToast('“' + clash.name + '” is already linked to ' + code, 'warning'); closeModal('inv-build-modal'); return; }
+  const st = Object.assign({
+    id: 'ST' + Date.now().toString(36).toUpperCase(),
+    // The PLM's own number, left for a human: an invented style number that
+    // collides with the real numbering scheme is worse than a blank one.
+    styleId: '',
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  }, plan.style);
+  STATE.styles.unshift(st);
+  save();
+  try { logActivity('Style built from Shopify: ' + st.name + ' (' + code + ')'
+    + ' — no cost sheet yet'); } catch(e){}
+  closeModal('inv-build-modal');
+  showToast('“' + st.name + '” created and linked — it has no COGS yet', 'success', 5000);
+  invShopifySync();
+};
+
+// Not everything in a store is a style. Old drafts, one-offs, a sample that was
+// listed once — they were reappearing in this panel after every sync with no
+// way to say "not that one".
+window.invIgnoreProduct = function(code, title){
+  if (!code) return;
+  if (!confirm('Stop offering “' + (title || code) + '” here?\n\n'
+    + 'It stays in Shopify and keeps selling. It just stops appearing in this list, and its '
+    + 'stock and sales still will not be counted against any style — because it is not one.\n\n'
+    + 'You can bring it back from “ignored products” at the bottom of this panel.')) return;
+  if (!STATE.invIgnored) STATE.invIgnored = {};
+  STATE.invIgnored[code] = { title: title || '', at: new Date().toISOString() };
+  const sy = STATE.invSync;
+  if (sy && sy.orphans) {
+    sy.orphans = sy.orphans.filter(x => x.code !== code);
+    sy.ignoredCount = (sy.ignoredCount || 0) + 1;
+  }
+  save();
+  try { logActivity('Shopify product ignored: ' + (title || code)); } catch(e){}
+  renderInventory(INV_FILTER);
+};
+window.invUnignoreProduct = function(code){
+  if (!STATE.invIgnored) return;
+  delete STATE.invIgnored[code];
+  save();
+  showToast('Back in the list on the next sync', 'info');
+  renderInventory(INV_FILTER);
+};
+
 window.invLinkPick = function(code, sel){
   const id = sel && sel.value; if (!id) return;
   invLinkCode(id, code);
@@ -14497,6 +14699,7 @@ function renderInventory(filter='all') {
         ${sy && sy.unmatched ? `<div style="font-size:10px;color:var(--amber);margin-top:4px">${sy.unmatched} Shopify variant${sy.unmatched===1?'':'s'} matched no style by SKU${
           sy.unmatchedSample && sy.unmatchedSample.length ? ' — e.g. ' + sy.unmatchedSample.slice(0,2).map(x=>String(x).replace(/</g,'&lt;')).join(', ') : ''} · not counted</div>` : ''}
         ${sy && sy.untracked ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">${sy.untracked} variant${sy.untracked===1?'':'s'} have inventory tracking off in Shopify — they count as 0</div>` : ''}
+        ${sy && sy.ignoredCount ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">${sy.ignoredCount} product${sy.ignoredCount===1?'':'s'} you marked "not a style" are held back from the list below</div>` : ''}
         ${sy && sy.truncated ? `<div style="font-size:10px;color:var(--amber);margin-top:3px">⚠ More products than this pull reads — the count is partial</div>` : ''}
       </div>
       <button class="btn btn-ghost btn-sm" id="inv-sync-btn" onclick="invShopifySync()">↻ Sync from Shopify</button>
@@ -14529,10 +14732,37 @@ function renderInventory(filter='all') {
           </select>
           <button class="btn btn-ghost btn-sm" style="flex:none"
             onclick="invLinkPick('${String(o.code).replace(/'/g,'')}', this.previousElementSibling)">Link</button>
+          <button class="btn btn-ghost btn-sm" style="flex:none"
+            title="Create a style from this product — it shows what carries over first"
+            onclick="invBuildStyleOpen('${String(o.code).replace(/'/g,'')}')">+ Build style</button>
+          <button class="btn btn-ghost btn-sm" style="flex:none;color:var(--muted)"
+            title="Old draft, one-off, never going to be a style — stop offering it here"
+            onclick="invIgnoreProduct('${String(o.code).replace(/'/g,'')}','${String(o.title).replace(/['\\]/g,'')}')">Not a style</button>
         </div>`;
       }).join('')}
       </div>
-    </div>` : ''}
+      ${(function(){
+        const ig = Object.keys(STATE.invIgnored || {});
+        if (!ig.length) return '';
+        return `<div style="padding:10px 14px;border-top:1px solid var(--border);background:var(--bg-off)">
+          <div style="font-size:10px;color:var(--muted);line-height:1.7">
+            <b>${ig.length} product${ig.length===1?'':'s'} ignored</b> — still selling in the store, still not counted against any style.
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px">
+            ${ig.map(c => `<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border);padding:2px 6px;font-size:10px;background:var(--bg)">
+              ${String((STATE.invIgnored[c]||{}).title || c).replace(/</g,'&lt;')}
+              <button onclick="invUnignoreProduct('${String(c).replace(/'/g,'')}')" title="Put it back in the list"
+                style="background:none;border:none;color:var(--muted);cursor:pointer;padding:0 0 0 2px;font-size:12px;line-height:1">&#x21ba;</button>
+            </span>`).join('')}
+          </div>
+        </div>`;
+      })()}
+    </div>` : (Object.keys(STATE.invIgnored||{}).length ? `
+    <div style="border:1px solid var(--border);background:var(--bg-off);padding:10px 14px;margin-bottom:16px;font-size:10px;color:var(--muted);line-height:1.7">
+      <b>${Object.keys(STATE.invIgnored).length} product${Object.keys(STATE.invIgnored).length===1?'':'s'} ignored</b> —
+      ${Object.keys(STATE.invIgnored).map(c => `<span style="margin-right:8px">${String((STATE.invIgnored[c]||{}).title || c).replace(/</g,'&lt;')}
+        <button onclick="invUnignoreProduct('${String(c).replace(/'/g,'')}')" style="background:none;border:none;color:var(--muted);cursor:pointer">&#x21ba;</button></span>`).join('')}
+    </div>` : '')}
     <div class="stats-row stats-3" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Total Units</div><div class="stat-val">${totalUnits.toLocaleString()}</div></div>
       <div class="stat-card"><div class="stat-label">Stock Value (Retail)</div><div class="stat-val">$${(totalVal/1000).toFixed(0)}k</div></div>
@@ -27005,6 +27235,10 @@ function agentRunGeneratePL(action, chatBody){
     + (st.grossPct != null ? ' (' + st.grossPct + '%)' : '')
     + ' · Operating <b>' + m(st.operating) + '</b>'
     + (st.operatingPct != null ? ' (' + st.operatingPct + '%)' : '') + '</div>'
+    + (st.uncostedCount ? '<div style="font-size:10.5px;color:var(--amber);margin-top:8px;line-height:1.6">'
+        + st.uncostedCount + ' style' + (st.uncostedCount === 1 ? '' : 's') + ' sold with no cost sheet, so '
+        + 'gross profit above is OVERSTATED. The statement says so in its notes; costing them is what fixes '
+        + 'the number.</div>' : '')
     + (flagged ? '<div style="font-size:10.5px;color:var(--amber);margin-top:8px;line-height:1.6">'
         + m(flagged.amount) + ' of bank outflows are still unclassified. They are INCLUDED as '
         + '"Unclassified" so the statement does not overstate profit — categorising them changes '
@@ -32698,6 +32932,39 @@ function finPLStatement(){
       + 'and reflect only what has been entered there. This is a material limitation: costs paid '
       + 'but not entered do not appear.');
   }
+  // STYLES THAT SELL WITH NO COST AGAINST THEM.
+  //
+  // The number that matters most on a submitted P&L, and the easiest one to
+  // miss: a style with no cost sheet contributes its revenue in full and zero
+  // COGS, so gross profit is overstated by whatever it actually cost to make.
+  // Building styles from Shopify makes this MORE likely, not less — a store
+  // knows the selling price and nothing about the cost — so the statement has
+  // to name it rather than let a clean-looking margin do the talking.
+  const uncosted = (d.rows || []).filter(r => r && (r.rY > 0 || r.rev > 0) && !(r.cogs > 0));
+  const uncostedRev = uncosted.reduce((t, r) => t + (r.rY || 0), 0);
+  let wsUncostedUnits = 0;
+  try {
+    const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
+    (STATE.slOrders || []).filter(o => o.status !== 'cancelled'
+        && (typeof slOrderBookedAt === 'function' ? slOrderBookedAt(o) : '') >= jan1)
+      .forEach(o => (o.items || []).forEach(it => {
+        const st = (STATE.styles || []).find(x => x.id === it.styleId);
+        if (st && !(landedCost(st) > 0)) wsUncostedUnits += (it.qty || 0);
+      }));
+  } catch (e) {}
+  if (uncosted.length || wsUncostedUnits) {
+    notes.push('COST OF GOODS IS INCOMPLETE. '
+      + (uncosted.length
+          ? uncosted.length + ' style' + (uncosted.length === 1 ? '' : 's') + ' sold online in this period '
+            + 'with no cost sheet against ' + (uncosted.length === 1 ? 'it' : 'them')
+            + (uncostedRev > 0 ? ' ($' + Math.round(uncostedRev).toLocaleString() + ' of revenue)' : '') + '. ' : '')
+      + (wsUncostedUnits ? wsUncostedUnits.toLocaleString() + ' wholesale units shipped from styles with no '
+          + 'cost sheet. ' : '')
+      + 'Their revenue is counted in full and NO cost is counted against it, so gross profit and gross '
+      + 'margin above are OVERSTATED by whatever those garments cost to make. '
+      + (uncosted.length ? 'Uncosted: ' + uncosted.slice(0, 8).map(r => r.name).join(', ')
+          + (uncosted.length > 8 ? ' and ' + (uncosted.length - 8) + ' more' : '') + '.' : ''));
+  }
   if (d.dtcAmbiguous > 0) {
     notes.push(d.dtcAmbiguous + ' silhouette' + (d.dtcAmbiguous === 1 ? ' is' : 's are') + ' produced in more '
       + 'than one fabrication under a single product name. Sales reporting cannot say which '
@@ -32741,6 +33008,9 @@ function finPLStatement(){
       { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0 },
     ],
     notes: notes,
+    // Named on the object too, so the chat card and the gauntlet read the same
+    // answer the printed notes do.
+    uncostedCount: uncosted.length, uncostedRevenue: uncostedRev, wsUncostedUnits: wsUncostedUnits,
     // Carried so the gauntlet can assert the document and the screen agree.
     _src: { revYtd: d.revYtd, cogsYtd: d.cogsYtd, opexYtd: d.opexYtd, opexUncat: uncat,
             bankOpex: d.bankOpex, screenOperating: d.operating },
