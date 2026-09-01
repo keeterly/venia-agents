@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '428';
+  const BUILD = '429';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26239,6 +26239,7 @@ const ACTION_MODULE = {
   create_pull: 'growth', log_coverage: 'growth', add_pitch: 'growth', save_brand_doc: 'growth',
   set_budget: 'money', set_revenue_goal: 'money', set_txn_category: 'money',
   set_money_watch: 'money', generate_pl: 'money',
+  set_order_status: 'sales',
   add_to_brainstorm: 'brainstorm',
   // Writes nothing — it opens a screen and asks a colleague. Always allowed,
   // because the colleague it opens is bound by exactly these same rules.
@@ -26481,6 +26482,19 @@ function agentFinActionSpec() { return agentSpecChunks([
     + 'The PO id comes from the FACTORY OBLIGATIONS block in context — never invent one. All dates are YYYY-MM-DD; pass "" to clear one. depositPaid / balancePaid RECORD that a payment already went out — they never send one. "units" sets how many of each style the factory is making, which is what sell-through is measured against; a season with no PO units can only report sell-through as unknown. Omit any field you are not changing.\n'
   },
   { m:'money', t: ''
+  },
+  // Cancelling is reversible and is what a founder actually means by "get that
+  // order out of the numbers". DELETING is deliberately NOT an action: it is
+  // the only irreversible verb in Sales, and an assistant destroying a
+  // financial record on a misheard sentence is not a trade worth making. It
+  // stays a human move behind a confirmation that names the account and the
+  // amount — and cancelling already fixes every total, so nothing is lost.
+  { m:'sales', t: ''
+    + '\nACTION — set_order_status: move a wholesale order to a different status, including CANCELLING one. A cancelled order keeps its record but stops counting toward total booked, open orders, AR, the season roll-up and the P&L.\n'
+    + '```venia:action\n'
+    + '{"type":"set_order_status","items":[{"order":"ORD-MTHXWD5G","status":"cancelled","note":"test data, not a real order"}]}\n'
+    + '```\n'
+    + '"status" \u2208 draft | confirmed | production | shipped | delivered | cancelled. Identify the order by its id from the ORDER BOOK in context, or by "account" when there is only one open order for that account \u2014 never invent an id. Use this when the founder says an order fell through, was never real, or should come out of the numbers. You CANNOT delete an order: nothing removes a record, and cancelling achieves what they are asking for. If they explicitly want it gone rather than cancelled, say that Delete is on the order itself \u2014 open it from Wholesale Orders \u2014 and that it is deliberately not something you do for them.\n'
   },
   // The one money action that produces a DOCUMENT rather than a change. It is
   // an action, not an answer, precisely so the assistant cannot be the thing
@@ -26883,6 +26897,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'set_po_terms') return agentRunSetPoTerms(action, chatBody);
   if (action.type === 'set_money_watch') return agentRunSetMoneyWatch(action, chatBody);
   if (action.type === 'generate_pl') return agentRunGeneratePL(action, chatBody);
+  if (action.type === 'set_order_status') return agentRunSetOrderStatus(action, chatBody);
   if (action.type === 'set_cost_sheet') return agentRunSetCostSheet(action, chatBody);
   if (action.type === 'price_from_retail') return agentRunPriceFromRetail(action, chatBody);
   if (action.type === 'handoff') return agentRunHandoff(action, chatBody);
@@ -26898,6 +26913,79 @@ function agentRunAction(key, action, chatBody) {
   } catch (e) {}
   return { unknown: true, type: action.type };
 }
+
+// Moving an order's status, cancelling included. Never deleting: see the spec.
+function agentRunSetOrderStatus(action, chatBody){
+  const VALID = ['draft','confirmed','production','shipped','delivered','cancelled'];
+  const items = Array.isArray(action && action.items) ? action.items.slice(0, 20) : [];
+  if (!items.length) { appendAgentNote(chatBody, 'Tell me which order and what to set it to.'); return; }
+  const all = STATE.slOrders || [];
+  const done = [], missed = [];
+  const prev = {};
+  items.forEach(it => {
+    const want = String(it && it.status || '').toLowerCase().trim();
+    if (VALID.indexOf(want) < 0) { missed.push((it && (it.order || it.account) || '?') + ' — "' + want + '" is not a status'); return; }
+    const id = String(it.order || '').trim();
+    let o = id ? all.find(x => x.id === id) : null;
+    if (!o && it.account) {
+      // Only when it is unambiguous. Two open orders for one account and a
+      // guess would cancel the wrong one.
+      const norm = (v) => String(v||'').toLowerCase().trim();
+      const hits = all.filter(x => norm(x.account) === norm(it.account) && x.status !== 'cancelled');
+      if (hits.length === 1) o = hits[0];
+      else if (hits.length > 1) { missed.push(it.account + ' has ' + hits.length + ' open orders — give me the id'); return; }
+    }
+    if (!o) { missed.push((id || it.account || '?') + ' — no order matches'); return; }
+    if (o.status === want) return;
+    prev[o.id] = o.status;
+    o.status = want;
+    o.updatedAt = new Date().toISOString();
+    if (want === 'cancelled') o.cancelledAt = o.updatedAt;
+    if (it.note) o.notes = (o.notes ? o.notes + '\n' : '') + String(it.note).slice(0, 300);
+    done.push(o);
+  });
+  if (done.length) {
+    try { dbSet('slOrders', STATE.slOrders); } catch(e){}
+    save();
+    done.forEach(o => { try { logActivity('Order ' + o.status + ': ' + o.id + ' — ' + (o.account||'')); } catch(e){} });
+    window.__agOrderStatusUndo = prev;
+    try { slAfterOrderChange(done[0].id); } catch(e){}
+  }
+  const cancelled = done.filter(o => o.status === 'cancelled');
+  if (!done.length) {
+    // No card: agentActionCard always draws an Undo button, and one that undoes
+    // nothing is worse than a sentence.
+    appendAgentNote(chatBody, '⚠ Nothing was changed — '
+      + (missed.length ? missed.join('; ') : 'those orders are already in that status') + '.');
+    return { ok: false, changed: 0 };
+  }
+  agentActionCard(chatBody,
+    done.length + ' order' + (done.length === 1 ? '' : 's') + ' updated',
+    '<div style="font-size:11.5px;line-height:1.8">'
+    + done.map(o => '#' + escHtml(o.id) + ' — ' + escHtml(o.account || '')
+        + ' · <b>' + escHtml(o.status) + '</b>').join('<br>')
+    + (cancelled.length ? '<div style="font-size:10.5px;color:var(--muted);margin-top:8px;line-height:1.6">'
+        + 'A cancelled order keeps its record and stops counting toward booked, open orders, AR, '
+        + 'the season roll-up and the P&L. To remove it entirely, use Delete on the order itself.</div>' : '')
+    + (missed.length ? '<div style="font-size:10.5px;color:var(--amber);margin-top:8px;line-height:1.6">Not changed: '
+        + escHtml(missed.join('; ')) + '</div>' : '')
+    + '</div>',
+    'agentUndoOrderStatus()');
+  return { ok: true, changed: done.length };
+}
+window.agentUndoOrderStatus = function(){
+  const prev = window.__agOrderStatusUndo; if (!prev) { toast('Nothing to undo'); return; }
+  window.__agOrderStatusUndo = null;
+  let n = 0;
+  Object.keys(prev).forEach(id => {
+    const o = (STATE.slOrders||[]).find(x => x.id === id);
+    if (o) { o.status = prev[id]; delete o.cancelledAt; o.updatedAt = new Date().toISOString(); n++; }
+  });
+  try { dbSet('slOrders', STATE.slOrders); } catch(e){}
+  save();
+  toast(n + ' order' + (n === 1 ? '' : 's') + ' put back');
+  try { slAfterOrderChange(Object.keys(prev)[0]); } catch(e){}
+};
 
 // The P&L document. The agent asked for it; the ledger wrote it. The card
 // says what the statement actually claims, because a founder about to send
@@ -31927,7 +32015,21 @@ function agBuildOrdersSection() {
       <div class="ag-wf" onclick="agentSend('sl','Which of our current orders are at risk of late delivery and why? Suggest one action per order.')"><div class="ag-wf-tag">ANALYZE</div><div class="ag-wf-title">Identify delivery risk orders</div><div class="ag-wf-desc">Flag late orders and suggest remedies.</div></div>
     </div>
   </div>
-  <div id="sl-order-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeModal('sl-order-modal')">
+`;
+}
+// The order statuses, in one place. They were defined inside the orders view,
+// which is part of why the editor could not live anywhere else.
+const SL_ORDER_STATUS = { draft:'Draft', confirmed:'Confirmed', production:'In Production',
+                          shipped:'Shipped', delivered:'Delivered', cancelled:'Cancelled' };
+function slOpenOrderModal(id) {
+  const o = id ? (STATE.slOrders||[]).find(x=>x.id===id) : null;
+  // Built here, on demand. Reached from the orders list, from Money → AR, from
+  // an account — anywhere an order can be opened, it can now be edited.
+  const old = document.getElementById('sl-order-modal'); if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'sl-order-modal'; ov.className = 'modal-overlay'; ov.style.display = 'none';
+  ov.onclick = (e) => { if (e.target === ov) closeModal('sl-order-modal'); };
+  ov.innerHTML = `
     <div class="modal-box" style="max-width:520px">
       <div class="modal-hdr"><span class="modal-title" id="sl-order-modal-title">New Order</span><button class="modal-close" aria-label="Close" onclick="closeModal('sl-order-modal')">✕</button></div>
       <div class="modal-body">
@@ -31935,7 +32037,7 @@ function agBuildOrdersSection() {
         <div class="form-row"><label>Order #</label><input id="slom-id" placeholder="Auto-generated if blank" class="form-input"></div>
         <div class="form-row"><label>Status</label>
           <select id="slom-status" class="form-input">
-            ${Object.entries(STATUS_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
+            ${Object.entries(SL_ORDER_STATUS).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}
           </select>
         </div>
         <div class="form-row"><label>Total ($)</label><input id="slom-total" type="number" placeholder="0" class="form-input"></div>
@@ -31943,14 +32045,11 @@ function agBuildOrdersSection() {
         <div class="form-row"><label>Notes</label><textarea id="slom-notes" class="form-input" rows="3"></textarea></div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-order-modal')">Cancel</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-order-modal')">Close</button>
         <button class="btn btn-primary btn-sm" onclick="slSaveOrder()">Save Order</button>
       </div>
-    </div>
-  </div>`;
-}
-function slOpenOrderModal(id) {
-  const o = id ? (STATE.slOrders||[]).find(x=>x.id===id) : null;
+    </div>`;
+  document.body.appendChild(ov);
   const set = (eid,v) => { const el=document.getElementById(eid); if(el) el.value=v||''; };
   set('slom-account',  o?.account||'');
   set('slom-id',       o?.id||'');
@@ -32052,6 +32151,105 @@ window.slSetOrderDeduction = function(orderId){
 };
 // A real order record (it used to just fire a chat prompt): items, status,
 // linked quote, and one-tap Stripe invoicing for wholesale.
+
+// ── CANCELLING AND DELETING AN ORDER ──────────────────────────────────────
+// Two different things, and the app offered neither by name. The only way to
+// stand an order down was Edit → Status → Cancelled, which nobody finds when
+// what they are looking for is a delete.
+//
+// CANCEL is for an order that was real and fell through. The record stays —
+// you want to know that Antonioli cancelled — and every total already skips
+// it: booked, open, AR, the season roll-up, the P&L and the CFO's context all
+// filter status !== 'cancelled'.
+//
+// DELETE is for a row that should never have existed: a test, a demo, a
+// duplicate. It is the only destructive verb in Sales, so it names the account
+// and the amount before it runs and it is undoable for as long as the toast is
+// on screen.
+window.slCancelOrder = function(id){
+  const o = (STATE.slOrders||[]).find(x => x.id === id); if (!o) return;
+  if (o.status === 'cancelled') { toast('That order is already cancelled'); return; }
+  const paid = o.payment && o.payment.status === 'paid';
+  if (!confirm('Cancel order #' + id + ' — ' + (o.account || 'no account') + ', $'
+      + Math.round(o.total || 0).toLocaleString() + '?\n\n'
+      + 'It stays on the record but stops counting: booked, open orders, AR, the season '
+      + 'roll-up and the P&L all skip a cancelled order.'
+      + (paid ? '\n\nNOTE: this order is marked PAID. Cancelling does not refund anything.' : ''))) return;
+  o.status = 'cancelled';
+  o.cancelledAt = new Date().toISOString();
+  o.updatedAt = o.cancelledAt;
+  try { dbSet('slOrders', STATE.slOrders); } catch(e){}
+  save();
+  try { logActivity('Order cancelled: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)); } catch(e){}
+  toast('Order cancelled — it no longer counts toward booked, AR or the P&L');
+  slAfterOrderChange(id);
+};
+
+window.slDeleteOrder = function(id){
+  const list = STATE.slOrders || [];
+  const idx = list.findIndex(x => x.id === id); if (idx < 0) return;
+  const o = list[idx];
+  const paid = o.payment && (o.payment.status === 'paid' || o.payment.amountPaid);
+  if (!confirm('DELETE order #' + id + ' — ' + (o.account || 'no account') + ', $'
+      + Math.round(o.total || 0).toLocaleString() + '?\n\n'
+      + 'This removes the record entirely, on both devices. For an order that was real and fell '
+      + 'through, Cancel is the right move — it keeps the history and still stops it counting.'
+      + (paid
+          ? '\n\n⚠ THIS ORDER HAS A PAYMENT AGAINST IT. Deleting it does not touch Stripe, and the '
+            + 'money will no longer be explained by anything in the app.' : ''))) return;
+  // Undoable while the toast is up. Deleting the wrong row is the one mistake
+  // here that cannot be typed back in — items, payment, terms and all.
+  window.__slDeleted = { at: Date.now(), idx, order: JSON.parse(JSON.stringify(o)) };
+  list.splice(idx, 1);
+  try { dbSet('slOrders', STATE.slOrders); } catch(e){}
+  save();
+  try { logActivity('Order DELETED: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)); } catch(e){}
+  slDeletedPill(o);
+  slAfterOrderChange(id);
+};
+
+// The toast is pointer-events:none by design, so it cannot carry the undo.
+// This is the one thing on screen you might need to tap in a hurry, so it is
+// its own pill — and it says what was deleted, not just that something was.
+function slDeletedPill(o){
+  const old = document.getElementById('sl-del-pill'); if (old) old.remove();
+  const b = document.createElement('button');
+  b.id = 'sl-del-pill';
+  b.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:10000;'
+    + 'background:var(--ink);color:var(--bg);border:none;padding:13px 18px;font-size:11px;'
+    + 'letter-spacing:1px;cursor:pointer;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;'
+    + 'box-shadow:0 6px 24px rgba(0,0,0,.28);max-width:92vw';
+  b.textContent = 'Deleted #' + (o.id || '') + ' · ' + (o.account || 'no account')
+    + ' · $' + Math.round(o.total || 0).toLocaleString() + '  —  UNDO';
+  b.onclick = function(){ slUndoDeleteOrder(); };
+  document.body.appendChild(b);
+  // Long enough to change your mind, and it goes on its own rather than
+  // sitting there implying the delete has not happened yet.
+  setTimeout(function(){ const e = document.getElementById('sl-del-pill'); if (e === b) e.remove(); }, 12000);
+}
+
+window.slUndoDeleteOrder = function(){
+  const e = document.getElementById('sl-del-pill'); if (e) e.remove();
+  const d = window.__slDeleted; if (!d) { toast('Nothing to undo'); return; }
+  window.__slDeleted = null;
+  if (!STATE.slOrders) STATE.slOrders = [];
+  STATE.slOrders.splice(Math.min(d.idx, STATE.slOrders.length), 0, d.order);
+  try { dbSet('slOrders', STATE.slOrders); } catch(e){}
+  save();
+  try { logActivity('Order delete undone: ' + d.order.id); } catch(e){}
+  toast('Order restored');
+  slAfterOrderChange(d.order.id);
+};
+
+// One repaint path for all three, so a change made from Money → AR updates the
+// screen the founder is actually looking at rather than the one it came from.
+function slAfterOrderChange(id){
+  try { const m = document.getElementById('sl-ord-modal'); if (m) closeModal('sl-ord-modal'); } catch(e){}
+  try { if (document.querySelector('#cp-screen-sl.active')) agNav('sl','orders', document.querySelector('#cp-screen-sl .ag-nav-item.active')); } catch(e){}
+  try { if (typeof cmdRenderMoney === 'function' && document.getElementById('cmd-money-body')) cmdRenderMoney(); } catch(e){}
+  try { if (typeof veniaRepaint === 'function') veniaRepaint(); } catch(e){}
+}
+
 function slOpenOrderDetail(id) {
   const o = (STATE.slOrders||[]).find(x=>x.id===id);
   if (!o) return;
@@ -32153,6 +32351,8 @@ function slOpenOrderDetail(id) {
         <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');slOpenOrderModal('${o.id}')">&#x270E; Edit</button>
 
         <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');agentSend('sl','Order #${slEsc(o.id)} for ${slEsc(o.account||'')} — status ${slEsc(o.status||'')}, $${o.total||0}, delivery ${slEsc(o.deliveryDate||'TBD')}. What should I do next?')">&#x2726; Ask the agent</button>
+        ${o.status === 'cancelled' ? '' : `<button class="btn btn-ghost btn-sm" onclick="slCancelOrder('${o.id}')" title="Keeps the record, stops it counting toward booked, AR and the P&amp;L">&#x2298; Cancel order</button>`}
+        <button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="slDeleteOrder('${o.id}')" title="Removes the record entirely — for a row that should never have existed">Delete</button>
       </div>
     </div>
   </div>`;
