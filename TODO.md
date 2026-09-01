@@ -2878,3 +2878,122 @@ Every table is additive and no existing path reads them, so Session 2 rolls
 back by dropping four tables. Session 3 rolls back by deleting one function.
 Session 5 is the first change to shipped UI and is the first that needs the
 usual before/after gauntlet against the current build.
+
+---
+
+## SOCIAL COMMAND — PHASE 1 (Build 432)
+
+The shell and the visual feed. **No new persistence**: `mkPosts` already carried
+`sequenceOrder` from Phase 0, so the feed, the unscheduled drawer and the
+calendar are three readings of one list. Everything added is a pure selector
+over `mkPosts` or a call into a Phase 0 mutation.
+
+### What landed
+
+- `MODULES.growth` gains **no** new keys. Phase 1 adds none.
+- `mkSocialFeed()` — the projection: `{ planned, published, drafts, conflicts,
+  blockers, from, to }`. `socWhen()` / `socPlatform()` / `socThumb()` /
+  `socCmp()` are the shared schedule and order calculation the grid AND the
+  calendar both read.
+- `agBuildSocialSection()` → `AG_SECTIONS.mk.social`, first Marketing route,
+  page title **SOCIAL**, toolbar **IMPORT** + **+ NEW POST**. Local view row
+  FEED / CALENDAR / CREATE / ASSETS. `cpGoto('mk')` lands here on first entry.
+- The rail item feeds the mobile drawer automatically (`mobDrawerBuild` mirrors
+  the rail), so GROWTH → MKTG → SOCIAL COMMAND needed no second list.
+- Three-column grid, 3:4 default with 1:1 / 4:5, planned → full-width
+  **Published** boundary → live posts newest first. Feed column capped at 520px
+  so it stays a feed preview on desktop.
+- Interaction: tap to select, long-press (touch) or drag (pointer) to swap,
+  explicit ← Earlier / Later → , `[` and `]` on the keyboard, arrow keys to walk
+  the grid. One selection = a swap with its neighbour; multi-selection = a block
+  move. Every reorder is one undo through `mkSequenceReorder`.
+- Unschedule pulls a post to the drawer and keeps the record; the drawer places
+  it back. Replace assigns an asset. Carousel merges 2+. Approve is human-only.
+- IMPORT = the two foundation asset sources that already exist in this
+  workspace: style photography (rights `owned`, provenance recorded) and a
+  manual URL. It does **not** read a live social feed and says so.
+- `socMigrateOnce()` runs `mkSocialMigrateV1()` on the first render of the
+  screen that reads its output — not at boot — and only when `moduleWritable
+  ('growth')`. A Growth viewer migrates nothing.
+- Conflicts: two planned posts on one day are marked and named, never blocked.
+
+### Deliberate deviations from the brief, and why
+
+- **Drop = swap, not insert.** Earlier/Later on one post is a swap with its
+  neighbour, so the drag and the buttons agree; insertion would re-flow the
+  whole grid and defeat judging a feed visually. A multi-post selection cannot
+  swap with one neighbour, so it moves as a block.
+- **Week grid is desktop-only.** §5 forbids seven columns on a phone; stacking
+  them under an agenda that already said everything is worse than omitting it.
+- **CREATE is a placer, not the Phase 3 composer.** Title, format, platform,
+  date, caption, and the two ENIGMA prompts. It says plainly that ENIGMA cannot
+  yet write a sequence in — that is Phase 5.
+- **ASSETS is a shelf, not the Phase 2 library.** Import, list, use count,
+  archive. No rights editor, filters, dedupe or visual search.
+
+### Still open after Phase 1
+
+- The floating sparkle opens the existing Growth assistant. Social Command
+  context and actions are Phase 5; the section's suggest chips are the interim.
+- No provider anywhere: nothing schedules, publishes or reconciles.
+- Ratio, selection and view are per-glance except ratio, which syncs in
+  `mkSocialPrefs`.
+
+---
+
+## TWO DIALOGS THAT WERE NEVER DIALOGS (fixed in Build 432)
+
+Reported live: *"the style builder is stuck and cannot close out."*
+
+`invBuildStyleOpen` (430) and `slOpenOrderModal` (429) were each built
+element-by-element in JS with class names that **do not exist in this
+stylesheet**: `modal-overlay`, `modal-box`, `modal-hdr`, `modal-footer`,
+`btn-primary`, `form-row`, `form-input`. `closeModal()` only removes `.open`,
+and `.open` styles nothing without `.overlay` — so the style builder rendered as
+plain flow content that could not be dismissed, and the order editor, which also
+carried an inline `display:none`, never appeared at all.
+
+Both now use the app's real classes. The tests that passed on both were asking
+whether the elements existed and prefilled correctly — which they did, inside
+something nobody could see or close.
+
+- `smoke88.js` — every `modal-*`, `btn-*`, `overlay` class the app applies must
+  have a CSS rule behind it, and any overlay built in JS must wear `.overlay`.
+- `invbuild.js` / `orders.js` now assert computed `position`, opacity and
+  dismissal, not DOM presence.
+
+Also fixed, found by the same sweep: `prOpenDetail` threw on any pull with no
+fee (`(pull.feeAmount||0).toFixed ? pull.feeAmount.toFixed(2) : …` tests a
+number that always has `toFixed`, then calls it on the undefined original).
+Build 427 let a comped pull reach that badge for the first time; `alias.js` and
+`perperson.js` had been red ever since. A pull with no fee now says so instead
+of claiming an unpaid amount.
+
+**A style built from a store product is created ⚑ Needs review** — it has no
+cost, wholesale price, fabric or season, and unmarked it is indistinguishable
+from one someone specified. The sheet says so before you agree to it.
+
+### A boot signal that did not exist
+
+`window.STATE` is assigned where it is declared, long before `init()` reads the
+saved workspace out of localStorage — so "STATE exists" has never meant "the
+workspace is loaded". `socMigrateOnce()` could therefore run against a
+half-built STATE and stamp `schemaVersion`, marking a one-way migration done for
+records it had not read. Because the stamp is the guard, the founder's real
+calendar would then never convert.
+
+Build 432 adds `window.__veniaBooted`, set once `init()` has finished reading,
+and the migration waits for it. A founder whose last route was Marketing has
+this screen restored *during* boot, so refusing to migrate there would have left
+them looking at an empty feed with nothing to redraw it — `socWaitForBoot()`
+polls (bounded, 6s) and re-renders once the workspace is actually there.
+
+Found by the Phase 1 suite failing intermittently in three different places on
+three different runs, which is what this bug looks like from outside.
+
+### Known red, not ours
+
+- `regress.js` — `[Supabase] init failed … createClient`: the supabase-js CDN is
+  blocked in the sandbox. Identical on Build 431.
+- `filtsweep.js` — skips its `prev389.html` half, a stale scratch snapshot with
+  no `cpGoto` in scope. Its current-build half is clean.
