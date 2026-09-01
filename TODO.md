@@ -3182,3 +3182,60 @@ still believes it has those units, so it can oversell. Fixing that means giving
 this app permission to change the store's inventory, which is a different kind
 of power from reading it and should be an explicit choice, not a side effect of
 a sync. Until then the divergence is shown rather than hidden.
+
+---
+
+## Build 440 — the P&L you can leave, and where manufacturing money is counted
+
+### The statement was a trap
+
+`finPrintPL()` opened a window, wrote a document, and called `print()` 400ms
+later. It had **no Close button** — the stylesheet even carried
+`@media print{button{display:none}}`, anticipating buttons that were never
+added. On a phone the print dialog is a full-screen share sheet thrown over a
+document nobody has read yet, and behind it is a page with no way out.
+
+Now: a fixed bar with **Print / Save PDF** and **Close**, hidden in the print
+itself. Auto-print only on a desktop, where a print dialog is a dialog. Close
+tries `window.close()` and falls back to `history.back()`.
+
+### Where manufacturing money is counted
+
+A payment to a factory or a mill must reach the P&L **exactly once**: through
+cost of goods sold as the units it produced are sold, or through operating
+expenses as cash that left the bank. Never both.
+
+`fabric` and `production` were already excluded from opex on the assumption of
+the first route. Nothing said so on the document, and nothing said what happens
+to the categories that are *not* excluded. `landedCost()` is
+material + labor + overhead + duties + freight — so `contractors` (labor),
+`materials` (material) and `shipping` (freight) are all live double-count risks
+the moment a cost sheet exists for the styles they made.
+
+The statement now names both piles, with the second one broken out by category
+and amount, and states the rule: recategorise them, or leave them and do not
+cost those styles — **either is defensible, both is not.**
+
+Counted in the same pass as opex, deliberately: they are one partition of one
+set of transactions, and a second loop is a second set of filters to drift.
+
+### The margin was the loudest lie on the page
+
+With uncosted styles selling, gross margin is not a trading margin — it is close
+to the share of revenue with no cost recorded against it. A 96% margin on a
+document going to an accountant reads as a claim. It now carries a note saying
+what it is measuring, and that it will fall as styles are costed — and that the
+fall is the statement getting more accurate, not the business getting worse.
+
+### An estimate that leaves the building says so
+
+Cost sheets have always let a section be marked **not quoted**, and the tech
+pack shows an amber banner when one is. The P&L said nothing — so a founder
+doing the right thing (entering the best figure they have rather than leaving a
+style uncosted) would hand an accountant estimated COGS presented as fact.
+
+The statement now names the styles whose cost is part estimate and says that
+COGS, gross profit and gross margin inherit it. That is what makes estimating
+the safe move instead of the risky one.
+
+`gauntlet/plcogs.js` — 21 assertions, all of which failed against Build 439.
