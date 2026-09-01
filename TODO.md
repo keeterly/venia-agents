@@ -2973,6 +2973,24 @@ of claiming an unpaid amount.
 cost, wholesale price, fabric or season, and unmarked it is indistinguishable
 from one someone specified. The sheet says so before you agree to it.
 
+### A boot signal that did not exist
+
+`window.STATE` is assigned where it is declared, long before `init()` reads the
+saved workspace out of localStorage — so "STATE exists" has never meant "the
+workspace is loaded". `socMigrateOnce()` could therefore run against a
+half-built STATE and stamp `schemaVersion`, marking a one-way migration done for
+records it had not read. Because the stamp is the guard, the founder's real
+calendar would then never convert.
+
+Build 432 adds `window.__veniaBooted`, set once `init()` has finished reading,
+and the migration waits for it. A founder whose last route was Marketing has
+this screen restored *during* boot, so refusing to migrate there would have left
+them looking at an empty feed with nothing to redraw it — `socWaitForBoot()`
+polls (bounded, 6s) and re-renders once the workspace is actually there.
+
+Found by the Phase 1 suite failing intermittently in three different places on
+three different runs, which is what this bug looks like from outside.
+
 ### Known red, not ours
 
 - `regress.js` — `[Supabase] init failed … createClient`: the supabase-js CDN is

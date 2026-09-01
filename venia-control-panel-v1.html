@@ -6059,6 +6059,7 @@ function init() {
     STATE.activityLog = [];
     save();
   }
+  window.__veniaBooted = true;
   buildSkus();
   renderPage('dashboard');
   populateStyleSelects();
@@ -30530,6 +30531,15 @@ function socMigrateOnce(){
   mkSocialInit();
   if ((STATE.mkSocialPrefs || {}).schemaVersion === MK_SOCIAL_SCHEMA) return null;
   if (typeof moduleWritable === 'function' && !moduleWritable('growth')) return null;
+  // Not before init() has read localStorage. Migrating an empty STATE would
+  // stamp the schema and leave the founder's actual calendar unconverted
+  // forever, because the stamp is what stops it running again.
+  //
+  // This screen CAN render that early: a founder whose last route was Marketing
+  // has it restored while boot is still running. Refusing to migrate is right;
+  // leaving them looking at an empty feed is not, and nothing else would ever
+  // redraw it. So wait for the workspace and draw again.
+  if (!window.__veniaBooted) { socWaitForBoot(); return null; }
   let r = null;
   try { r = mkSocialMigrateV1(); save(); } catch (e) { return null; }
   if (r && (r.posts || r.captions || r.campaigns)) {
@@ -30539,6 +30549,20 @@ function socMigrateOnce(){
   return r;
 }
 window.socMigrateOnce = socMigrateOnce;
+let SOC_BOOT_WAIT = null;
+function socWaitForBoot(){
+  if (SOC_BOOT_WAIT) return;
+  let tries = 0;
+  SOC_BOOT_WAIT = setInterval(function(){
+    // Bounded: if boot never completes the app has a much larger problem than
+    // an unredrawn grid, and a timer running forever would hide it.
+    if (++tries > 60) { clearInterval(SOC_BOOT_WAIT); SOC_BOOT_WAIT = null; return; }
+    if (!window.__veniaBooted) return;
+    clearInterval(SOC_BOOT_WAIT); SOC_BOOT_WAIT = null;
+    socMigrateOnce();
+    socRender();
+  }, 100);
+}
 function agBuildSocialSection(){
   socMigrateOnce();
   const f = mkSocialFeed();
