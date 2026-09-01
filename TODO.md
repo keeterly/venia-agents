@@ -3140,3 +3140,45 @@ rots.
 
 - No approvals queue, no composer, no Reel or Story planner, no provider
   publishing. Enigma proposes; a person approves; nothing publishes anywhere.
+
+---
+
+## ONE STOCK NUMBER (Build 439)
+
+Asked: *"If I update stock in Shopify does it sync across the board?"* It did
+not, and the way it failed was expensive.
+
+**There were two numbers.** `invStock()` preferred Shopify's figure — and almost
+nothing called it. The Inventory screen used it; the line sheet a buyer
+receives, the production gap and the forecast shortfall all read `s.stock`
+directly, the typed number Shopify never touches. A style could read 42 on
+Inventory and 8 on the line sheet, and the line sheet is the one that leaves the
+building. The production planner was the costly one: with 42 in the store and a
+stale 8 typed in, it computed a gap of **92 units instead of 58** — fifty units
+of production nobody needed.
+
+`invStock()` is now the only way to ask, and every consumer routes through it.
+
+### Two things one number cannot say
+
+- **How old it is.** Shopify is polled, not pushed, so the age is part of the
+  fact. Stock now carries it, and the line sheet prints it beside the figure.
+- **What has happened since.** A delivered wholesale order takes real units off
+  the shelf and Shopify never hears — this app cannot tell it, because the
+  Shopify proxy is read-only by design. `invStockEffective()` shows the store's
+  figure less anything wholesale shipped **after** the last sync, and keeps the
+  raw figure readable. An order delivered before the sync is not double-counted.
+
+### It refreshes itself
+
+Opening Inventory re-syncs when the last answer is more than ten minutes old.
+Not on every render — that would be a request per keystroke — and never when no
+store is connected.
+
+### Still not done, and it is a decision rather than a gap
+
+**Nothing writes back to Shopify.** Ship a wholesale order and the storefront
+still believes it has those units, so it can oversell. Fixing that means giving
+this app permission to change the store's inventory, which is a different kind
+of power from reading it and should be an explicit choice, not a side effect of
+a sync. Until then the divergence is shown rather than hidden.

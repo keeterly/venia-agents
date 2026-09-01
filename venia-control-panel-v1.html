@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '438';
+  const BUILD = '439';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14593,6 +14593,51 @@ function invStock(s){
   if (s && s.shopifyStock != null) return { units: s.shopifyStock, src: 'shopify', at: s.shopifyAt };
   return { units: (s && s.stock) || 0, src: (s && s.stock != null && s.stock !== '') ? 'manual' : 'none' };
 }
+window.invStock = invStock;
+// How stale, in minutes. A live number with no age is a number pretending to be
+// current; Shopify is polled, not pushed, so the age is part of the fact.
+function invStockAgeMin(s){
+  const st = invStock(s);
+  if (st.src !== 'shopify' || !st.at) return null;
+  const m = Math.round((Date.now() - new Date(st.at).getTime()) / 60000);
+  return isNaN(m) ? null : Math.max(0, m);
+}
+function invStockAgeText(s){
+  const m = invStockAgeMin(s);
+  if (m === null) return '';
+  if (m < 2) return 'just now';
+  if (m < 60) return m + ' min ago';
+  const h = Math.round(m / 60);
+  return h < 24 ? h + 'h ago' : Math.round(h / 24) + 'd ago';
+}
+// WHOLESALE DOES NOT GO THROUGH THE STORE. A delivered order takes real units
+// off the shelf, and Shopify never hears about it — this app cannot tell it,
+// because the Shopify proxy is read-only by design. So the number from Shopify
+// is right about the storefront and wrong about the warehouse, and the honest
+// thing is to say by how much rather than silently pick one.
+function invWholesaleSince(s){
+  if (!s) return 0;
+  const st = invStock(s);
+  if (st.src !== 'shopify' || !st.at) return 0;
+  const since = new Date(st.at).getTime();
+  let n = 0;
+  (STATE.slOrders || []).forEach(function(o){
+    if (!o || o.status !== 'delivered' || !o.inventoryApplied) return;
+    const when = new Date(o.deliveredAt || o.updatedAt || 0).getTime();
+    if (!when || when < since) return;
+    (o.items || []).forEach(function(it){ if (it && it.styleId === s.id) n += Number(it.qty) || 0; });
+  });
+  return n;
+}
+// What to SHOW: the store's figure, less anything wholesale has shipped since
+// it was taken. Never below zero, and the caller can still ask for both halves.
+function invStockEffective(s){
+  const st = invStock(s);
+  const out = Math.max(0, st.units - invWholesaleSince(s));
+  return { units: out, raw: st.units, src: st.src, at: st.at,
+           shippedSince: invWholesaleSince(s), age: invStockAgeText(s) };
+}
+window.invStockEffective = invStockEffective;
 let INV_FILTER = 'all';
 
 // Suggest a style for an unmatched Shopify product by name. Exact first, then a
@@ -14830,8 +14875,30 @@ window.invLinkPick = function(code, sel){
   const id = sel && sel.value; if (!id) return;
   invLinkCode(id, code);
 };
+// "It should stay in sync" — so it refreshes itself rather than waiting for a
+// button nobody remembers to press. Only on opening the screen, and only when
+// the last answer is more than ten minutes old: Shopify is polled, not pushed,
+// and a poll on every render would be a request per keystroke.
+const INV_STALE_MIN = 10;
+function invStale(){
+  const at = (STATE.invSync || {}).at;
+  if (!at) return true;
+  const m = (Date.now() - new Date(at).getTime()) / 60000;
+  return !(m >= 0) || m > INV_STALE_MIN;
+}
+function invAutoSync(){
+  if (!invStale()) return;
+  if (window.__invSyncing) return;
+  if (typeof shopifyConnected === 'function' && !shopifyConnected()) return;
+  window.__invSyncing = true;
+  Promise.resolve().then(function(){ return invShopifySync(); })
+    .catch(function(){})
+    .then(function(){ window.__invSyncing = false; });
+}
+window.invAutoSync = invAutoSync;
 function renderInventory(filter='all') {
   INV_FILTER = filter;
+  try { invAutoSync(); } catch(e){}
   // WHAT COUNTS AS INVENTORY. This used to be styles at active/sale/production
   // only — and with a line still marked SMS in the PLM while it sells in the
   // store, that hid all 64 styles behind an empty table reading 0 units. Stock
@@ -15100,7 +15167,7 @@ function poDemandRows(season){
   return (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season)
     .map(s => {
       const f = parseInt(s.forecastUnits,10)||0;
-      const onPo = poUnitsForStyle(s.id), stock = s.stock||0;
+      const onPo = poUnitsForStyle(s.id), stock = invStockEffective(s).units;
       return { s, f, sold: poSoldUnitsForStyle(s.id, season), onPo, stock, gap: Math.max(0, f - onPo - stock) };
     });
 }
@@ -23372,7 +23439,7 @@ function buildTodayFocus() {
     let gapUnits = 0, gapStyles = 0;
     (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season).forEach(s => {
       const f = parseInt(s.forecastUnits,10)||0; if (!f) return;
-      const gap = Math.max(0, f - poUnitsForStyle(s.id) - (s.stock||0));
+      const gap = Math.max(0, f - poUnitsForStyle(s.id) - invStockEffective(s).units);
       if (gap > 0){ gapUnits += gap; gapStyles++; }
     });
     if (!gapUnits) return;
@@ -37835,7 +37902,8 @@ window.oeGenerate = async function() {
       // connected, OR local stock exists (PO receiving fills it now), OR any
       // production PO has been cut.
       const hasLocal = (window.STATE && (
-        (STATE.styles||[]).some(s => (s.stock||0) > 0) || (STATE.pos||[]).length > 0));
+        (STATE.styles||[]).some(s => (typeof invStock === 'function' ? invStock(s).units : (s.stock||0)) > 0)
+        || (STATE.pos||[]).length > 0));
       const on = ((typeof shopifyConnected === 'function') && shopifyConnected()) || hasLocal;
       document.querySelectorAll('.nav-inventory').forEach(el => { el.style.display = on ? '' : 'none'; });
     };
@@ -41157,7 +41225,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           </div>
           <div style="display:flex;gap:12px;margin-top:6px;font-size:10px;color:#888">
             <span>${s.drop ? 'Delivery ' + agEsc(s.drop) : (s.lead ? agEsc(String(s.lead)) + ' wks lead' : 'Delivery TBC')}</span>
-            <span style="margin-left:auto">${Number(s.stock||0) > 0 ? Number(s.stock) + ' on hand' : 'Made to order'}</span>
+            <span style="margin-left:auto">${(() => {
+              const st = (typeof invStockEffective === 'function') ? invStockEffective(s) : { units: Number(s.stock||0), src:'manual' };
+              if (!(st.units > 0)) return 'Made to order';
+              return st.units + ' on hand' + (st.src === 'shopify' && st.age ? ' · ' + agEsc(st.age) : '');
+            })()}</span>
           </div>
         </div>
       </div>`).join('') + '</div>';
