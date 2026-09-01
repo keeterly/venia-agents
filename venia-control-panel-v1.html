@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '439';
+  const BUILD = '440';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35342,6 +35342,74 @@ function finPLStatement(){
       + 'fabrication sold, so those units are costed at the average landed cost of the matching '
       + 'styles. Revenue is unaffected.');
   }
+  // AN ESTIMATED COST IS STILL AN ESTIMATE ON THE WAY OUT.
+  //
+  // Cost sheets can mark a section "not quoted", and the tech pack says so. The
+  // P&L never did — so a founder doing the right thing (entering the best
+  // figure they have rather than leaving the style uncosted) would hand an
+  // accountant estimated COGS presented as fact. Naming it is what makes
+  // estimating the safe move instead of the risky one.
+  const estStyles = [];
+  try {
+    const sheets = JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}');
+    (STATE.styles || []).forEach(function(st){
+      const d = st && sheets[st.id];
+      if (d && typeof csEstList === 'function' && csEstList(d).length) {
+        estStyles.push(st.name);
+      }
+    });
+  } catch (e) {}
+  if (estStyles.length) {
+    notes.push('COST OF GOODS INCLUDES ESTIMATES. ' + estStyles.length + ' style'
+      + (estStyles.length === 1 ? ' carries' : 's carry') + ' a cost sheet with at least one section '
+      + 'marked not quoted — a best figure rather than an invoiced one. Cost of goods sold, gross '
+      + 'profit and gross margin above inherit that. '
+      + estStyles.slice(0, 8).join(', ')
+      + (estStyles.length > 8 ? ' and ' + (estStyles.length - 8) + ' more' : '') + '.');
+  }
+  // Two routes, and the statement says which one the money took. This is the
+  // note that answers "so what do I do about COGS" without pretending to know
+  // what any particular wire was for.
+  const mfgOpex = Math.round(d.mfgViaOpex || 0);
+  const mfgCogs = Math.round(d.mfgViaCogs || 0);
+  if (mfgOpex || mfgCogs) {
+    // Named with their amounts, because "check contractors" is advice and
+    // "$8,583 in Contractors" is a place to start.
+    const keys = Object.keys(d.mfgOpexBy || {});
+    const named = keys
+      .sort(function(a, b){ return (d.mfgOpexBy[b] || 0) - (d.mfgOpexBy[a] || 0); })
+      .map(function(c){
+        // Category labels are stored lowercase because they are tokens, not
+        // prose. This is prose, and it is on a document going to an accountant.
+        const lb = (typeof finCatLabel === 'function' ? finCatLabel(c) : c) || c;
+        const nm = lb.charAt(0).toUpperCase() + lb.slice(1);
+        // The split is only worth printing when there IS a split — "$2,334 sits
+        // in Shipping ($2,334)" says the same number twice.
+        return keys.length > 1 ? nm + ' ($' + Math.round(d.mfgOpexBy[c]).toLocaleString() + ')' : nm;
+      });
+    notes.push('WHERE MANUFACTURING MONEY IS COUNTED. A payment to a factory or a mill reaches this '
+      + 'statement one of two ways, and must only take one: through cost of goods sold as the units it '
+      + 'produced are sold, or through operating expenses as money that left the bank. '
+      + '$' + mfgCogs.toLocaleString() + ' is categorised fabric or production and is therefore '
+      + 'EXCLUDED from operating expenses above, on the basis that its cost arrives through cost of '
+      + 'goods sold instead. '
+      + (mfgOpex
+        ? '$' + mfgOpex.toLocaleString() + ' sits in ' + named.join(' and ') + ' and IS counted as an '
+          + 'operating expense. If any of that was manufacturing, it will be counted a second time as '
+          + 'soon as a cost sheet exists for the styles it made. Recategorise those to fabric or '
+          + 'production, or leave them and do not cost those styles — either is defensible, both is not.'
+        : 'Nothing is sitting in a category that would double-count.'));
+  }
+  // The margin is the loudest number on the page and the easiest to misread
+  // when the cost side is empty. Say what it is measuring.
+  const grossPctNow = revenue > 0 ? Math.round((gross / revenue) * 1000) / 10 : null;
+  if (uncosted.length && grossPctNow != null && grossPctNow > 70) {
+    notes.push('The gross margin above is not a trading margin. With ' + uncosted.length + ' style'
+      + (uncosted.length === 1 ? '' : 's') + ' selling with no cost sheet, it is close to the share of '
+      + 'revenue for which no cost has been recorded yet. It will fall — probably sharply — as those '
+      + 'styles are costed, and that fall is the statement getting more accurate, not the business '
+      + 'getting worse.');
+  }
   notes.push('Purchase orders paid to factories ($' + Math.round(d.poPaidYtd || 0).toLocaleString()
     + ' in the period) are not an expense line here: their cost reaches this statement through '
     + 'cost of goods sold as the units they produced are sold. $'
@@ -35458,7 +35526,14 @@ window.finPrintPL = function(){
     + '.notes ol{margin:0;padding-left:18px}'
     + '.notes li{font-size:10.5px;line-height:1.75;color:#333;margin-bottom:8px}'
     + '.sign{margin-top:40px;font-size:10.5px;color:#555;line-height:1.9}'
-    + '@media print{body{padding:24px 0}button{display:none}}'
+    + '.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;justify-content:center;'
+    +   'padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);'
+    +   'border-top:1px solid #ddd;font-family:Helvetica,Arial,sans-serif}'
+    + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
+    +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
+    + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + 'body{padding-bottom:110px}'
+    + '@media print{body{padding:24px 0}button{display:none}.bar{display:none}}'
     + '</style></head><body>'
     + '<h1>' + esc(st.entity) + '</h1>'
     + '<h2>' + esc(st.title) + '</h2>'
@@ -35471,12 +35546,25 @@ window.finPrintPL = function(){
     + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
     + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
     +   'VENIA Collection · Los Angeles, California</div>'
+    // A document you cannot leave is a trap, not a document. window.close()
+    // works because this window was opened by a script; history.back() is the
+    // fallback for a browser that refuses, and the link is the fallback for one
+    // that refuses both.
+    + '<div class="bar">'
+    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
+    +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    + '</div>'
     + '<' + '/body></html>';
 
   const w = window.open('', '_blank', 'width=900,height=1000');
   if (!w) { showToast('Allow pop-ups to open the statement', 'warning'); return null; }
   w.document.write(html); w.document.close();
-  setTimeout(function(){ try { w.print(); } catch(e){} }, 400);
+  // Print on a desktop, where a print dialog is a dialog. On a phone it is a
+  // full-screen share sheet thrown over a document nobody has read yet, so the
+  // founder taps Print when they are ready.
+  const wide = (w.innerWidth || 900) >= 700 && !/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  if (wide) setTimeout(function(){ try { w.print(); } catch(e){} }, 400);
   try { logActivity('P&L statement generated — ' + st.periodLabel); } catch(e){}
   return st;
 };
@@ -35572,7 +35660,22 @@ function cmdMoneyData() {
   // This is the same split finCashCalendar makes for recurring detection.
   // transfer is money moving between our own accounts, and income is inflow.
   const OPEX_EXCLUDE = ['fabric','production','transfer','income'];
+  // THE SAME MONEY, SPLIT BY WHICH ROUTE IT TAKES TO THE STATEMENT.
+  //
+  // A payment to a factory or a mill must reach the P&L exactly once: through
+  // COGS as the units it produced are sold, or through opex as cash that left
+  // the bank. fabric and production are excluded above on the assumption of the
+  // first. These three are NOT excluded, and they are what a founder plausibly
+  // files a factory or fabric payment under — contractors is labor, materials
+  // is material, shipping is freight, and landedCost() carries all three. So
+  // anything manufacturing sitting here gets charged a second time the moment a
+  // cost sheet exists for the styles it made.
+  //
+  // Counted in the same pass as opex on purpose: these are one partition of one
+  // set of transactions, and a second loop is a second set of filters to drift.
+  const MFG_LOOKALIKE = ['contractors','materials','shipping'];
   let opexYtd = 0, opexUncat = 0; const opexBy = {};
+  let mfgViaCogs = 0, mfgViaOpex = 0; const mfgOpexBy = {};
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void' || t.status === 'pending') return;
     const amt = t.amount || 0;
@@ -35580,6 +35683,10 @@ function cmdMoneyData() {
     if (!t.date || t.date < jan1iso.slice(0,10)) return;
     const c = (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category||'')) || '';
     if (!c) { opexUncat += -amt; return; }              // can't classify it yet — reported, never guessed
+    if (c === 'fabric' || c === 'production') mfgViaCogs += -amt;
+    else if (MFG_LOOKALIKE.indexOf(c) >= 0) {
+      mfgViaOpex += -amt; mfgOpexBy[c] = (mfgOpexBy[c] || 0) + -amt;
+    }
     if (OPEX_EXCLUDE.indexOf(c) >= 0) return;
     opexYtd += -amt; opexBy[c] = (opexBy[c] || 0) + -amt;
   });
@@ -35656,6 +35763,7 @@ function cmdMoneyData() {
     .sort((a,b) => String(b.season).localeCompare(String(a.season)));
   return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous, seasonRows,
            opexYtd, opexUncat, opexBy, bankOpex, opexTotal,
+           mfgViaCogs, mfgViaOpex, mfgOpexBy,
            revYtd, cogsYtd, operating: revYtd - cogsYtd - opexTotal, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
 }
