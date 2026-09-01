@@ -2703,7 +2703,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '434';
+  const BUILD = '435';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30646,10 +30646,11 @@ async function socIgCall(body){
   const r = await socIgReady().functions.invoke('instagram', { body: body });
   if (r.error) {
     // functions.invoke flattens every non-2xx into one opaque sentence; the
-    // useful message is in the body.
-    let msg = r.error.message || 'request failed';
-    try { const d = await r.error.context.json(); if (d && d.error) msg = d.error; } catch(e){}
-    throw new Error(msg);
+    // useful message — and the list of what is missing — is in the body.
+    let msg = r.error.message || 'request failed', detail = null;
+    try { const d = await r.error.context.json(); if (d) { detail = d; if (d.error) msg = d.error; } } catch(e){}
+    const err = new Error(msg); err.detail = detail;
+    throw err;
   }
   if (r.data && r.data.error && !r.data.items) throw new Error(r.data.error);
   return r.data || {};
@@ -30665,10 +30666,16 @@ window.socIgConnect = async function(){
   let j;
   try { j = await socIgCall({ action: 'authurl' }); }
   catch (e) {
-    // A server with no app configured should say which piece is missing rather
-    // than "could not connect".
-    socToast(/not configured/i.test(e.message)
-      ? 'Instagram is not set up on the server yet' : e.message);
+    // A server with no app configured names the pieces, and says so on the row
+    // rather than in a toast that is gone before the founder reaches the
+    // dashboard they need it in.
+    const missing = (e.detail && e.detail.missing) || null;
+    if (missing && missing.length) {
+      SOC_IG = Object.assign({}, SOC_IG, { connected: false, missing: missing });
+      socRender();
+      return;
+    }
+    socToast(e.message);
     return;
   }
   const w = window.open(j.url, 'venia-ig', 'width=520,height=720');
@@ -30737,7 +30744,16 @@ function socIgRow(){
       + '<span class="soc-plan-f">Instagram</span>'
       + '<span class="soc-plan-f" style="color:var(--muted)">not connected</span>'
       + '<span class="soc-bar-sp"></span>'
-      + '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="socIgConnect()">Connect</button></div>';
+      + '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="socIgConnect()">Connect</button></div>'
+      // Stays on the screen while the founder goes to set them, and names each
+      // one exactly as the dashboard field expects it.
+      + ((g.missing || []).length
+          ? '<div style="font-size:10px;line-height:1.7;color:var(--gold,#8a6a1f);margin:-4px 0 10px">'
+            + 'The server is missing ' + g.missing.length + ' setting'
+            + (g.missing.length === 1 ? '' : 's') + ' — add '
+            + g.missing.map(function(k){ return '<b>' + esc(k) + '</b>'; }).join(', ')
+            + ' under Supabase → Project Settings → Edge Functions → Secrets.</div>'
+          : '');
   }
   const live = SOC_LIVE || {};
   const stale = live.at ? Math.round((Date.now() - live.at) / 60000) : null;
