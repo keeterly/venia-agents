@@ -2534,6 +2534,16 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
 /* Compact profile / plan row — one line of facts, never a card. */
 .soc-plan{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 9px;
   border-bottom:1px solid var(--border);margin-bottom:12px}
+.soc-ig{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 10px}
+.soc-ig .ag-btn{min-height:32px;font-size:9px;letter-spacing:1px;padding:6px 9px}
+@media (max-width:768px){
+  .soc-ig{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+    mask-image:linear-gradient(90deg,#000 93%,transparent);
+    -webkit-mask-image:linear-gradient(90deg,#000 93%,transparent)}
+  .soc-ig::-webkit-scrollbar{display:none}
+  .soc-ig > *{flex-shrink:0}
+  .soc-ig .soc-bar-sp{display:none}
+}
 .soc-plan-h{font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:1.4px;
   text-transform:uppercase;color:var(--ink);margin-right:2px}
 .soc-plan-f{font-size:9px;letter-spacing:.9px;text-transform:uppercase;color:var(--muted)}
@@ -2689,7 +2699,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '432';
+  const BUILD = '433';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30355,7 +30365,14 @@ function socPlanRow(f){
     + '<span class="soc-plan-h">VENIA</span>'
     + '<span class="soc-plan-f">' + esc(range) + '</span>'
     + '<span class="soc-plan-f"><b>' + f.planned.length + '</b> planned</span>'
-    + '<span class="soc-plan-f"><b>' + f.published.length + '</b> published</span>'
+    + (function(){
+        // The live count when connected, the migrated count otherwise. Same
+        // rule as the grid below, so the strip and the tiles never disagree.
+        const live = (SOC_IG && SOC_IG.connected && SOC_LIVE) ? (SOC_LIVE.items || []) : null;
+        return live
+          ? '<span class="soc-plan-f"><b>' + live.length + '</b> published</span>'
+          : '<span class="soc-plan-f"><b>' + f.published.length + '</b> published</span>';
+      })()
     + (f.drafts.length ? '<button class="soc-plan-f" style="background:none;border:none;padding:0;'
         + 'text-decoration:underline;cursor:pointer;letter-spacing:.9px;text-transform:uppercase;'
         + 'color:var(--muted);font-size:9px" onclick="socDraftsOpen()"><b>' + f.drafts.length + '</b> unscheduled</button>' : '')
@@ -30401,24 +30418,32 @@ function socBar(f){
     + '</div>';
 }
 function socFeedView(f){
-  if (!f.planned.length && !f.published.length) {
+  const live = (SOC_IG && SOC_IG.connected && SOC_LIVE) ? (SOC_LIVE.items || []) : null;
+  if (!f.planned.length && !f.published.length && !(live && live.length)) {
     return '<div class="soc-empty">Nothing in the feed yet.<br>'
       + 'Use <b>+ New Post</b> to place one, or <b>Import</b> to bring style photography in as assets first.'
       + (f.drafts.length ? '<br><br><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socDraftsOpen()">'
           + f.drafts.length + ' unscheduled draft' + (f.drafts.length === 1 ? '' : 's') + '</button>' : '')
       + '</div>';
   }
-  const pub = f.published.slice(0, SOC.pubCap);
+  // Instagram wins when it is connected: it is the account speaking, and the
+  // migrated rows were only ever the old calendar's word for it. The migrated
+  // records are not deleted — they are simply not what the grid shows.
+  const pub = live ? [] : f.published.slice(0, SOC.pubCap);
+  const shown = live ? live.slice(0, SOC.pubCap) : pub;
+  const note = live
+    ? shown.length + ' from Instagram'
+    : (pub.length + ' from your calendar' + (f.published.length > pub.length ? ' of ' + f.published.length : '')
+       + ' · unverified');
   return '<div class="soc-grid" id="soc-grid" data-ratio="' + socRatio() + '" role="listbox" aria-multiselectable="true">'
     + f.planned.map(function(p){ return socTile(p, { planned: true, conflict: f.conflicts[p.id] }); }).join('')
-    + (pub.length
+    + (shown.length
         ? '<div class="soc-bound"><span class="soc-bound-l">Published</span>'
           + '<span class="soc-bound-r"></span>'
-          + '<span class="soc-bound-s">' + pub.length + ' live'
-          + (f.published.length > pub.length ? ' of ' + f.published.length : '')
-          + ' · not editable</span></div>'
+          + '<span class="soc-bound-s">' + note + ' · not editable</span></div>'
         : '')
-    + pub.map(function(p){ return socTile(p, { planned: false }); }).join('')
+    + (live ? shown.map(socLiveTile).join('')
+            : pub.map(function(p){ return socTile(p, { planned: false }); }).join(''))
     + '</div>';
 }
 function socAgendaView(f){
@@ -30565,6 +30590,7 @@ function socWaitForBoot(){
 }
 function agBuildSocialSection(){
   socMigrateOnce();
+  socIgAuto();
   const f = mkSocialFeed();
   // Prune a selection whose posts have gone (archived, merged away, undone).
   SOC.sel = SOC.sel.filter(function(id){ return !!mkFindPost(id); });
@@ -30572,7 +30598,7 @@ function agBuildSocialSection(){
   if (SOC.view === 'calendar')    body = socAgendaView(f);
   else if (SOC.view === 'create') body = socCreateView(f);
   else if (SOC.view === 'assets') body = socAssetsView(f);
-  else  body = '<div class="soc-feed">' + socBar(f) + socPlanRow(f) + socFeedView(f) + '</div>';
+  else  body = '<div class="soc-feed">' + socBar(f) + socIgRow() + socPlanRow(f) + socFeedView(f) + '</div>';
   setTimeout(socWire, 0);
   return '<div class="soc-wrap">' + socViewsRow() + body + '</div>';
 }
@@ -30589,6 +30615,141 @@ function socRender(){
   el.scrollTop = top;
 }
 window.socRender = socRender;
+
+
+// ── THE LIVE FEED ─────────────────────────────────────────────────────────
+// Everything above this point plans posts. This reads the account: what VENIA
+// has ACTUALLY published, from Instagram, so the sequence is judged against the
+// real grid rather than against the migrated approximation of one.
+//
+// The token is not here and never will be. Every call goes to the `instagram`
+// edge function, which holds it in a table this browser cannot read, and which
+// asks Instagram for `instagram_business_basic` alone — so nothing reachable
+// from this file can post, comment, or read a message.
+//
+// NOT PERSISTED, DELIBERATELY. Instagram's media URLs are CDN links that expire;
+// storing them would fill the workspace with pictures that stop loading and
+// sync that decay to every device. The pull lives in memory for this visit and
+// is asked for again next time.
+let SOC_LIVE = null;          // { at, items, username } for this page visit only
+let SOC_IG = null;            // last known connection status
+function socIgReady(){
+  const c = window.__sbClient;
+  if (!c) throw new Error('Not signed in to the cloud — Settings → Security.');
+  return c;
+}
+async function socIgCall(body){
+  const r = await socIgReady().functions.invoke('instagram', { body: body });
+  if (r.error) {
+    // functions.invoke flattens every non-2xx into one opaque sentence; the
+    // useful message is in the body.
+    let msg = r.error.message || 'request failed';
+    try { const d = await r.error.context.json(); if (d && d.error) msg = d.error; } catch(e){}
+    throw new Error(msg);
+  }
+  if (r.data && r.data.error && !r.data.items) throw new Error(r.data.error);
+  return r.data || {};
+}
+window.socIgStatus = async function(quiet){
+  try { SOC_IG = await socIgCall({ action: 'status' }); }
+  catch (e) { SOC_IG = { connected: false, unavailable: String(e.message) }; if (!quiet) socFail(e); }
+  return SOC_IG;
+};
+// Opens Instagram's own authorization page. The state is minted server-side per
+// attempt, so this cannot be replayed and there is nothing secret in the URL.
+window.socIgConnect = async function(){
+  let j;
+  try { j = await socIgCall({ action: 'authurl' }); }
+  catch (e) {
+    // A server with no app configured should say which piece is missing rather
+    // than "could not connect".
+    socToast(/not configured/i.test(e.message)
+      ? 'Instagram is not set up on the server yet' : e.message);
+    return;
+  }
+  const w = window.open(j.url, 'venia-ig', 'width=520,height=720');
+  if (!w) { socToast('Allow pop-ups to connect Instagram'); return; }
+  // The callback page posts back when it lands, so the grid refreshes itself
+  // rather than leaving the founder to guess whether it worked.
+  const onMsg = async (ev) => {
+    if (!ev.data || ev.data.venia !== 'instagram') return;
+    window.removeEventListener('message', onMsg);
+    await socIgStatus(true);
+    if (SOC_IG && SOC_IG.connected) { socToast('Instagram connected'); await socIgRefresh(true); }
+    socRender();
+  };
+  window.addEventListener('message', onMsg);
+};
+window.socIgRefresh = async function(quiet){
+  if (!SOC_IG || !SOC_IG.connected) return null;
+  try {
+    const j = await socIgCall({ action: 'feed', limit: 24 });
+    // An error WITH items is not a failure; an error with none is.
+    SOC_LIVE = { at: Date.now(), items: j.items || [], username: j.username || '',
+                 error: j.error || '', expired: !!j.expired };
+    if (j.error && !(j.items || []).length && !quiet) socToast(j.error);
+  } catch (e) { SOC_LIVE = { at: Date.now(), items: [], error: String(e.message) }; if (!quiet) socFail(e); }
+  if (!quiet) socRender();
+  return SOC_LIVE;
+};
+window.socIgDisconnect = async function(){
+  if (!confirm('Disconnect Instagram?\n\nThe grid goes back to showing what the old calendar said was posted. '
+    + 'Nothing is deleted.')) return;
+  try { const j = await socIgCall({ action: 'disconnect' }); SOC_IG = { connected: false }; SOC_LIVE = null;
+        socToast(j.note || 'Disconnected'); }
+  catch (e) { return socFail(e); }
+  socRender();
+};
+// Fetch once per visit to the screen, not once per render.
+function socIgAuto(){
+  if (SOC_IG !== null) return;
+  SOC_IG = { connected: false, checking: true };
+  socIgStatus(true).then(function(){
+    if (SOC_IG && SOC_IG.connected) return socIgRefresh(true).then(socRender);
+    socRender();
+  });
+}
+// A live post is not an mkPost and is never turned into one. Phase 1 draws it
+// as a tile; matching it back to a planned post is reconciliation, and that
+// belongs with provider publishing where the evidence exists.
+function socLiveTile(m){
+  const when = String(m.at || '').slice(0, 10);
+  return '<button type="button" class="soc-tile" data-plan="0" data-live="1"'
+    + ' onclick="window.open(\'' + esc(m.permalink) + '\',\'_blank\',\'noopener\')"'
+    + ' title="' + esc(String(m.caption || '').slice(0, 120)) + '">'
+    + (m.mediaUrl ? '<img src="' + esc(m.mediaUrl) + '" alt="" loading="lazy" decoding="async">'
+                  : '<span class="soc-tile-txt">' + esc(String(m.caption || 'Published').slice(0, 48)) + '</span>')
+    + '<span class="soc-tile-in"><span></span><span class="soc-tile-bot">'
+    +   '<span class="soc-chip">' + (SOC_KIND_MARK[m.kind] || '▣') + '</span>'
+    +   (when ? '<span class="soc-chip soc-chip-d">' + esc(socFmtDay(when)) + '</span>' : '')
+    + '</span></span></button>';
+}
+// The connection, said in one line, wherever the founder is looking.
+function socIgRow(){
+  const g = SOC_IG || {};
+  if (g.checking) return '';
+  if (!g.connected) {
+    return '<div class="soc-ig">'
+      + '<span class="soc-plan-f" style="text-transform:none;letter-spacing:.2px;font-size:10px">'
+      + 'Not connected to Instagram — what is below the line is your old calendar, not the account.</span>'
+      + '<span class="soc-bar-sp"></span>'
+      + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgConnect()">Connect</button></div>';
+  }
+  const live = SOC_LIVE || {};
+  const stale = live.at ? Math.round((Date.now() - live.at) / 60000) : null;
+  return '<div class="soc-ig">'
+    + '<span class="soc-plan-f"><b>@' + esc(g.username || 'instagram') + '</b></span>'
+    + (live.error ? '<span style="font-size:10px;letter-spacing:.2px;color:var(--gold,#8a6a1f);'
+         + 'text-transform:none;line-height:1.5">' + esc(live.error.slice(0, 90)) + '</span>'
+       : '<span class="soc-plan-f">' + (live.items ? live.items.length : 0) + ' live'
+         + (stale !== null ? ' · ' + (stale < 1 ? 'just now' : stale + 'm ago') : '') + '</span>')
+    // A connection with days left is a connection about to stop working.
+    + (g.daysLeft !== null && g.daysLeft <= 10
+        ? '<span class="soc-plan-f" style="color:var(--gold,#8a6a1f)">token ' + g.daysLeft + 'd left</span>' : '')
+    + '<span class="soc-bar-sp"></span>'
+    + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgRefresh()">Refresh</button>'
+    + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgDisconnect()">Disconnect</button></div>';
+}
 
 // ── INTERACTION ───────────────────────────────────────────────────────────
 // Three ways to do the same thing, because a phone, a mouse and a keyboard do
