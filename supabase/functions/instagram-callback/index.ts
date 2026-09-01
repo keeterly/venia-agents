@@ -37,8 +37,69 @@ function page(title: string, body: string, good: boolean, status = 200) {
   });
 }
 
+// ── THE TWO CALLBACKS META INSISTS ON ────────────────────────────────────
+// Business login settings also asks for a Deauthorize callback and a Data
+// deletion request URL. Pointing them at a page that shrugs would be a lie in a
+// form field, so they land here too — distinguished by ?event= — and do the
+// real thing: when someone revokes this app inside Instagram, the token we hold
+// is already dead, and an app that keeps saying "connected" about a dead token
+// is worse than one that says nothing.
+//
+// Meta signs these with the app secret. Verified, because an unverified
+// endpoint that deletes the connection is a URL anyone can use to disconnect us.
+async function signedRequestOk(signed: string, secret: string) {
+  const [sig, payload] = String(signed).split(".");
+  if (!sig || !payload) return null;
+  const b64url = (t: string) => {
+    const p = t.replace(/-/g, "+").replace(/_/g, "/");
+    return Uint8Array.from(atob(p + "=".repeat((4 - p.length % 4) % 4)), (c) => c.charCodeAt(0));
+  };
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const okSig = await crypto.subtle.verify("HMAC", key, b64url(sig), new TextEncoder().encode(payload));
+  if (!okSig) return null;
+  try { return JSON.parse(new TextDecoder().decode(b64url(payload))); } catch { return null; }
+}
+async function forgetConnection() {
+  const db = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { persistSession: false } },
+  );
+  await db.from("venia_instagram").delete().eq("id", "venia");
+}
+
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
+  const event = url.searchParams.get("event") || "";
+
+  if (event === "deauthorize" || event === "delete") {
+    const secret = Deno.env.get("INSTAGRAM_APP_SECRET") || "";
+    let signed = "";
+    try {
+      const form = await req.formData();
+      signed = String(form.get("signed_request") || "");
+    } catch (_) { /* not a form post */ }
+    const claim = secret && signed ? await signedRequestOk(signed, secret) : null;
+    // Unsigned, or signed by someone who is not Meta: nothing happens, and the
+    // answer is the same either way.
+    if (!claim) return new Response(JSON.stringify({ error: "unverified" }), {
+      status: 400, headers: { "Content-Type": "application/json" } });
+    await forgetConnection();
+    if (event === "deauthorize") return new Response("ok", { status: 200 });
+    // Meta's data-deletion contract: a URL a person can visit to see the status,
+    // and a code to quote. There is nothing else of theirs to delete — this app
+    // stores one token for one account and no personal data at all.
+    return new Response(JSON.stringify({
+      url: url.origin + url.pathname + "?event=deleted",
+      confirmation_code: "venia-" + String(claim.user_id || "ig"),
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (event === "deleted") {
+    return page("Deleted",
+      "The Instagram connection and its token have been removed. This app stores no other Instagram data.", true);
+  }
+
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const denied = url.searchParams.get("error") || "";
