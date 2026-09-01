@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '427';
+  const BUILD = '428';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26238,7 +26238,7 @@ const ACTION_MODULE = {
   price_from_retail: 'product',
   create_pull: 'growth', log_coverage: 'growth', add_pitch: 'growth', save_brand_doc: 'growth',
   set_budget: 'money', set_revenue_goal: 'money', set_txn_category: 'money',
-  set_money_watch: 'money',
+  set_money_watch: 'money', generate_pl: 'money',
   add_to_brainstorm: 'brainstorm',
   // Writes nothing — it opens a screen and asks a colleague. Always allowed,
   // because the colleague it opens is bound by exactly these same rules.
@@ -26481,6 +26481,17 @@ function agentFinActionSpec() { return agentSpecChunks([
     + 'The PO id comes from the FACTORY OBLIGATIONS block in context — never invent one. All dates are YYYY-MM-DD; pass "" to clear one. depositPaid / balancePaid RECORD that a payment already went out — they never send one. "units" sets how many of each style the factory is making, which is what sell-through is measured against; a season with no PO units can only report sell-through as unknown. Omit any field you are not changing.\n'
   },
   { m:'money', t: ''
+  },
+  // The one money action that produces a DOCUMENT rather than a change. It is
+  // an action, not an answer, precisely so the assistant cannot be the thing
+  // that types the figures: the block runs the same generator the button runs,
+  // and every number on the page is computed from the ledger.
+  { m:'money', t: ''
+    + '\nACTION — generate_pl: produce the PROFIT AND LOSS STATEMENT as a document the founder can submit — to a lender, a landlord, an accountant, a grant. It opens a print-ready page (unaudited management accounts) with revenue, cost of goods sold, gross profit, operating expenses by category, and operating profit, plus the basis of preparation and its limitations stated on the face of it.\n'
+    + '```venia:action\n'
+    + '{"type":"generate_pl"}\n'
+    + '```\n'
+    + 'Use it whenever the founder asks for a P&L, an income statement, financials to submit, or "put our numbers in a document". Emit the block and say in one sentence what the statement covers and what they should check before sending it — NEVER type the figures into your reply as if they were the statement. You do not compute this and you cannot see the result inside this turn: the numbers come from the ledger, and a figure you wrote out beside a document that says something else is the worst thing this app could hand someone. It is YEAR TO DATE only; if they ask for a different period, say that online sales are held as a year-to-date total so a custom range would mix periods, and that wholesale and bank expenses alone could be dated if that is enough for them.\n'
     + '\nACTION — set_money_watch: tune your own alert thresholds (Money → Plan). They ship as generic placeholders, so calibrate them to this business once you understand its cash rhythm — and say why you chose each number.\n'
     + '```venia:action\n'
     + '{"type":"set_money_watch","cashFloor":15000,"runwayMo":4,"burnSpike":40,"marginFloor":45,"uncatMax":10}\n'
@@ -26871,6 +26882,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'record_payment') return agentRunRecordPayment(action, chatBody);
   if (action.type === 'set_po_terms') return agentRunSetPoTerms(action, chatBody);
   if (action.type === 'set_money_watch') return agentRunSetMoneyWatch(action, chatBody);
+  if (action.type === 'generate_pl') return agentRunGeneratePL(action, chatBody);
   if (action.type === 'set_cost_sheet') return agentRunSetCostSheet(action, chatBody);
   if (action.type === 'price_from_retail') return agentRunPriceFromRetail(action, chatBody);
   if (action.type === 'handoff') return agentRunHandoff(action, chatBody);
@@ -26885,6 +26897,35 @@ function agentRunAction(key, action, chatBody) {
       + String(action.type || '?').slice(0, 40) + '"). Say it again and I\'ll use one that exists, or add it by hand.');
   } catch (e) {}
   return { unknown: true, type: action.type };
+}
+
+// The P&L document. The agent asked for it; the ledger wrote it. The card
+// says what the statement actually claims, because a founder about to send
+// this to a bank should see its limits here and not discover them on the page.
+function agentRunGeneratePL(action, chatBody){
+  let st = null;
+  try { st = window.finPrintPL(); } catch(e){}
+  if (!st) {
+    appendAgentNote(chatBody, '⚠ The statement did not open — allow pop-ups for this site and ask me again.');
+    return { blocked: true };
+  }
+  const m = (n) => '$' + Math.round(Number(n) || 0).toLocaleString('en-US');
+  const flagged = (st.opex || []).find(r => r.flag);
+  agentActionCard(chatBody, 'Profit &amp; loss — ' + escHtml(st.periodLabel),
+    '<div style="font-size:11.5px;line-height:1.8">'
+    + 'Revenue <b>' + m(st.revenueTotal) + '</b> · Gross profit <b>' + m(st.gross) + '</b>'
+    + (st.grossPct != null ? ' (' + st.grossPct + '%)' : '')
+    + ' · Operating <b>' + m(st.operating) + '</b>'
+    + (st.operatingPct != null ? ' (' + st.operatingPct + '%)' : '') + '</div>'
+    + (flagged ? '<div style="font-size:10.5px;color:var(--amber);margin-top:8px;line-height:1.6">'
+        + m(flagged.amount) + ' of bank outflows are still unclassified. They are INCLUDED as '
+        + '"Unclassified" so the statement does not overstate profit — categorising them changes '
+        + 'the breakdown, not the result.</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.6">'
+    + 'Unaudited management accounts. The basis of preparation and every limitation are printed on '
+    + 'the document itself. It opened in a new tab — print to PDF from there.</div>',
+    'finPrintPL()', 'Open it again →');
+  return { ok: true };
 }
 
 // Passing work to the colleague who owns it. Nothing moves without a tap: the
@@ -32389,6 +32430,216 @@ function revGetGoals() {
 // were last touched in. createdAt is authoritative; updatedAt is the fallback
 // for records written before it was stamped.
 function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
+
+// ══════════════════════════════════════════════════════════
+//  PROFIT & LOSS — the statement you hand to someone else
+// ══════════════════════════════════════════════════════════
+// A P&L on screen answers "how are we doing". A P&L you SUBMIT — to a lender,
+// a landlord, an accountant, a grant — has to be exact, reproducible, and
+// honest about what it is. Three rules follow, and they are why this is code
+// rather than something the assistant writes:
+//
+// 1. THE ASSISTANT NEVER WRITES THE NUMBERS. Enigma can be asked for this
+//    document and will run it, but every figure is computed here from the
+//    ledger. A language model transcribing money into prose is the exact
+//    failure this app exists to avoid.
+// 2. ONE COMPUTATION. Everything comes from cmdMoneyData() — the same
+//    function the Money screen and the CFO's context read. A second
+//    computation is two numbers that will eventually disagree, and the one on
+//    the letterhead is the one someone acts on.
+// 3. IT SAYS WHAT IT IS. Unaudited, prepared by the company, mixed basis, and
+//    the period it covers, on the face of the document.
+//
+// UNCLASSIFIED OUTFLOWS ARE INCLUDED HERE, and are not on the Money screen.
+// That is deliberate, not a drift: money that left the bank is an expense
+// whether or not it has been labelled yet, and excluding it OVERSTATES PROFIT
+// on a document someone is going to rely on. The screen is a working view
+// where "not yet classified" is a to-do; the statement is a claim about a
+// period. So the document carries the line, includes it in the total, and says
+// so in the notes — a stated difference, with the amount on the page.
+function finPLStatement(){
+  const d = cmdMoneyData();
+  const now = new Date();
+  const yr = now.getFullYear();
+
+  // OPEX by category, biggest first, with the unclassified remainder named
+  // rather than dropped.
+  const cats = Object.keys(d.opexBy || {})
+    .map(function(c){ return { key: c, label: (typeof finCatLabel === 'function' ? finCatLabel(c) : c), amount: d.opexBy[c] }; })
+    .filter(function(r){ return r.amount > 0; })
+    .sort(function(a, b){ return b.amount - a.amount; });
+
+  const uncat = d.opexUncat || 0;
+  const opexClassified = d.bankOpex ? (d.opexYtd || 0) : (d.opexTotal || 0);
+  const opexTotal = opexClassified + (d.bankOpex ? uncat : 0);
+  const revenue = d.revYtd || 0;
+  const cogs = d.cogsYtd || 0;
+  const gross = revenue - cogs;
+  const operating = gross - opexTotal;
+
+  const notes = [];
+  notes.push('Unaudited management accounts prepared by VENIA Collection from its own records. '
+    + 'They have not been reviewed or audited by an independent accountant.');
+  // The basis matters to whoever reads this, and it is genuinely mixed. Saying
+  // so is the difference between a document an accountant can work with and one
+  // they have to interrogate.
+  notes.push('Basis of preparation: wholesale revenue is recognised when an order is booked; '
+    + 'direct-to-consumer revenue is taken from settled Shopify sales; operating expenses are '
+    + 'recognised when they left the bank account (cash basis). Cost of goods sold is the landed '
+    + 'cost of units actually sold, not units produced.');
+  if (d.bankOpex && uncat > 0) {
+    notes.push('$' + Math.round(uncat).toLocaleString() + ' of bank outflows have not yet been '
+      + 'assigned to a category. They are INCLUDED in total operating expenses above, as '
+      + '"Unclassified", so this statement does not overstate profit. Classifying them changes '
+      + 'how the total is distributed, not the total or the operating result.');
+  }
+  if (!d.bankOpex) {
+    notes.push('No bank feed is connected, so operating expenses are taken from the Budget Tracker '
+      + 'and reflect only what has been entered there. This is a material limitation: costs paid '
+      + 'but not entered do not appear.');
+  }
+  if (d.dtcAmbiguous > 0) {
+    notes.push(d.dtcAmbiguous + ' silhouette' + (d.dtcAmbiguous === 1 ? ' is' : 's are') + ' produced in more '
+      + 'than one fabrication under a single product name. Sales reporting cannot say which '
+      + 'fabrication sold, so those units are costed at the average landed cost of the matching '
+      + 'styles. Revenue is unaffected.');
+  }
+  notes.push('Purchase orders paid to factories ($' + Math.round(d.poPaidYtd || 0).toLocaleString()
+    + ' in the period) are not an expense line here: their cost reaches this statement through '
+    + 'cost of goods sold as the units they produced are sold. $'
+    + Math.round(d.poCommitted || 0).toLocaleString() + ' is committed on open orders and not yet paid.');
+
+  return {
+    entity: 'VENIA Collection',
+    title: 'Statement of Profit and Loss',
+    // The period the DATA supports, stated plainly. See finPLPeriodNote().
+    periodLabel: 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
+      { month: 'long', day: 'numeric', year: 'numeric' }),
+    preparedAt: now,
+    currency: 'USD',
+    revenue: [
+      { label: 'Wholesale', amount: d.wsYtd || 0, note: 'booked orders' },
+      { label: 'Direct-to-consumer', amount: (d.p && d.p.ytd) || 0, note: 'settled online sales' },
+    ],
+    revenueTotal: revenue,
+    cogs: [
+      { label: 'Wholesale — landed cost of goods sold', amount: d.wsCogsYtd || 0 },
+      { label: 'Direct-to-consumer — landed cost of goods sold', amount: d.dtcCogsYtd || 0 },
+    ],
+    cogsTotal: cogs,
+    gross: gross,
+    grossPct: revenue > 0 ? Math.round((gross / revenue) * 1000) / 10 : null,
+    opex: cats.concat(d.bankOpex && uncat > 0
+      ? [{ key: '_uncat', label: 'Unclassified', amount: uncat, flag: true }] : []),
+    opexTotal: opexTotal,
+    operating: operating,
+    operatingPct: revenue > 0 ? Math.round((operating / revenue) * 1000) / 10 : null,
+    memo: [
+      { label: 'Wholesale collected in period', amount: d.wsCollectedYtd || 0 },
+      { label: 'Accounts receivable outstanding', amount: (d.arOpen || []).reduce(function(t, a){ return t + (a.open || 0); }, 0) },
+      { label: 'Paid to factories in period', amount: d.poPaidYtd || 0 },
+      { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0 },
+    ],
+    notes: notes,
+    // Carried so the gauntlet can assert the document and the screen agree.
+    _src: { revYtd: d.revYtd, cogsYtd: d.cogsYtd, opexYtd: d.opexYtd, opexUncat: uncat,
+            bankOpex: d.bankOpex, screenOperating: d.operating },
+  };
+}
+window.finPLStatement = finPLStatement;
+
+// Why there is no date picker yet, said honestly wherever it is asked.
+// Wholesale and bank outflows carry dates and could be windowed to any period.
+// DTC cannot: Shopify is held here as a year-to-date and an all-time aggregate
+// per product, with nothing in between. A custom range would therefore produce
+// a correct wholesale figure beside a year-to-date DTC figure and call the sum
+// a period — which is worse than not offering it. A real range needs a
+// per-period pull from Shopify, which is its own build.
+function finPLPeriodNote(){
+  return 'Year to date only. Wholesale and bank expenses could be windowed to any period, but '
+    + 'online sales are held as a year-to-date total per product, so a custom range would mix '
+    + 'one period with another. A dated range needs a per-period pull from Shopify.';
+}
+window.finPLPeriodNote = finPLPeriodNote;
+
+// The document. Print → Save as PDF is the submission format everyone accepts.
+window.finPrintPL = function(){
+  const st = finPLStatement();
+  const esc = function(v){ return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); };
+  const m = function(n){
+    const v = Math.round(Number(n) || 0);
+    return (v < 0 ? '(' + Math.abs(v).toLocaleString('en-US') + ')' : v.toLocaleString('en-US'));
+  };
+  const row = function(label, amount, opt){
+    const o = opt || {};
+    return '<tr class="' + (o.cls || '') + '"><td>' + esc(label)
+      + (o.note ? ' <span class="sub">' + esc(o.note) + '</span>' : '') + '</td>'
+      + '<td class="n">' + m(amount) + '</td></tr>';
+  };
+  const section = function(title){ return '<tr class="sec"><td colspan="2">' + esc(title) + '</td></tr>'; };
+
+  const body =
+      section('Revenue')
+    + st.revenue.map(function(r){ return row(r.label, r.amount, { note: r.note }); }).join('')
+    + row('Total revenue', st.revenueTotal, { cls: 'tot' })
+    + section('Cost of goods sold')
+    + st.cogs.map(function(r){ return row(r.label, r.amount); }).join('')
+    + row('Total cost of goods sold', st.cogsTotal, { cls: 'tot' })
+    + row('Gross profit' + (st.grossPct != null ? '  ·  ' + st.grossPct + '% of revenue' : ''), st.gross, { cls: 'big' })
+    + section('Operating expenses')
+    + st.opex.map(function(r){ return row(r.label, r.amount, { cls: r.flag ? 'flag' : '' }); }).join('')
+    + (st.opex.length ? '' : '<tr><td colspan="2" class="sub">None recorded in the period.</td></tr>')
+    + row('Total operating expenses', st.opexTotal, { cls: 'tot' })
+    + row('Operating profit' + (st.operatingPct != null ? '  ·  ' + st.operatingPct + '% of revenue' : ''),
+          st.operating, { cls: 'big' });
+
+  const memo = st.memo.map(function(r){ return row(r.label, r.amount); }).join('');
+  const notes = st.notes.map(function(n, i){
+    return '<li>' + esc(n) + '</li>'; }).join('');
+
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+    + esc(st.entity) + ' — Profit and Loss</title><style>'
+    + 'body{font-family:Georgia,"Times New Roman",serif;color:#111;padding:56px 60px;max-width:760px;margin:0 auto}'
+    + 'h1{font-size:15px;letter-spacing:5px;text-transform:uppercase;margin:0 0 2px;font-family:Helvetica,Arial,sans-serif}'
+    + 'h2{font-size:12px;letter-spacing:1px;margin:0 0 2px;font-weight:400;color:#333}'
+    + '.meta{font-size:10.5px;color:#666;line-height:1.7;margin-bottom:26px}'
+    + 'table{width:100%;border-collapse:collapse;margin-top:8px}'
+    + 'td{padding:7px 2px;font-size:12px;vertical-align:baseline}'
+    + 'td.n{text-align:right;font-family:"DM Mono",Menlo,Consolas,monospace;white-space:nowrap;font-size:12px}'
+    + '.sub{color:#777;font-size:10px;font-style:italic}'
+    + 'tr.sec td{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;'
+    +   'color:#666;padding:22px 2px 4px;border-bottom:1px solid #111}'
+    + 'tr.tot td{border-top:1px solid #bbb;font-weight:700}'
+    + 'tr.big td{border-top:2px solid #111;border-bottom:2px solid #111;font-weight:700;font-size:13.5px;padding:11px 2px}'
+    + 'tr.flag td{color:#8a5a00}'
+    + '.notes{margin-top:34px;border-top:1px solid #111;padding-top:14px}'
+    + '.notes h3{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;margin:0 0 8px}'
+    + '.notes ol{margin:0;padding-left:18px}'
+    + '.notes li{font-size:10.5px;line-height:1.75;color:#333;margin-bottom:8px}'
+    + '.sign{margin-top:40px;font-size:10.5px;color:#555;line-height:1.9}'
+    + '@media print{body{padding:24px 0}button{display:none}}'
+    + '</style></head><body>'
+    + '<h1>' + esc(st.entity) + '</h1>'
+    + '<h2>' + esc(st.title) + '</h2>'
+    + '<div class="meta">' + esc(st.periodLabel) + '<br>'
+    +   'All figures in US dollars. Prepared ' + esc(st.preparedAt.toLocaleString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }))
+    +   '.<br>Unaudited.</div>'
+    + '<table>' + body + '</table>'
+    + '<table>' + section('Supplementary — not part of the profit and loss') + memo + '</table>'
+    + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
+    + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
+    +   'VENIA Collection · Los Angeles, California</div>'
+    + '<' + '/body></html>';
+
+  const w = window.open('', '_blank', 'width=900,height=1000');
+  if (!w) { showToast('Allow pop-ups to open the statement', 'warning'); return null; }
+  w.document.write(html); w.document.close();
+  setTimeout(function(){ try { w.print(); } catch(e){} }, 400);
+  try { logActivity('P&L statement generated — ' + st.periodLabel); } catch(e){}
+  return st;
+};
+
 function cmdMoneyData() {
   const p = STATE.bizPulse || {};
   const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
@@ -32593,7 +32844,9 @@ window.cmdRenderMoney = function() {
     ${!d.hasDtc ? `<div style="padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);margin-bottom:16px">Shopify hasn't reported yet this session — DTC lines show $0 until the pulse loads (it refreshes automatically).</div>` : ''}
     <div class="money-cols">
     <section>
-    <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2></div>
+    <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2>
+      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button></div>
+    </div>
     <div class="money-block">
       ${line('DTC revenue', d.p.ytd||0, 'Shopify, live')}
       ${line('Wholesale booked', d.wsYtd, 'orders this year')}
