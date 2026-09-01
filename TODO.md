@@ -2997,3 +2997,69 @@ three different runs, which is what this bug looks like from outside.
   blocked in the sandbox. Identical on Build 431.
 - `filtsweep.js` — skips its `prev389.html` half, a stale scratch snapshot with
   no `cpGoto` in scope. Its current-build half is clean.
+
+---
+
+## INSTAGRAM — THE LIVE FEED (Build 433)
+
+Read only. The grid now shows what the account has actually published, below the
+boundary, instead of what the old calendar claimed was posted.
+
+### The shape of it
+
+- `supabase/functions/instagram` — founders-only: `status`, `authurl`, `feed`,
+  `disconnect`. Requests **`instagram_business_basic` and nothing else**, so a
+  token minted here cannot publish, comment, or read a message. That is a
+  property of the credential, not of the code that uses it.
+- `supabase/functions/instagram-callback` — the one public door, because
+  Instagram redirects a browser there with no headers of ours on it. It redeems
+  a code only when it carries a state this app minted in the last ten minutes
+  and has not used; the state is deleted on the way in, so a link cannot be
+  replayed even when the exchange after it fails. Also serves Meta's deauthorize
+  and data-deletion callbacks at `?event=`, both signature-verified.
+- `venia_instagram` — **RLS on, no policies at all.** That is the security
+  model: PostgREST returns nothing to anon and nothing to authenticated, a
+  founder's own session included. Only the service role inside the function can
+  read a row, and no action returns the token, including `status`.
+
+### Two rules the screen keeps
+
+**Nothing from Instagram is written down.** `media_url` is a CDN link that
+expires; a workspace full of pictures that stop loading, synced to every device,
+is the failure this avoids. The pull lives in `SOC_LIVE` for one visit and is
+asked for again next time. Asserted, not assumed.
+
+**The boundary says which claim it is making.** Connected, it reads *"6 from
+Instagram"*; not connected, *"2 from your calendar · unverified"*. Those are
+different claims and the screen never lets them read as one. The migrated rows
+are not deleted when the account speaks — they simply are not what the grid
+shows.
+
+### Days Instagram does not cooperate
+
+- A refused request shows the reason Meta gave, not "could not connect".
+- A failed refresh keeps the token that is still valid — a bad minute is not a
+  reconnection.
+- An expired token says reconnect without troubling Instagram.
+- A token within 10 days of expiry says so on the screen before it stops working.
+- None of these hide the planned sequence: the grid above the line still works.
+
+### Setup, and what is still the founders'
+
+Supabase secrets `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`,
+`INSTAGRAM_REDIRECT_URI`. Meta app: use case **Manage messaging and content on
+Instagram**, no business portfolio connected, the Instagram account holding the
+**Instagram Tester** role (accepted at instagram.com/accounts/manage_access/ —
+the tab does not exist in the phone app). App stays unpublished; App Review is
+the gate for Advanced Access, which serving your own account does not need.
+
+Meta bundles `instagram_business_manage_comments` and `_manage_messages` into
+that use case as required. They are permissions the APP may offer, not scopes
+the token carries — the authorize URL asks for basic alone.
+
+### Not done
+
+- Reconciliation: a live post is drawn as a tile and never matched back to a
+  planned `mkPost`. Matching needs provider evidence and belongs with publishing.
+- Nothing schedules or publishes anywhere.
+- 24 posts per pull, one pull per visit. No pagination.
