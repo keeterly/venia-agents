@@ -71,7 +71,13 @@ async function forgetConnection() {
 
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
-  const event = url.searchParams.get("event") || "";
+  // Meta's dashboard rejects some URLs with a query string in the deauthorize
+  // and data-deletion fields, so the same two events are reachable as a path
+  // suffix as well: .../instagram-callback/deauthorize. Both spellings, one
+  // handler — whichever the form will accept on the day.
+  const tail = url.pathname.split("/").filter(Boolean).pop() || "";
+  const event = url.searchParams.get("event")
+    || (["deauthorize", "delete", "deleted"].includes(tail) ? tail : "");
 
   if (event === "deauthorize" || event === "delete") {
     const secret = Deno.env.get("INSTAGRAM_APP_SECRET") || "";
