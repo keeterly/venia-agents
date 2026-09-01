@@ -3063,3 +3063,80 @@ the token carries — the authorize URL asks for basic alone.
   planned `mkPost`. Matching needs provider evidence and belongs with publishing.
 - Nothing schedules or publishes anywhere.
 - 24 posts per pull, one pull per visit. No pagination.
+
+---
+
+## CAMPAIGNS, THE ROADMAP, AGENCY AND DRIVE (Build 438)
+
+Three asks after the feed went live: plan from here, make it AI-assisted, and
+connect a folder for assets.
+
+### Campaigns
+
+The record existed from Phase 0; this is the screen for it. **Create** hosts
+them rather than a drawer route — the brief keeps campaigns out of the tab row
+and is right that nine tabs on a phone is nobody's idea, but burying them while
+the founder is asking to plan from this screen would be the letter over the
+point.
+
+- A brief **names what is still missing from it**: objective, narrative,
+  audience, dates, styles. "Draft" on its own is not a status, it is a shrug.
+- A campaign points at **real styles**, which is the thing no other planner can
+  do — the sequence knows what it is selling, and the P&L knows what it cost.
+- Deliverables are not a second list. A post belongs to a campaign by carrying
+  its id, so progress cannot drift from the posts.
+- The feed filters by campaign, applied **where the projection is built**, so
+  the grid, the plan strip and the calendar narrow together.
+
+### Roadmap
+
+Campaigns over the weeks they occupy. The bar fills by what is **approved or
+published**, not by time passing — a campaign is not 60% done because 60% of its
+days have gone.
+
+### Enigma writes the sequence in
+
+`propose_social_plan`, Growth's first record-writing action. Until now Marketing
+could only draft, which is why a proposal was always something to retype.
+
+- It is given the real campaign and asset **ids** in context. Without them the
+  model invents ids and the action rejects the whole plan — safe, and useless.
+- An invented asset or campaign id loses the **whole** plan and names the id.
+  Silently dropping the field would produce a sequence nobody asked for.
+- Posts land `proposed` or `needs_asset`. Nothing arrives approved, scheduled or
+  published, and the mutation refuses it even if asked.
+- A post with no asset is created **blocked**, not quietly fine.
+- The whole sequence is one undo.
+- The card says nothing is approved and how many need a photo, because a card
+  that reads like a finished job is the failure this app has a rule against.
+
+### A Drive folder as the asset shelf
+
+The shoot already lives in Drive; asking for a second library means one of them
+rots.
+
+- **Scope stays `drive.file`** — access to what the founder explicitly picks and
+  nothing else. Picking the folder through Google's own Picker is what grants
+  access to its contents. Widening to `drive.readonly` to avoid needing the
+  Picker key would trade real privacy for two minutes of setup.
+- Stored: folder id, file ids, names. **Not thumbnails** — Drive's
+  `thumbnailLink` is authorised and expires, so storing one syncs rot to every
+  device. They live in memory for the visit, like the Instagram feed. Asserted.
+- Asset ids derive from the Drive file id, so syncing twice updates rather than
+  doubling.
+- Rights are `owned`: it is the brand's own Drive, which is the strongest
+  provenance the app can state without asking a question it cannot verify.
+
+### Still the founders' to do
+
+- **The Picker API key.** Drive attach has never worked because the field wants
+  an `AIza…` key that does not exist yet. Cloud Console → Credentials → Create
+  credentials → API key, then paste it in Settings.
+- **Rotate the Google OAuth client secret** (see the older note above). A
+  `GOCSPX-` secret was once pasted into that field and synced; it was purged
+  from both stores but has to be rotated at source.
+
+### Not done
+
+- No approvals queue, no composer, no Reel or Story planner, no provider
+  publishing. Enigma proposes; a person approves; nothing publishes anywhere.
