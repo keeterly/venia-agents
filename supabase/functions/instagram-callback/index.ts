@@ -10,31 +10,29 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // all — no token exchange, no write, no different answer that would tell an
 // attacker they were close.
 //
-// It returns a small HTML page rather than JSON: a human's browser lands here.
+// SUPABASE WILL NOT SERVE HTML FROM AN EDGE FUNCTION.
+// It rewrites text/html to text/plain on the default *.supabase.co domain, an
+// anti-phishing measure, and sends nosniff with it — so a browser shows the
+// source of the page instead of the page. Confirmed against the deployment:
+// the JSON branch keeps its content type and only the HTML one is rewritten.
+//
+// So do not render. Send the founder back into VENIA OS with the outcome in the
+// query string, which is where they wanted to end up anyway. A bare page with a
+// Close button was always the worse half of this.
+const APP_URL = Deno.env.get("VENIA_APP_URL") || "https://creator.veniacollection.com";
 
-const OK_HTML = (title: string, body: string, good: boolean) => `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title><style>
-  :root{color-scheme:light}
-  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
-    background:#fff;color:#111;font:14px/1.7 'Helvetica Neue',Helvetica,Arial,sans-serif;padding:28px}
-  .box{max-width:420px;text-align:center}
-  h1{font-size:13px;letter-spacing:2.5px;text-transform:uppercase;font-weight:700;margin:0 0 14px;
-     color:${good ? "#111" : "#b3352f"}}
-  p{color:#666;margin:0 0 18px}
-  button{background:#111;color:#fff;border:none;padding:12px 22px;font:inherit;font-size:11px;
-    letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;min-height:44px}
-</style></head><body><div class="box">
-  <h1>${title}</h1><p>${body}</p>
-  <button onclick="try{window.close()}catch(e){};location.href='/'">Close</button>
-</div>
-<script>try{ if (window.opener) { window.opener.postMessage({venia:'instagram',ok:${good}}, '*'); } }catch(e){}</script>
-</body></html>`;
-
-function page(title: string, body: string, good: boolean, status = 200) {
-  return new Response(OK_HTML(title, body, good), {
-    status, headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
+// The whole result of this function, expressed as somewhere to be. `ok` carries
+// the account that connected; `err` carries the reason, short enough to read.
+function backToApp(good: boolean, detail: string) {
+  const u = new URL(APP_URL);
+  u.searchParams.set("ig", good ? "ok" : "err");
+  if (detail) u.searchParams.set("igmsg", detail.slice(0, 160));
+  return new Response(null, { status: 302, headers: { Location: u.toString() } });
+}
+// For the one endpoint a stranger from Meta might open rather than a founder.
+// Plain text on purpose: it is a compliance answer, not a screen.
+function plain(body: string, status = 200) {
+  return new Response(body, { status, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
 // ── THE TWO CALLBACKS META INSISTS ON ────────────────────────────────────
@@ -102,21 +100,17 @@ Deno.serve(async (req: Request) => {
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
   if (event === "deleted") {
-    return page("Deleted",
-      "The Instagram connection and its token have been removed. This app stores no other Instagram data.", true);
+    return plain("Deleted. The Instagram connection and its token have been removed. "
+      + "This application stores no other Instagram data.");
   }
 
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const denied = url.searchParams.get("error") || "";
 
-  if (denied) {
-    return page("Not connected",
-      "Instagram was not given permission, so nothing was connected. You can try again from Social Command.", false);
-  }
-  if (!code || !/^[a-f0-9]{16,64}$/.test(state)) {
-    return page("Not connected", "That link is missing something Instagram should have sent.", false, 400);
-  }
+  if (denied) return backToApp(false, "Instagram was not given permission, so nothing was connected.");
+  if (!code || !/^[a-f0-9]{16,64}$/.test(state))
+    return backToApp(false, "That link is missing something Instagram should have sent.");
 
   const db = createClient(
     Deno.env.get("SUPABASE_URL")!,
@@ -129,20 +123,15 @@ Deno.serve(async (req: Request) => {
   // than a stale state staying redeemable, which is not.
   const { data: st } = await db.from("venia_instagram_oauth")
     .delete().eq("state", state).select("state, created_by, created_at").maybeSingle();
-  if (!st) {
-    return page("Not connected",
-      "That authorization was not one this app started, or it was already used.", false, 400);
-  }
-  if (Date.now() - new Date(String(st.created_at)).getTime() > 600_000) {
-    return page("Not connected", "That authorization took too long. Start again from Social Command.", false, 400);
-  }
+  if (!st) return backToApp(false, "That authorization was not one this app started, or it was already used.");
+  if (Date.now() - new Date(String(st.created_at)).getTime() > 600_000)
+    return backToApp(false, "That authorization took too long. Start again.");
 
   const appId = Deno.env.get("INSTAGRAM_APP_ID") || "";
   const secret = Deno.env.get("INSTAGRAM_APP_SECRET") || "";
   const redirect = Deno.env.get("INSTAGRAM_REDIRECT_URI") || "";
-  if (!appId || !secret || !redirect) {
-    return page("Not connected", "This server has no Instagram app configured yet.", false, 500);
-  }
+  if (!appId || !secret || !redirect)
+    return backToApp(false, "This server has no Instagram app configured yet.");
 
   try {
     // 1. Code -> short-lived token (one hour).
@@ -155,8 +144,8 @@ Deno.serve(async (req: Request) => {
     const r1 = await fetch("https://api.instagram.com/oauth/access_token", { method: "POST", body: form });
     const j1 = await r1.json().catch(() => ({}));
     if (!r1.ok || !j1.access_token) {
-      return page("Not connected",
-        escape_(String(j1?.error_message || j1?.error?.message || "Instagram would not issue a token.")), false, 400);
+      return backToApp(false, String(j1?.error_message || j1?.error?.message
+        || "Instagram would not issue a token."));
     }
 
     // 2. Short-lived -> long-lived (60 days, refreshable).
@@ -189,17 +178,8 @@ Deno.serve(async (req: Request) => {
       updated_at: new Date().toISOString(),
     });
 
-    const who = j3.username ? "@" + String(j3.username) : "the account";
-    return page("Connected",
-      `${escape_(who)} is connected. Social Command can now read what it has published — and nothing else.`, true);
+    return backToApp(true, String(j3.username || ""));
   } catch (e) {
-    return page("Not connected", escape_(String((e as Error).message || e)), false, 500);
+    return backToApp(false, String((e as Error).message || e));
   }
 });
-
-// The only thing on that page that did not come from us is an error string
-// relayed from Meta. It goes into HTML, so it gets escaped.
-function escape_(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;").slice(0, 300);
-}

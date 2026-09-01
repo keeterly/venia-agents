@@ -2703,7 +2703,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '435';
+  const BUILD = '436';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22731,7 +22731,12 @@ window.routeRestore = routeRestore;
 
 document.addEventListener('DOMContentLoaded', init);
 // After init() — registered above, so it has already run and STATE is loaded.
-document.addEventListener('DOMContentLoaded', function(){ setTimeout(routeRestore, 0); });
+document.addEventListener('DOMContentLoaded', function(){
+  setTimeout(routeRestore, 0);
+  // ...and if we have just come back from Instagram, that outranks the restored
+  // route: the founder left this app on purpose and expects to return to it.
+  setTimeout(function(){ try { if (window.socIgLanding) socIgLanding(); } catch(e){} }, 30);
+});
 </script>
 
 <script>
@@ -30678,18 +30683,51 @@ window.socIgConnect = async function(){
     socToast(e.message);
     return;
   }
-  const w = window.open(j.url, 'venia-ig', 'width=520,height=720');
-  if (!w) { socToast('Allow pop-ups to connect Instagram'); return; }
-  // The callback page posts back when it lands, so the grid refreshes itself
-  // rather than leaving the founder to guess whether it worked.
-  const onMsg = async (ev) => {
-    if (!ev.data || ev.data.venia !== 'instagram') return;
-    window.removeEventListener('message', onMsg);
-    await socIgStatus(true);
-    if (SOC_IG && SOC_IG.connected) { socToast('Instagram connected'); await socIgRefresh(true); }
-    socRender();
+  // Remember where to come back to, so the return lands on Social Command
+  // rather than on Today.
+  try { sessionStorage.setItem('venia_ig_return', '1'); } catch(e){}
+  socNavigate(j.url);
+};
+// One place that owns leaving the app. window.location.href cannot be
+// intercepted, so without this there is no way to assert WHERE a founder is
+// being sent — and "sends you to Instagram" is the claim most worth checking
+// on a screen that hands an account over.
+window.socNavigate = function(url){ window.location.href = url; };
+// THE RETURN. The callback sends the browser back here with the outcome in the
+// query string; this reads it once, says what happened, and takes the marks out
+// of the URL so a refresh does not replay the message.
+window.socIgLanding = function(){
+  let p;
+  try { p = new URLSearchParams(location.search); } catch(e){ return false; }
+  const r = p.get('ig');
+  if (!r) return false;
+  const msg = p.get('igmsg') || '';
+  try {
+    p.delete('ig'); p.delete('igmsg');
+    const q = p.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+  } catch(e){}
+  let wanted = false;
+  try { wanted = sessionStorage.getItem('venia_ig_return') === '1';
+        sessionStorage.removeItem('venia_ig_return'); } catch(e){}
+  // Land on the screen this started from, then say how it went.
+  const show = function(){
+    try { cpGoto('mk'); } catch(e){}
+    setTimeout(function(){
+      const nav = document.querySelector('#cp-screen-mk .ag-nav-item[onclick*="social"]');
+      try { agNav('mk', 'social', nav); } catch(e){}
+      if (r === 'ok') {
+        SOC_IG = null; SOC_LIVE = null;
+        try { showToast('Instagram connected' + (msg ? ' — @' + msg : '')); } catch(e){}
+        socRender();
+      } else {
+        // The reason Meta or the exchange gave, not "could not connect".
+        try { showToast(msg || 'Instagram was not connected'); } catch(e){}
+      }
+    }, 260);
   };
-  window.addEventListener('message', onMsg);
+  if (wanted || r === 'ok' || r === 'err') setTimeout(show, 420);
+  return true;
 };
 window.socIgRefresh = async function(quiet){
   if (!SOC_IG || !SOC_IG.connected) return null;
