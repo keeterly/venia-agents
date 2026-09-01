@@ -146,7 +146,12 @@ export default async (req) => {
     const wanted = ['active','draft','archived'].includes(body.status) ? body.status : 'active';
     const cap = clampInt(body.pages, 1, 10, 6);
     let url = `https://${domain}/admin/api/${version}/products.json?status=${wanted}&limit=250`
-      + '&fields=id,title,handle,status,variants,tags,product_type';
+      // product_type, tags, options, images and body_html were already being
+      // ASKED FOR (or nearly) and then thrown away. They are what a style built
+      // from a store product can be filled in with — category, colourways,
+      // sizes, a photo, the copy — so they come back now instead of leaving the
+      // PLM to invent them.
+      + '&fields=id,title,handle,status,variants,tags,product_type,options,image,body_html';
     const out = [];
     let pages = 0, truncated = false;
     try {
@@ -158,6 +163,17 @@ export default async (req) => {
         let d = {}; try { d = JSON.parse(txt); } catch(e){ return json({ error:'Shopify sent something that is not JSON' }, 502, cors); }
         (d.products || []).forEach(p => out.push({
           id: p.id, title: p.title, handle: p.handle, status: p.status,
+          type: p.product_type || '',
+          tags: typeof p.tags === 'string' ? p.tags : (Array.isArray(p.tags) ? p.tags.join(', ') : ''),
+          image: (p.image && p.image.src) || '',
+          // The option NAMES and values are how a store says "this comes in
+          // Black and Ivory, XS to L" — without them a style built from here
+          // would have to guess its own colourways.
+          options: (p.options || []).map(o => ({ name: o.name || '', values: o.values || [] })),
+          // Marketing copy, capped. It is the line sheet's description when
+          // there is nothing better, and a whole product page pasted into the
+          // PLM helps nobody.
+          body: String(p.body_html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600),
           variants: (p.variants || []).map(v => ({
             id: v.id, sku: v.sku || '', title: v.title || '',
             qty: Number(v.inventory_quantity) || 0,
