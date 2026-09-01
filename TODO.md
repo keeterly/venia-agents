@@ -2748,3 +2748,133 @@ fabrication is not sold online" and shows 0.
 
 A line item with no `product_id` (a custom sale, a deleted product) stays in the
 title total and cannot be linked, which is the truth about it.
+
+---
+
+# CLO INTEGRATION — SESSION 1 RECONNAISSANCE (no feature code written)
+
+_Against `VENIA_OS_CLO_Integration_Master_Handoff.docx`. Done at Build 430;
+the handoff's baseline is Build 426 / `cf55e2d`, four builds behind._
+
+The handoff's own Part XII says Session 1 is reconnaissance only, so nothing
+below has been implemented. This is what the next six sessions have to build
+on, and what is already wrong in the document because the repo moved.
+
+## What the document gets right about this repo
+
+Verified present and reusable exactly as it assumes:
+
+| It assumes | Reality |
+|---|---|
+| `venia_members` (email, module, role) + `venia_module_data` | Yes, both live |
+| RLS helpers `venia_is_founder()`, `venia_module_role(text)` | Yes; plus `venia_has_access()` and `venia_module_owner()` added at 424 |
+| Product module owns pattern data | Yes — `MODULES.product` |
+| Privileged Edge Functions as the pattern for machine access | Yes — `team` and `pull-sign` are exactly this shape |
+| `measParse` / `measFmt` fractional-inch semantics | Yes, at 6584. `MEAS_DEN = 16`; a value off the grid renders as a decimal rather than being rounded |
+| POM target + tolerance structure | Yes — `STATE.pom[styleId] = [{id, point, tol, comment, rounds, specs}]` |
+| Development-spec revision history | Yes — `pomSpecs()` / `POM_SPEC_LABELS` = Initial/Revised/Final/Rev N, and every round records WHICH revision it was judged against (`pomRoundRev`) |
+| Grading + stale detection | Yes — `pomGradeReadiness()` |
+| Gauntlet methodology | Yes — 86 node smoke suites + ~15 Playwright gauntlets |
+
+`pull-sign` (Build 427) is the closest working precedent for the whole CLO
+machine story: a token IS the credential, the row carries its own frozen
+snapshot so the caller can reach nothing else, and the server stamps the facts
+the client must not be trusted to supply. Session 3 should copy its shape.
+
+## Conflicts and corrections the document does not know about
+
+1. **MODULES already has a ninth entry.** Build 424 added `catalog` — a
+   cost-stripped projection of `styles` that owns no STATE key and is readable
+   by ANYONE with any module grant. §7 ("do not create a ninth module") is
+   satisfied in spirit; the live risk is different and sharper: **`catalog` is
+   the one surface where pattern data could reach Sales.** It is an allowlist
+   (`CATALOG_STYLE_FIELDS`), so it cannot today — but no pattern field may ever
+   be added to that list, and Session 2 should assert it in a gauntlet.
+
+2. **Storage is PUBLIC.** `veniaUploadImage` uploads to bucket `venia-photos`
+   and hands back `getPublicUrl()`. The document requires private storage with
+   signed uploads for ZPRJ/DXF, and it is right: a production DXF at a guessable
+   public URL is a factory package anyone can take. **A new private bucket is
+   required — the existing one must not be reused.** There are no storage
+   policies in `supabase/migrations/` at all; they were set in the dashboard.
+
+3. **A CLO3D screen already exists** (`renderClo3d`, ~11962) with `s.cloFile`
+   and `s.cloStatus` — a hand-typed filename and a four-state label. The
+   document's §4.6 ("content identity beats filenames") and §88 condemn exactly
+   this. `cloFile` must NOT become the link key; the integration replaces this
+   screen rather than extending it. `venia_styles` also has vestigial
+   `clo_file` / `clo_status` columns from the same era.
+
+4. **Two write paths to Supabase, not one.** The live sync is
+   `venia_module_data` (per-module rows, RLS by membership). There is ALSO a
+   manual normalized push (`venia_styles`, `venia_materials`, `venia_bom`,
+   `venia_pom`) fired from Settings. Pattern revisions must hang off style
+   identity, not off either mirror — and Session 2 must decide which table the
+   FK points at. Recommendation: no FK to either; store `style_id` as text and
+   treat the workspace as the resolver, because `venia_styles` is not
+   guaranteed current.
+
+5. **Style identity is `s.id`, not `styleId`.** `styleId` is the human code
+   (VN-SS27-WT08) and is editable and sometimes blank — Build 430 deliberately
+   leaves it empty on styles built from Shopify. The document's examples use
+   "27B014" as though it were the key. **The machine API must key on `s.id` and
+   treat `styleId` as a display label**, or a renamed style breaks its own
+   pattern history.
+
+6. **`landedCost()` reads a localStorage cost sheet**, not a synced table
+   (`venia-cost-sheets`, carried in the workspace `_ls`). §3 says costing is
+   VENIA-authoritative and CLO consumption "may inform" — fine, but any
+   consumption→cost path has to go through that store, not around it.
+
+## Required migrations (Session 2)
+
+Per Appendix A, reconciled to this repo:
+
+- `venia_clo_integrations` — machine tokens. Store the hash only. Founder-gated
+  by `venia_is_founder()`, same as `venia_agent_policy`.
+- `venia_pattern_revisions`, `venia_pattern_assets`, `venia_pattern_validations`,
+  `venia_style_pattern_state` — read via `venia_module_role('product')`, write
+  via the Edge Function only.
+- A private storage bucket + policies, **committed as a migration** rather than
+  set in the dashboard, since none of the current ones are.
+
+## Files that will change
+
+- `venia-control-panel-v1.html` — Pattern workspace in Style Detail (Session 5),
+  replacing `renderClo3d`. Registry: pattern state is Product-owned, so any new
+  STATE key goes in `MODULES.product.keys` and `modules.js`'s key count moves
+  deliberately (it is 65 now).
+- `supabase/functions/clo/index.ts` — new, modelled on `pull-sign`.
+- `supabase/migrations/` — the tables above.
+- `clo-plugin/` — new tree, per §35.
+
+## Minimal Phase 1
+
+Sessions 2 → 3 → 4 in that order, as the document says. Do not start the
+plug-in until the machine API passes on its own — Session 3's fixtures are what
+make Session 4 debuggable at all, since a CLO plug-in cannot be run here.
+
+## Risks
+
+- **The CLO API surface in §41 is unverified from here.** `ExportZPrj`,
+  `ExportDXF(ExportDxfOption)`, `ExportTechPack`, `ExportPatternJSON` and the
+  v11 seam-ID enrichment are stated as fact in the document; none of it has
+  been checked against the installed SDK, and §40 already concedes some DXF
+  options may not be controllable. Session 4 must verify each call against the
+  real SDK and record anything unavailable as unavailable (§4.5) rather than
+  building around an assumption.
+- **Nothing here can be tested end to end in this environment.** No CLO, no
+  Windows/macOS host. Sessions 2 and 3 are fixture-testable; Session 4 is not,
+  and should be written so its hashing, manifest, mapping and retry logic are
+  unit-testable OUTSIDE CLO (§35 says this too).
+- **Token handling.** A machine token displayed once and stored hashed is the
+  same pattern as `pull-sign`, but the raw token must never enter the workspace
+  blob — `SYNC_KEYS` is derived from the registry, so a careless new key would
+  sync it to both phones and into every module row.
+
+## Rollback
+
+Every table is additive and no existing path reads them, so Session 2 rolls
+back by dropping four tables. Session 3 rolls back by deleting one function.
+Session 5 is the first change to shipped UI and is the first that needs the
+usual before/after gauntlet against the current build.
