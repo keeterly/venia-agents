@@ -2571,7 +2571,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '430';
+  const BUILD = '431';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5929,6 +5929,7 @@ function init() {
     if (!STATE.mkCaptions) STATE.mkCaptions = [];
     if (!STATE.mkCalendar) STATE.mkCalendar = [];
     if (!STATE.prPrefs)    STATE.prPrefs    = {};
+    try { if (typeof mkSocialInit === 'function') mkSocialInit(); } catch(e){}
   } else {
     // Real data only — the demo seed era is over. A fresh workspace is empty.
     STATE.styles = [];
@@ -6006,7 +6007,13 @@ const MODULES = {
     owns: 'press, marketing and brand — sample pulls, pitches, coverage, the editor radar, '
         + 'campaigns and the content calendar, brand voice, guidelines and references',
     keys: ['prPulls', 'workingPullId', 'prPitches', 'prCoverage', 'prEditors', 'prPrefs',
-           'mkCaptions', 'mkCalendar', 'mkPrefs', 'brTone', 'brPrefs', 'brandDocs', 'growthSeen'],
+           'mkCaptions', 'mkCalendar', 'mkPrefs', 'brTone', 'brPrefs', 'brandDocs', 'growthSeen',
+           // SOCIAL COMMAND (Phase 0). Growth owns them like every other key, so
+           // SYNC_KEYS, the module projection, access and cloud sync all keep
+           // deriving from this one list rather than gaining a second registry.
+           'mkAssets', 'mkCampaigns', 'mkPosts', 'mkChannels', 'mkContentPillars',
+           'mkAssetRequests', 'mkApprovalThreads', 'mkQueues', 'mkCreativeDecisions',
+           'mkPublishedFeed', 'mkSocialPrefs', 'mkPlanJobs'],
     ls: ['VENIA_BOILERPLATE', 'VENIA_OE_DRAFTS', 'VENIA_PRESSKIT', 'venia-brand-watch',
            'venia_campaigns', 'venia-launch-checklist'],
   },
@@ -29567,6 +29574,501 @@ function mkOpenCalEntryModal(id) {
   modal.innerHTML = html;
   openModal('mk-cal-modal');
 }
+
+// ══════════════════════════════════════════════════════════
+//  SOCIAL COMMAND — PHASE 0: RECORDS, MIGRATION, MUTATIONS
+// ══════════════════════════════════════════════════════════
+// Phase 0 changes NO visible Marketing UI. It establishes the canonical
+// records the later phases are projections of, migrates the three disconnected
+// legacy stores into them without deleting anything, and gives the UI and the
+// agent ONE set of mutation functions so they can never diverge.
+//
+// mkPosts is the canonical content source. Feed order, calendar cards,
+// approval rows and campaign deliverables are all projections of it — there is
+// never a second copy of a planned post to keep in step.
+
+const MK_SOCIAL_SCHEMA = 1;
+// Deterministic defaults. Every collection is an array, prefs is an object, and
+// they are created in one place so a fresh workspace and a migrated one have
+// the same shape.
+const MK_SOCIAL_KEYS = {
+  mkAssets: [], mkCampaigns: [], mkPosts: [], mkChannels: [], mkContentPillars: [],
+  mkAssetRequests: [], mkApprovalThreads: [], mkQueues: [], mkCreativeDecisions: [],
+  mkPublishedFeed: [], mkPlanJobs: [], mkSocialPrefs: {},
+};
+function mkSocialInit(){
+  Object.keys(MK_SOCIAL_KEYS).forEach(function(k){
+    const want = MK_SOCIAL_KEYS[k];
+    if (Array.isArray(want)) { if (!Array.isArray(STATE[k])) STATE[k] = []; }
+    else if (!STATE[k] || typeof STATE[k] !== 'object' || Array.isArray(STATE[k])) STATE[k] = {};
+  });
+  return STATE;
+}
+window.mkSocialInit = mkSocialInit;
+
+// ── ONE UNDO PER OPERATION ────────────────────────────────────────────────
+// A generated 12-post sequence is one undo, not twelve. Everything below goes
+// through here: it snapshots exactly the keys an operation touches, runs it,
+// saves ONCE, and leaves a labelled restore point. An operation that throws
+// leaves state untouched rather than half-applied.
+let MK_SOCIAL_UNDO = null;
+function mkSocialTx(label, keys, fn){
+  mkSocialInit();
+  const before = {};
+  keys.forEach(function(k){ before[k] = JSON.parse(JSON.stringify(STATE[k] === undefined ? null : STATE[k])); });
+  let out;
+  try { out = fn(); }
+  catch (e) {
+    keys.forEach(function(k){ STATE[k] = before[k]; });
+    throw e;
+  }
+  MK_SOCIAL_UNDO = { label: label, keys: keys, before: before, at: Date.now() };
+  save();
+  return out;
+}
+window.mkSocialUndoAvailable = function(){ return MK_SOCIAL_UNDO ? MK_SOCIAL_UNDO.label : ''; };
+window.mkSocialUndo = function(){
+  const u = MK_SOCIAL_UNDO; if (!u) return false;
+  MK_SOCIAL_UNDO = null;
+  u.keys.forEach(function(k){ STATE[k] = u.before[k]; });
+  save();
+  try { logActivity('Undone: ' + u.label); } catch(e){}
+  return true;
+};
+
+// Stable ids. Derived from the legacy id where there is one, so running the
+// migration twice produces the same records rather than a second set.
+function mkSocialId(prefix, seed){
+  if (seed) return prefix + '_' + String(seed).replace(/[^A-Za-z0-9_-]/g, '');
+  return prefix + '_' + Date.now().toString(36).toUpperCase()
+    + Math.random().toString(36).slice(2, 6).toUpperCase();
+}
+const MK_POST_STATUS = ['idea','proposed','draft','needs_asset','ready','approved','scheduled','published','archived'];
+const MK_POST_KIND = ['single','carousel','reel','story','document'];
+// NOT MK_PLATFORMS — that name is already the legacy Captions/Calendar picker
+// (Instagram, TikTok, Email, Story, Reel), which mixes destinations with
+// formats. Renaming it would touch three working screens for no benefit.
+const MK_SOCIAL_PLATFORMS = ['instagram','tiktok','linkedin','facebook','pinterest','youtube','threads'];
+// ...and that legacy list is why this map exists. "Reel" and "Story" are not
+// platforms, they are what the post IS, so they migrate to a kind on Instagram
+// rather than being flattened to a destination that was never chosen.
+const MK_LEGACY_PLATFORM = {
+  instagram: { platform: 'instagram', kind: 'single' },
+  tiktok:    { platform: 'tiktok',    kind: 'single' },
+  reel:      { platform: 'instagram', kind: 'reel'   },
+  story:     { platform: 'instagram', kind: 'story'  },
+  // Email is not a social destination at all. It keeps its own note so nothing
+  // pretends a newsletter was ever an Instagram post.
+  email:     { platform: 'instagram', kind: 'single', note: 'Legacy platform was Email — not a social destination' },
+};
+function mkLegacyPlatform(v){
+  const k = String(v || '').trim().toLowerCase();
+  if (MK_LEGACY_PLATFORM[k]) return MK_LEGACY_PLATFORM[k];
+  if (MK_SOCIAL_PLATFORMS.indexOf(k) >= 0) return { platform: k, kind: 'single' };
+  return { platform: 'instagram', kind: 'single' };
+}
+function mkNow(){ return new Date().toISOString(); }
+
+// ══════════════════════════════════════════════════════════
+//  LEGACY MIGRATION — idempotent, additive, trust-preserving
+// ══════════════════════════════════════════════════════════
+// Three disconnected stores become one. Nothing legacy is deleted in this
+// release, and nothing gains trust it did not already have.
+//
+// WHAT THE LEGACY DATA ACTUALLY IS, having read it rather than assumed:
+//   mkCalendar  {id,title,date,platform,campaign,status,createdAt}
+//   mkCaptions  {id,text,tone,platform,status,createdAt}
+//   venia_campaigns  {name,channel,date,status,impressions,clicks}
+//
+// Two consequences the handoff could not know:
+//
+// 1. A CAPTION HAS NO LINK TO A CALENDAR ENTRY. There is no field — not an id,
+//    not a foreign key, nothing. The only correlation available would be
+//    "same platform, near date", which is exactly the guessed similarity §7
+//    forbids. So every caption becomes a caption-only draft post. None are
+//    attached, and that is the honest reading, not a shortfall.
+//
+// 2. A CAMPAIGN IS SIX FIELDS, none of which are objective, narrative or
+//    audience. Those are left genuinely empty rather than invented; a campaign
+//    brief written by nobody is worse than a blank one.
+function mkSocialMigrateV1(){
+  mkSocialInit();
+  const cal = Array.isArray(STATE.mkCalendar) ? STATE.mkCalendar : [];
+  const caps = Array.isArray(STATE.mkCaptions) ? STATE.mkCaptions : [];
+  let legacyCampaigns = [];
+  try { const raw = JSON.parse(localStorage.getItem('venia_campaigns') || '[]');
+        if (Array.isArray(raw)) legacyCampaigns = raw; } catch(e){}
+
+  const report = { posts: 0, captions: 0, campaigns: 0, skipped: 0, alreadyDone: false };
+  const havePost = {}; (STATE.mkPosts || []).forEach(function(p){ if (p && p.id) havePost[p.id] = 1; });
+  const haveCamp = {}; (STATE.mkCampaigns || []).forEach(function(c){ if (c && c.id) haveCamp[c.id] = 1; });
+
+  // Campaigns first, so a calendar entry naming one can point at its id.
+  const byName = {};
+  legacyCampaigns.forEach(function(r){
+    if (!r || !r.name) return;
+    const id = mkSocialId('CMP', 'legacy-' + String(r.name).toLowerCase().replace(/\s+/g, '-'));
+    byName[String(r.name).trim().toLowerCase()] = id;
+    if (haveCamp[id]) return;
+    const st = String(r.status || '').toLowerCase();
+    STATE.mkCampaigns.push({
+      id: id, name: String(r.name),
+      // NOT INVENTED. The legacy row has none of these, so they stay empty and
+      // a founder fills them in — see the note above.
+      objective: '', narrative: '', audience: '',
+      startDate: String(r.date || ''), endDate: '',
+      styleIds: [], channels: r.channel ? [String(r.channel)] : [],
+      channelRoles: {}, contentPillarIds: [], contentMix: {}, requiredFormats: [],
+      guardrails: [], successMetrics: [],
+      status: st === 'live' ? 'active' : st === 'ended' ? 'complete'
+            : st === 'paused' ? 'planning' : st === 'planned' ? 'planning' : 'draft',
+      legacySource: { type: 'campaign', id: String(r.name), status: r.status || '',
+                      impressions: r.impressions || '', clicks: r.clicks || '' },
+      createdAt: String(r.date || '') || mkNow(), updatedAt: mkNow(),
+    });
+    report.campaigns++;
+  });
+
+  cal.forEach(function(e){
+    if (!e || !e.id) { report.skipped++; return; }
+    const id = mkSocialId('PST', 'cal-' + e.id);
+    if (havePost[id]) return;
+    const legacyStatus = String(e.status || 'planned').toLowerCase();
+    // §7 rule 3: preserve status without UPGRADING trust. planned/scheduled both
+    // become draft — a legacy row was never reviewed by the new approval model,
+    // and 'scheduled' in the new model means a real provider schedule exists,
+    // which none of these have.
+    const status = legacyStatus === 'posted' ? 'published' : 'draft';
+    const lp = mkLegacyPlatform(e.platform);
+    const platform = lp.platform;
+    const variants = {};
+    variants[platform] = {
+      platform: platform, enabled: true, format: lp.kind, caption: '',
+      timezone: 'America/Los_Angeles', publishMode: 'manual',
+      scheduledAt: e.date ? String(e.date) : undefined,
+    };
+    STATE.mkPosts.push({
+      id: id, campaignId: byName[String(e.campaign || '').trim().toLowerCase()] || undefined,
+      kind: lp.kind, title: String(e.title || ''),
+      assetIds: [], variants: variants, styleIds: [],
+      status: status, blockingIssues: lp.note ? [lp.note] : [], version: 1,
+      // The original row, whole. A migration that loses the thing it migrated
+      // from cannot be checked afterwards.
+      legacySource: { type: 'calendar', id: e.id, status: e.status || '',
+                      campaignName: e.campaign || '', platform: e.platform || '' },
+      createdAt: e.createdAt || mkNow(), updatedAt: mkNow(),
+    });
+    report.posts++;
+  });
+
+  caps.forEach(function(c){
+    if (!c || !c.id) { report.skipped++; return; }
+    const id = mkSocialId('PST', 'cap-' + c.id);
+    if (havePost[id]) return;
+    const lp = mkLegacyPlatform(c.platform);
+    const platform = lp.platform;
+    const variants = {};
+    variants[platform] = { platform: platform, enabled: true, format: lp.kind,
+      caption: String(c.text || ''), timezone: 'America/Los_Angeles', publishMode: 'manual' };
+    STATE.mkPosts.push({
+      id: id, kind: lp.kind,
+      title: String(c.text || '').slice(0, 60).replace(/\s+/g, ' ').trim(),
+      assetIds: [], variants: variants, styleIds: [],
+      status: 'draft',
+      blockingIssues: ['No asset — caption only, migrated from Captions'].concat(lp.note ? [lp.note] : []),
+      version: 1,
+      legacySource: { type: 'caption', id: c.id, status: c.status || '', tone: c.tone || '' },
+      createdAt: c.createdAt || mkNow(), updatedAt: mkNow(),
+    });
+    report.captions++;
+  });
+
+  const already = STATE.mkSocialPrefs && STATE.mkSocialPrefs.schemaVersion === MK_SOCIAL_SCHEMA;
+  report.alreadyDone = !!already && !report.posts && !report.captions && !report.campaigns;
+  // §7 rule 7: stamp the version only after a successful pass.
+  STATE.mkSocialPrefs.schemaVersion = MK_SOCIAL_SCHEMA;
+  if (!STATE.mkSocialPrefs.migratedAt) STATE.mkSocialPrefs.migratedAt = mkNow();
+  // §7 rule 6 and 9: legacy records are NOT deleted and the old stores stay
+  // readable for a release. venia_campaigns also stays in MODULES.growth.ls.
+  return report;
+}
+window.mkSocialMigrateV1 = mkSocialMigrateV1;
+
+// ══════════════════════════════════════════════════════════
+//  MUTATIONS — the only way records change, UI or agent
+// ══════════════════════════════════════════════════════════
+// Every one validates before it writes, stamps timestamps consistently, calls
+// save() exactly once through mkSocialTx, and is one undo.
+function mkFind(list, id){ return (STATE[list] || []).find(function(x){ return x && x.id === id; }); }
+// Exposed so a test can read a record back the same way the app does,
+// rather than reaching into STATE and asserting on its own copy.
+window.mkFindPost = function(id){ return mkFind('mkPosts', id); };
+window.mkFindAsset = function(id){ return mkFind('mkAssets', id); };
+window.mkFindCampaign = function(id){ return mkFind('mkCampaigns', id); };
+function mkSocialBad(msg){ const e = new Error(msg); e.mkSocial = true; return e; }
+
+// A material change is one that invalidates a review someone already gave.
+// Copy, media, schedule and format all qualify; a title tidy-up does not.
+const MK_MATERIAL_FIELDS = ['assetIds','carousel','reelPlan','storyPlan','variants','kind','coverAssetId'];
+function mkPostTouch(p, materially){
+  p.updatedAt = mkNow();
+  if (!materially) return p;
+  p.version = (p.version || 1) + 1;
+  // §8: any material change invalidates an approval tied to an earlier version.
+  if (p.approval && p.approval.approvedVersion !== p.version) {
+    p.approval = undefined;
+    if (p.status === 'approved' || p.status === 'scheduled') p.status = 'draft';
+  }
+  return p;
+}
+
+window.mkCampaignCreate = function(fields){
+  const f = fields || {};
+  if (!String(f.name || '').trim()) throw mkSocialBad('A campaign needs a name');
+  return mkSocialTx('Create campaign “' + f.name + '”', ['mkCampaigns'], function(){
+    const c = {
+      id: mkSocialId('CMP'), name: String(f.name).trim(),
+      objective: String(f.objective || ''), narrative: String(f.narrative || ''),
+      audience: String(f.audience || ''),
+      startDate: String(f.startDate || ''), endDate: String(f.endDate || ''),
+      styleIds: Array.isArray(f.styleIds) ? f.styleIds.slice() : [],
+      channels: Array.isArray(f.channels) ? f.channels.slice() : [],
+      channelRoles: f.channelRoles || {}, contentPillarIds: [], contentMix: f.contentMix || {},
+      requiredFormats: Array.isArray(f.requiredFormats) ? f.requiredFormats.slice() : [],
+      guardrails: Array.isArray(f.guardrails) ? f.guardrails.slice() : [],
+      successMetrics: Array.isArray(f.successMetrics) ? f.successMetrics.slice() : [],
+      status: 'draft', createdAt: mkNow(), updatedAt: mkNow(),
+    };
+    STATE.mkCampaigns.push(c);
+    return c;
+  });
+};
+window.mkCampaignUpdate = function(id, patch){
+  const c = mkFind('mkCampaigns', id); if (!c) throw mkSocialBad('No campaign ' + id);
+  return mkSocialTx('Update campaign “' + c.name + '”', ['mkCampaigns'], function(){
+    Object.keys(patch || {}).forEach(function(k){ if (k !== 'id' && k !== 'createdAt') c[k] = patch[k]; });
+    c.updatedAt = mkNow();
+    return c;
+  });
+};
+
+window.mkAssetUpsert = function(a){
+  const f = a || {};
+  if (!String(f.filename || f.sourceUrl || '').trim()) throw mkSocialBad('An asset needs a filename or a URL');
+  return mkSocialTx('Save asset', ['mkAssets'], function(){
+    const id = f.id || mkSocialId('AST');
+    const existing = mkFind('mkAssets', id);
+    const rec = Object.assign({
+      id: id, source: f.source || 'url', mediaType: f.mediaType === 'video' ? 'video' : 'image',
+      filename: String(f.filename || ''), styleIds: [], tags: [],
+      // Rights start UNKNOWN and only a human moves them. §9 forbids an agent
+      // action that clears rights, so nothing here defaults to cleared.
+      rights: { status: 'unknown' }, variants: [], useHistory: [],
+      status: 'available', createdAt: mkNow(),
+    }, existing || {}, f, { id: id, updatedAt: mkNow() });
+    if (existing) Object.assign(existing, rec); else STATE.mkAssets.push(rec);
+    return rec;
+  });
+};
+window.mkAssetArchive = function(id){
+  const a = mkFind('mkAssets', id); if (!a) throw mkSocialBad('No asset ' + id);
+  return mkSocialTx('Archive asset', ['mkAssets'], function(){
+    a.status = 'archived'; a.updatedAt = mkNow(); return a;
+  });
+};
+window.mkAssetRequestCreate = function(r){
+  const f = r || {};
+  if (!String(f.need || '').trim()) throw mkSocialBad('A request needs to say what is missing');
+  return mkSocialTx('Request an asset', ['mkAssetRequests'], function(){
+    const rec = { id: mkSocialId('REQ'), need: String(f.need), postId: f.postId || undefined,
+      orientation: f.orientation || '', framing: f.framing || '', styleIds: f.styleIds || [],
+      secondsRequired: f.secondsRequired, deadline: f.deadline || '',
+      status: 'open', createdAt: mkNow(), updatedAt: mkNow() };
+    STATE.mkAssetRequests.push(rec);
+    return rec;
+  });
+};
+
+window.mkPostCreate = function(fields){
+  const f = fields || {};
+  const kind = MK_POST_KIND.indexOf(f.kind) >= 0 ? f.kind : 'single';
+  return mkSocialTx('Create post', ['mkPosts'], function(){
+    const p = {
+      id: mkSocialId('PST'), campaignId: f.campaignId || undefined, kind: kind,
+      title: String(f.title || ''), objective: f.objective || undefined,
+      assetIds: Array.isArray(f.assetIds) ? f.assetIds.slice() : [],
+      variants: f.variants || {}, styleIds: Array.isArray(f.styleIds) ? f.styleIds.slice() : [],
+      // §9: the agent may only create proposed/draft work. Nothing here can
+      // start life approved, scheduled or published.
+      status: (f.status === 'proposed' || f.status === 'idea') ? f.status : 'draft',
+      agentRationale: f.agentRationale || undefined,
+      blockingIssues: Array.isArray(f.blockingIssues) ? f.blockingIssues.slice() : [],
+      version: 1, sequenceOrder: f.sequenceOrder,
+      createdAt: mkNow(), updatedAt: mkNow(),
+    };
+    STATE.mkPosts.push(p);
+    return p;
+  });
+};
+window.mkPostUpdate = function(id, patch, opts){
+  const p = mkFind('mkPosts', id); if (!p) throw mkSocialBad('No post ' + id);
+  // §8: published records are immutable except for reconciliation metadata.
+  if (p.status === 'published' && !(opts && opts.reconciliation))
+    throw mkSocialBad('A published post cannot be edited — use reconciliation');
+  const patchKeys = Object.keys(patch || {});
+  const material = patchKeys.some(function(k){ return MK_MATERIAL_FIELDS.indexOf(k) >= 0; });
+  return mkSocialTx('Update post', ['mkPosts'], function(){
+    patchKeys.forEach(function(k){
+      if (k === 'id' || k === 'createdAt' || k === 'version') return;
+      // Only a human sets approved. An agent handler calling this cannot smuggle
+      // a status through the patch.
+      if (k === 'status' && ['approved','scheduled','published'].indexOf(patch[k]) >= 0
+          && !(opts && opts.human)) throw mkSocialBad('Only a person can set ' + patch[k]);
+      p[k] = patch[k];
+    });
+    return mkPostTouch(p, material);
+  });
+};
+window.mkPostAssignAssets = function(id, assetIds){
+  const p = mkFind('mkPosts', id); if (!p) throw mkSocialBad('No post ' + id);
+  const ids = Array.isArray(assetIds) ? assetIds : [];
+  // §9: an action may reference only asset IDs that exist. An unknown id is a
+  // rejection, never a silently dropped field.
+  const missing = ids.filter(function(a){ return !mkFind('mkAssets', a); });
+  if (missing.length) throw mkSocialBad('Unknown asset id: ' + missing.join(', '));
+  return mkSocialTx('Assign assets', ['mkPosts'], function(){
+    p.assetIds = ids.slice();
+    p.blockingIssues = (p.blockingIssues || []).filter(function(b){ return !/^No asset/.test(b); });
+    if (p.status === 'needs_asset' && ids.length) p.status = 'draft';
+    return mkPostTouch(p, true);
+  });
+};
+window.mkSequenceReorder = function(orderedIds){
+  const ids = Array.isArray(orderedIds) ? orderedIds : [];
+  const posts = ids.map(function(i){ return mkFind('mkPosts', i); });
+  const bad = ids.filter(function(i, n){ return !posts[n]; });
+  if (bad.length) throw mkSocialBad('Unknown post id: ' + bad.join(', '));
+  // §8 and §15: reordering cannot silently renumber a published post.
+  const pub = posts.filter(function(p){ return p.status === 'published'; });
+  if (pub.length) throw mkSocialBad('A published post cannot be reordered — it is an anchor');
+  return mkSocialTx('Reorder ' + ids.length + ' posts', ['mkPosts'], function(){
+    posts.forEach(function(p, n){ p.sequenceOrder = n; p.updatedAt = mkNow(); });
+    return posts.length;
+  });
+};
+// A whole generated sequence, applied as ONE operation and ONE undo.
+window.mkSequenceApply = function(plan){
+  const items = Array.isArray(plan && plan.posts) ? plan.posts : [];
+  if (!items.length) throw mkSocialBad('That plan has no posts');
+  const allAssets = [];
+  items.forEach(function(it){ (it.assetIds || []).forEach(function(a){ allAssets.push(a); }); });
+  const missing = allAssets.filter(function(a){ return !mkFind('mkAssets', a); });
+  if (missing.length) throw mkSocialBad('Unknown asset id: ' + missing.slice(0, 5).join(', '));
+  if (plan && plan.campaignId && !mkFind('mkCampaigns', plan.campaignId))
+    throw mkSocialBad('Unknown campaign ' + plan.campaignId);
+  return mkSocialTx('Apply a ' + items.length + '-post plan', ['mkPosts','mkCreativeDecisions'], function(){
+    const made = items.map(function(it, n){
+      const p = {
+        id: mkSocialId('PST'), campaignId: plan.campaignId || undefined,
+        kind: MK_POST_KIND.indexOf(it.kind) >= 0 ? it.kind : 'single',
+        title: String(it.title || ''), objective: it.objective || undefined,
+        assetIds: (it.assetIds || []).slice(), variants: it.variants || {},
+        styleIds: (it.styleIds || []).slice(),
+        status: (it.assetIds && it.assetIds.length) ? 'proposed' : 'needs_asset',
+        agentRationale: it.rationale || undefined,
+        blockingIssues: (it.assetIds && it.assetIds.length) ? [] : ['No asset assigned'],
+        sequenceOrder: n, version: 1, createdAt: mkNow(), updatedAt: mkNow(),
+      };
+      STATE.mkPosts.push(p);
+      return p;
+    });
+    STATE.mkCreativeDecisions.push({
+      id: mkSocialId('DEC'), entityType: 'sequence', entityId: plan.campaignId || '',
+      decision: 'reordered', after: made.map(function(p){ return p.id; }),
+      reason: plan.rationale || '', actor: 'enigma', createdAt: mkNow(),
+    });
+    return made;
+  });
+};
+window.mkPostUnschedule = function(ids){
+  const list = (Array.isArray(ids) ? ids : [ids]).map(function(i){ return mkFind('mkPosts', i); });
+  if (list.some(function(p){ return !p; })) throw mkSocialBad('Unknown post id');
+  return mkSocialTx('Unschedule ' + list.length + ' post' + (list.length === 1 ? '' : 's'), ['mkPosts'], function(){
+    list.forEach(function(p){
+      Object.keys(p.variants || {}).forEach(function(k){ delete p.variants[k].scheduledAt; });
+      p.sequenceOrder = undefined;
+      mkPostTouch(p, true);
+    });
+    return list.length;
+  });
+};
+// §15: merging is confirmed, preserves provenance, and is one undo.
+window.mkPostMerge = function(targetId, sourceIds){
+  const t = mkFind('mkPosts', targetId); if (!t) throw mkSocialBad('No post ' + targetId);
+  const srcs = (sourceIds || []).map(function(i){ return mkFind('mkPosts', i); });
+  if (srcs.some(function(p){ return !p; })) throw mkSocialBad('Unknown post id');
+  if ([t].concat(srcs).some(function(p){ return p.status === 'published'; }))
+    throw mkSocialBad('A published post cannot be merged');
+  return mkSocialTx('Merge into a carousel', ['mkPosts'], function(){
+    const slides = (t.carousel && t.carousel.slides ? t.carousel.slides.slice() : [])
+      .concat([]);
+    let order = slides.length;
+    [t].concat(srcs).forEach(function(p){
+      if (p.carousel && p.carousel.slides) return;   // already contributed above
+      (p.assetIds || []).forEach(function(a){
+        slides.push({ id: mkSocialId('SLD'), assetId: a, order: order++,
+                      sourcePostId: p.id });
+      });
+    });
+    t.kind = 'carousel';
+    t.carousel = { slides: slides };
+    t.assetIds = slides.map(function(sl){ return sl.assetId; });
+    srcs.forEach(function(p){ p.status = 'archived'; p.updatedAt = mkNow(); });
+    return mkPostTouch(t, true);
+  });
+};
+// §14: only a human sets approved. There is deliberately no agent action for
+// this, and the handler is not reachable from agentRunAction.
+window.mkPostApprove = function(ids, actor){
+  const list = (Array.isArray(ids) ? ids : [ids]).map(function(i){ return mkFind('mkPosts', i); });
+  if (list.some(function(p){ return !p; })) throw mkSocialBad('Unknown post id');
+  const notReady = list.filter(function(p){ return p.status !== 'ready' && p.status !== 'draft'; });
+  if (notReady.length) throw mkSocialBad('Only a draft or ready post can be approved');
+  const blocked = list.filter(function(p){ return (p.blockingIssues || []).length; });
+  if (blocked.length) throw mkSocialBad(blocked.length + ' post(s) still have blockers');
+  return mkSocialTx('Approve ' + list.length + ' post' + (list.length === 1 ? '' : 's'),
+    ['mkPosts','mkCreativeDecisions'], function(){
+      list.forEach(function(p){
+        p.status = 'approved';
+        p.approval = { approvedBy: actor || 'founder', approvedAt: mkNow(), approvedVersion: p.version };
+        p.updatedAt = mkNow();
+        STATE.mkCreativeDecisions.push({ id: mkSocialId('DEC'), entityType: 'post', entityId: p.id,
+          decision: 'approved', actor: actor || 'founder', createdAt: mkNow() });
+      });
+      return list.length;
+    });
+};
+window.mkPostUnapprove = function(id, reason){
+  const p = mkFind('mkPosts', id); if (!p) throw mkSocialBad('No post ' + id);
+  return mkSocialTx('Withdraw approval', ['mkPosts','mkCreativeDecisions'], function(){
+    p.approval = undefined; p.status = 'draft'; p.updatedAt = mkNow();
+    STATE.mkCreativeDecisions.push({ id: mkSocialId('DEC'), entityType: 'post', entityId: p.id,
+      decision: 'rejected', reason: reason || '', actor: 'founder', createdAt: mkNow() });
+    return p;
+  });
+};
+window.mkCreativeDecisionLog = function(d){
+  const f = d || {};
+  if (!f.entityId || !f.decision) throw mkSocialBad('A decision needs an entity and a decision');
+  return mkSocialTx('Record a decision', ['mkCreativeDecisions'], function(){
+    const rec = { id: mkSocialId('DEC'), entityType: f.entityType || 'post', entityId: f.entityId,
+      decision: f.decision, before: f.before, after: f.after, reason: f.reason || '',
+      actor: f.actor || 'founder', createdAt: mkNow() };
+    STATE.mkCreativeDecisions.push(rec);
+    return rec;
+  });
+};
+
 function mkSaveCalEntry(existingId) {
   if (!STATE.mkCalendar) STATE.mkCalendar = [];
   const data = {
