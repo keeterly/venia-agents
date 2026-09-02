@@ -38642,7 +38642,9 @@ window.bankAskCfo = function(){
 // "what's on screen" and "what I sent the CFO" can never drift apart.
 function finTxFiltered(all){
   const q = String(FIN_TX_FILTER.q || '').toLowerCase();
+  const since = finPeriodSince(FIN_SPEND_PERIOD);
   return all.filter(t => {
+    if (since && String(t.date || '') < since) return false;
     if (FIN_TX_FILTER.cat && String(t.category||'') !== FIN_TX_FILTER.cat) return false;
     if (FIN_TX_FILTER.mode === 'uncat' && finTxnCat(t) && !FIN_TX_KEEP[t.id]) return false;
     if (FIN_TX_FILTER.mode === 'in'  && (t.amount||0) < 0) return false;
@@ -38937,16 +38939,53 @@ window.bankBulkCategorize = function(opts){
 // Rows filed since the last time the filter was touched. They stay visible
 // under "Uncategorized", marked, until you change filter or search.
 let FIN_TX_KEEP = {};
-window.bankSetCategory = function(id, cat){
+// WHY THE DROPDOWN LOST TAGS AND THE BULK BUTTON DID NOT.
+//
+// They share every line of the write. They differ in one thing: this handler
+// ran INSIDE the select's change event and synchronously rebuilt the whole
+// list, destroying the very element that was still delivering the event. On
+// iOS a select's picker stays bound to its element until it closes, and a
+// picker whose element has been torn out from under it can deliver a second
+// change — to the detached element, whose value now reads as "", or to the new
+// element rendered into the same spot, which is a DIFFERENT ROW. The first is
+// "the tag did not stick"; the second is "changing this one cleared that one".
+// A button click has no picker and no second event, so bulk was fine.
+//
+// Three defences, because one is not enough on a phone:
+//   1. An unrecognised value is REJECTED, not turned into "". The old line
+//      made any value the list did not know into a clear.
+//   2. The element is blurred before anything else happens, and the re-render
+//      is deferred past the end of the event, so the picker is closed and the
+//      event finished before the DOM moves.
+//   3. An EMPTY value arriving within 600ms of a real change is the echo, not
+//      a decision, and is ignored — a founder does not file a row and then
+//      unfile it in the same half-second.
+window.__lastCatSet = null;
+window.bankSetCategory = function(id, cat, el){
   const t = (STATE.finTxns||[]).find(x => x.id === id);
   if (!t) return;
-  t.category = finAllCats().indexOf(cat) >= 0 ? cat : '';
+  const next = String(cat || '');
+  if (next && finAllCats().indexOf(next) < 0) {
+    // Not a category we know: leave the row exactly as it was and put the
+    // select back to the truth rather than letting it display a lie.
+    try { if (el) el.value = finTxnCat(t) || ''; } catch(e){}
+    return;
+  }
+  const now = Date.now();
+  if (!next && window.__lastCatSet && (now - window.__lastCatSet.t) < 600) {
+    try { if (el) el.value = finTxnCat(t) || ''; } catch(e){}
+    return;
+  }
+  if (next === (t.category || '')) return;              // nothing to do
+  t.category = next;
+  window.__lastCatSet = { id: id, t: now };
   save();
   // Keep the row you just filed on screen — a row vanishing from under the
   // cursor mid-list is worse than a stale count — but repaint everything that
   // counts it, so the header and the filter tell the truth immediately.
   FIN_TX_KEEP[id] = 1;
-  cmdRenderBank();
+  try { if (el && el.blur) el.blur(); } catch(e){}
+  setTimeout(function(){ try { cmdRenderBank(); } catch(e){} }, 0);
 };
 
 // ── Spend by category ────────────────────────────────────────────────────
@@ -38956,11 +38995,20 @@ window.bankSetCategory = function(id, cat){
 const FIN_SPEND_EXCLUDE = ['transfer','income'];
 let FIN_SPEND_PERIOD = '90d';
 window.finSpendPeriod = function(p){ FIN_SPEND_PERIOD = p; cmdRenderBank(); };
-function finSpendData(period){
-  const days = period === '30d' ? 30 : period === '90d' ? 90 : period === 'ytd' ? null : null;
+// The period pills (30d / 90d / YTD / all) are one filter for the whole screen,
+// not a setting for the spend chart alone. They scoped the chart and left the
+// transaction list on all-time, so "Uncategorized" showed two years of rows
+// under a pill that said 90 days — the screen disagreeing with itself.
+function finPeriodSince(period){
+  const days = period === '30d' ? 30 : period === '90d' ? 90 : null;
   const now = new Date();
-  const since = days ? new Date(now.getTime() - days*864e5).toISOString().slice(0,10)
-    : period === 'ytd' ? new Date(now.getFullYear(), 0, 1).toISOString().slice(0,10) : '';
+  if (days) return new Date(now.getTime() - days*864e5).toISOString().slice(0,10);
+  if (period === 'ytd') return new Date(now.getFullYear(), 0, 1).toISOString().slice(0,10);
+  return '';
+}
+window.finPeriodSince = finPeriodSince;
+function finSpendData(period){
+  const since = finPeriodSince(period);
   const by = {}; let total = 0, uncat = 0, uncatN = 0;
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void') return;
@@ -39145,7 +39193,7 @@ window.cmdRenderBank = function(){
       <div style="grid-column:2/4;display:flex;gap:8px;align-items:center">
         <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(t.date||'')}</span>
         ${FIN_TX_FILTER.mode === 'uncat' && FIN_TX_KEEP[t.id] && t.category ? '<span style="color:var(--green);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">Filed \u2713</span>' : ''}
-        <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value)">${catOpts(finTxnCat(t) || '')}</select>
+        <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value, this)">${catOpts(finTxnCat(t) || '')}</select>
       </div>
     </div>`).join('');
   el.innerHTML = stats
@@ -39185,7 +39233,7 @@ window.cmdRenderBank = function(){
         ? `<div style="max-width:560px;margin-bottom:20px">${acctRows}</div>`
         : `<div style="font-size:11px;color:var(--muted);margin-bottom:20px">${money(bk.bal)} cash${bk.debt ? ' · ' + money(bk.debt) + ' owed' : ''} across ${bk.accounts.length} connected account${bk.accounts.length===1?'':'s'}.</div>`}
       ${finSpendBlock()}
-      <div class="ag-sec-head"><h2 class="ag-sec-title">Transactions</h2><div class="ag-sec-actions" style="font-size:10px;color:var(--muted)">${shown.length} of ${all.length}</div></div>
+      <div class="ag-sec-head"><h2 class="ag-sec-title">Transactions</h2><div class="ag-sec-actions" style="font-size:10px;color:var(--muted)">${shown.length} of ${finTxFiltered(all).length}${finPeriodSince(FIN_SPEND_PERIOD) ? ' in this period · ' + all.length + ' all time' : ''}</div></div>
       ${FIN_TX_FILTER.cat ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--ink);margin-bottom:10px;font-size:11px">
         <span style="flex:1">Showing <b>${slEsc(finCatLabel(FIN_TX_FILTER.cat))}</b> only</span>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankTxCat('${slEsc(FIN_TX_FILTER.cat)}')">Show all</button>

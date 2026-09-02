@@ -3991,3 +3991,33 @@ one holding the empty value), and nothing changes about which records exist.
 
 `gauntlet/tagsync.js` — 9 assertions, 5 failing against Build 453. Runs the merge
 machinery directly out of the file: this is arithmetic, not a screen.
+
+### Build 454, continued — the dropdown lost tags and the bulk button did not
+
+*"Changing the tag here doesn't set the tag sometimes. Changing a tag may remove
+a tag of another still. Setting the category through the bulk action works
+though."* That last sentence is the whole diagnosis.
+
+They share every line of the write. The dropdown's handler ran INSIDE the
+select's change event and **synchronously rebuilt the list, destroying the
+element still delivering the event**. On iOS the picker stays bound to its
+element until it closes; a picker whose element was torn out can deliver a
+second change — to the detached element, whose value reads `""`, or to the new
+element rendered into the same spot, which is a **different row**. The first is
+"the tag did not stick"; the second is "changing this one cleared that one". A
+button click has no picker and no second event, so bulk was fine.
+
+Replayed deterministically against 453: **both symptoms reproduce.**
+
+Three defences: an unrecognised value is rejected, not turned into a clear
+(the old line made anything the list did not know into `""`); the element is
+blurred and the re-render deferred past the end of the event; and an empty
+value within 600ms of a real change is the echo, not a decision.
+
+**The period pills scope the whole screen now.** They scoped the spend chart
+and left the list on all-time, so "Uncategorized" showed two years of rows under
+a pill that said 90d. One `finPeriodSince()` for both; the count says which it
+is; select-all-matching inherits it, so "file all" never sweeps rows in another
+year.
+
+`gauntlet/tagdropdown.js` — 8 assertions, 7 failing against Build 453.
