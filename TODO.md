@@ -3789,3 +3789,95 @@ that balance. Said outright, along with where the error lands if a movement is
 missing: entirely on the opening balance.
 
 `gauntlet/cashflow.js` — 20 assertions, all failing against Build 450.
+
+---
+
+## Build 452 — a false claim with no warning at all
+
+Reported: the CFO was asked to set HISCOX to insurance, said it had, and nothing
+changed. Checked against the live ledger:
+
+- **21 HISCOX rows uncategorised, every one with an `imp_` id**
+- 4 filed — 3 feed rows and 1 imported — and the CFO's own reply called those
+  "the 4 already filed", so **this turn filed zero**
+
+### The reply carried no warning
+
+Its words were *"Filing all 21 uncategorized HISCOX rows as insurance"* and
+*"All 25 HISCOX transactions now read as insurance."* `AGENT_CLAIM_RE` knew
+`filed` and not `filing`, and had no pattern for "now read as" — so the founder
+got a confident false report with **no ⚠ at all**, which is worse than the
+failure it exists to catch.
+
+Five real phrasings were slipping through, including a sentence that simply
+opens with the verb: *"Filed — same three merchants."* The detector is now a
+composed pattern covering past tense, present participle, "are now X", and a
+bare sentence-opening assertion. Twelve cases pinned, four of them non-claims
+(a question, a suggestion, two plain answers) that must NOT be flagged.
+
+A missed claim costs a founder their trust in the ledger; a spurious warning
+costs a sentence, and only ever appears when nothing was written anyway — so
+this leans towards catching.
+
+### And the app was pushing it down the fragile path
+
+The snapshot said *"Use those ids in set_txn_category"* and the ledger block
+ended *"Use set_txn_category with these ids."* For a merchant that repeats 25
+times across two years, **twenty-one enumerated ids is a long block that can be
+cut off mid-way, and every id is a chance to mistype**. One
+`{"match":{"desc":"HISCOX"}}` files the whole history in one item.
+
+That path already worked — Build 449 removed the cap that used to refuse it —
+the app simply never told the model to prefer it. Both instructions and the spec
+example now do.
+
+**Not a new capability, a changed instruction:** 3 of the 4 new HISCOX
+assertions pass against 451 too. They document that description matching works;
+what changed is that the CFO is now told to use it.
+
+### And a test that assumed a one-line regex
+
+`smoke36` extracted `AGENT_CLAIM_RE` with `[^\n]+`. The detector outgrew one
+line when the phrasings it has to catch did, so the extraction now takes the
+whole declaration.
+
+`gauntlet/agenthistory.js` — now 12, the 2 claim assertions failing against 451.
+`gauntlet/txnfile.js` — now 15.
+
+### Build 452, continued — the path that cannot fail
+
+Same failure a third time, on INXPRESS: *"All 14 INXPRESS transactions now read
+as shipping."* The live ledger held **14 uncategorised and 1 filed**. Nothing ran.
+
+**The app pipeline is not the problem, and that was proved rather than assumed.**
+Driving the exact cloud landing path with a realistic reply carrying 13 ids files
+**1 → 14**, persists, and renders an action card listing every row. Also ruled
+out by measurement: system-block truncation (20k and 12k against a 100k limit,
+spec present at offset 6360), permissions, the resolver, and the old 8-row cap.
+
+The model simply does not emit the block reliably. Three builds spent trying to
+make it is two too many for something done this often, so filing a recurring
+merchant stops depending on it.
+
+**Search a merchant → "Select all 15 matching" → pick a category.** One tap, no
+model, no ids, undoable. Offered only while a filter is narrowing the list,
+because "select all 1,436" is nobody's intent.
+
+### And the bug reported earlier, finally reproduced
+
+*"When I set a transaction type, it removes a tag from another one."* Not
+reproducible at the time; here it is.
+
+```js
+if (cat && finAllCats().indexOf(cat) < 0) return;   // '' is not a name, so it passed
+```
+
+`bankBulkCategorize` read the dropdown, which starts on "—". Select rows, some
+already filed, press **Set category** without touching it, and **every selected
+row was silently cleared**. The guard only rejected names it did not recognise.
+
+Now an empty category refuses with a message, `bankBulkCat` keeps the stored
+intent and the DOM select in step so they cannot drift, and an explicit
+**Uncategorize** button covers the case where clearing is what you meant.
+
+`gauntlet/bulkfile.js` — 10 assertions, all failing against the first half of 452.

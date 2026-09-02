@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '451';
+  const BUILD = '452';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -27088,7 +27088,7 @@ function agentFinActionSpec() { return agentSpecChunks([
     + '"period" ∈ monthly | quarterly | annual | seasonal. "source" binds the goal to live actuals — "" (manual) | dtc-30 | dtc-ytd | wholesale-ytd | total-ytd; prefer a live source when one fits so the goal tracks itself. "target" is required; "current" only matters for manual goals.\n'
     + '\nACTION — set_txn_category: categorize bank-feed transactions (Money → Cash) so burn and runway read true.\n'
     + '```venia:action\n'
-    + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"},{"match":{"desc":"Karol Jimenez","amount":-500},"category":"contractors"}]}\n'
+    + '{"type":"set_txn_category","items":[{"match":{"desc":"HISCOX"},"category":"insurance"},{"id":"fctxn_abc","category":"software"}]}\n'
     + 'THE SNAPSHOT LIST IS NOT THE WHOLE LEDGER. It shows the largest and the most repetitive '
     + 'patterns, not every merchant. If the founder names one you cannot see — a subscription, a '
     + 'vendor, anything — file it with {"match":{"desc":"KLAVIYO"}} and no id. Matching on '
@@ -27382,7 +27382,29 @@ function agentImageActionSpec() {
 // Phrases that assert a record was written. If a reply says one of these and
 // carries no action block, nothing was saved and the sentence is false — which
 // is worse than any missing feature, because the founder stops checking.
-const AGENT_CLAIM_RE = /\b(filed|saved|added|created|logged|recorded|updated|set up|entered|onboarded)\b[^.!?\n]{0,60}\b(it|them|that|this|correctly|now|to (?:the|your))\b|\b(?:i(?:'ve| have)?)\s+(?:just\s+)?(?:filed|saved|added|created|logged|recorded|updated|onboarded)\b/i;
+// Missed five real phrasings, two of them live: "Filing all 21 rows as
+// insurance" and "All 25 transactions now read as insurance" — a confident false
+// report with NO warning, which is worse than the failure it was meant to catch.
+// The past tense was covered and the PRESENT PARTICIPLE was not, and neither was
+// the "are now X" construction a model reaches for when narrating what it just
+// did. A missed claim costs a founder their trust in the ledger; a spurious
+// warning costs a sentence, and only ever appears when nothing was written
+// anyway — so this leans towards catching.
+const AGENT_CLAIM_RE = new RegExp([
+  // "…filed them", "…updated that for you"
+  "\\b(filed|saved|added|created|logged|recorded|updated|set up|entered|onboarded|categori[sz]ed)\\b[^.!?\\n]{0,60}\\b(it|them|that|this|those|these|correctly|now|to (?:the|your))\\b",
+  // "I've filed", "I just saved"
+  "\\b(?:i(?:'ve| have)?)\\s+(?:just\\s+)?(?:filed|saved|added|created|logged|recorded|updated|onboarded|categori[sz]ed)\\b",
+  // "Filing all 21 rows as insurance" — narrating the act as it happens
+  "(?:^|[\\n.!?]\\s*)(filing|saving|adding|creating|logging|recording|updating|setting|categori[sz]ing)\\b[^.!?\\n]{0,80}\\bas\\b",
+  "(?:^|[\\n.!?]\\s*)(filing|saving|adding|creating|logging|recording|updating|setting|categori[sz]ing)\\s+(?:all|every|the|those|these|them|both)\\b",
+  // "All 25 now read as insurance", "those are now categorized as rent"
+  "\\b(?:now|all)\\b[^.!?\\n]{0,60}\\b(?:read|reads|show|shows|are|is)\\s+(?:now\\s+)?(?:as|categori[sz]ed|filed|set)\\b",
+  "\\b(?:are|is)\\s+now\\s+(?:categori[sz]ed|filed|set|recorded|logged)\\b",
+  // "Filed — same three merchants." A sentence that OPENS with a past-tense
+  // verb of writing is an assertion with nothing after it to qualify.
+  "(?:^|[\\n.!?]\\s*)(filed|saved|logged|recorded|categori[sz]ed|updated)\\b\\s*[—,.-]",
+].join('|'), 'i');
 // WHAT THE MODEL SEES OF ITS OWN LAST TURN.
 //
 // The action block is stripped before the reply is shown, and the STRIPPED text
@@ -36762,7 +36784,13 @@ function veniaFinanceContext(){
         if (filed.length) parts.push('RECENT FILED transactions (newest first — re-file any of these with set_txn_category if the category is wrong):\n'
           + filed.map(row).join('\n') + (live.length > filed.length + un.length ? '\n…older rows exist; ask if you need them' : ''));
         parts.push('RUNWAY above is measured from bank flow ALONE. It does not know about committed PO obligations or dated cash-calendar events, so a positive runway and a cash-calendar dip can both be true — read the calendar before calling the position safe.');
-        parts.push('Every transaction above carries its real id. Use those ids in set_txn_category — never invent one. If you want to file something you can see here, you already have what you need; do not ask the founder to paste ids.');
+        parts.push('Every transaction above carries its real id. Use those ids in set_txn_category — never invent one. If you want to file something you can see here, you already have what you need; do not ask the founder to paste ids.'
+          + '\n\nFOR A RECURRING MERCHANT, MATCH ON THE DESCRIPTION INSTEAD OF LISTING IDS. One '
+          + '{"match":{"desc":"HISCOX"},"category":"insurance"} files every row of that merchant across '
+          + 'its whole history in one item — including rows not shown above, since this list is only '
+          + 'the most material ones. Twenty-one ids is a long block that can be cut off mid-way, and '
+          + 'every id is a chance to mistype; one description is neither. Use ids for one-offs and for '
+          + 'rows that need different categories from each other.');
         // What Money Watch is flagging right now — so a chat answer and the
     // morning push never tell the founders different stories.
     try {
@@ -38550,7 +38578,13 @@ window.bankTxMode = function(m){ FIN_TX_FILTER.mode = m; FIN_TX_FILTER.limit = 4
 // Ticking another row re-renders the bulk bar, so the category already chosen
 // has to survive that — otherwise picking a category then selecting one more
 // row silently resets it to "—".
-window.bankBulkCat = function(v){ FIN_TX_FILTER.bulk = v; };
+window.bankBulkCat = function(v){
+  FIN_TX_FILTER.bulk = v;
+  // The select is the founder's visible choice and bankBulkCategorize reads it,
+  // so the two must not drift apart — a stored intent the button cannot see is
+  // how an empty category reached the write in the first place.
+  try { const el = document.getElementById('fin-bulk-cat'); if (el && el.value !== v) el.value = v; } catch(e){}
+};
 window.bankToggleAccts = function(){ FIN_TX_FILTER.accts = !FIN_TX_FILTER.accts; cmdRenderBank(); };
 // Fix transactions by typing. The founder's sentence goes to the CFO with the
 // rows it is about attached — the ticked ones, else whatever the filter is
@@ -38572,7 +38606,9 @@ window.bankAskCfo = function(){
   if (el) el.value = '';
   FIN_TX_SEL = {};
   const prompt = ask + '\n\n' + scope + '\n' + (lines || '(none)')
-    + '\n\nUse set_txn_category with these ids. Anything you are unsure about, leave alone and tell me why.';
+    + '\n\nUse set_txn_category. For a merchant that repeats, ONE {"match":{"desc":"..."}} item files its '
+    + 'whole history and is far more reliable than listing every id; use ids only for one-offs or where '
+    + 'the rows need different categories. Anything you are unsure about, leave alone and tell me why.';
   if (typeof agentSend === 'function') agentSend('fin', prompt);
 };
 // One filter definition, used by both the ledger render and the ask box, so
@@ -38592,13 +38628,45 @@ window.bankTxMore = function(){ FIN_TX_FILTER.limit = (FIN_TX_FILTER.limit || 40
 window.finSpendBlock = finSpendBlock;
 window.bankSelectTxn = function(id, on){ if (on) FIN_TX_SEL[id] = 1; else delete FIN_TX_SEL[id]; cmdRenderBank(); };
 window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
+// SELECT EVERY ROW THE FILTER MATCHES, not just the page you can see.
+//
+// Filing a recurring merchant across two years is the main job after a history
+// import, and there were only two ways to do it: tick fourteen boxes spread
+// across a 1,436-row ledger twenty-five at a time, or ask the CFO — which
+// depends on a model reliably emitting fourteen ids and, measured against the
+// live ledger, it does not. This is the third way and it cannot fail: the
+// filter already knows exactly which rows match, so it selects them.
+window.bankSelectAllMatching = function(){
+  const all = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
+  const rows = finTxFiltered(all);
+  // Selecting past the page is only safe because the founder can SEE the count
+  // before they set anything, and every bulk set is undoable.
+  rows.forEach(t => { FIN_TX_SEL[t.id] = 1; });
+  cmdRenderBank();
+  try { showToast(rows.length + ' row' + (rows.length === 1 ? '' : 's') + ' selected', 'info'); } catch(e){}
+};
 // Bulk set — one undo restores every row it touched.
-window.bankBulkCategorize = function(){
+window.bankBulkCategorize = function(opts){
   const sel = document.getElementById('fin-bulk-cat');
   const cat = sel ? sel.value : (FIN_TX_FILTER.bulk || '');
   const ids = Object.keys(FIN_TX_SEL).filter(k => FIN_TX_SEL[k]);
   if (!ids.length) return;
   if (cat && finAllCats().indexOf(cat) < 0) return;
+  // AN EMPTY CATEGORY USED TO MEAN "WIPE THEM ALL".
+  //
+  // The dropdown starts on "—". Select fifteen rows, some already filed, press
+  // Set category without touching it, and every one of them was silently
+  // cleared — which is exactly what "setting a transaction type removed a tag
+  // from another one" looks like from the outside. The guard above let '' pass
+  // because it only rejected names it did not recognise, and '' is not a name.
+  //
+  // Clearing in bulk is still possible, but it has to be asked for: the Clear
+  // button passes {clear:true}. Pressing the primary button with nothing chosen
+  // now does nothing except say so.
+  if (!cat && !(opts && opts.clear === true)) {
+    showToast('Choose a category first — or use Clear to empty these', 'warning');
+    return;
+  }
   const prev = {};
   let n = 0;
   (STATE.finTxns||[]).forEach(t => {
@@ -38874,8 +38942,26 @@ window.cmdRenderBank = function(){
         <span style="font-size:11px;font-weight:600">${selN} selected</span>
         <select class="fs" id="fin-bulk-cat" style="min-height:auto;padding:6px 8px;font-size:11px" onchange="bankBulkCat(this.value)">${catOpts(FIN_TX_FILTER.bulk||'')}</select>
         <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankBulkCategorize()">Set category</button>
-        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectClear()">Clear</button>
-      </div>` : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankBulkCategorize({clear:true})" title="Empty the category on all ${selN} — undoable">Uncategorize</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectClear()">Deselect</button>
+      </div>` : ''}
+      ${(function(){
+        // The one-tap path for a recurring merchant. Only offered when a filter
+        // is narrowing the ledger, because "select all 1,436" is not a thing
+        // anybody wants, and only when it would select more than is on screen —
+        // otherwise the checkboxes are right there.
+        var narrowed = FIN_TX_FILTER.q || FIN_TX_FILTER.cat || FIN_TX_FILTER.mode !== 'all';
+        if (!narrowed) return '';
+        var matchN = finTxFiltered((STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; })).length;
+        if (!matchN || matchN <= selN) return '';
+        var what = FIN_TX_FILTER.q ? '“' + slEsc(FIN_TX_FILTER.q) + '”'
+          : FIN_TX_FILTER.cat ? slEsc(finCatLabel(FIN_TX_FILTER.cat)) : 'this filter';
+        return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectAllMatching()">Select all ${matchN} matching ${what}</button>
+          <span style="font-size:10px;color:var(--muted)">then set a category on the lot — one tap, and undoable</span>
+        </div>`;
+      })()}
+      ${selN ? '' : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:10px;color:var(--muted)">
         <span>Categories:</span>
         <!-- EVERY category, not just the ones you added. Showing only the custom
