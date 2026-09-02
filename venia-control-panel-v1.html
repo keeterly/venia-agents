@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '450';
+  const BUILD = '451';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35351,6 +35351,161 @@ function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 //
 // A statement that quietly claimed to balance would be worse than one that
 // explains why it cannot.
+// ══════════════════════════════════════════════════════════════════════════
+//  THE CASH FLOW STATEMENT — the third document, and the most reliable one
+// ══════════════════════════════════════════════════════════════════════════
+// The P&L is a mixed basis and the balance sheet has no double entry behind it.
+// This one is neither: it is built ENTIRELY from money that actually moved
+// through the bank, so there is nothing estimated, accrued or inferred in it.
+// That makes it the statement a lender can lean on hardest, and it is worth
+// saying so on the page rather than leaving all three looking equally soft.
+//
+// MANUFACTURING CASH BELONGS HERE. The P&L deliberately keeps fabric and
+// production out of operating expenses, because their cost reaches it through
+// COGS as garments sell. A cash flow statement has the opposite job: that money
+// left the bank this period whatever the P&L does with it, so it appears in
+// full. The two statements disagreeing about factory payments is correct, and
+// the note says why — otherwise it looks like one of them is wrong.
+//
+// DIRECT METHOD, because it is derivable. An indirect reconciliation starts
+// from net profit and adjusts for non-cash items, which needs a general ledger
+// this app does not have. Listing what actually came in and went out needs only
+// the bank.
+function finCashFlow(){
+  const now = new Date();
+  const yr = now.getFullYear();
+  const jan1 = yr + '-01-01';
+  const bank = (typeof finBankData === 'function') ? finBankData() : null;
+
+  // FINANCING is money that changes who owns what. Everything else that moved
+  // is operating, for a brand with no plant to buy — including the factory
+  // payments the P&L excludes.
+  const FIN_CATS = { owner_draw: 1, owner_invest: 1, loan: 1 };
+
+  let opIn = 0, opOut = 0, finIn = 0, finOut = 0;
+  let transferIn = 0, transferOut = 0, uncatOut = 0, uncatIn = 0;
+  const outBy = {}, inBy = {};
+  let rows = 0, earliest = '';
+
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void' || t.status === 'pending') return;
+    const d = String(t.date || '');
+    if (!d || d < jan1) return;
+    const amt = t.amount || 0;
+    if (!amt) return;
+    rows++;
+    if (!earliest || d < earliest) earliest = d;
+    const c = (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category || '')) || '';
+
+    // Transfers are our own money between our own accounts. Netted and reported
+    // separately: counting one leg as cash leaving the business is how a
+    // healthy month reads as a bad one.
+    if (c === 'transfer') { if (amt < 0) transferOut += -amt; else transferIn += amt; return; }
+
+    if (FIN_CATS[c]) {
+      if (amt < 0) { finOut += -amt; outBy[c] = (outBy[c] || 0) + -amt; }
+      else { finIn += amt; inBy[c] = (inBy[c] || 0) + amt; }
+      return;
+    }
+    if (amt < 0) {
+      opOut += -amt;
+      const k = c || '_uncat';
+      outBy[k] = (outBy[k] || 0) + -amt;
+      if (!c) uncatOut += -amt;
+    } else {
+      opIn += amt;
+      const k = c || '_uncat';
+      inBy[k] = (inBy[k] || 0) + amt;
+      if (!c) uncatIn += amt;
+    }
+  });
+
+  const netOperating = opIn - opOut;
+  const netFinancing = finIn - finOut;
+  const netTransfers = transferIn - transferOut;
+  const netMovement = netOperating + netFinancing + netTransfers;
+
+  // Closing cash is the bank's own figure. Opening is therefore DERIVED, not
+  // observed — the app never saw the balance on 1 January. Stated as derived,
+  // because a reader would otherwise take it for a fact.
+  const closing = bank && bank.connected ? (bank.bal || 0) : null;
+  const opening = closing == null ? null : closing - netMovement;
+
+  const line = (label, amount, note) => ({ label: label, amount: amount, note: note || '' });
+  const sortBy = (o) => Object.keys(o).sort(function(a, b){ return o[b] - o[a]; });
+
+  return {
+    entity: 'VENIA Collection',
+    title: 'Statement of Cash Flows',
+    periodLabel: 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
+      { month: 'long', day: 'numeric', year: 'numeric' }),
+    preparedAt: now, currency: 'USD',
+    operatingIn: sortBy(inBy).filter(k => !FIN_CATS[k]).map(k => line(
+      k === '_uncat' ? 'Unclassified receipts' : (typeof finCatLabel === 'function' ? finCatLabel(k) : k),
+      inBy[k])),
+    operatingOut: sortBy(outBy).filter(k => !FIN_CATS[k]).map(k => line(
+      k === '_uncat' ? 'Unclassified payments' : (typeof finCatLabel === 'function' ? finCatLabel(k) : k),
+      outBy[k])),
+    operatingInTotal: opIn, operatingOutTotal: opOut, netOperating: netOperating,
+    financing: sortBy(inBy).filter(k => FIN_CATS[k]).map(k => line(
+      (typeof finCatLabel === 'function' ? finCatLabel(k) : k) + ' received', inBy[k]))
+      .concat(sortBy(outBy).filter(k => FIN_CATS[k]).map(k => line(
+        (typeof finCatLabel === 'function' ? finCatLabel(k) : k) + ' paid', outBy[k]))),
+    netFinancing: netFinancing,
+    transfersIn: transferIn, transfersOut: transferOut, netTransfers: netTransfers,
+    netMovement: netMovement,
+    opening: opening, closing: closing,
+    rows: rows, from: earliest,
+    uncatOut: uncatOut, uncatIn: uncatIn,
+    notes: finCashFlowNotes(bank, netTransfers, transferIn, transferOut, uncatOut, uncatIn, earliest, jan1),
+  };
+}
+window.finCashFlow = finCashFlow;
+
+function finCashFlowNotes(bank, netTransfers, tIn, tOut, uncatOut, uncatIn, earliest, jan1){
+  const n = [];
+  n.push('Unaudited, prepared by VENIA Collection from its own records. Unlike the profit and loss '
+    + 'statement, NOTHING here is accrued, estimated or inferred: every line is money that actually '
+    + 'moved through the bank in the period. It is the most reliable of the three statements, and '
+    + 'the direct method is used because it needs only the bank — an indirect reconciliation would '
+    + 'start from net profit and require a general ledger this company does not keep.');
+  n.push('FACTORY AND FABRIC PAYMENTS ARE INCLUDED HERE IN FULL, and are deliberately excluded from '
+    + 'operating expenses on the profit and loss statement, where their cost arrives through cost of '
+    + 'goods sold as the garments sell. The two statements are meant to disagree about this: one '
+    + 'reports when the money left, the other when the cost was earned.');
+  if (!bank || !bank.connected) {
+    n.push('NO BANK IS CONNECTED, so there is no closing balance to anchor these movements against '
+      + 'and no opening balance can be derived. The figures below are what the ledger holds, not a '
+      + 'reconciled cash position.');
+  } else {
+    n.push('Closing cash is the balance the bank reports today. The opening balance is DERIVED by '
+      + 'subtracting the movements below from it — this application was not connected on 1 January '
+      + 'and never observed that figure. If any movement in the period is missing from the ledger, '
+      + 'the error lands entirely on the opening balance.');
+  }
+  if (earliest && earliest > jan1) {
+    n.push('The earliest movement on record is ' + earliest + ', not 1 January. Anything that moved '
+      + 'before that date is absent from every figure below, and from the derived opening balance.');
+  }
+  if (tIn > 0 || tOut > 0) {
+    n.push('$' + Math.round(tOut).toLocaleString() + ' out and $' + Math.round(tIn).toLocaleString()
+      + ' in are transfers between the company\'s own accounts, shown separately and NOT counted as '
+      + 'operating cash. They net to $' + Math.round(Math.abs(netTransfers)).toLocaleString()
+      + (Math.abs(netTransfers) > 1
+        ? ' — a transfer that does not net to zero means only one side of it is in the ledger, '
+          + 'usually because the other account is not connected.'
+        : ', as they should.'));
+  }
+  if (uncatOut > 0 || uncatIn > 0) {
+    n.push('$' + Math.round(uncatOut).toLocaleString() + ' of payments and $'
+      + Math.round(uncatIn).toLocaleString() + ' of receipts have not been assigned a category. They '
+      + 'are INCLUDED in the totals — money that moved is cash flow whether or not it has been '
+      + 'labelled — so classifying them changes the breakdown, never the net movement.');
+  }
+  return n;
+}
+window.finCashFlowNotes = finCashFlowNotes;
+
 function finBalanceSheet(){
   const now = new Date();
   const d = cmdMoneyData();
@@ -35887,6 +36042,87 @@ window.finPLPeriodNote = finPLPeriodNote;
 // The document. Print → Save as PDF is the submission format everyone accepts.
 // The printed statement of financial position. Same chrome as the P&L on
 // purpose — a lender receives both together and they should look like one pack.
+window.finPrintCF = function(){
+  const cf = finCashFlow();
+  const esc = (t) => String(t == null ? '' : t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const money = (n) => n == null ? '—'
+    : (n < 0 ? '(' : '') + '$' + Math.abs(Math.round(n)).toLocaleString() + (n < 0 ? ')' : '');
+  const row = (label, amount, o) => '<tr class="' + ((o && o.cls) || '') + '">'
+    + '<td>' + esc(label) + '</td><td class="n">' + money(amount) + '</td></tr>';
+  const section = (t) => '<tr><td colspan="2" class="sec">' + esc(t) + '</td></tr>';
+  const lines = (arr) => arr.length
+    ? arr.map(function(r){ return row(r.label, r.amount); }).join('')
+    : '<tr><td colspan="2" class="sub">None recorded in the period.</td></tr>';
+
+  const body = section('Cash received — operating')
+    + lines(cf.operatingIn) + row('Total received', cf.operatingInTotal, { cls: 'tot' })
+    + section('Cash paid — operating')
+    + lines(cf.operatingOut) + row('Total paid', cf.operatingOutTotal, { cls: 'tot' })
+    + row('Net cash from operations', cf.netOperating, { cls: 'big' })
+    + (cf.financing.length
+        ? section('Financing') + lines(cf.financing)
+          + row('Net cash from financing', cf.netFinancing, { cls: 'tot' })
+        : '')
+    + (cf.transfersIn || cf.transfersOut
+        ? section('Between our own accounts — not operating cash')
+          + row('Transferred out', cf.transfersOut) + row('Transferred in', cf.transfersIn)
+          + row('Net', cf.netTransfers, { cls: 'tot' })
+        : '')
+    + section('Reconciliation')
+    + row('Opening cash — derived, not observed', cf.opening)
+    + row('Net movement in the period', cf.netMovement)
+    + row('Closing cash — reported by the bank', cf.closing, { cls: 'big' });
+
+  const notes = cf.notes.map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+    + esc(cf.entity) + ' — Statement of Cash Flows</title><style>'
+    + 'body{font-family:Georgia,"Times New Roman",serif;color:#111;max-width:720px;margin:0 auto;padding:40px 24px 110px;background:#fff}'
+    + 'h1{font-family:Helvetica,Arial,sans-serif;font-size:15px;letter-spacing:4px;text-transform:uppercase;margin:0 0 2px}'
+    + 'h2{font-family:Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#666;font-weight:400;margin:0 0 2px}'
+    + '.meta{font-size:10.5px;color:#666;margin-bottom:22px}'
+    + 'table{width:100%;border-collapse:collapse;margin-bottom:6px}'
+    + 'td{padding:5px 0;font-size:12px;vertical-align:baseline}'
+    + 'td.n{text-align:right;font-family:"DM Mono",Menlo,monospace;white-space:nowrap}'
+    + 'td.sec{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;padding:16px 0 4px;border-bottom:1px solid #ddd}'
+    + 'td.sub{font-size:10px;color:#777;padding:0 0 5px 14px}'
+    + 'tr.tot td{border-top:1px solid #111;font-weight:700}'
+    + 'tr.big td{border-top:2px solid #111;border-bottom:2px solid #111;font-size:13.5px;font-weight:700;padding:8px 0}'
+    + '.notes{margin-top:34px;border-top:1px solid #111;padding-top:14px}'
+    + '.notes h3{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;margin:0 0 8px}'
+    + '.notes ol{margin:0;padding-left:18px}'
+    + '.notes li{font-size:10.5px;line-height:1.75;color:#333;margin-bottom:8px}'
+    + '.sign{margin-top:40px;font-size:10.5px;color:#555;line-height:1.9}'
+    + '.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;justify-content:center;'
+    +   'padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);'
+    +   'border-top:1px solid #ddd;font-family:Helvetica,Arial,sans-serif}'
+    + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
+    +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
+    + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '@media print{body{padding:24px 0}button{display:none}.bar{display:none}}'
+    + '</style></head><body>'
+    + '<h1>' + esc(cf.entity) + '</h1><h2>' + esc(cf.title) + '</h2>'
+    + '<div class="meta">' + esc(cf.periodLabel) + '  ·  ' + esc(cf.currency)
+    +   '  ·  Unaudited — prepared by the company</div>'
+    + '<table>' + body + '</table>'
+    + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
+    + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
+    +   'VENIA Collection · Los Angeles, California</div>'
+    + '<div class="bar">'
+    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
+    +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    + '</div><' + '/body></html>';
+
+  const w = window.open('', '_blank', 'width=900,height=1000');
+  if (!w) { showToast('Allow pop-ups to open the statement', 'warning'); return null; }
+  w.document.write(html); w.document.close();
+  const wide = (w.innerWidth || 900) >= 700 && !/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  if (wide) setTimeout(function(){ try { w.print(); } catch(e){} }, 400);
+  try { logActivity('Cash flow statement generated — ' + cf.periodLabel); } catch(e){}
+  return cf;
+};
+
 window.finPrintBS = function(){
   const bs = finBalanceSheet();
   const esc = (t) => String(t == null ? '' : t)
@@ -36320,7 +36556,7 @@ window.cmdRenderMoney = function() {
     <div class="money-cols">
     <section>
     <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2>
-      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintBS()" title="What the business is worth on a day — the other half of a lender's pack">↓ Balance sheet</button></div>
+      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintBS()" title="What the business is worth on a day — the other half of a lender's pack">↓ Balance sheet</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintCF()" title="Where the money actually went — built entirely from bank movements, nothing estimated">↓ Cash flow</button></div>
     </div>
     <div class="money-block">
       ${line('DTC revenue', d.p.ytd||0, 'Shopify, live')}
