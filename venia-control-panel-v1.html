@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '449';
+  const BUILD = '450';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26662,7 +26662,7 @@ async function agentSend(key, message) {
     if (extraBlocks) {
       shown += '\n\n⚠ I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
     }
-    SK.history.push({ role: 'assistant', content: shown });
+    SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim) });
     skSaveHistory();
     if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
@@ -26671,12 +26671,30 @@ async function agentSend(key, message) {
     if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); try { appendAgentNote(body, '⚠ That change did NOT save — ' + (e && e.message || 'something went wrong') + '. Please try again.'); } catch(_){} } }
     agentEndWork(workKey, !!action);
   } catch (err) {
-    think.__done && think.__done();
-    agentEndWork(workKey, false);
-    const t = think.querySelector('.sk-work');
     if (err && err.__cfoQueued) {
-      if (t) t.outerHTML = `<div class="sk-msg-body">☁ Working on it in the cloud — you can close the app any time. You’ll get a push when it’s ready, and the answer will be here when you return.</div>`;
-    } else if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
+      // QUEUED IS NOT FINISHED. Calling __done() here stopped the animation and
+      // ended the work tracking while the run was still going, so the app looked
+      // idle for the whole cloud turn — and because the job was never registered,
+      // the answer arrived as a new bubble instead of replacing the one that had
+      // been spinning. The dock path already did this correctly; the CFO's did
+      // not. Keep the indicator alive and hand the job the bubble to land in.
+      SK.cloudJobs = SK.cloudJobs || {};
+      if (err.__cfoJobId) SK.cloudJobs[err.__cfoJobId] = { think: think, workKey: workKey };
+      try { think.__note && think.__note('Working in the cloud — you can close the app'); } catch(e){}
+      if (!err.__cfoJobId) {
+        // No id came back, so nothing will ever land in this bubble. Say so
+        // rather than leaving it spinning for good.
+        think.__done && think.__done();
+        agentEndWork(workKey, false);
+        const t0 = think.querySelector('.sk-work');
+        if (t0) t0.outerHTML = `<div class="sk-msg-body">☁ Working on it in the cloud — you can close the app any time. You’ll get a push when it’s ready, and the answer will be here when you return.</div>`;
+      }
+    } else {
+      think.__done && think.__done();
+      agentEndWork(workKey, false);
+      const t = think.querySelector('.sk-work');
+      if (t) t.outerHTML = `<div class="sk-msg-body"><span style="color:var(--red)">&#x26A0; ${escHtml(err.message)}</span></div>`;
+    }
   }
   body.scrollTop = body.scrollHeight;
 }
@@ -27365,6 +27383,36 @@ function agentImageActionSpec() {
 // carries no action block, nothing was saved and the sentence is false — which
 // is worse than any missing feature, because the founder stops checking.
 const AGENT_CLAIM_RE = /\b(filed|saved|added|created|logged|recorded|updated|set up|entered|onboarded)\b[^.!?\n]{0,60}\b(it|them|that|this|correctly|now|to (?:the|your))\b|\b(?:i(?:'ve| have)?)\s+(?:just\s+)?(?:filed|saved|added|created|logged|recorded|updated|onboarded)\b/i;
+// WHAT THE MODEL SEES OF ITS OWN LAST TURN.
+//
+// The action block is stripped before the reply is shown, and the STRIPPED text
+// is what goes into the history the next turn is built from. So a model that
+// filed something correctly reads its own past turn as pure prose — and after
+// two or three of those, the transcript is a few-shot example teaching it that
+// replies here do not carry blocks. It then answers "Filed" and emits nothing,
+// which is exactly the failure a founder hit three times running.
+//
+// The transcript therefore records what actually happened. A turn that acted
+// says so; a turn that CLAIMED to act and did not is corrected in the place the
+// model will read it, rather than only in the place the founder will.
+function agentHistoryText(shown, action, unbacked){
+  if (action && action.type) {
+    // No backticks in the marker. A fenced block inside the transcript could
+    // read as a real block boundary on the next turn, and the whole point of
+    // this note is to be unambiguous about where blocks belong.
+    return shown + '\n\n[You emitted a venia:action block of type "' + action.type
+      + '" with this reply and it was applied. The block itself is stripped from the transcript for '
+      + 'readability — it WAS there. Keep emitting one whenever you change a record.]';
+  }
+  if (unbacked) {
+    return shown + '\n\n[SYSTEM CORRECTION — that reply said a change had been made but carried NO '
+      + 'venia:action block, so nothing was written. Prose never changes a record in this app; '
+      + 'only the block does. Do not repeat the claim. Re-issue the change WITH the block.]';
+  }
+  return shown;
+}
+window.agentHistoryText = agentHistoryText;
+
 function agentExtractAction(text) {
   const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
   if (!m) {
@@ -37148,7 +37196,12 @@ async function cfoCallCloudFirst(sysPrompt, history, userMsg){
     agent: 'eni', agKey: 'fin', itemId: 'cfo-chat',
     note: { title: 'Your CFO replied', body: 'The answer is waiting in the Enigma dock.', tag: 'venia-cfo-chat' },
   });
-  if (queued) { const q = new Error('queued'); q.__cfoQueued = true; throw q; }
+  // The job id rides the throw. Without it the caller cannot register the turn
+  // in SK.cloudJobs, and cfoChatApply — which looks the turn up by id to find
+  // the working bubble it should replace — lands the answer as a fresh message
+  // with no indicator ever having run. That is the "no AI Working animation"
+  // the founder saw.
+  if (queued) { const q = new Error('queued'); q.__cfoQueued = true; q.__cfoJobId = queued; throw q; }
   return await _callClaudeOnce(sysPrompt, null, history);
 }
 // Queue ONE agent turn to the cloud. Used by the CFO and by both dock personas
@@ -37325,7 +37378,7 @@ function cfoChatApply(status, result, job){
   }
   if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
   SK.history = SK.history || [];
-  SK.history.push({ role: 'assistant', content: shown });
+  SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim) });
   if (SK.history.length > 40) SK.history = SK.history.slice(-40);
   try { skSaveHistory(); } catch(e){}
   const landed = land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
@@ -38535,7 +38588,7 @@ window.cmdRenderBank = function(){
       <div style="grid-column:2/4;display:flex;gap:8px;align-items:center">
         <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(t.date||'')}</span>
         ${FIN_TX_FILTER.mode === 'uncat' && FIN_TX_KEEP[t.id] && t.category ? '<span style="color:var(--green);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">Filed \u2713</span>' : ''}
-        <select class="fs" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px" onchange="bankSetCategory('${slEsc(t.id)}', this.value)">${catOpts(t.category||'')}</select>
+        <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value)">${catOpts(finTxnCat(t) || '')}</select>
       </div>
     </div>`).join('');
   el.innerHTML = stats
@@ -48733,15 +48786,17 @@ async function skSend(preset, opts){
       return;
     }
     const reply = await callClaude(system, null, callHist);
-    let shown = reply, action = null;
+    let shown = reply, action = null, unbacked = false;
     if (hasActions) {
       const parsed = agentExtractAction(reply);
       action = parsed.action;
+      unbacked = !parsed.action && !parsed.parseError && parsed.unbackedClaim;
       shown = parsed.parseError
         ? ((parsed.clean || '') + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.').trim()
         : (parsed.clean || (action ? "Done — here's what I set up:" : reply));
+      if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
     }
-    SK.history.push({role:'assistant', content:shown});
+    SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked)});
     skSaveHistory();
     // The bubble is already on screen, so this reply IS rendered — it just may
     // not have been looked at.
