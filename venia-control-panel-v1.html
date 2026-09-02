@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '445';
+  const BUILD = '446';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -37507,10 +37507,14 @@ function bankImportKey(date, amount, desc){
   const d = bankImportNorm(desc).toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 40);
   return String(date) + '|' + Number(amount).toFixed(2) + '|' + d;
 }
-function bankImportId(key){
+// The occurrence index is part of the identity, not decoration: three identical
+// coffees on one day are three transactions, and they need three ids that are
+// still STABLE, so re-importing the same file lands on the same three.
+function bankImportId(key, occ){
   let h = 5381;
   for (let i = 0; i < key.length; i++) h = ((h * 33) ^ key.charCodeAt(i)) >>> 0;
-  return 'imp_' + h.toString(36) + '_' + key.slice(0, 10).replace(/[^0-9]/g, '');
+  return 'imp_' + h.toString(36) + '_' + key.slice(0, 10).replace(/[^0-9]/g, '')
+    + (occ > 1 ? '_' + occ : '');
 }
 
 // Find the header row and the columns that matter. Returns the reason it could
@@ -37592,24 +37596,45 @@ function bankImportPlan(rows){
 }
 
 // What importing WOULD do, computed against the ledger as it stands.
+// COUNTING, NOT SET MEMBERSHIP.
+//
+// A statement genuinely contains repeats: two identical Zelle payments on one
+// day, three coffees at the same price. Treating the key as a set collapses them
+// into one transaction and quietly loses the rest — on a full-history import
+// that is hundreds of real payments gone, and the total would never foot.
+//
+// So the ledger is counted per key, the file is counted per key, and what is
+// imported is the DIFFERENCE. Re-importing the same file yields the same counts
+// and therefore imports nothing, which is what made a set look sufficient.
 function bankImportReconcile(rows){
-  const seen = {};
+  const have = {};
   (STATE.finTxns || []).forEach(t => {
-    if (t && t.date != null) seen[bankImportKey(t.date, t.amount || 0, t.desc || '')] = true;
+    if (!t || t.date == null) return;
+    const k = bankImportKey(t.date, t.amount || 0, t.desc || '');
+    have[k] = (have[k] || 0) + 1;
   });
-  const fresh = [], dupes = [], within = {};
+  const fresh = [], dupes = [], occ = {};
   rows.forEach(r => {
     const key = bankImportKey(r.date, r.amount, r.desc);
-    if (seen[key] || within[key]) { dupes.push(r); return; }
-    within[key] = true;
-    fresh.push(Object.assign({}, r, { _key: key }));
+    const n = (occ[key] = (occ[key] || 0) + 1);
+    if (n <= (have[key] || 0)) { dupes.push(r); return; }
+    fresh.push(Object.assign({}, r, { _key: key, _occ: n }));
   });
   const dates = rows.map(r => r.date).sort();
+  // WOULD THIS IMPORT PUSH THE LEDGER PAST THE CAP?
+  //
+  // Asked BEFORE writing, because a full-history import is exactly the thing
+  // that reaches it, and finding out afterwards means the oldest years — the
+  // reason for importing at all — are already gone. Warning after the fact is
+  // the same mistake the retention cap made for months.
+  const after = (STATE.finTxns || []).length + fresh.length;
+  const cap = (typeof BANK_KEEP !== 'undefined') ? BANK_KEEP : 10000;
   return {
     fresh: fresh, dupeCount: dupes.length, total: rows.length,
     from: dates[0] || '', to: dates[dates.length - 1] || '',
     inflow: fresh.reduce((t, r) => t + (r.amount > 0 ? r.amount : 0), 0),
     outflow: fresh.reduce((t, r) => t + (r.amount < 0 ? -r.amount : 0), 0),
+    ledgerAfter: after, cap: cap, overCap: Math.max(0, after - cap),
   };
 }
 
@@ -37623,7 +37648,7 @@ window.bankImportApply = function(){
   let added = 0;
   plan.fresh.forEach(r => {
     STATE.finTxns.push({
-      id: bankImportId(r._key), acct: 'imported', date: r.date, amount: r.amount,
+      id: bankImportId(r._key, r._occ || 1), acct: 'imported', date: r.date, amount: r.amount,
       desc: r.desc, status: 'posted', src: 'import',
       importedAt: new Date().toISOString(),
       category: (typeof bankAutoCategory === 'function' ? bankAutoCategory(r.desc, r.amount) : '') || '',
@@ -37714,6 +37739,12 @@ window.bankImportPreview = async function(){
     +   (rec.from ? 'Covers <strong>' + slEsc(rec.from) + '</strong> to <strong>' + slEsc(rec.to) + '</strong>. ' : '')
     +   'New rows: ' + money(rec.outflow) + ' out, ' + money(rec.inflow) + ' in.'
     + '</div>'
+    + (rec.overCap ? '<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);'
+        + 'padding:10px 12px;margin-top:12px;font-size:10.5px;color:var(--ink);line-height:1.7">'
+        + '<strong>This would take the ledger to ' + rec.ledgerAfter.toLocaleString() + ' rows, past the '
+        + rec.cap.toLocaleString() + ' it can hold.</strong> The oldest ' + rec.overCap.toLocaleString()
+        + ' would be dropped — which on a history import is the years you are importing FOR. Import a '
+        + 'shorter range, or export the ledger first so nothing is lost for good.</div>' : '')
     + (rec.fresh.length ? '<div style="margin-top:14px;display:flex;gap:8px">'
         + '<button class="btn btn-gold btn-sm" onclick="bankImportApply()">Import ' + rec.fresh.length + ' &rarr;</button>'
         + '</div>'

@@ -3507,3 +3507,41 @@ riding inside the module blob. That is the real architecture for a financial
 backbone, and it is years away.
 
 `gauntlet/ledger.js` — 16 assertions, 13 of which fail against Build 444.
+
+---
+
+## Build 446 — three identical coffees are three transactions
+
+Said before importing: *"I was planning to import transaction history CSV from
+account opening that I exported from Chase."* Checking that path first found a
+bug that would have silently cost money on exactly that import.
+
+### Identical rows were collapsing into one
+
+`bankImportReconcile` treated the dedupe key as **set membership**. A statement
+genuinely repeats itself — two identical Zelle payments in a day, three coffees
+at the same price — and all three became one transaction. On a full account
+history that is potentially hundreds of real payments gone, with no signal
+except a total that never foots against the bank.
+
+Now it **counts**: occurrences per key in the ledger, occurrences per key in the
+file, import the difference. Three identical coffees import as three, each with
+its own stable id — and re-importing the same file still adds nothing. Set
+membership could only ever deliver one of those two.
+
+### The other Chase export
+
+The card CSV is a different shape entirely — `Transaction Date, Post Date,
+Description, Category, Type, Amount, Memo`. It already parsed correctly (taking
+Transaction Date over Post Date, and not mistaking Chase's own `Category` for the
+description), and is now pinned in the gauntlet so it cannot regress.
+
+### The cap warns before, not after
+
+An import that would push the ledger past 10,000 now says by how much **before
+writing**, with the point made plainly: on a history import the rows that get
+dropped are the years being imported for. Finding out afterwards would be the
+same mistake the retention cap made for months.
+
+`gauntlet/bankimport.js` — now 23 assertions, the 3 new behaviours failing
+against Build 445.
