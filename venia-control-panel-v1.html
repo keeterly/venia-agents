@@ -38578,7 +38578,13 @@ window.bankTxMode = function(m){ FIN_TX_FILTER.mode = m; FIN_TX_FILTER.limit = 4
 // Ticking another row re-renders the bulk bar, so the category already chosen
 // has to survive that — otherwise picking a category then selecting one more
 // row silently resets it to "—".
-window.bankBulkCat = function(v){ FIN_TX_FILTER.bulk = v; };
+window.bankBulkCat = function(v){
+  FIN_TX_FILTER.bulk = v;
+  // The select is the founder's visible choice and bankBulkCategorize reads it,
+  // so the two must not drift apart — a stored intent the button cannot see is
+  // how an empty category reached the write in the first place.
+  try { const el = document.getElementById('fin-bulk-cat'); if (el && el.value !== v) el.value = v; } catch(e){}
+};
 window.bankToggleAccts = function(){ FIN_TX_FILTER.accts = !FIN_TX_FILTER.accts; cmdRenderBank(); };
 // Fix transactions by typing. The founder's sentence goes to the CFO with the
 // rows it is about attached — the ticked ones, else whatever the filter is
@@ -38622,13 +38628,45 @@ window.bankTxMore = function(){ FIN_TX_FILTER.limit = (FIN_TX_FILTER.limit || 40
 window.finSpendBlock = finSpendBlock;
 window.bankSelectTxn = function(id, on){ if (on) FIN_TX_SEL[id] = 1; else delete FIN_TX_SEL[id]; cmdRenderBank(); };
 window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
+// SELECT EVERY ROW THE FILTER MATCHES, not just the page you can see.
+//
+// Filing a recurring merchant across two years is the main job after a history
+// import, and there were only two ways to do it: tick fourteen boxes spread
+// across a 1,436-row ledger twenty-five at a time, or ask the CFO — which
+// depends on a model reliably emitting fourteen ids and, measured against the
+// live ledger, it does not. This is the third way and it cannot fail: the
+// filter already knows exactly which rows match, so it selects them.
+window.bankSelectAllMatching = function(){
+  const all = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
+  const rows = finTxFiltered(all);
+  // Selecting past the page is only safe because the founder can SEE the count
+  // before they set anything, and every bulk set is undoable.
+  rows.forEach(t => { FIN_TX_SEL[t.id] = 1; });
+  cmdRenderBank();
+  try { showToast(rows.length + ' row' + (rows.length === 1 ? '' : 's') + ' selected', 'info'); } catch(e){}
+};
 // Bulk set — one undo restores every row it touched.
-window.bankBulkCategorize = function(){
+window.bankBulkCategorize = function(opts){
   const sel = document.getElementById('fin-bulk-cat');
   const cat = sel ? sel.value : (FIN_TX_FILTER.bulk || '');
   const ids = Object.keys(FIN_TX_SEL).filter(k => FIN_TX_SEL[k]);
   if (!ids.length) return;
   if (cat && finAllCats().indexOf(cat) < 0) return;
+  // AN EMPTY CATEGORY USED TO MEAN "WIPE THEM ALL".
+  //
+  // The dropdown starts on "—". Select fifteen rows, some already filed, press
+  // Set category without touching it, and every one of them was silently
+  // cleared — which is exactly what "setting a transaction type removed a tag
+  // from another one" looks like from the outside. The guard above let '' pass
+  // because it only rejected names it did not recognise, and '' is not a name.
+  //
+  // Clearing in bulk is still possible, but it has to be asked for: the Clear
+  // button passes {clear:true}. Pressing the primary button with nothing chosen
+  // now does nothing except say so.
+  if (!cat && !(opts && opts.clear === true)) {
+    showToast('Choose a category first — or use Clear to empty these', 'warning');
+    return;
+  }
   const prev = {};
   let n = 0;
   (STATE.finTxns||[]).forEach(t => {
@@ -38904,8 +38942,26 @@ window.cmdRenderBank = function(){
         <span style="font-size:11px;font-weight:600">${selN} selected</span>
         <select class="fs" id="fin-bulk-cat" style="min-height:auto;padding:6px 8px;font-size:11px" onchange="bankBulkCat(this.value)">${catOpts(FIN_TX_FILTER.bulk||'')}</select>
         <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankBulkCategorize()">Set category</button>
-        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectClear()">Clear</button>
-      </div>` : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankBulkCategorize({clear:true})" title="Empty the category on all ${selN} — undoable">Uncategorize</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectClear()">Deselect</button>
+      </div>` : ''}
+      ${(function(){
+        // The one-tap path for a recurring merchant. Only offered when a filter
+        // is narrowing the ledger, because "select all 1,436" is not a thing
+        // anybody wants, and only when it would select more than is on screen —
+        // otherwise the checkboxes are right there.
+        var narrowed = FIN_TX_FILTER.q || FIN_TX_FILTER.cat || FIN_TX_FILTER.mode !== 'all';
+        if (!narrowed) return '';
+        var matchN = finTxFiltered((STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; })).length;
+        if (!matchN || matchN <= selN) return '';
+        var what = FIN_TX_FILTER.q ? '“' + slEsc(FIN_TX_FILTER.q) + '”'
+          : FIN_TX_FILTER.cat ? slEsc(finCatLabel(FIN_TX_FILTER.cat)) : 'this filter';
+        return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectAllMatching()">Select all ${matchN} matching ${what}</button>
+          <span style="font-size:10px;color:var(--muted)">then set a category on the lot — one tap, and undoable</span>
+        </div>`;
+      })()}
+      ${selN ? '' : `<div style="font-size:10px;color:var(--muted);margin-bottom:8px">Tick rows to set a category on several at once — or just tell the CFO in chat, e.g. “file every Zelle payment from Marie as income”.</div>`}
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px;font-size:10px;color:var(--muted)">
         <span>Categories:</span>
         <!-- EVERY category, not just the ones you added. Showing only the custom

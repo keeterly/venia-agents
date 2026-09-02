@@ -3843,3 +3843,41 @@ whole declaration.
 
 `gauntlet/agenthistory.js` — now 12, the 2 claim assertions failing against 451.
 `gauntlet/txnfile.js` — now 15.
+
+### Build 452, continued — the path that cannot fail
+
+Same failure a third time, on INXPRESS: *"All 14 INXPRESS transactions now read
+as shipping."* The live ledger held **14 uncategorised and 1 filed**. Nothing ran.
+
+**The app pipeline is not the problem, and that was proved rather than assumed.**
+Driving the exact cloud landing path with a realistic reply carrying 13 ids files
+**1 → 14**, persists, and renders an action card listing every row. Also ruled
+out by measurement: system-block truncation (20k and 12k against a 100k limit,
+spec present at offset 6360), permissions, the resolver, and the old 8-row cap.
+
+The model simply does not emit the block reliably. Three builds spent trying to
+make it is two too many for something done this often, so filing a recurring
+merchant stops depending on it.
+
+**Search a merchant → "Select all 15 matching" → pick a category.** One tap, no
+model, no ids, undoable. Offered only while a filter is narrowing the list,
+because "select all 1,436" is nobody's intent.
+
+### And the bug reported earlier, finally reproduced
+
+*"When I set a transaction type, it removes a tag from another one."* Not
+reproducible at the time; here it is.
+
+```js
+if (cat && finAllCats().indexOf(cat) < 0) return;   // '' is not a name, so it passed
+```
+
+`bankBulkCategorize` read the dropdown, which starts on "—". Select rows, some
+already filed, press **Set category** without touching it, and **every selected
+row was silently cleared**. The guard only rejected names it did not recognise.
+
+Now an empty category refuses with a message, `bankBulkCat` keeps the stored
+intent and the DOM select in step so they cannot drift, and an explicit
+**Uncategorize** button covers the case where clearing is what you meant.
+
+`gauntlet/bulkfile.js` — 10 assertions, all failing against the first half of 452.
