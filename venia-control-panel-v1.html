@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '452';
+  const BUILD = '453';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -38628,6 +38628,153 @@ window.bankTxMore = function(){ FIN_TX_FILTER.limit = (FIN_TX_FILTER.limit || 40
 window.finSpendBlock = finSpendBlock;
 window.bankSelectTxn = function(id, on){ if (on) FIN_TX_SEL[id] = 1; else delete FIN_TX_SEL[id]; cmdRenderBank(); };
 window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
+// ══════════════════════════════════════════════════════════════════════════
+//  UNFILED, BY MERCHANT — 725 decisions collapsed into about thirty
+// ══════════════════════════════════════════════════════════════════════════
+// Half the ledger is unfiled after a two-year import, and a statement cannot be
+// submitted like that. But those rows are not 725 different problems: they are
+// roughly thirty merchants, each repeating. Grouping them turns an afternoon of
+// scrolling into a short list of decisions, and shows the SIZE of each one so
+// the $96,000 of founder transfers is dealt with before the $73 of taxi rides.
+//
+// The merchant key has to survive a bank's descriptor formats: Zelle names the
+// counterparty, ACH names the originator, and a card charge just runs the
+// merchant and a city together. Each is pulled out where it lives rather than
+// hoping a common prefix exists.
+function finMerchantKey(desc){
+  const d = String(desc || '').toUpperCase();
+  let m = d.match(/ZELLE PAYMENT (?:TO|FROM)\s+([A-Z' -]{2,40})/);
+  if (m) {
+    const dir = /ZELLE PAYMENT FROM/.test(d) ? 'from ' : 'to ';
+    return 'Zelle ' + dir + m[1].trim().split(/\s+/).slice(0, 2).join(' ');
+  }
+  m = d.match(/ORIG CO NAME:\s*([A-Z0-9&.' -]{2,40})/);
+  if (m) {
+    // The originator name runs straight into the bank's own ACH fields, and
+    // WHICH field follows differs between exports of the same payment — Chase
+    // writes "GUSTO CO ENTRY DESCR:…" where Stripe writes "GUSTO ORIG ID:…".
+    // Taking two words blind yields "GUSTO CO" and "GUSTO ORIG": one vendor
+    // split in two. Cut at the first field marker instead.
+    const name = m[1].split(/\b(?:CO ENTRY|ENTRY DESCR|ORIG ID|IND ID|DESC|SEC|TRACE|PPD|CCD|WEB|TEL)\b/)[0];
+    const t2 = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+    if (t2) return t2;
+  }
+  // A card descriptor: strip the payment-network prefix and the trailing phone
+  // number, city and state that make every month look like a different vendor.
+  // "HIS*HISCOX INC" — a short token before an asterisk is the payment
+  // processor's own tag, not the merchant. Keeping it gives a list full of
+  // vendors called "HIS HISCOX" and "SQ BLUE", which reads like noise.
+  const starred = d.match(/^[A-Z]{2,4}\s*\*\s*(.+)$/);
+  const base = starred ? starred[1] : d;
+  const clean = base.replace(/^(SQ|TST|PY|PAYPAL|POS DEBIT|RECURRING CARD|CARD PURCHASE)\s*\*?\s*/i, '')
+    .replace(/\b\d{3}[- ]?\d{3}[- ]?\d{4}\b/g, ' ')
+    .replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return clean.split(' ').slice(0, 2).join(' ') || 'Unnamed';
+}
+function finUnfiledByMerchant(){
+  const groups = {};
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void') return;
+    if (finTxnCat(t)) return;                       // already filed, or inferable
+    const k = finMerchantKey(t.desc);
+    const g = groups[k] = groups[k] || { merchant: k, rows: 0, out: 0, in: 0,
+                                         from: '', to: '', ids: [], sample: t.desc || '' };
+    g.rows++;
+    const a = t.amount || 0;
+    if (a < 0) g.out += -a; else g.in += a;
+    if (!g.from || (t.date && t.date < g.from)) g.from = t.date || '';
+    if (!g.to || (t.date && t.date > g.to)) g.to = t.date || '';
+    g.ids.push(t.id);
+  });
+  return Object.values(groups)
+    .map(g => Object.assign(g, { value: g.out + g.in }))
+    .sort((a, b) => b.value - a.value);
+}
+window.finUnfiledByMerchant = finUnfiledByMerchant;
+
+// File a whole merchant in one call. Same undo as every other bulk write.
+window.finFileMerchant = function(key, cat){
+  if (!cat) { showToast('Choose a category first', 'warning'); return 0; }
+  if (finAllCats().indexOf(cat) < 0) { showToast('No category called "' + cat + '"', 'error'); return 0; }
+  const prev = {}; let n = 0;
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void' || finTxnCat(t)) return;
+    if (finMerchantKey(t.desc) !== key) return;
+    prev[t.id] = t.category || '';
+    t.category = cat; n++;
+  });
+  if (!n) { showToast('Nothing left to file for ' + key, 'info'); return 0; }
+  window.__agPrevTxnCats = prev;
+  save();
+  try { cmdRenderBank(); } catch(e){}
+  showToast(n + ' ' + key + ' row' + (n === 1 ? '' : 's') + ' filed as ' + finCatLabel(cat)
+    + ' — Undo above the list', 'success');
+  try { logActivity('Filed ' + n + ' ' + key + ' transactions as ' + cat); } catch(e){}
+  return n;
+};
+
+// WHAT STILL STANDS BETWEEN THIS LEDGER AND A SUBMITTABLE STATEMENT.
+//
+// Not a score out of ten. Each line is a specific thing a reader of the P&L or
+// the balance sheet would catch, with its size, so it can be worked down.
+function finTagAudit(){
+  const live = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
+  const unfiled = live.filter(t => !finTxnCat(t));
+  const sum = (a, f) => a.reduce((s, t) => s + f(t), 0);
+  const issues = [];
+  const untaggedOut = sum(unfiled.filter(t => (t.amount||0) < 0), t => -(t.amount||0));
+  const untaggedIn = sum(unfiled.filter(t => (t.amount||0) > 0), t => (t.amount||0));
+  if (unfiled.length) issues.push({ key: 'unfiled', level: 'block',
+    label: unfiled.length.toLocaleString() + ' transactions have no category',
+    detail: '$' + Math.round(untaggedOut).toLocaleString() + ' of payments and $'
+      + Math.round(untaggedIn).toLocaleString() + ' of receipts. The payments are counted in '
+      + 'operating expenses as "Unclassified", so the total is right and the breakdown is not — '
+      + 'which is the first thing a lender asks about.' });
+  // A transfer moves our own money between our own accounts: both legs should
+  // be present and cancel. A large net means one side is missing or something
+  // that is not a transfer is filed as one.
+  const tNet = sum(live.filter(t => finTxnCat(t) === 'transfer'), t => (t.amount||0));
+  if (Math.abs(tNet) > 500) issues.push({ key: 'transfer', level: 'check',
+    label: 'Transfers do not cancel — $' + Math.round(Math.abs(tNet)).toLocaleString() + ' net',
+    detail: 'Money moved between your own accounts should net to zero. A net this size means one '
+      + 'leg is missing (the other account is not connected) or something that is not a transfer '
+      + 'is filed as one. Either way the cash flow statement is wrong by this much.' });
+  // A category with a sign it should never have.
+  const wrongSign = [];
+  live.forEach(t => {
+    const c = finTxnCat(t); const a = t.amount || 0;
+    if (!c) return;
+    if (c === 'income' && a < 0) wrongSign.push(t);
+    if (['payroll','rent','software','fabric','production','contractors','shipping','marketing','fees','taxes','insurance']
+        .indexOf(c) >= 0 && a > 0) wrongSign.push(t);
+  });
+  if (wrongSign.length) issues.push({ key: 'sign', level: 'check',
+    label: wrongSign.length + ' transaction' + (wrongSign.length === 1 ? ' has' : 's have')
+      + ' a category its direction contradicts',
+    detail: 'An expense category on money coming IN, or income on money going OUT. Usually a '
+      + 'refund that needs its own treatment, or a filing slip. $'
+      + Math.round(sum(wrongSign, t => Math.abs(t.amount||0))).toLocaleString() + ' in total.' });
+  // Founder money still sitting unfiled is the balance sheet's biggest line.
+  const founderish = unfiled.filter(t => /ZELLE PAYMENT FROM/i.test(t.desc || '') && (t.amount||0) > 0);
+  if (founderish.length > 5) issues.push({ key: 'owner', level: 'check',
+    label: founderish.length + ' unfiled Zelle receipts totalling $'
+      + Math.round(sum(founderish, t => t.amount||0)).toLocaleString(),
+    detail: 'Money arriving from a named person is usually owner investment or a loan, not revenue. '
+      + 'Until it is filed as owner investment or loan principal it appears nowhere on the balance '
+      + 'sheet, and equity is understated by whatever it comes to.' });
+  const inv = (typeof finInventoryAtCost === 'function') ? finInventoryAtCost() : null;
+  if (inv && inv.uncostedUnits > 0) issues.push({ key: 'costed', level: 'check',
+    label: inv.uncostedStyles + ' styles hold stock with no cost sheet',
+    detail: inv.uncostedUnits.toLocaleString() + ' units are excluded from inventory on the balance '
+      + 'sheet and contribute no cost on the P&L, so gross margin is overstated and assets are '
+      + 'understated.' });
+  return { issues: issues, unfiledRows: unfiled.length, unfiledOut: untaggedOut,
+           unfiledIn: untaggedIn, total: live.length,
+           pctFiled: live.length ? Math.round(100 * (live.length - unfiled.length) / live.length) : 100,
+           ready: issues.filter(i => i.level === 'block').length === 0 };
+}
+window.finTagAudit = finTagAudit;
+
 // SELECT EVERY ROW THE FILTER MATCHES, not just the page you can see.
 //
 // Filing a recurring merchant across two years is the main job after a history
@@ -38636,6 +38783,85 @@ window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
 // depends on a model reliably emitting fourteen ids and, measured against the
 // live ledger, it does not. This is the third way and it cannot fail: the
 // filter already knows exactly which rows match, so it selects them.
+// The review screen. One row per merchant, biggest first, with a category
+// dropdown and a File button — so the founder answers "what is this vendor"
+// thirty times instead of "what is this row" seven hundred times.
+window.finReviewOpen = function(){
+  const ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'fin-review-modal';
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  ov.innerHTML = '<div class="modal modal-lg" onclick="event.stopPropagation()">'
+    + '<div class="modal-head"><div class="modal-title">Get the books submission-ready</div>'
+    +   '<button class="modal-close" onclick="document.getElementById(\'fin-review-modal\').remove()" aria-label="Close">&times;</button></div>'
+    + '<div class="modal-body" id="fin-review-body"></div></div>';
+  document.body.appendChild(ov);
+  finReviewRender();
+};
+window.finReviewRender = function(){
+  const el = document.getElementById('fin-review-body');
+  if (!el) return;
+  const a = finTagAudit();
+  const groups = finUnfiledByMerchant();
+  const money = n => '$' + Math.round(n).toLocaleString();
+  const cats = finAllCats();
+  const opts = (id) => '<option value="">Choose…</option>'
+    + cats.map(c => '<option value="' + c + '">' + slEsc(finCatLabel(c)) + '</option>').join('');
+
+  const issues = a.issues.map(i => '<div style="border-left:2px solid '
+    + (i.level === 'block' ? 'var(--red)' : 'var(--amber)')
+    + ';padding:6px 0 6px 10px;margin-bottom:10px">'
+    + '<div style="font-size:11.5px;font-weight:600">' + slEsc(i.label) + '</div>'
+    + '<div style="font-size:10px;color:var(--muted);line-height:1.65;margin-top:2px">' + slEsc(i.detail) + '</div>'
+    + '</div>').join('') || '<div style="font-size:11px;color:var(--green)">Nothing is standing in the way — '
+      + 'every transaction is categorised and no figure contradicts itself.</div>';
+
+  const rows = groups.slice(0, 60).map((g, i) => {
+    const id = 'fr-cat-' + i;
+    return '<div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;'
+      + 'padding:9px 0;border-bottom:1px solid var(--border)">'
+      + '<div style="min-width:0">'
+      +   '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
+      +     slEsc(g.merchant) + '</div>'
+      +   '<div style="font-size:10px;color:var(--muted);font-family:\'DM Mono\',monospace;margin-top:2px">'
+      +     g.rows + ' row' + (g.rows === 1 ? '' : 's') + ' · '
+      +     (g.out ? money(g.out) + ' out' : '') + (g.out && g.in ? ' · ' : '')
+      +     (g.in ? money(g.in) + ' in' : '')
+      +     (g.from ? ' · ' + slEsc(g.from) + (g.to && g.to !== g.from ? ' → ' + slEsc(g.to) : '') : '')
+      +   '</div>'
+      + '</div>'
+      + '<div style="display:flex;gap:5px;align-items:center">'
+      +   '<select class="fs" id="' + id + '" style="min-height:auto;padding:5px 6px;font-size:10.5px;max-width:132px">'
+      +     opts(id) + '</select>'
+      +   '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="finReviewFile(' + JSON.stringify(g.merchant).replace(/"/g, '&quot;') + ", '" + id + "')\">File</button>"
+      + '</div></div>';
+  }).join('');
+
+  el.innerHTML =
+      '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">'
+    +   '<strong>' + a.pctFiled + '% of ' + a.total.toLocaleString() + ' transactions are categorised.</strong> '
+    +   'These are not ' + a.unfiledRows.toLocaleString() + ' separate problems — they are '
+    +   groups.length + ' vendors, each repeating. Answer "what is this vendor" once and every row '
+    +   'of it is filed. Biggest first, because the order matters more than the count.'
+    + '</div>'
+    + '<div style="margin-bottom:16px">' + issues + '</div>'
+    + (rows ? '<div class="ag-sec-head"><h2 class="ag-sec-title">Unfiled vendors — biggest first</h2></div>'
+        + rows
+        + (groups.length > 60 ? '<div style="font-size:10px;color:var(--muted);margin-top:10px">'
+            + '…and ' + (groups.length - 60) + ' smaller vendors below these.</div>' : '')
+      : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:14px;line-height:1.7">'
+    +   'Every filing here is undoable from Money → Cash. Anything you are not sure about, leave — '
+    +   'a wrong category on a submitted statement is worse than an honest "Unclassified" line.'
+    + '</div>';
+};
+window.finReviewFile = function(merchant, selId){
+  const sel = document.getElementById(selId);
+  const cat = sel ? sel.value : '';
+  if (!cat) { showToast('Choose a category for ' + merchant + ' first', 'warning'); return; }
+  finFileMerchant(merchant, cat);
+  finReviewRender();
+};
+
 window.bankSelectAllMatching = function(){
   const all = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
   const rows = finTxFiltered(all);
@@ -38902,6 +39128,15 @@ window.cmdRenderBank = function(){
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankConnect()">+ Add account</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankImportOpen()" title="For the months the feed cannot reach — import a statement CSV">&uarr; Import statement</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankExportCSV()" title="Every transaction, with its category and where it came from">&darr; Export ledger</button>
+        ${(function(){
+          // The route into the review, carrying the number that makes the case
+          // for opening it. Hidden once there is nothing left unfiled.
+          var a = (typeof finTagAudit === 'function') ? finTagAudit() : null;
+          if (!a || !a.unfiledRows) return '';
+          return '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="finReviewOpen()" '
+            + 'title="Group every unfiled row by vendor and file each one in a tap">&#9635; Review '
+            + a.unfiledRows.toLocaleString() + ' unfiled</button>';
+        })()}
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
       <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
