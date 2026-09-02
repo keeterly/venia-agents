@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '443';
+  const BUILD = '444';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35296,8 +35296,35 @@ function finLedgerCoverage(){
   // The strict fact is kept separately from the judgement, so nothing downstream
   // has to guess which one it is reading.
   const TOLERANCE_DAYS = 14;
+
+  // A HOLE IN THE MIDDLE IS AS BAD AS A SHORT START, AND HARDER TO SEE.
+  //
+  // Checking only the earliest date was not enough: a ledger holding January
+  // and September with nothing between them reports that it reaches 1 January
+  // and looks complete. That is exactly what a 180-day feed window produces
+  // when nobody syncs for half a year — the old months are kept, the new ones
+  // arrive, and the span the window slid past is simply absent.
+  //
+  // An operating business with rent and software subscriptions does not have a
+  // month with no transactions at all. So a completed month inside the covered
+  // span with nothing in it is reported — as a question, not a verdict, because
+  // a genuinely dormant month is possible and this cannot tell the difference.
+  const now = new Date();
+  const thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+  const months = {};
+  dates.forEach(d => { months[d.slice(0, 7)] = (months[d.slice(0, 7)] || 0) + 1; });
+  const emptyMonths = [];
+  const startM = from.slice(0, 7);
+  for (let m = 1; m <= 12; m++) {
+    const key = yr + '-' + String(m).padStart(2, '0');
+    if (key < startM) continue;      // before the ledger begins — the gapDays story
+    if (key >= thisMonth) break;     // the current month is not finished
+    if (!months[key]) emptyMonths.push(key);
+  }
+
   return { any: true, from: from, reachesJan1: from <= jan1, gapDays: gapDays,
            materialGap: gapDays > TOLERANCE_DAYS, toleranceDays: TOLERANCE_DAYS,
+           emptyMonths: emptyMonths, byMonth: months,
            yr: yr, count: dates.length };
 }
 window.finLedgerCoverage = finLedgerCoverage;
@@ -35486,6 +35513,19 @@ function finPLStatement(){
       + 'direction a statement must not be wrong in quietly. Bank feeds return roughly the last 180 '
       + 'days, so the missing months cannot be re-fetched — they have to be entered from statements '
       + 'if this period is to be reported in full.');
+  }
+  if (d.bankOpex && cov && cov.any && cov.emptyMonths && cov.emptyMonths.length) {
+    const names = cov.emptyMonths.map(function(k){
+      try { return new Date(k + '-01T00:00:00').toLocaleDateString('en-US',
+        { month: 'long', year: 'numeric' }); } catch (e) { return k; }
+    });
+    notes.push('A MONTH INSIDE THIS PERIOD HAS NO TRANSACTIONS AT ALL. Nothing is recorded in '
+      + names.join(', ') + ', although the ledger covers months either side. A business paying rent '
+      + 'and subscriptions does not have an empty month, so this is more likely a hole in the feed '
+      + 'than a quiet one — and a hole means expenses missing while revenue is counted in full, '
+      + 'which OVERSTATES profit. Bank feeds return roughly the last 180 days: a span nobody synced '
+      + 'through can slide out of the window and never arrive. Import those months from the '
+      + 'statement to close it, or disregard this if the account genuinely was not used.');
   }
   // THE PERIOD A COST BELONGS TO.
   //

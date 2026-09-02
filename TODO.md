@@ -3411,3 +3411,53 @@ header NAME rather than position, and a column cannot be two fields at once.
 Caught because the gauntlet seeds a real export rather than a clean one.
 
 `gauntlet/bankimport.js` — 16 assertions, all of which fail against Build 442.
+
+---
+
+## Build 444 — a hole in the middle is as bad as a short start
+
+Asked whether Plaid is worth it for the history, keeping Stripe for processing.
+
+**The framing is right and the answer is no.** Financial Connections and payment
+processing are separate Stripe products sharing one API key — `stripe.js` does
+Checkout, holds and invoices, `bank.js` does the feed — so swapping the feed
+would not touch processing. But the problem that prompted the question is gone,
+and it is worth being precise about whose fault each part was:
+
+| Cause | Whose |
+|---|---|
+| 180-day window | Stripe's limit — real, permanent |
+| Deleted captured history | **ours** — fixed in 442 |
+| Could not walk past 500 rows | **ours** — fixed in 442 |
+| No backfill path | missing — built in 443 |
+
+Two of three were ours. With retention keeping everything and the sync walking
+2,500 rows, the feed now accumulates permanently: sync twice a year and no month
+is ever lost again. The window only ever bit for backfill, which the importer
+handles.
+
+Plaid would buy 730 days automatically, wider institution coverage and merchant
+enrichment. Against that: an integration the size of the Instagram connector, a
+second vendor holding bank credentials, and pricing that needs a sales call
+(Pay-as-you-go is month-to-month, and there is a 200-call free tier). Revisit if
+Stripe FC drops an institution, or if enrichment would pay for itself in filing
+time.
+
+### The hole in that reasoning, found while making it
+
+"Stripe plus the importer is enough" could not be said honestly without checking
+whether the app can tell when it **is not**. It could not.
+
+`finLedgerCoverage()` looked only at the EARLIEST date. A ledger holding January
+and August with nothing between reported that it reaches 1 January and looked
+complete — which is exactly what a 180-day window produces when nobody syncs for
+half a year: the old months are kept, the new ones arrive, and the span the
+window slid past is simply absent.
+
+Every completed month inside the covered span is now checked. Empty ones are
+named in plain English on the statement, with the same restraint as the rest: a
+hole is called **more likely** than a dormant month, not certain, because a
+genuinely unused account is possible and this cannot tell the difference. The
+current month is never called empty — it is unfinished, not missing.
+
+`gauntlet/plcoverage.js` — now 20 assertions, the 5 new ones failing against 443.
