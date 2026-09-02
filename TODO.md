@@ -3643,3 +3643,51 @@ Zelle payments to sewing contractors need the production/contractors split.
 
 `gauntlet/bankdupe.js` — 11 assertions, 8 failing against 447.
 `gauntlet/balancesheet.js` — 20 assertions, 19 failing against 447.
+
+---
+
+## Build 449 — "my assignments aren't saving when I ask the CFO to file these"
+
+Reported live: asked the CFO to file Klaviyo, Google Workspace and ClickUp as
+software; it said it had, and nothing changed. The app had already caught the
+lie — *"Nothing was actually saved — that reply had no save action behind it"* —
+so the honesty layer worked. The filing did not, for two compounding reasons.
+
+### The cap that made it impossible
+
+```js
+if (hits.length > 8) return { hits: [], why: '…too broad to file safely' };
+```
+
+Any description match hitting more than eight rows was refused. `CLICKUP` across
+two years of monthly subscriptions is ~24 rows. So is `KLAVIYO`. So is
+`Google Workspace`. **Every one was rejected**, and the refusal came back to the
+model as a failed item which it reported as success.
+
+That cap was written when the ledger was six months of bank feed. The history
+import turned it into the bug: filing a recurring merchant across its whole
+history is now the main job.
+
+**Breadth is not what makes a match unsafe — vagueness is.** The guard moved to
+the QUERY: under four characters is refused, a real merchant name files its whole
+run however many rows that is. Every filing stays undoable.
+
+### And it could not see them anyway
+
+The snapshot listed the top **24** merchant patterns by dollar value. A $15
+Google Workspace ranks below every five-figure wire, so with 860 uncategorised
+rows they were never in context at all. Window widened to 60, and the spec now
+says the list is not the whole ledger: file an unseen merchant by description
+match and let the result answer.
+
+### Two tests pushed back, and one was right
+
+- **smoke26** asserts the biggest amount leads the list. Sorting repeats to the
+  front was tried and **reverted** — materiality is the right order for a CFO
+  snapshot, and widening the window alone fixes the crowding.
+- **smoke7** asserted the 8-row cap as intended behaviour. That test was changed,
+  because live data disproved the rule it encoded. It now asserts the new rule
+  from both sides: a named merchant files its whole run, a one-letter query is
+  still refused with its reason.
+
+`gauntlet/txnfile.js` — 7 assertions, 5 failing against Build 448.

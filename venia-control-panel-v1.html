@@ -27071,6 +27071,13 @@ function agentFinActionSpec() { return agentSpecChunks([
     + '\nACTION — set_txn_category: categorize bank-feed transactions (Money → Cash) so burn and runway read true.\n'
     + '```venia:action\n'
     + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"},{"match":{"desc":"Karol Jimenez","amount":-500},"category":"contractors"}]}\n'
+    + 'THE SNAPSHOT LIST IS NOT THE WHOLE LEDGER. It shows the largest and the most repetitive '
+    + 'patterns, not every merchant. If the founder names one you cannot see — a subscription, a '
+    + 'vendor, anything — file it with {"match":{"desc":"KLAVIYO"}} and no id. Matching on '
+    + 'description is the NORMAL way to file a recurring merchant and it files the whole run at '
+    + 'once, across years, however many rows that is. Never answer that you have filed something '
+    + 'without emitting this block, and never decline because a merchant is missing from the list '
+    + 'above — try the match and let the result tell you.\n'
     + '```\n'
     + 'Prefer the real transaction id from the ledger in the FINANCE SNAPSHOT — every row there carries one, so you almost never need anything else. When you genuinely lack an id, use "match" with the description exactly as it appears (optionally narrowed by "amount" and/or "date") and it will be resolved against the ledger; a match hitting more than 8 rows is refused rather than mis-filed. NEVER invent an id. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | rnd (R&D — experiments, prototypes, research subscriptions) | fees | taxes | transfer | other'
     + (finCustomCats().length ? ' | ' + finCustomCats().join(' | ') + ' (categories the founders added themselves \u2014 use these where they fit)' : '')
@@ -28051,7 +28058,23 @@ function finResolveTxns(it, txns){
   const date = m && m.date ? String(m.date).slice(0,10) : '';
   if (date) hits = hits.filter(t => String(t.date||'').slice(0,10) === date);
   if (!hits.length) return { hits: [], why: 'nothing matched "' + q + '"' };
-  if (hits.length > 8) return { hits: [], why: '"' + q + '" matched ' + hits.length + ' transactions — too broad to file safely' };
+  // BREADTH IS NOT THE DANGER; VAGUENESS IS.
+  //
+  // The old rule refused any match over 8 rows as "too broad to file safely".
+  // That was written when the ledger was six months of feed. After a two-year
+  // statement import, "CLICKUP" legitimately matches two dozen monthly
+  // subscriptions — and filing a recurring merchant across its whole history is
+  // now the main job, not an edge case. The cap made the CFO unable to do the
+  // one thing it was being asked for, and it failed with a refusal the model
+  // then reported as success.
+  //
+  // What actually makes a match unsafe is a query too short to identify a
+  // merchant — "a" or "in" sweeping the ledger. So the guard is on the QUERY,
+  // and the count is reported rather than refused. Every filing is undoable.
+  if (q.length < 4) return { hits: [], why: '"' + q + '" is too short to identify a merchant — '
+    + 'give more of the description' };
+  if (hits.length > 400) return { hits: [], why: '"' + q + '" matched ' + hits.length
+    + ' transactions — narrow it, that is more than a merchant' };
   return { hits };
 }
 function agentRunSetTxnCategory(action, chatBody){
@@ -36430,9 +36453,15 @@ function veniaFinanceContext(){
             .split(' ').slice(0, 3).join(' ');   // the merchant, not the memo
           const groups = {};
           un.forEach(t => { const k = norm(t.desc) || '(no description)'; (groups[k] = groups[k] || []).push(t); });
+          // BIGGEST MONEY STILL LEADS. Sorting repeats to the front was tried
+          // and reverted: materiality is the right order for a CFO snapshot,
+          // and a $15 subscription outranking a five-figure commission would be
+          // the wrong list. The reason Klaviyo and ClickUp were invisible was
+          // the WINDOW, not the sort — 24 patterns is nothing once a two-year
+          // history is imported — so the window is what changed.
           const ordered = Object.entries(groups).sort((a,b) =>
             Math.abs(b[1].reduce((x,t)=>x+(t.amount||0),0)) - Math.abs(a[1].reduce((x,t)=>x+(t.amount||0),0)));
-          const lines = ordered.slice(0, 24).map(([k, ts]) => {
+          const lines = ordered.slice(0, 60).map(([k, ts]) => {
             const tot = ts.reduce((x,t)=>x+(t.amount||0),0);
             if (ts.length === 1) return row(ts[0]);
             return '• ' + ts.length + '× "' + String(ts[0].desc||'').slice(0,50) + '" — ' + money(tot) + ' total, '
@@ -36442,7 +36471,8 @@ function veniaFinanceContext(){
           const repeats = ordered.filter(([,ts]) => ts.length > 1).length;
           parts.push('UNCATEGORIZED bank transactions (' + un.length + ' rows in ' + ordered.length + ' merchant pattern'
             + (ordered.length===1?'':'s') + ' — file with set_txn_category):\n' + lines.join('\n')
-            + (ordered.length > 24 ? '\n…+' + (ordered.length-24) + ' more patterns' : '')
+            + (ordered.length > 60 ? '\n…+' + (ordered.length-60) + ' more patterns not listed — you can still '
+                + 'file any of them by description match without seeing it here' : '')
             + (repeats ? '\nA repeating merchant is one rule, not one decision per row: use "match" with the description to file the whole run in a single item.' : ''));
         }
         if (filed.length) parts.push('RECENT FILED transactions (newest first — re-file any of these with set_txn_category if the category is wrong):\n'
