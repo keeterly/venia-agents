@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '447';
+  const BUILD = '448';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -27071,6 +27071,13 @@ function agentFinActionSpec() { return agentSpecChunks([
     + '\nACTION — set_txn_category: categorize bank-feed transactions (Money → Cash) so burn and runway read true.\n'
     + '```venia:action\n'
     + '{"type":"set_txn_category","items":[{"id":"fctxn_abc","category":"software"},{"match":{"desc":"Karol Jimenez","amount":-500},"category":"contractors"}]}\n'
+    + 'THE SNAPSHOT LIST IS NOT THE WHOLE LEDGER. It shows the largest and the most repetitive '
+    + 'patterns, not every merchant. If the founder names one you cannot see — a subscription, a '
+    + 'vendor, anything — file it with {"match":{"desc":"KLAVIYO"}} and no id. Matching on '
+    + 'description is the NORMAL way to file a recurring merchant and it files the whole run at '
+    + 'once, across years, however many rows that is. Never answer that you have filed something '
+    + 'without emitting this block, and never decline because a merchant is missing from the list '
+    + 'above — try the match and let the result tell you.\n'
     + '```\n'
     + 'Prefer the real transaction id from the ledger in the FINANCE SNAPSHOT — every row there carries one, so you almost never need anything else. When you genuinely lack an id, use "match" with the description exactly as it appears (optionally narrowed by "amount" and/or "date") and it will be resolved against the ledger; a match hitting more than 8 rows is refused rather than mis-filed. NEVER invent an id. "category" ∈ income | fabric | production | contractors | rent | payroll | software | shipping | marketing | rnd (R&D — experiments, prototypes, research subscriptions) | fees | taxes | transfer | other'
     + (finCustomCats().length ? ' | ' + finCustomCats().join(' | ') + ' (categories the founders added themselves \u2014 use these where they fit)' : '')
@@ -28051,7 +28058,23 @@ function finResolveTxns(it, txns){
   const date = m && m.date ? String(m.date).slice(0,10) : '';
   if (date) hits = hits.filter(t => String(t.date||'').slice(0,10) === date);
   if (!hits.length) return { hits: [], why: 'nothing matched "' + q + '"' };
-  if (hits.length > 8) return { hits: [], why: '"' + q + '" matched ' + hits.length + ' transactions — too broad to file safely' };
+  // BREADTH IS NOT THE DANGER; VAGUENESS IS.
+  //
+  // The old rule refused any match over 8 rows as "too broad to file safely".
+  // That was written when the ledger was six months of feed. After a two-year
+  // statement import, "CLICKUP" legitimately matches two dozen monthly
+  // subscriptions — and filing a recurring merchant across its whole history is
+  // now the main job, not an edge case. The cap made the CFO unable to do the
+  // one thing it was being asked for, and it failed with a refusal the model
+  // then reported as success.
+  //
+  // What actually makes a match unsafe is a query too short to identify a
+  // merchant — "a" or "in" sweeping the ledger. So the guard is on the QUERY,
+  // and the count is reported rather than refused. Every filing is undoable.
+  if (q.length < 4) return { hits: [], why: '"' + q + '" is too short to identify a merchant — '
+    + 'give more of the description' };
+  if (hits.length > 400) return { hits: [], why: '"' + q + '" matched ' + hits.length
+    + ' transactions — narrow it, that is more than a merchant' };
   return { hits };
 }
 function agentRunSetTxnCategory(action, chatBody){
@@ -35262,6 +35285,122 @@ function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 // where "not yet classified" is a to-do; the statement is a claim about a
 // period. So the document carries the line, includes it in the total, and says
 // so in the notes — a stated difference, with the amount on the page.
+// ══════════════════════════════════════════════════════════════════════════
+//  THE BALANCE SHEET — the other half of the pack
+// ══════════════════════════════════════════════════════════════════════════
+// A P&L says what a period earned. A lender asks that AND what the business is
+// worth on a day, because the second is what they lend against. Handing over
+// only the first is handing over half a pack, and every input for the other
+// half already existed here — cash, receivables, stock at landed cost, factory
+// commitments, loan principal — unassembled.
+//
+// WHAT THIS IS NOT. It is not a general ledger, and it does not balance by
+// double entry: there is no bookkeeping system underneath, so equity cannot be
+// derived from prior periods. Equity is therefore stated as what it actually is
+// — assets less liabilities — and the document SAYS so rather than implying a
+// reconciliation nobody performed. Owner draws and contributions are shown
+// beneath it as movements, because those are known.
+//
+// A statement that quietly claimed to balance would be worse than one that
+// explains why it cannot.
+function finBalanceSheet(){
+  const now = new Date();
+  const d = cmdMoneyData();
+  const bank = (typeof finBankData === 'function') ? finBankData() : null;
+  const inv = (typeof finInventoryAtCost === 'function') ? finInventoryAtCost() : null;
+
+  const cash = bank && bank.connected ? (bank.bal || 0) : 0;
+  const ar = (d.arOpen || []).reduce(function(t, a){ return t + (a.open || 0); }, 0);
+  const stock = (inv && inv.value) || 0;
+  // Deposits already paid to factories buy goods that do not exist yet: not
+  // stock, not an expense, but money the business is owed in garments.
+  const prepaid = Math.max(0, (d.poPaidYtd || 0) - (d.mfgViaCogs || 0));
+
+  const assets = [
+    { label: 'Cash at bank', amount: cash,
+      note: bank && bank.connected ? (bank.cashAccts || []).length + ' account'
+        + (((bank.cashAccts || []).length) === 1 ? '' : 's') : 'no bank connected' },
+    { label: 'Accounts receivable', amount: ar, note: 'wholesale invoiced, not yet collected' },
+    { label: 'Inventory at landed cost', amount: stock,
+      note: inv ? inv.units.toLocaleString() + ' units across ' + inv.styles + ' styles' : '' },
+  ];
+  if (prepaid > 0) assets.push({ label: 'Paid to factories, goods not yet received',
+    amount: prepaid, note: 'deposits against open production' });
+
+  // Card and loan balances the bank reports, as a positive debt figure.
+  const cardDebt = bank && bank.connected ? (bank.debt || 0) : 0;
+  const liabilities = [
+    { label: 'Cards and credit lines', amount: cardDebt,
+      note: bank && bank.connected ? '' : 'no bank connected' },
+    { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0,
+      note: 'open purchase orders' },
+  ];
+
+  const assetsTotal = assets.reduce(function(t, r){ return t + r.amount; }, 0);
+  const liabTotal = liabilities.reduce(function(t, r){ return t + r.amount; }, 0);
+  const equity = assetsTotal - liabTotal;
+
+  return {
+    entity: 'VENIA Collection',
+    title: 'Statement of Financial Position',
+    asAt: now,
+    asAtLabel: 'As at ' + now.toLocaleDateString('en-US',
+      { month: 'long', day: 'numeric', year: 'numeric' }),
+    currency: 'USD',
+    assets: assets, assetsTotal: assetsTotal,
+    liabilities: liabilities, liabilitiesTotal: liabTotal,
+    equity: equity,
+    ownerMovements: [
+      { label: 'Owner investment received this year', amount: d.ownerInvest || 0 },
+      { label: 'Owner draws taken this year', amount: d.ownerDraw || 0 },
+      { label: 'Loan principal received this year', amount: d.loanIn || 0 },
+      { label: 'Loan principal repaid this year', amount: d.loanOut || 0 },
+    ].filter(function(x){ return x.amount > 0; }),
+    // Working capital is the number a lender computes first, so it is computed
+    // here rather than left to them.
+    workingCapital: (cash + ar + stock) - liabTotal,
+    notes: finBalanceSheetNotes(d, bank, inv, cash, ar, stock),
+  };
+}
+window.finBalanceSheet = finBalanceSheet;
+
+// Every limitation the figures above carry, on the same page as the figures.
+function finBalanceSheetNotes(d, bank, inv, cash, ar, stock){
+  const n = [];
+  n.push('Unaudited, prepared by VENIA Collection from its own records, and NOT produced by '
+    + 'double-entry bookkeeping. There is no general ledger behind these figures, so equity is '
+    + 'stated as assets less liabilities rather than carried forward from prior periods and '
+    + 'reconciled. A reader should treat this as a statement of position assembled from source '
+    + 'systems — the bank, the order book, the cost sheets — not as a trial balance.');
+  if (!bank || !bank.connected) {
+    n.push('NO BANK IS CONNECTED, so cash is shown as zero and any card or loan balance is missing. '
+      + 'Both sides of this statement are understated and the equity figure is not meaningful.');
+  }
+  if (inv && inv.uncostedUnits > 0) {
+    n.push(inv.uncostedUnits.toLocaleString() + ' units across ' + inv.uncostedStyles + ' style'
+      + (inv.uncostedStyles === 1 ? '' : 's') + ' are EXCLUDED from inventory because those styles '
+      + 'have no cost sheet. Real stock is therefore worth more than the figure above; it is left '
+      + 'out rather than guessed, so inventory is understated by whatever those units cost to make.');
+  }
+  if (!(stock > 0)) {
+    n.push('Inventory is zero. That is either true or it means no style carries both stock and a '
+      + 'cost sheet — worth checking before this leaves the building, because stock is usually the '
+      + 'largest asset a clothing brand owns.');
+  }
+  n.push('Accounts receivable is wholesale invoiced and not yet collected. No allowance for bad '
+    + 'debts has been deducted, and no ageing is applied: a long-overdue invoice is carried here at '
+    + 'full value.');
+  n.push('Inventory is carried at landed cost — material, labour, overhead, duties and freight — '
+    + 'and never at what it might sell for. No write-down has been taken for stock that is old, '
+    + 'damaged or out of season, so a reader should ask how much of it is current.');
+  n.push('Liabilities include what the bank reports on cards and credit lines and what is committed '
+    + 'on open purchase orders. They do NOT include amounts owed to suppliers outside the purchase '
+    + 'order system, accrued taxes, or any lease obligation, because this application does not '
+    + 'record those. Liabilities are therefore understated by whatever those come to.');
+  return n;
+}
+window.finBalanceSheetNotes = finBalanceSheetNotes;
+
 // WHAT THE LEDGER ACTUALLY COVERS.
 //
 // A statement headed "Year to date — 1 January" is a claim about a period, and
@@ -35698,6 +35837,84 @@ function finPLPeriodNote(){
 window.finPLPeriodNote = finPLPeriodNote;
 
 // The document. Print → Save as PDF is the submission format everyone accepts.
+// The printed statement of financial position. Same chrome as the P&L on
+// purpose — a lender receives both together and they should look like one pack.
+window.finPrintBS = function(){
+  const bs = finBalanceSheet();
+  const esc = (t) => String(t == null ? '' : t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const money = (n) => (n < 0 ? '(' : '') + '$'
+    + Math.abs(Math.round(n)).toLocaleString() + (n < 0 ? ')' : '');
+  const row = (label, amount, o) => '<tr class="' + ((o && o.cls) || '') + '">'
+    + '<td>' + esc(label) + '</td><td class="n">' + money(amount) + '</td></tr>';
+  const sub = (label, note) => '<tr><td colspan="2" class="sub">' + esc(label)
+    + (note ? ' — ' + esc(note) : '') + '</td></tr>';
+  const section = (t) => '<tr><td colspan="2" class="sec">' + esc(t) + '</td></tr>';
+  const lines = (arr) => arr.map(function(r){
+    return row(r.label, r.amount) + (r.note ? sub('', r.note) : ''); }).join('');
+
+  const body = section('Assets') + lines(bs.assets)
+    + row('Total assets', bs.assetsTotal, { cls: 'tot' })
+    + section('Liabilities') + lines(bs.liabilities)
+    + row('Total liabilities', bs.liabilitiesTotal, { cls: 'tot' })
+    + row('Net position — assets less liabilities', bs.equity, { cls: 'big' })
+    + row('Working capital', bs.workingCapital)
+    + (bs.ownerMovements.length
+        ? section('Owner and financing movements this year')
+          + bs.ownerMovements.map(function(r){ return row(r.label, r.amount); }).join('')
+        : '');
+
+  const notes = bs.notes.map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+    + esc(bs.entity) + ' — Statement of Financial Position</title><style>'
+    + 'body{font-family:Georgia,"Times New Roman",serif;color:#111;max-width:720px;margin:0 auto;padding:40px 24px 110px;background:#fff}'
+    + 'h1{font-family:Helvetica,Arial,sans-serif;font-size:15px;letter-spacing:4px;text-transform:uppercase;margin:0 0 2px}'
+    + 'h2{font-family:Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#666;font-weight:400;margin:0 0 2px}'
+    + '.meta{font-size:10.5px;color:#666;margin-bottom:22px}'
+    + 'table{width:100%;border-collapse:collapse;margin-bottom:6px}'
+    + 'td{padding:5px 0;font-size:12px;vertical-align:baseline}'
+    + 'td.n{text-align:right;font-family:"DM Mono",Menlo,monospace;white-space:nowrap}'
+    + 'td.sec{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;padding:16px 0 4px;border-bottom:1px solid #ddd}'
+    + 'td.sub{font-size:10px;color:#777;padding:0 0 5px 14px}'
+    + 'tr.tot td{border-top:1px solid #111;font-weight:700}'
+    + 'tr.big td{border-top:2px solid #111;border-bottom:2px solid #111;font-size:13.5px;font-weight:700;padding:8px 0}'
+    + '.notes{margin-top:34px;border-top:1px solid #111;padding-top:14px}'
+    + '.notes h3{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;margin:0 0 8px}'
+    + '.notes ol{margin:0;padding-left:18px}'
+    + '.notes li{font-size:10.5px;line-height:1.75;color:#333;margin-bottom:8px}'
+    + '.sign{margin-top:40px;font-size:10.5px;color:#555;line-height:1.9}'
+    + '.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;justify-content:center;'
+    +   'padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);'
+    +   'border-top:1px solid #ddd;font-family:Helvetica,Arial,sans-serif}'
+    + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
+    +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
+    + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '@media print{body{padding:24px 0}button{display:none}.bar{display:none}}'
+    + '</style></head><body>'
+    + '<h1>' + esc(bs.entity) + '</h1>'
+    + '<h2>' + esc(bs.title) + '</h2>'
+    + '<div class="meta">' + esc(bs.asAtLabel) + '  ·  ' + esc(bs.currency)
+    +   '  ·  Unaudited — prepared by the company</div>'
+    + '<table>' + body + '</table>'
+    + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
+    + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
+    +   'VENIA Collection · Los Angeles, California</div>'
+    + '<div class="bar">'
+    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
+    +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    + '</div>'
+    + '<' + '/body></html>';
+
+  const w = window.open('', '_blank', 'width=900,height=1000');
+  if (!w) { showToast('Allow pop-ups to open the statement', 'warning'); return null; }
+  w.document.write(html); w.document.close();
+  const wide = (w.innerWidth || 900) >= 700 && !/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  if (wide) setTimeout(function(){ try { w.print(); } catch(e){} }, 400);
+  try { logActivity('Balance sheet generated — ' + bs.asAtLabel); } catch(e){}
+  return bs;
+};
+
 window.finPrintPL = function(){
   const st = finPLStatement();
   const esc = function(v){ return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); };
@@ -36055,7 +36272,7 @@ window.cmdRenderMoney = function() {
     <div class="money-cols">
     <section>
     <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2>
-      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button></div>
+      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintBS()" title="What the business is worth on a day — the other half of a lender's pack">↓ Balance sheet</button></div>
     </div>
     <div class="money-block">
       ${line('DTC revenue', d.p.ytd||0, 'Shopify, live')}
@@ -36236,9 +36453,15 @@ function veniaFinanceContext(){
             .split(' ').slice(0, 3).join(' ');   // the merchant, not the memo
           const groups = {};
           un.forEach(t => { const k = norm(t.desc) || '(no description)'; (groups[k] = groups[k] || []).push(t); });
+          // BIGGEST MONEY STILL LEADS. Sorting repeats to the front was tried
+          // and reverted: materiality is the right order for a CFO snapshot,
+          // and a $15 subscription outranking a five-figure commission would be
+          // the wrong list. The reason Klaviyo and ClickUp were invisible was
+          // the WINDOW, not the sort — 24 patterns is nothing once a two-year
+          // history is imported — so the window is what changed.
           const ordered = Object.entries(groups).sort((a,b) =>
             Math.abs(b[1].reduce((x,t)=>x+(t.amount||0),0)) - Math.abs(a[1].reduce((x,t)=>x+(t.amount||0),0)));
-          const lines = ordered.slice(0, 24).map(([k, ts]) => {
+          const lines = ordered.slice(0, 60).map(([k, ts]) => {
             const tot = ts.reduce((x,t)=>x+(t.amount||0),0);
             if (ts.length === 1) return row(ts[0]);
             return '• ' + ts.length + '× "' + String(ts[0].desc||'').slice(0,50) + '" — ' + money(tot) + ' total, '
@@ -36248,7 +36471,8 @@ function veniaFinanceContext(){
           const repeats = ordered.filter(([,ts]) => ts.length > 1).length;
           parts.push('UNCATEGORIZED bank transactions (' + un.length + ' rows in ' + ordered.length + ' merchant pattern'
             + (ordered.length===1?'':'s') + ' — file with set_txn_category):\n' + lines.join('\n')
-            + (ordered.length > 24 ? '\n…+' + (ordered.length-24) + ' more patterns' : '')
+            + (ordered.length > 60 ? '\n…+' + (ordered.length-60) + ' more patterns not listed — you can still '
+                + 'file any of them by description match without seeing it here' : '')
             + (repeats ? '\nA repeating merchant is one rule, not one decision per row: use "match" with the description to file the whole run in a single item.' : ''));
         }
         if (filed.length) parts.push('RECENT FILED transactions (newest first — re-file any of these with set_txn_category if the category is wrong):\n'
@@ -37911,12 +38135,68 @@ window.bankTrimTxns = bankTrimTxns;
 
 // Merge new transactions into the synced feed (dedupe by id, statuses update
 // in place, auto-categorize the obvious, newest first, capped at 600).
+// FEED AND STATEMENT DESCRIBE THE SAME ACCOUNT, SO THEY MUST NOT BOTH BE KEPT.
+//
+// The import deduped against the ledger. The SYNC never did — it matched on the
+// Stripe id alone, and an imported row has no Stripe id, so every sync after a
+// history import re-adds the overlap period as brand new transactions. Nine of
+// them, worth $5,725, on the first real import.
+//
+// MATCHED ON DATE AND AMOUNT, NOT DESCRIPTION. Chase and Stripe render the same
+// ACH payment differently — "ORIG CO NAME:GUSTO CO ENTRY DESCR:..." against
+// "ORIG CO NAME:GUSTO ORIG ID:..." — so a description fold misses exactly the
+// pairs that matter. Date and amount are written by the bank and agree. Counting
+// keeps this safe where a set would not: two genuine $300 payments on one day
+// appear twice in each source, match two-for-two, and two survive.
+function bankDupKey(t){
+  return String(t && t.date || '') + '|' + Number((t && t.amount) || 0).toFixed(2);
+}
+// The pairs where a feed row and an imported row are the same transaction.
+// Returned rather than acted on: this deletes financial records, so it is shown
+// before it happens, never applied by surprise.
+window.bankFindDupes = function(){
+  const imported = {}, pairs = [];
+  (STATE.finTxns || []).forEach(t => {
+    if (t && t.src === 'import') (imported[bankDupKey(t)] = imported[bankDupKey(t)] || []).push(t);
+  });
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.src === 'import') return;
+    const bucket = imported[bankDupKey(t)];
+    if (bucket && bucket.length) pairs.push({ feed: t, imported: bucket.shift() });
+  });
+  return pairs;
+};
+// Merge, keeping the feed row — it carries a real Stripe id and its status keeps
+// updating — but INHERITING the category if the imported row was filed and the
+// feed row was not. Losing a filing somebody did by hand would be its own bug.
+window.bankMergeDupes = function(){
+  const pairs = bankFindDupes();
+  if (!pairs.length) { showToast('No duplicates found', 'info'); return 0; }
+  const drop = {};
+  pairs.forEach(pr => {
+    if (!pr.feed.category && pr.imported.category) pr.feed.category = pr.imported.category;
+    drop[pr.imported.id] = true;
+  });
+  STATE.finTxns = (STATE.finTxns || []).filter(t => !drop[t.id]);
+  save();
+  showToast(pairs.length + ' duplicate' + (pairs.length === 1 ? '' : 's') + ' merged', 'success');
+  try { logActivity('Merged ' + pairs.length + ' duplicate transactions between the bank feed and an imported statement'); } catch(e){}
+  try { cmdRenderBank(); } catch(e){}
+  return pairs.length;
+};
+
 window.bankSyncTxns = async function(silent){
   const fb = STATE.finBank || {}; const accounts = fb.accounts || [];
   if (!accounts.length) return;
   if (!STATE.finTxns) STATE.finTxns = [];
   const byId = {}; STATE.finTxns.forEach(t => { byId[t.id] = t; });
-  let added = 0;
+  // Imported rows indexed by date+amount, so an arriving feed transaction can
+  // recognise the one the statement already supplied instead of adding a twin.
+  const impByKey = {};
+  STATE.finTxns.forEach(t => {
+    if (t && t.src === 'import') (impByKey[bankDupKey(t)] = impByKey[bankDupKey(t)] || []).push(t);
+  });
+  let added = 0, absorbed = 0;
   for (const a of accounts) {
     let cursor = null;
     // Stripe returns 100 at a time, newest first, and walks backwards through
@@ -37933,6 +38213,16 @@ window.bankSyncTxns = async function(silent){
       (d.transactions||[]).forEach(t => {
         const ex = byId[t.id];
         if (ex) { ex.status = t.status; ex.amount = t.amount; if (t.date) ex.date = t.date; }
+        else if ((impByKey[bankDupKey(t)] || []).length) {
+          // The statement already had this one. Upgrade it in place to the feed
+          // row — a real id, and a status that keeps updating — while KEEPING
+          // any category somebody filed by hand.
+          const prior = impByKey[bankDupKey(t)].shift();
+          prior.id = t.id; prior.acct = t.account; prior.status = t.status;
+          prior.desc = t.description || prior.desc;
+          prior.src = 'feed'; prior.wasImported = true;
+          byId[t.id] = prior; absorbed++;
+        }
         else {
           const rec = { id: t.id, acct: t.account, date: t.date, amount: t.amount, desc: t.description, status: t.status, category: bankAutoCategory(t.description, t.amount) };
           byId[t.id] = rec; STATE.finTxns.push(rec); added++;
@@ -37949,7 +38239,10 @@ window.bankSyncTxns = async function(silent){
   if (!STATE.finBank) STATE.finBank = {};
   STATE.finBank.lastSync = new Date().toISOString();
   save();
-  if (!silent) showToast(added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date', added ? 'success' : 'info');
+  if (!silent) showToast(
+    (added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date')
+    + (absorbed ? ' · ' + absorbed + ' matched to imported rows instead of duplicated' : ''),
+    added ? 'success' : 'info');
   try { cmdRenderBank(); } catch(e){}
 };
 // Ledger view state (per device — a filter is not workspace data).
@@ -38255,6 +38548,17 @@ window.cmdRenderBank = function(){
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
       <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
+      ${(function(){
+        // Duplicates left by syncs that ran before the feed could recognise an
+        // imported row. Shown with their value, because "9 duplicates" and
+        // "$5,725 counted twice" are different sentences to a founder.
+        var dp = (typeof bankFindDupes === 'function') ? bankFindDupes() : [];
+        if (!dp.length) return '';
+        var val = dp.reduce(function(t, x){ return t + Math.abs(x.feed.amount || 0); }, 0);
+        return `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:10px 12px;margin:-8px 0 16px;font-size:10.5px;color:var(--ink);line-height:1.7">
+          <strong>${dp.length} transaction${dp.length===1?'':'s'} counted twice</strong> — $${Math.round(val).toLocaleString()} that the bank feed and an imported statement both supplied. The feed used to match on its own id only, so it could not tell an imported row was the same payment. Merging keeps the feed row and any category you filed.
+          <div style="margin-top:8px"><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankMergeDupes()">Merge ${dp.length} duplicate${dp.length===1?'':'s'}</button></div></div>`;
+      })()}
       ${STATE.finTrim && STATE.finTrim.total > 0 ? `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:9px 12px;margin:-8px 0 16px;font-size:10px;color:var(--ink);line-height:1.7">
         <strong>${STATE.finTrim.total.toLocaleString()} older transaction${STATE.finTrim.total===1?'':'s'} dropped</strong> to keep the workspace within the size a browser will hold — oldest dated ${slEsc(STATE.finTrim.from||'')}. The current year is never dropped. Export the ledger to keep a copy of what is left.</div>` : ''}
       <div class="ag-sec-head"><h2 class="ag-sec-title">Accounts</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankToggleAccts()">${acctsOpen ? 'Hide' : 'Show ' + bk.accounts.length}</button></div></div>
