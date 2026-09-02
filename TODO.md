@@ -3355,3 +3355,59 @@ tolerance is pinned from both sides.
 feed, so today there is no way to enter it at all. That is the next thing.
 
 `gauntlet/plcoverage.js` — 14 assertions, 12 of which fail against Build 441.
+
+---
+
+## Build 443 — the months the feed cannot reach
+
+Asked: *"Is there any way to go back farther than Stripe's limit? Otherwise I
+can download all the bank statements and give it to Enigma."*
+
+**No, and yes.** Stripe's ~180 days is a hard ceiling — no parameter extends it,
+and `transacted_at` only narrows what is already in the window. Plaid offers up
+to 730 days (`transactions.days_requested`, max 730), but that is a different
+aggregator: new account, new integration, new cost.
+
+### The statements are the answer — but not through the assistant
+
+The obvious move is to paste the statement into chat and let Enigma file it. It
+must not go that way. **A model asked to retype eight hundred amounts will get
+some of them wrong, and a wrong amount in a ledger is indistinguishable from a
+right one afterwards.** The P&L action already carries the rule — never type the
+figures — and it applies with more force here, because these figures *become*
+the ledger.
+
+So the file is parsed deterministically and the assistant's job stays what it is
+good at: deciding what each row **is**, once the numbers are safe.
+
+### Money → Cash → ↑ Import statement
+
+Handles the shape a real export has, not a tidy one: a preamble line above the
+header, `MM/DD/YYYY`, quoted descriptions containing commas, `"-$9,000.00"`
+with symbol and separators, separate Debit/Credit columns, and accounting
+parentheses `(1,234.56)` meaning negative.
+
+**It refuses rather than guesses.** An all-positive file with no debit column is
+rejected with the reason — filing every expense as income is worse than
+importing nothing. A file with no header row says to export CSV, not PDF.
+
+**It never double-counts.** Rows are keyed on date + amount + a hard-folded
+description, so a statement overlapping the feed is matched and skipped even
+though Stripe and the bank capitalise differently. Importing the same file twice
+adds nothing.
+
+Imported rows carry `src: 'import'` and an `imp_` id, never a Stripe-shaped one,
+so the ledger can always say which figures came from a feed and which from a
+document somebody downloaded.
+
+### The bug the gauntlet caught
+
+The first version filed **every Chase transaction with the description "DEBIT"**.
+Chase's first column is headed `Details` and holds DEBIT/CREDIT — it matched a
+loose description pattern and sat to the LEFT of the real `Description`, so
+first-match-wins took the wrong one. Column detection is now priority-ordered by
+header NAME rather than position, and a column cannot be two fields at once.
+
+Caught because the gauntlet seeds a real export rather than a clean one.
+
+`gauntlet/bankimport.js` — 16 assertions, all of which fail against Build 442.

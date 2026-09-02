@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '442';
+  const BUILD = '443';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -37389,6 +37389,292 @@ window.bankRefreshBalances = async function(){
   } catch(e){ showToast(String(e && e.message || e), 'error'); }
   try { cmdRenderBank(); } catch(e){}
 };
+// ══════════════════════════════════════════════════════════════════════════
+//  IMPORTING A BANK STATEMENT — the months the feed cannot reach
+// ══════════════════════════════════════════════════════════════════════════
+// Stripe returns roughly the last 180 days, so by autumn the start of the year
+// is outside the window and no amount of syncing will bring it back. The only
+// remaining source is the bank's own statement, which the founder can download
+// for years.
+//
+// WHY THIS IS NOT A JOB FOR THE ASSISTANT. The obvious move is to paste the
+// statement into chat and let Enigma file it. It must not: a model asked to
+// retype eight hundred rows of amounts will get some of them wrong, and a
+// wrong amount in a ledger is indistinguishable from a right one afterwards.
+// The same rule the P&L action already carries — never type the figures —
+// applies with more force here, because these figures become the ledger.
+// So the file is parsed deterministically, and the assistant's job stays what
+// it is good at: deciding what each row IS, once the numbers are safe.
+//
+// Column names differ by bank, so they are found rather than assumed, and
+// anything that cannot be found is refused with the reason rather than guessed.
+const BANK_IMPORT_MAX = 20000;
+function bankImportNorm(v){
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+}
+// Dates arrive as 2026-01-04, 01/04/2026, 1/4/26, or an Excel serial. Only the
+// unambiguous readings are accepted; a value that could be two different days
+// is not silently picked.
+function bankImportDate(v){
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+  const t = bankImportNorm(v);
+  if (!t) return '';
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + '-' + String(+m[2]).padStart(2,'0') + '-' + String(+m[3]).padStart(2,'0');
+  m = t.match(/^(\d{1,2})[\/.](\d{1,2})[\/.](\d{2,4})$/);
+  if (m) {
+    let yy = +m[3]; if (yy < 100) yy += yy < 70 ? 2000 : 1900;
+    // US statements are month first. A day > 12 in the first slot would mean
+    // the other order, so it is taken rather than mangled.
+    let mo = +m[1], da = +m[2];
+    if (mo > 12 && da <= 12) { const x = mo; mo = da; da = x; }
+    if (mo < 1 || mo > 12 || da < 1 || da > 31) return '';
+    return yy + '-' + String(mo).padStart(2,'0') + '-' + String(da).padStart(2,'0');
+  }
+  // Excel serial day count, which xlsx hands back for unformatted date cells.
+  if (/^\d{5}(\.\d+)?$/.test(t)) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(parseFloat(t)) * 86400000);
+    if (!isNaN(d)) return d.toISOString().slice(0, 10);
+  }
+  return '';
+}
+// "$1,234.56", "(1,234.56)" and "-1,234.56" are all money. Parentheses are
+// negative — an accounting convention a naive parseFloat reads as positive.
+function bankImportAmount(v){
+  let t = bankImportNorm(v).replace(/[$£€,\s]/g, '');
+  if (!t) return null;
+  let neg = false;
+  if (/^\(.*\)$/.test(t)) { neg = true; t = t.slice(1, -1); }
+  if (/^-/.test(t)) { neg = true; t = t.slice(1); }
+  if (!/^\d*\.?\d+$/.test(t)) return null;
+  const n = parseFloat(t);
+  if (!isFinite(n)) return null;
+  return neg ? -n : n;
+}
+// A stable key for the same real-world transaction however it arrived, so a
+// statement that overlaps the feed does not double-charge the P&L. Description
+// is folded hard because banks reformat their own text between exports.
+function bankImportKey(date, amount, desc){
+  const d = bankImportNorm(desc).toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 40);
+  return String(date) + '|' + Number(amount).toFixed(2) + '|' + d;
+}
+function bankImportId(key){
+  let h = 5381;
+  for (let i = 0; i < key.length; i++) h = ((h * 33) ^ key.charCodeAt(i)) >>> 0;
+  return 'imp_' + h.toString(36) + '_' + key.slice(0, 10).replace(/[^0-9]/g, '');
+}
+
+// Find the header row and the columns that matter. Returns the reason it could
+// not, rather than a half-parsed file.
+function bankImportPlan(rows){
+  // PRIORITY, NOT COLUMN ORDER. Chase's first column is headed "Details" and
+  // contains the word DEBIT — it matches a loose description pattern and sits
+  // to the LEFT of the real "Description", so first-match-wins files every
+  // transaction with the description "DEBIT". Each field therefore carries an
+  // ordered list, best name first, and the best NAME wins wherever it sits.
+  const HEAD = {
+    date: [/^(transaction\s*date|posting\s*date|post\s*date)$/i, /^(date|posted)$/i],
+    desc: [/^(description|payee|merchant)$/i, /^(memo|name|details|transaction)$/i],
+    amount: [/^amount$/i, /^value$/i],
+    debit: [/^(debit|withdrawal|withdrawals)$/i, /^(money\s*out|paid\s*out)$/i],
+    credit: [/^(credit|deposit|deposits)$/i, /^(money\s*in|paid\s*in)$/i],
+  };
+  let head = -1, col = null;
+  for (let i = 0; i < Math.min(rows.length, 25); i++) {
+    const cells = (rows[i] || []).map(bankImportNorm);
+    if (!cells.length) continue;
+    const c = {};
+    Object.keys(HEAD).forEach(k => {
+      for (const re of HEAD[k]) {
+        const n = cells.findIndex(h => re.test(h));
+        if (n >= 0) { c[k] = n; return; }
+      }
+    });
+    // A column cannot be two things at once: "Amount" that also matched debit
+    // would count the same money twice.
+    if (c.amount != null && c.amount === c.debit) delete c.debit;
+    if (c.amount != null && c.amount === c.credit) delete c.credit;
+    if (c.desc != null && (c.desc === c.date || c.desc === c.amount)) delete c.desc;
+    if (c.date != null && c.desc != null && (c.amount != null || c.debit != null || c.credit != null)) {
+      head = i; col = c; break;
+    }
+  }
+  if (head < 0) return { error: 'No header row with a date, a description and an amount. '
+    + 'Export the statement as CSV (not PDF) and try again.' };
+
+  const out = [], skipped = []; let zero = 0;
+  for (let i = head + 1; i < rows.length && out.length < BANK_IMPORT_MAX; i++) {
+    const r = rows[i] || [];
+    const date = bankImportDate(r[col.date]);
+    const desc = bankImportNorm(r[col.desc]);
+    let amt = null;
+    if (col.amount != null) amt = bankImportAmount(r[col.amount]);
+    if (amt == null && col.debit != null) {
+      const dv = bankImportAmount(r[col.debit]);
+      // A debit column is money OUT whichever sign the bank wrote it with.
+      if (dv != null && dv !== 0) amt = -Math.abs(dv);
+    }
+    if (amt == null && col.credit != null) {
+      const cv = bankImportAmount(r[col.credit]);
+      if (cv != null && cv !== 0) amt = Math.abs(cv);
+    }
+    // A zero-amount row is not a dropped row, it is not a transaction — a
+    // balance-forward or a reversal pair. Counted apart from rows that could
+    // not be READ, because those two need different reactions from a founder
+    // reconciling a total.
+    if (date && amt === 0) { zero++; continue; }
+    if (!date || amt == null) {
+      if (date || desc || amt != null) skipped.push(i + 1);
+      continue;
+    }
+    out.push({ date: date, desc: desc.slice(0, 200), amount: amt });
+  }
+  if (!out.length) return { error: 'Found the header but no rows with a readable date and amount.' };
+
+  // A file where nothing is negative and there was no debit column cannot say
+  // which way the money went. Refusing beats filing every expense as income.
+  if (col.amount != null && col.debit == null && col.credit == null
+      && !out.some(r => r.amount < 0)) {
+    return { error: 'Every amount in this file is positive and there is no debit or credit column, '
+      + 'so nothing here says which way the money went. Export a version with signed amounts, or '
+      + 'with separate debit and credit columns.' };
+  }
+  return { rows: out, skipped: skipped, zero: zero, headerRow: head + 1, columns: col };
+}
+
+// What importing WOULD do, computed against the ledger as it stands.
+function bankImportReconcile(rows){
+  const seen = {};
+  (STATE.finTxns || []).forEach(t => {
+    if (t && t.date != null) seen[bankImportKey(t.date, t.amount || 0, t.desc || '')] = true;
+  });
+  const fresh = [], dupes = [], within = {};
+  rows.forEach(r => {
+    const key = bankImportKey(r.date, r.amount, r.desc);
+    if (seen[key] || within[key]) { dupes.push(r); return; }
+    within[key] = true;
+    fresh.push(Object.assign({}, r, { _key: key }));
+  });
+  const dates = rows.map(r => r.date).sort();
+  return {
+    fresh: fresh, dupeCount: dupes.length, total: rows.length,
+    from: dates[0] || '', to: dates[dates.length - 1] || '',
+    inflow: fresh.reduce((t, r) => t + (r.amount > 0 ? r.amount : 0), 0),
+    outflow: fresh.reduce((t, r) => t + (r.amount < 0 ? -r.amount : 0), 0),
+  };
+}
+
+// Commit. Imported rows are marked as such and never given a Stripe-shaped id,
+// so the ledger can always say which figures came from a feed and which from a
+// document somebody downloaded.
+window.bankImportApply = function(){
+  const plan = window.__bankImport;
+  if (!plan || !plan.fresh || !plan.fresh.length) { showToast('Nothing to import', 'info'); return; }
+  if (!STATE.finTxns) STATE.finTxns = [];
+  let added = 0;
+  plan.fresh.forEach(r => {
+    STATE.finTxns.push({
+      id: bankImportId(r._key), acct: 'imported', date: r.date, amount: r.amount,
+      desc: r.desc, status: 'posted', src: 'import',
+      importedAt: new Date().toISOString(),
+      category: (typeof bankAutoCategory === 'function' ? bankAutoCategory(r.desc, r.amount) : '') || '',
+    });
+    added++;
+  });
+  STATE.finTxns = bankTrimTxns(STATE.finTxns);
+  save();
+  window.__bankImport = null;
+  const ov = document.getElementById('bank-import-modal'); if (ov) ov.remove();
+  showToast(added + ' transaction' + (added === 1 ? '' : 's') + ' imported', 'success');
+  try { logActivity('Bank statement imported — ' + added + ' transactions from ' + plan.from + ' to ' + plan.to); } catch(e){}
+  try { cmdRenderBank(); } catch(e){}
+};
+
+// The sheet. Nothing is written until the founder has seen what it found —
+// a total, a date range, and how much of it the ledger already had.
+window.bankImportOpen = function(){
+  const ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'bank-import-modal';
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  ov.innerHTML = '<div class="modal" onclick="event.stopPropagation()">'
+    + '<div class="modal-head"><div class="modal-title">Import a bank statement</div>'
+    +   '<button class="modal-close" onclick="document.getElementById(\'bank-import-modal\').remove()" aria-label="Close">&times;</button></div>'
+    + '<div class="modal-body">'
+    + '<p style="font-size:11px;color:var(--muted);line-height:1.7;margin:0 0 14px">'
+    +   'For the months a bank feed cannot reach — it returns about the last 180 days, so anything '
+    +   'older has to come from the statement itself. Download it from your bank as <strong>CSV</strong> '
+    +   '(Excel works too). Rows already in the ledger are matched and skipped, so importing a period '
+    +   'that overlaps the feed will not double-count anything.</p>'
+    + '<input type="file" id="bank-import-file" accept=".csv,.tsv,.txt,.xlsx,.xls" style="font-size:12px">'
+    + '<div style="display:flex;gap:8px;margin-top:14px">'
+    +   '<button class="btn btn-gold btn-sm" onclick="bankImportPreview()">Read the file &rarr;</button>'
+    + '</div>'
+    + '<div id="bank-import-out" style="margin-top:16px"></div>'
+    + '</div></div>';
+  document.body.appendChild(ov);
+};
+window.bankImportPreview = async function(){
+  const inp = document.getElementById('bank-import-file');
+  const f = inp && inp.files && inp.files[0];
+  const out = document.getElementById('bank-import-out');
+  if (!out) return;
+  if (!f) { out.innerHTML = '<div style="font-size:11px;color:var(--amber)">Choose a file first.</div>'; return; }
+  out.innerHTML = '<div style="font-size:11px;color:var(--muted)">Reading&hellip;</div>';
+  let rows = [];
+  try {
+    const ext = (f.name.split('.').pop() || '').toLowerCase();
+    if (ext === 'xlsx' || ext === 'xls') {
+      const X = await skLoadXLSX();
+      const wb = X.read(await f.arrayBuffer(), { type: 'array' });
+      rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, blankrows: false });
+    } else {
+      const text = await f.text();
+      rows = text.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim()).map(l => {
+        const cells = []; let cur = '', q = false;
+        for (const ch of l) {
+          if (ch === '"') q = !q;
+          else if (ch === ',' && !q) { cells.push(cur); cur = ''; }
+          else cur += ch;
+        }
+        cells.push(cur); return cells;
+      });
+    }
+  } catch (e) {
+    out.innerHTML = '<div style="font-size:11px;color:var(--red)">Could not read that file — '
+      + slEsc(String(e && e.message || e)) + '</div>';
+    return;
+  }
+  const plan = bankImportPlan(rows);
+  if (plan.error) {
+    out.innerHTML = '<div style="font-size:11px;color:var(--red);line-height:1.7">' + slEsc(plan.error) + '</div>';
+    return;
+  }
+  const rec = bankImportReconcile(plan.rows);
+  window.__bankImport = rec;
+  const money = n => '$' + Math.round(n).toLocaleString();
+  const line = (n, label, colour) => '<div style="display:flex;gap:10px;align-items:baseline;padding:4px 0">'
+    + '<span style="font-family:\'DM Mono\',monospace;font-size:15px;font-weight:700;color:' + colour
+    + ';min-width:56px">' + n + '</span>'
+    + '<span style="font-size:11px;color:var(--ink)">' + label + '</span></div>';
+  out.innerHTML =
+      line(rec.fresh.length, 'new transactions to import', 'var(--green)')
+    + (rec.dupeCount ? line(rec.dupeCount, 'already in the ledger — skipped, not double-counted', 'var(--muted)') : '')
+    + (plan.skipped.length ? line(plan.skipped.length, 'rows the parser could not read — ignored, and worth a look', 'var(--amber)') : '')
+    + (plan.zero ? line(plan.zero, 'zero-amount rows — not transactions', 'var(--muted)') : '')
+    + '<div style="font-size:11px;color:var(--muted);line-height:1.8;margin-top:10px">'
+    +   (rec.from ? 'Covers <strong>' + slEsc(rec.from) + '</strong> to <strong>' + slEsc(rec.to) + '</strong>. ' : '')
+    +   'New rows: ' + money(rec.outflow) + ' out, ' + money(rec.inflow) + ' in.'
+    + '</div>'
+    + (rec.fresh.length ? '<div style="margin-top:14px;display:flex;gap:8px">'
+        + '<button class="btn btn-gold btn-sm" onclick="bankImportApply()">Import ' + rec.fresh.length + ' &rarr;</button>'
+        + '</div>'
+        + '<div style="font-size:10px;color:var(--muted);margin-top:10px;line-height:1.7">'
+        +   'They are filed by the same rules as the feed, and anything the rules cannot place is left '
+        +   'uncategorized for the CFO rather than guessed.</div>'
+      : '<div style="font-size:11px;color:var(--muted);margin-top:12px">Everything in this file is '
+        + 'already in the ledger. Nothing to do.</div>');
+};
+
 // RETENTION. The old cap kept the 600 newest and DELETED the rest — and because
 // the list is sorted newest first, the rows it deleted were the OLDEST ones,
 // which is precisely what a year-to-date statement is made of. History synced in
@@ -37753,6 +38039,7 @@ window.cmdRenderBank = function(){
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankRefreshBalances()">↻ Refresh balances</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSyncTxns()">⟳ Sync transactions</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankConnect()">+ Add account</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankImportOpen()" title="For the months the feed cannot reach — import a statement CSV">&uarr; Import statement</button>
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
       <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · read-only — nothing here can move money</div>
