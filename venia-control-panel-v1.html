@@ -38640,9 +38640,14 @@ window.bankAskCfo = function(){
 };
 // One filter definition, used by both the ledger render and the ask box, so
 // "what's on screen" and "what I sent the CFO" can never drift apart.
-function finTxFiltered(all){
+// `opts.allTime` ignores the period pill. Two things the founder asked for
+// collide here: the pill scopes the list, AND "select all matching" exists to
+// file a vendor across its whole history. Under a 90-day pill the second
+// silently became "file the last 90 days of it". So the list honours the pill,
+// and the select-all control offers BOTH counts and lets the founder choose.
+function finTxFiltered(all, opts){
   const q = String(FIN_TX_FILTER.q || '').toLowerCase();
-  const since = finPeriodSince(FIN_SPEND_PERIOD);
+  const since = (opts && opts.allTime) ? '' : finPeriodSince(FIN_SPEND_PERIOD);
   return all.filter(t => {
     if (since && String(t.date || '') < since) return false;
     if (FIN_TX_FILTER.cat && String(t.category||'') !== FIN_TX_FILTER.cat) return false;
@@ -38891,9 +38896,9 @@ window.finReviewFile = function(merchant, selId){
   finReviewRender();
 };
 
-window.bankSelectAllMatching = function(){
+window.bankSelectAllMatching = function(allTime){
   const all = (STATE.finTxns || []).filter(t => t && t.status !== 'void');
-  const rows = finTxFiltered(all);
+  const rows = finTxFiltered(all, { allTime: allTime === true });
   // Selecting past the page is only safe because the founder can SEE the count
   // before they set anything, and every bulk set is undoable.
   rows.forEach(t => { FIN_TX_SEL[t.id] = 1; });
@@ -39262,12 +39267,19 @@ window.cmdRenderBank = function(){
         // otherwise the checkboxes are right there.
         var narrowed = FIN_TX_FILTER.q || FIN_TX_FILTER.cat || FIN_TX_FILTER.mode !== 'all';
         if (!narrowed) return '';
-        var matchN = finTxFiltered((STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; })).length;
-        if (!matchN || matchN <= selN) return '';
+        var live = (STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; });
+        var matchN = finTxFiltered(live).length;
+        var matchAll = finTxFiltered(live, { allTime: true }).length;
+        if ((!matchN && !matchAll) || Math.max(matchN, matchAll) <= selN) return '';
         var what = FIN_TX_FILTER.q ? '“' + slEsc(FIN_TX_FILTER.q) + '”'
           : FIN_TX_FILTER.cat ? slEsc(finCatLabel(FIN_TX_FILTER.cat)) : 'this filter';
+        var scoped = !!finPeriodSince(FIN_SPEND_PERIOD);
+        // Under a period pill, say which count this is — and when the vendor
+        // has more history than the pill shows, offer that too, because filing
+        // a merchant almost always means all of it.
         return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-          <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectAllMatching()">Select all ${matchN} matching ${what}</button>
+          ${matchN ? `<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectAllMatching()">Select all ${matchN} matching ${what}${scoped ? ' in this period' : ''}</button>` : ''}
+          ${scoped && matchAll > matchN ? `<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSelectAllMatching(true)">${matchN ? 'or ' : 'Select '}all ${matchAll} across all time</button>` : ''}
           <span style="font-size:10px;color:var(--muted)">then set a category on the lot — one tap, and undoable</span>
         </div>`;
       })()}

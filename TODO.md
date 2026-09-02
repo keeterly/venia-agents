@@ -4021,3 +4021,14 @@ is; select-all-matching inherits it, so "file all" never sweeps rows in another
 year.
 
 `gauntlet/tagdropdown.js` — 8 assertions, 7 failing against Build 453.
+
+### Build 454, continued — two right asks that collided
+
+The period pill now scopes the list (asked for), and "Select all matching"
+exists to file a vendor across its whole history (built the build before). Under
+the default 90-day pill the second silently became "file the last 90 days of
+it" — `bulkfile.js` caught it in the sweep: 2 rows selected where 15 were meant.
+
+Neither ask is wrong, so the control offers both and the founder chooses:
+**"Select all 2 matching 'INXPRESS' in this period · or all 15 across all
+time."** The list honours the pill; nothing about a vendor's history is hidden.
