@@ -3461,3 +3461,49 @@ genuinely unused account is possible and this cannot tell the difference. The
 current month is never called empty — it is unfinished, not missing.
 
 `gauntlet/plcoverage.js` — now 20 assertions, the 5 new ones failing against 443.
+
+---
+
+## Build 445 — the feed is a delivery van, not the archive
+
+Asked: if Money is the financial backbone, is a 180-day feed a problem for
+planning, P&L accuracy and company health?
+
+**The 180 days limits what Stripe will HAND OVER. It does not limit what the
+ledger holds.** `finTxns` syncs to `venia_module_data` — a Postgres `jsonb`
+column, not just browser storage — so once a transaction is in, it stays.
+Stripe could disconnect tomorrow and 2024 would still be there.
+
+So the question is not how to see past 180 days. It is **how to get the years in,
+once**: import 2024, 2025 and this year from statements, after which the feed
+keeps up and it never has to happen again. That is not a workaround — it is how
+you stop renting your financial history from a vendor's retention policy.
+
+### What had to change to make that safe
+
+**The cap was about to bite.** 3,000 rows is roughly four years at this volume;
+importing two more years would have reached it and started deleting the oldest.
+Raised to **10,000**. The gauntlet proves five years (3,500 rows) now import
+whole where the old cap silently ate the oldest of them.
+
+**Dropping rows is never silent again.** If the cap is ever reached the count and
+date range are recorded, shown on the Money screen and named on the P&L —
+precisely: this period is intact, earlier ones are not, and a comparison against
+them would be wrong. **The original bug was never the cap. It was that hitting it
+destroyed history without saying so.**
+
+**↓ Export ledger.** Every transaction with date, description, amount, the
+category somebody filed, and whether it came from the feed or an import. That
+last column is the part no bank statement can give back. If statements are the
+source of truth for the early years, re-typing them is the cost of losing this,
+so the archive has to be able to leave.
+
+### The honest limit
+
+The cap exists because the whole workspace also lives in localStorage — about
+5MB for everything. Ten thousand transactions is comfortable. If VENIA ever needs
+fifty thousand, transactions belong in their own Supabase table rather than
+riding inside the module blob. That is the real architecture for a financial
+backbone, and it is years away.
+
+`gauntlet/ledger.js` — 16 assertions, 13 of which fail against Build 444.

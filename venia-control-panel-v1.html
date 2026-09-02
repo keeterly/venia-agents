@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '444';
+  const BUILD = '445';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35514,6 +35514,15 @@ function finPLStatement(){
       + 'days, so the missing months cannot be re-fetched — they have to be entered from statements '
       + 'if this period is to be reported in full.');
   }
+  const trim = STATE.finTrim;
+  if (d.bankOpex && trim && trim.total > 0) {
+    notes.push('TRANSACTIONS HAVE BEEN DROPPED FROM THIS LEDGER. ' + trim.total.toLocaleString()
+      + ' row' + (trim.total === 1 ? ' has' : 's have') + ' been removed to keep the workspace within '
+      + 'the size a browser will hold, the oldest dated ' + trim.from + '. Anything in the current '
+      + 'reporting year is never removed, so this statement is not affected — but earlier periods are '
+      + 'incomplete, and a comparison against them would be. Export the ledger before it grows further '
+      + 'if those years matter.');
+  }
   if (d.bankOpex && cov && cov.any && cov.emptyMonths && cov.emptyMonths.length) {
     const names = cov.emptyMonths.map(function(k){
       try { return new Date(k + '-01T00:00:00').toLocaleDateString('en-US',
@@ -37727,15 +37736,65 @@ window.bankImportPreview = async function(){
 // Its own function rather than four lines inside the sync, so it can be tested
 // without a network call — a retention rule verified by re-typing it in the test
 // proves only that the test can type.
-const BANK_KEEP = 3000;
+// Ten thousand rows is several years for a business this size, and the ledger
+// itself is durable — it syncs to venia_module_data, a Postgres jsonb column,
+// not just to browser storage. The cap is not there to save the database; it is
+// there because the whole workspace also lives in localStorage, which is about
+// 5MB for everything, and a runaway ledger would evict the rest of the app.
+const BANK_KEEP = 10000;
 function bankTrimTxns(list, keep){
   const rows = (list || []).slice()
     .sort((x, y) => String(y.date || '').localeCompare(String(x.date || '')));
   const cap = keep || BANK_KEEP;
   if (rows.length <= cap) return rows;
   const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
-  return rows.slice(0, cap).concat(rows.slice(cap).filter(t => t && String(t.date || '') >= jan1));
+  const kept = rows.slice(0, cap).concat(rows.slice(cap).filter(t => t && String(t.date || '') >= jan1));
+  // TRIMMING IS NEVER SILENT AGAIN.
+  //
+  // The original bug was not the cap, it was that hitting it destroyed history
+  // without saying so — and the founder only discovered it by going looking for
+  // January months later. A record is kept of exactly what went and when, and
+  // the screens that report on the ledger read it, so losing data is an event
+  // rather than a discovery.
+  const dropped = rows.filter(t => kept.indexOf(t) < 0);
+  if (dropped.length && typeof STATE !== 'undefined') {
+    const ds = dropped.map(t => String(t.date || '')).filter(Boolean).sort();
+    const prev = STATE.finTrim || { total: 0 };
+    STATE.finTrim = {
+      total: (prev.total || 0) + dropped.length,
+      last: dropped.length,
+      from: [prev.from, ds[0]].filter(Boolean).sort()[0] || '',
+      to: [prev.to, ds[ds.length - 1]].filter(Boolean).sort().pop() || '',
+      at: new Date().toISOString(),
+    };
+  }
+  return kept;
 }
+
+// THE LEDGER IS YOURS, AND IT CAN LEAVE.
+//
+// If bank statements are the source of truth for the years a feed cannot reach,
+// then re-typing them is the cost of losing this ledger — so it must be possible
+// to get it back out in the same shape it went in. Everything is exported,
+// including the category somebody filed and where each row came from, which is
+// the part no bank statement can give back.
+window.bankExportCSV = function(){
+  const rows = [['Date', 'Description', 'Amount', 'Category', 'Source', 'Status', 'Id']];
+  (STATE.finTxns || []).slice()
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))
+    .forEach(t => rows.push([
+      t.date || '', t.desc || '', (t.amount == null ? '' : t.amount),
+      (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category || '')) || '',
+      t.src === 'import' ? 'statement import' : 'bank feed',
+      t.status || 'posted', t.id || '',
+    ]));
+  const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'venia-ledger-' + new Date().toISOString().slice(0, 10) + '.csv';
+  a.click();
+  showToast((rows.length - 1).toLocaleString() + ' transactions exported', 'success');
+};
 window.bankTrimTxns = bankTrimTxns;
 
 // Merge new transactions into the synced feed (dedupe by id, statuses update
@@ -38080,9 +38139,12 @@ window.cmdRenderBank = function(){
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSyncTxns()">⟳ Sync transactions</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankConnect()">+ Add account</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankImportOpen()" title="For the months the feed cannot reach — import a statement CSV">&uarr; Import statement</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankExportCSV()" title="Every transaction, with its category and where it came from">&darr; Export ledger</button>
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · read-only — nothing here can move money</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
+      ${STATE.finTrim && STATE.finTrim.total > 0 ? `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:9px 12px;margin:-8px 0 16px;font-size:10px;color:var(--ink);line-height:1.7">
+        <strong>${STATE.finTrim.total.toLocaleString()} older transaction${STATE.finTrim.total===1?'':'s'} dropped</strong> to keep the workspace within the size a browser will hold — oldest dated ${slEsc(STATE.finTrim.from||'')}. The current year is never dropped. Export the ledger to keep a copy of what is left.</div>` : ''}
       <div class="ag-sec-head"><h2 class="ag-sec-title">Accounts</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankToggleAccts()">${acctsOpen ? 'Hide' : 'Show ' + bk.accounts.length}</button></div></div>
       ${acctsOpen
         ? `<div style="max-width:560px;margin-bottom:20px">${acctRows}</div>`
