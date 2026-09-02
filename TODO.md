@@ -3881,3 +3881,66 @@ intent and the DOM select in step so they cannot drift, and an explicit
 **Uncategorize** button covers the case where clearing is what you meant.
 
 `gauntlet/bulkfile.js` — 10 assertions, all failing against the first half of 452.
+
+---
+
+## Build 453 — 725 decisions are about thirty decisions
+
+Asked for accuracy above everything, so the P&L and balance sheet can be
+submitted. Audited the live ledger rather than guessing at it.
+
+### Where it stands
+
+**725 of 1,436 transactions have no category — 50.5%.** $146,098 of payments and
+$183,478 of receipts.
+
+The two biggest unfiled vendors are the same thing:
+
+| | Rows | Amount |
+|---|---|---|
+| Zelle from Christine Ko | 65 | **$96,210 in** |
+| Zelle from Keeter Ly | 52 | **$58,763 in** |
+
+**$154,973 of founder money, untagged.** Filed as owner investment it becomes
+equity; left as it is, it appears nowhere and equity is understated by the whole
+amount. It is the largest single line the balance sheet is missing.
+
+### Three errors already in the books
+
+- **Transfers net +$42,052 instead of zero** (129 rows) — one leg missing, or
+  something that is not a transfer filed as one. The cash flow statement is
+  wrong by that much.
+- **15 rows tagged `payroll` on money coming IN** ($1,823).
+- **2 rows tagged `income` on money going OUT** ($521).
+
+### The review
+
+**Money → Cash → "Review N unfiled"** — one row per vendor, biggest first, a
+category dropdown and a File button. Thirty answers instead of seven hundred,
+and the order matters more than the count: $96,000 of founder transfers before
+$73 of taxi rides.
+
+`finTagAudit()` runs the checks above in the app. Unfiled rows **block**
+readiness rather than warning softly; the founder Zelles, the sign
+contradictions and the transfer imbalance are each named with their size.
+
+### The merchant key is the whole trick
+
+A bank writes one vendor a dozen ways. Zelle names the counterparty, ACH names
+the originator, a card charge buries it between a processor tag, a phone number
+and a city.
+
+- `HIS*HISCOX INC 888-202-3007 NY 08/24` → **HISCOX INC** — a short token before
+  an asterisk is the processor's tag, not the merchant, and keeping it gives a
+  list of vendors called "HIS HISCOX" and "SQ BLUE".
+- `ORIG CO NAME:GUSTO CO ENTRY DESCR:…` and `ORIG CO NAME:GUSTO ORIG ID:…` both
+  → **GUSTO**. Taking two words blind gives "GUSTO CO" and "GUSTO ORIG": one
+  vendor split in two, which is exactly what the two sources do to the same
+  payment.
+
+**A test corrected, not the code:** the ACH assertion first ran through the
+unfiled list, where it tested the auto-categoriser as much as the grouping —
+Gusto is already a payroll rule, and the neutral name picked to replace it turned
+out to be a transfer rule. It now asserts the key function directly.
+
+`gauntlet/tagreview.js` — 17 assertions, all failing against Build 452.
