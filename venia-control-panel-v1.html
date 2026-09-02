@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '446';
+  const BUILD = '447';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35498,6 +35498,27 @@ function finPLStatement(){
           + 'production, or leave them and do not cost those styles — either is defensible, both is not.'
         : 'Nothing is sitting in a category that would double-count.'));
   }
+  // WHAT IS NOT TRADING, said before anyone has to ask.
+  const fin = (d.ownerDraw || 0) + (d.ownerInvest || 0) + (d.loanIn || 0) + (d.loanOut || 0);
+  if (fin > 0) {
+    const bits = [];
+    if (d.ownerDraw > 0) bits.push('$' + Math.round(d.ownerDraw).toLocaleString() + ' of owner draws');
+    if (d.ownerInvest > 0) bits.push('$' + Math.round(d.ownerInvest).toLocaleString() + ' of owner investment');
+    if (d.loanIn > 0) bits.push('$' + Math.round(d.loanIn).toLocaleString() + ' of loan principal received');
+    if (d.loanOut > 0) bits.push('$' + Math.round(d.loanOut).toLocaleString() + ' of loan principal repaid');
+    notes.push('FINANCING IS NOT TRADING, AND IS NOT IN THE FIGURES ABOVE. ' + bits.join(', ')
+      + ' moved in this period. None of it is revenue and none of it is an operating expense: it '
+      + 'changes who owns what, not what the business earned. A draw counted as an expense would '
+      + 'understate profit and capital counted as income would overstate revenue — both on a document '
+      + 'somebody is being asked to lend against. They are listed under Financing so the cash can be '
+      + 'followed without distorting the trading result.');
+  }
+  if (d.interestPaid > 0) {
+    notes.push('Interest of $' + Math.round(d.interestPaid).toLocaleString() + ' is reported BELOW '
+      + 'operating profit rather than among operating expenses. It is a real cost, but a cost of how '
+      + 'the business is financed rather than of running it, and operating profit is the figure a '
+      + 'lender compares against other businesses.');
+  }
   // THE LEDGER'S OWN START DATE, ON THE FACE OF THE DOCUMENT.
   const cov = (typeof finLedgerCoverage === 'function') ? finLedgerCoverage() : null;
   const covShort = function(iso){
@@ -35627,6 +35648,20 @@ function finPLStatement(){
     opexTotal: opexTotal,
     operating: operating,
     operatingPct: revenue > 0 ? Math.round((operating / revenue) * 1000) / 10 : null,
+    // BELOW OPERATING PROFIT. Interest is a real expense but a financing one; a
+    // reader looks for it here, not among the rent and the software.
+    interest: d.interestPaid || 0,
+    netProfit: operating - (d.interestPaid || 0),
+    // FINANCING AND OWNERSHIP — reported, never mixed into trading. These four
+    // change who owns what; none of them is something the business earned or
+    // spent, and putting any of them in the columns above would misstate what
+    // somebody is being asked to lend against.
+    financing: [
+      { label: 'Owner investment received', amount: d.ownerInvest || 0 },
+      { label: 'Owner draws taken', amount: d.ownerDraw || 0 },
+      { label: 'Loan principal received', amount: d.loanIn || 0 },
+      { label: 'Loan principal repaid', amount: d.loanOut || 0 },
+    ].filter(function(x){ return x.amount > 0; }),
     memo: [
       { label: 'Wholesale collected in period', amount: d.wsCollectedYtd || 0 },
       { label: 'Accounts receivable outstanding', amount: (d.arOpen || []).reduce(function(t, a){ return t + (a.open || 0); }, 0) },
@@ -35691,7 +35726,19 @@ window.finPrintPL = function(){
     + (st.opex.length ? '' : '<tr><td colspan="2" class="sub">None recorded in the period.</td></tr>')
     + row('Total operating expenses', st.opexTotal, { cls: 'tot' })
     + row('Operating profit' + (st.operatingPct != null ? '  ·  ' + st.operatingPct + '% of revenue' : ''),
-          st.operating, { cls: 'big' });
+          st.operating, { cls: 'big' })
+    // Interest sits between operating and net, which is where a lender looks for
+    // it. With no borrowing there is nothing to show and no empty line.
+    + (st.interest > 0
+        ? row('Interest paid', st.interest)
+          + row('Net profit after interest', st.netProfit, { cls: 'big' })
+        : '')
+    // Financing last, under its own heading and outside every total above, so
+    // the cash can be followed without any of it touching the trading result.
+    + (st.financing && st.financing.length
+        ? section('Financing and ownership — not part of the result above')
+          + st.financing.map(function(r){ return row(r.label, r.amount); }).join('')
+        : '');
 
   const memo = st.memo.map(function(r){ return row(r.label, r.amount); }).join('');
   const notes = st.notes.map(function(n, i){
@@ -35850,7 +35897,14 @@ function cmdMoneyData() {
   // them into COGS above, so counting the wires too would double-charge them.
   // This is the same split finCashCalendar makes for recurring detection.
   // transfer is money moving between our own accounts, and income is inflow.
-  const OPEX_EXCLUDE = ['fabric','production','transfer','income'];
+  // owner_draw, owner_invest and loan are financing, not trading: they move money
+  // between the founders, a bank and the business without the business having
+  // earned or spent anything. Counting a draw as an expense understates profit
+  // on the document somebody lends against. interest is excluded here too, but
+  // for a different reason — it IS an expense, and it is reported below
+  // operating profit where a reader expects to find it.
+  const OPEX_EXCLUDE = ['fabric','production','transfer','income',
+                        'owner_draw','owner_invest','loan','interest'];
   // THE SAME MONEY, SPLIT BY WHICH ROUTE IT TAKES TO THE STATEMENT.
   //
   // A payment to a factory or a mill must reach the P&L exactly once: through
@@ -35867,13 +35921,28 @@ function cmdMoneyData() {
   const MFG_LOOKALIKE = ['contractors','materials','shipping'];
   let opexYtd = 0, opexUncat = 0; const opexBy = {};
   let mfgViaCogs = 0, mfgViaOpex = 0; const mfgOpexBy = {};
+  // Financing, kept where it can be reported rather than merely excluded — an
+  // amount that vanishes from a statement is not the same as one that is
+  // explained on it.
+  let ownerDraw = 0, ownerInvest = 0, loanOut = 0, loanIn = 0, interestPaid = 0;
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void' || t.status === 'pending') return;
     const amt = t.amount || 0;
-    if (amt >= 0) return;                               // outflow only
     if (!t.date || t.date < jan1iso.slice(0,10)) return;
     const c = (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category||'')) || '';
+    // INFLOWS FIRST, because two of them are not revenue and the loop below has
+    // always thrown every inflow away. Capital the founders put in and a loan
+    // that lands are cash the business now HAS and did not EARN — invisible on
+    // a P&L, which is correct, and invisible everywhere else, which is not.
+    if (amt >= 0) {
+      if (c === 'owner_invest') ownerInvest += amt;
+      else if (c === 'loan') loanIn += amt;
+      return;
+    }
     if (!c) { opexUncat += -amt; return; }              // can't classify it yet — reported, never guessed
+    if (c === 'owner_draw') ownerDraw += -amt;
+    else if (c === 'loan') loanOut += -amt;               // principal repaid
+    else if (c === 'interest') interestPaid += -amt;
     if (c === 'fabric' || c === 'production') mfgViaCogs += -amt;
     else if (MFG_LOOKALIKE.indexOf(c) >= 0) {
       mfgViaOpex += -amt; mfgOpexBy[c] = (mfgOpexBy[c] || 0) + -amt;
@@ -35955,6 +36024,7 @@ function cmdMoneyData() {
   return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous, seasonRows,
            opexYtd, opexUncat, opexBy, bankOpex, opexTotal,
            mfgViaCogs, mfgViaOpex, mfgOpexBy,
+           ownerDraw, ownerInvest, loanOut, loanIn, interestPaid,
            revYtd, cogsYtd, operating: revYtd - cogsYtd - opexTotal, rows, poPaidYtd, poCommitted,
            hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
 }
@@ -37208,9 +37278,20 @@ window.finBriefMarkSeen = function(){
 //  VENIA access code, fail-closed. Amounts arrive in dollars with Stripe's
 //  sign convention: negative = money out, positive = money in.
 // ══════════════════════════════════════════════════════════
-const FIN_CATEGORIES = ['income','fabric','production','contractors','rent','payroll','software','shipping','marketing','rnd','fees','taxes','transfer','other'];
+// MONEY THAT IS NOT TRADING. The four at the end are new and they are not
+// decoration: without them a founder's draw has nowhere to go but `other`, where
+// it is counted as an OPERATING EXPENSE and understates profit — and money the
+// founders put in has nowhere but `income`, which at least keeps it out of opex
+// but leaves the cash story with a hole in it.
+//
+// A lender or an investor reads a P&L to learn what the BUSINESS earns. Owner
+// draws, capital in, and loan principal are all financing: they change who owns
+// what, not what the trading made. Interest is genuinely an expense, but a
+// financing one, so it belongs below operating profit rather than beside rent.
+const FIN_CATEGORIES = ['income','fabric','production','contractors','rent','payroll','software','shipping','marketing','rnd','fees','taxes','transfer','other','owner_draw','owner_invest','loan','interest'];
 // Display labels where the stored token isn't self-explanatory.
-const FIN_CAT_LABEL = { rnd: 'R&D' };
+const FIN_CAT_LABEL = { rnd: 'R&D', owner_draw: 'owner draw', owner_invest: 'owner investment',
+                        loan: 'loan principal', interest: 'interest' };
 // The built-in list is a starting point, not the whole vocabulary — every
 // business spends on something the list did not anticipate. Custom categories
 // live in STATE (so they sync across devices) and are valid everywhere a
