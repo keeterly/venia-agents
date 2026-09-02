@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '453';
+  const BUILD = '454';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6696,6 +6696,33 @@ function mergeSnapshots(base, local, cloud) {
           });
         });
       }
+      return;
+    }
+    // A FILING IS NEVER UNDONE BY A SYNC.
+    //
+    // Categorising the ledger is hours of a founder's judgement, and the merge
+    // has one branch that can throw it away: when a record looks unchanged on
+    // this device but changed in the cloud, the cloud copy wins. If the cloud is
+    // stale for any reason — a module row that did not land, a push that raced a
+    // pull — that branch replaces a filed transaction with an unfiled one, a row
+    // at a time, silently. Which is precisely what "I set a tag and another one
+    // lost its tag" looks like.
+    //
+    // Emptying a category is a rare, deliberate act; losing one to a race is a
+    // bug. So the merge is allowed to CHANGE a category and never to blank one:
+    // if this device has a category and the merge came back without it, the
+    // category is put back. Deliberate clearing still works, because that side
+    // is the one holding the empty value locally.
+    if (k === 'finTxns' && (_mRecArray(l) || _mRecArray(c))) {
+      const merged = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
+      const lCat = Object.create(null);
+      (Array.isArray(l) ? l : []).forEach(function (t) {
+        if (t && t.id != null && t.category) lCat[t.id] = t.category;
+      });
+      merged.forEach(function (t) {
+        if (t && t.id != null && !t.category && lCat[t.id]) t.category = lCat[t.id];
+      });
+      out[k] = merged;
       return;
     }
     if (_mRecArray(l) || _mRecArray(c)) out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
@@ -41765,6 +41792,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             id: WS_ID, data: toPush, updated_by: clientId(),
             updated_at: stamp, rev: rev
           }, { onConflict:'id' });
+      // A MODULE WRITE THAT FAILED MUST FAIL THE PUSH.
+      //
+      // `res` is the BLOB result. For a founder the blob almost always succeeds,
+      // so a module row that did NOT land — RLS, a dropped connection, a payload
+      // the server refused — was recorded in __syncStat and then ignored: the
+      // base advanced to local as though everything had been published.
+      //
+      // That is the one state the three-way merge cannot survive. With the base
+      // level with local and the cloud still holding the old values, the next
+      // merge reads every unpublished edit as "only the cloud changed" and
+      // REVERTS it — one row at a time, silently, which is exactly what a
+      // category disappearing off a transaction looks like.
+      //
+      // So the base only advances when what we actually pushed landed.
+      if (modErr && ids.length) {
+        syncFail('push', 'module write failed (' + modErr + ') — your last change is still only on '
+          + 'this device. It will be retried; do not clear the app until the next sync succeeds.');
+        window.__syncStat.push = { t: new Date().toISOString(), ok: false, err: modErr,
+          via: 'module rows refused — base NOT advanced' };
+        // Try again shortly rather than waiting for the next edit: an unpushed
+        // change that nothing retries is a change that gets reverted later.
+        clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 20000);
+        return;
+      }
       if (!res || !res.error) {
         localStorage.setItem('venia-sync-rev', String(rev));
         // Read-modify-WRITE was only doing read-modify: the merged blob (which

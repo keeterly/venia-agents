@@ -3944,3 +3944,50 @@ Gusto is already a payroll rule, and the neutral name picked to replace it turne
 out to be a transfer rule. It now asserts the key function directly.
 
 `gauntlet/tagreview.js` — 17 assertions, all failing against Build 452.
+
+---
+
+## Build 454 — a filing is never undone by a sync
+
+Reported four times, each time as *"I set a tag and another expense lost its
+tag."* Every previous attempt looked in the wrong place. **The categorisation
+logic was never the problem** — `bankSetCategory` only touches its target, the
+live ledger has no duplicate ids, and the bulk path was proven correct. The loss
+happens in the SYNC, and it is reproducible in nine lines.
+
+### Two faults, either of which reverts a filing on its own
+
+**1. The push read the wrong result.**
+
+```js
+var res = !writesBlob ? … : await c.from('venia_workspace').upsert(…);
+if (!res || !res.error) { … setBase(localSnap); }
+```
+
+`res` is the BLOB's result. For a founder the blob almost always writes, so a
+module row that did **not** land — RLS, a dropped connection, a payload the
+server refused — was recorded in `__syncStat` and then **ignored**, and the merge
+base advanced as though everything had been published.
+
+**2. The three-way merge then reverts.** With the base level with local and the
+cloud holding older values, `_mArray` reads every unpublished edit as "only the
+cloud changed" and takes the cloud copy — blanking categories one row at a time,
+silently. Which is exactly what the founder saw.
+
+Measured against the pre-fix code: base level with local, stale cloud,
+**0 of 3 filings survived**.
+
+### The fix, in two parts
+
+**The base only advances when what was pushed landed.** A failed module write now
+fails the whole push, says so, and retries in twenty seconds — an unpushed change
+that nothing retries is a change that gets reverted later.
+
+**And the merge is allowed to change a category, never to blank one.** Emptying a
+category is a rare deliberate act; losing one to a race is a bug. If this device
+holds a category and the merge came back without it, it is put back. A partner
+recategorising still wins, a deliberate clear still clears (that device is the
+one holding the empty value), and nothing changes about which records exist.
+
+`gauntlet/tagsync.js` — 9 assertions, 5 failing against Build 453. Runs the merge
+machinery directly out of the file: this is arithmetic, not a screen.
