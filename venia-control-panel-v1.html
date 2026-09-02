@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '441';
+  const BUILD = '442';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35262,6 +35262,46 @@ function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 // where "not yet classified" is a to-do; the statement is a claim about a
 // period. So the document carries the line, includes it in the total, and says
 // so in the notes — a stated difference, with the amount on the page.
+// WHAT THE LEDGER ACTUALLY COVERS.
+//
+// A statement headed "Year to date — 1 January" is a claim about a period, and
+// until now it was made without checking whether the ledger reaches back that
+// far. It usually does not. Stripe returns roughly the last 180 days of
+// transactions, depending on the institution, so on any date after the end of
+// June the start of the year is already outside the window — and the retention
+// cap used to delete what had been captured while it was still reachable.
+//
+// A missing month of expenses does not make the statement incomplete in a
+// harmless way: revenue for the period is counted in full and the costs are
+// not, so it OVERSTATES PROFIT. That is the one direction a document must never
+// be wrong in silently.
+function finLedgerCoverage(){
+  const yr = new Date().getFullYear();
+  const jan1 = yr + '-01-01';
+  const dates = (STATE.finTxns || [])
+    .filter(t => t && t.status !== 'void' && t.date)
+    .map(t => String(t.date));
+  if (!dates.length) return { any: false, from: '', reachesJan1: false, gapDays: 0, yr: yr };
+  const from = dates.reduce((a, b) => (a < b ? a : b));
+  const gapDays = Math.max(0, Math.round((new Date(from) - new Date(jan1)) / 86400000));
+  // A TOLERANCE, AND WHY THERE HAS TO BE ONE.
+  //
+  // "Earliest transaction is 2 January" does not mean the ledger is missing a
+  // day — it means nothing was spent on New Year's Day, which is normal. The
+  // hole this is looking for is a FEED WINDOW, not a quiet week: a bank feed
+  // that starts in March because that is as far back as it reaches. Two weeks
+  // is longer than any plausible quiet start to a year and far shorter than a
+  // missing month, so it separates the two without crying wolf every January.
+  //
+  // The strict fact is kept separately from the judgement, so nothing downstream
+  // has to guess which one it is reading.
+  const TOLERANCE_DAYS = 14;
+  return { any: true, from: from, reachesJan1: from <= jan1, gapDays: gapDays,
+           materialGap: gapDays > TOLERANCE_DAYS, toleranceDays: TOLERANCE_DAYS,
+           yr: yr, count: dates.length };
+}
+window.finLedgerCoverage = finLedgerCoverage;
+
 // WHERE THE TIMING MISMATCH GOES: INVENTORY.
 //
 // Manufacturing cash and cost of goods sold are NOT the same money in the same
@@ -35431,6 +35471,22 @@ function finPLStatement(){
           + 'production, or leave them and do not cost those styles — either is defensible, both is not.'
         : 'Nothing is sitting in a category that would double-count.'));
   }
+  // THE LEDGER'S OWN START DATE, ON THE FACE OF THE DOCUMENT.
+  const cov = (typeof finLedgerCoverage === 'function') ? finLedgerCoverage() : null;
+  const covShort = function(iso){
+    try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-US',
+      { month: 'long', day: 'numeric', year: 'numeric' }); } catch (e) { return iso; }
+  };
+  if (d.bankOpex && cov && cov.any && cov.materialGap) {
+    notes.push('THE EXPENSE LEDGER DOES NOT REACH 1 JANUARY. The earliest bank transaction on record '
+      + 'is ' + covShort(cov.from) + ' — ' + cov.gapDays + ' day' + (cov.gapDays === 1 ? '' : 's')
+      + ' after the start of the year. Everything spent before that date is MISSING from operating '
+      + 'expenses above, while revenue for the whole year is counted in full, so operating profit is '
+      + 'OVERSTATED by whatever was spent in that gap. This is not a rounding matter and it is the one '
+      + 'direction a statement must not be wrong in quietly. Bank feeds return roughly the last 180 '
+      + 'days, so the missing months cannot be re-fetched — they have to be entered from statements '
+      + 'if this period is to be reported in full.');
+  }
   // THE PERIOD A COST BELONGS TO.
   //
   // The question this answers: 2026's manufacturing spend has almost nothing to
@@ -35495,8 +35551,14 @@ function finPLStatement(){
     entity: 'VENIA Collection',
     title: 'Statement of Profit and Loss',
     // The period the DATA supports, stated plainly. See finPLPeriodNote().
+    // The period the DOCUMENT can stand behind, not the one that was asked for.
+    // Heading a statement "1 January" when the ledger starts in March is the
+    // claim, not the note that corrects it further down.
     periodLabel: 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
-      { month: 'long', day: 'numeric', year: 'numeric' }),
+      { month: 'long', day: 'numeric', year: 'numeric' })
+      + ((d.bankOpex && cov && cov.any && cov.materialGap)
+          ? '  ·  expenses from ' + covShort(cov.from) + ' only' : ''),
+    coverage: cov,
     preparedAt: now,
     currency: 'USD',
     revenue: [
@@ -37327,6 +37389,29 @@ window.bankRefreshBalances = async function(){
   } catch(e){ showToast(String(e && e.message || e), 'error'); }
   try { cmdRenderBank(); } catch(e){}
 };
+// RETENTION. The old cap kept the 600 newest and DELETED the rest — and because
+// the list is sorted newest first, the rows it deleted were the OLDEST ones,
+// which is precisely what a year-to-date statement is made of. History synced in
+// March was silently thrown away in September, and Stripe will not sell it back:
+// its window is roughly the last 180 days, so a deleted January is gone for good.
+//
+// So the cut is never allowed to cross 1 January of the current year. Rows inside
+// the reporting year survive past the cap; only genuinely historical ones shed.
+//
+// Its own function rather than four lines inside the sync, so it can be tested
+// without a network call — a retention rule verified by re-typing it in the test
+// proves only that the test can type.
+const BANK_KEEP = 3000;
+function bankTrimTxns(list, keep){
+  const rows = (list || []).slice()
+    .sort((x, y) => String(y.date || '').localeCompare(String(x.date || '')));
+  const cap = keep || BANK_KEEP;
+  if (rows.length <= cap) return rows;
+  const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString().slice(0, 10);
+  return rows.slice(0, cap).concat(rows.slice(cap).filter(t => t && String(t.date || '') >= jan1));
+}
+window.bankTrimTxns = bankTrimTxns;
+
 // Merge new transactions into the synced feed (dedupe by id, statuses update
 // in place, auto-categorize the obvious, newest first, capped at 600).
 window.bankSyncTxns = async function(silent){
@@ -37337,7 +37422,14 @@ window.bankSyncTxns = async function(silent){
   let added = 0;
   for (const a of accounts) {
     let cursor = null;
-    for (let page = 0; page < 5; page++) {
+    // Stripe returns 100 at a time, newest first, and walks backwards through
+    // the window with starting_after. Five pages capped the ledger at the 500
+    // newest rows PER SYNC and never resumed from where it stopped, so an
+    // account busier than that could never reach its own January. Twenty-five
+    // pages covers 2,500 — more than Stripe's own 180-day window holds for a
+    // business this size — and the loop still exits the moment Stripe says
+    // there is no more.
+    for (let page = 0; page < 25; page++) {
       let d;
       try { d = await bankApi('transactions', Object.assign({ account: a.id }, cursor ? { starting_after: cursor } : {})); }
       catch(e){ if (!silent) showToast(String(e && e.message || e), 'error'); break; }
@@ -37356,7 +37448,7 @@ window.bankSyncTxns = async function(silent){
   // Backfill categories on rows that synced before a rule existed.
   STATE.finTxns.forEach(t => { if (!t.category) { const c = bankAutoCategory(t.desc, t.amount); if (c) t.category = c; } });
   STATE.finTxns.sort((x,y) => String(y.date||'').localeCompare(String(x.date||'')));
-  if (STATE.finTxns.length > 600) STATE.finTxns = STATE.finTxns.slice(0, 600);
+  STATE.finTxns = bankTrimTxns(STATE.finTxns);
   if (!STATE.finBank) STATE.finBank = {};
   STATE.finBank.lastSync = new Date().toISOString();
   save();

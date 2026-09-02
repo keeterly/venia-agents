@@ -3292,3 +3292,66 @@ than a transaction-by-transaction job.
 
 `gauntlet/pltiming.js` — 15 assertions, 13 of which fail against Build 440. The
 two that pass are the ones proving the matching was already correct.
+
+---
+
+## Build 442 — a statement headed "1 January" that the ledger could not reach
+
+Reported: *"It looks like I'm not getting transactions from January 1st even
+though I said year to date."* Three causes, and the dangerous one is not the
+missing data.
+
+### 1. Stripe only hands back about 180 days
+
+From the docs, fetched not recalled: *"Stripe returns a paginated list of up to
+the last 180 days of transaction history on an account, depending on the
+account's financial institution."* On 2 September that window starts 6 March.
+January is outside it and cannot be re-fetched.
+
+### 2. The app was deleting the history it had
+
+```js
+if (STATE.finTxns.length > 600) STATE.finTxns = STATE.finTxns.slice(0, 600);
+```
+
+The list is sorted newest-first, so keeping the newest 600 **deletes the
+oldest** — exactly what a year-to-date statement is made of. January captured in
+March was thrown away in September, and Stripe will not sell it back.
+
+Retention is now `bankTrimTxns()`, its own function so it can be tested without
+a network call, and **the cut is never allowed to cross 1 January**: rows inside
+the reporting year survive past the cap. Cap 600 → 3,000.
+
+### 3. It could only walk back 500 rows per account
+
+`for (let page = 0; page < 5; page++)` at 100 a page, always from the newest,
+never resuming where it stopped. Now 25 pages, still exiting the moment Stripe
+says there is no more.
+
+### And Refresh only ever refreshed the balance
+
+`features[]=balance`. The balance moved; the ledger never did. Now both, with a
+balance-only fallback so a rate-limited transaction refresh does not lose both —
+and `form()` expands array values into repeated keys, which an object literal
+could not express.
+
+### The part that mattered most
+
+A missing month is not harmless: revenue for the year is counted in full and the
+costs are not, so it **OVERSTATES PROFIT**. The heading now reads
+*"…· expenses from March 6, 2026 only"* and a note names the gap in days and
+says which way the statement is wrong.
+
+**A tolerance, and why there has to be one.** The first version fired unless a
+transaction was dated on or before 1 January — a business whose first spend was
+2 January would get a false alarm every year. Fourteen days separates "nothing
+was spent on New Year's Day" from "the feed starts in March". The strict fact
+(`reachesJan1`) is kept apart from the judgement (`materialGap`), and the
+tolerance is pinned from both sides.
+
+### Still missing
+
+**No manual entry and no CSV import.** January–early March cannot come from the
+feed, so today there is no way to enter it at all. That is the next thing.
+
+`gauntlet/plcoverage.js` — 14 assertions, 12 of which fail against Build 441.

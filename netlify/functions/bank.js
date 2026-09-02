@@ -116,8 +116,12 @@ export default async (req) => {
   const sent = req.headers.get('x-venia-code') || '';
   if (!sent || (await sha256Hex(sent)) !== gateHash) return json({ error: 'Not authorized — VENIA access code required.' }, 401, cors);
 
+  // Stripe takes repeated keys for list parameters (features[]=a&features[]=b),
+  // which an object literal cannot express — so an array value expands into one
+  // pair per element rather than being stringified into "a,b" and rejected.
   const form = (o) => Object.entries(o)
-    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
+    .flatMap(([k, v]) => (Array.isArray(v) ? v : [v])
+      .map((x) => encodeURIComponent(k) + '=' + encodeURIComponent(x))).join('&');
   const call = async (path, data, method = 'POST') => {
     const r = await fetch('https://api.stripe.com/v1/' + path, {
       method,
@@ -200,12 +204,22 @@ export default async (req) => {
       return json({ account: slimAccount(a) }, 200, cors);
     }
 
-    // On-demand balance refresh.
+    // On-demand refresh of BOTH balance and transactions.
+    //
+    // It used to ask for balance alone, which is why pressing Refresh moved the
+    // balance and never moved the ledger. Stripe rate-limits transaction
+    // refreshes (next_refresh_available_at), and asking too early fails the
+    // whole call — so transactions are requested first and the balance-only
+    // call is the fallback, rather than losing both to one refusal.
     if (action === 'refresh') {
       if (!FCA_RE.test(String(body.account || ''))) return json({ error: 'Bad account id' }, 400, cors);
-      const a = await call('financial_connections/accounts/' + body.account + '/refresh', { 'features[]': 'balance' });
+      const path = 'financial_connections/accounts/' + body.account + '/refresh';
+      let a = await call(path, { 'features[]': ['balance', 'transactions'] });
+      let txnRefresh = !a.error;
+      if (a.error) a = await call(path, { 'features[]': 'balance' });
       if (a.error) return json({ error: a.error.message }, 400, cors);
-      return json({ account: slimAccount(a) }, 200, cors);
+      // Said out loud so the screen can explain a ledger that did not move.
+      return json({ account: slimAccount(a), transactionsRefreshed: txnRefresh }, 200, cors);
     }
 
     // Transactions, newest-capable pagination via starting_after. Amounts in
