@@ -3691,3 +3691,63 @@ match and let the result answer.
   still refused with its reason.
 
 `gauntlet/txnfile.js` — 7 assertions, 5 failing against Build 448.
+
+---
+
+## Build 450 — the transcript was teaching the CFO not to emit action blocks
+
+Reported after 449: still *"Filed — same three merchants, third time now"*, still
+nothing saved, and **no working animation** while it ran. Two separate bugs.
+
+### The history was a poisoned few-shot
+
+The action block is stripped from a reply before it is shown — and the STRIPPED
+text is what goes into the history the next turn is built from. So the model read
+its own past turns as pure prose with no `venia:action` block anywhere. Three of
+those in a row and its own transcript is an example teaching it that replies here
+do not carry blocks. It writes "Filed" and emits nothing.
+
+**That is why it escalated.** Each failure made the next more likely.
+
+The transcript now records what actually happened: a turn that acted says so with
+its action type; a turn that CLAIMED to act and did not carries a correction into
+the place the model reads. The ⚠ warning was only ever shown to the founder.
+
+Applied on all three paths — direct, cloud, and the dock.
+
+### Queued is not finished
+
+The cloud path called `think.__done()` and `agentEndWork()` the moment the job
+was accepted, stopping the indicator while the run was still going, and never
+registered the job in `SK.cloudJobs` — which is where `cfoChatApply` looks for
+the bubble to land the answer in. So the app looked idle for the whole turn and
+the reply arrived detached. The dock path already did this correctly.
+
+### The dropdown disagreed with the accounting
+
+`finTxnCat()` reads the description when nothing is filed, so a row can be
+COUNTED under a category everywhere while its dropdown showed `—`. Measured:
+STUDIO RENT counted as `rent`, shown as `—`; UPS STORE counted as `shipping`,
+shown as `—`. Setting such a row explicitly moves a count the founder never knew
+it was in — which reads as a tag being removed from another row.
+
+The dropdown now shows the effective category, italic grey with a tooltip when it
+was read from the description rather than filed by hand.
+
+**Not proven:** a case where setting row A clears row B's stored category. No
+duplicate ids exist in the live ledger (1,436 rows, 1,436 distinct) and
+`bankSetCategory` was driven directly with only the targeted row changing.
+
+### Two corrections to my own work
+
+The history marker was first written with literal backticks around
+`venia:action` — a fenced block inside a transcript could read as a real block
+boundary, the exact confusion it exists to remove. Dropped.
+
+**smoke6** then failed with "block leaked". It was right to fire, but its check
+was a proxy — it grepped for `venia:action` to mean "the raw block leaked". It
+now asserts what actually matters: no fence, no JSON payload, AND that the note
+recording the action IS present.
+
+`gauntlet/agenthistory.js` — 10 assertions, all failing against 449.
+`gauntlet/txnfile.js` — now 11, the 4 new ones failing against 449.
