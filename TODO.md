@@ -3545,3 +3545,46 @@ same mistake the retention cap made for months.
 
 `gauntlet/bankimport.js` — now 23 assertions, the 3 new behaviours failing
 against Build 445.
+
+---
+
+## Build 447 — a draw is not an expense, and capital is not revenue
+
+Asked to find what would cause a problem raising a loan or investment. Top of
+the list was not a missing feature but a **misstatement**.
+
+### There was no category for money the founders take out
+
+A transfer to a founder had nowhere to go but `other`, where it was counted as an
+**operating expense**. On the gauntlet's ledger the old build reported **$12,150
+of operating expenses against a real $4,600** — the extra $7,550 being an owner
+draw, loan principal and interest, none of which the business spent on running
+itself.
+
+The direction is what matters: it makes the business look like it burns more
+than it does and earns less than it does, on the exact document somebody is
+being asked to lend against.
+
+The mirror image was live too: money the founders put IN had nowhere but
+`income` — kept out of revenue, which is right, but invisible everywhere, which
+is not. The opex loop discarded every inflow.
+
+### Four categories, and where each belongs
+
+- **owner draw, owner investment, loan principal** — financing. They change who
+  owns what, not what the trading made. Excluded from operating expenses and
+  listed under their own heading, outside every total above.
+- **interest** — a real expense, but a financing one. Now between operating
+  profit and a new **net profit after interest**, where a lender looks for it.
+
+### Still open for an investor pack
+
+- **No balance sheet.** Every input now exists — cash, AR, inventory at cost,
+  factory commitments, loan principal and owner equity movements — but they are
+  not assembled. A lender asks for P&L *and* balance sheet; today they get half.
+- **No cash flow statement.** Same: the pieces exist, unassembled.
+- **`taxes` is still an operating expense.** Sales and payroll tax belong there;
+  income tax does not. Not moved, because the app cannot tell which a wire is
+  and guessing would be worse than the current state.
+
+`gauntlet/plfinancing.js` — 14 assertions, all failing against Build 446.
