@@ -3239,3 +3239,56 @@ COGS, gross profit and gross margin inherit it. That is what makes estimating
 the safe move instead of the risky one.
 
 `gauntlet/plcogs.js` — 21 assertions, all of which failed against Build 439.
+
+---
+
+## Build 441 — the year the money left is not the year the cost belongs to
+
+### The question
+
+2026's manufacturing spend has almost nothing to do with what sold in 2026.
+Goods sold this year may have been paid for last year, or the year before. So
+how do the two ever reconcile?
+
+**They don't, and they are not supposed to.** A cost belongs to the sale it made
+possible, not to the date the factory was paid.
+
+### The app was already right about this, and silent about it
+
+Verified rather than assumed: COGS is `landedCost(style) × units sold in the
+period`, and `landedCost` is **dateless** — it reads the style's cost sheet, not
+a transaction. Seed $50,000 of manufacturing cash leaving the bank and sell 20
+units at $50, and the statement charges **$1,000**. Those two assertions in
+`gauntlet/pltiming.js` pass against Build 440 unchanged.
+
+What was missing was saying so. The statement excluded the money correctly and
+then showed nothing about where it went — the founder watched $50k leave with no
+expense appearing and had to take it on faith.
+
+### Where the difference goes: the shelf
+
+`finInventoryAtCost()` — units on hand × landed cost — as a memo line beside
+"Paid to factories", plus a note carrying **both** figures in one sentence with
+the reason they differ: the gap is stock moving on or off the shelf, an asset,
+not a profit or a loss.
+
+Units of a style with **no cost sheet cannot be valued** and are counted
+separately rather than valued at zero, which would quietly understate the shelf.
+
+### A cost sheet is a current fact, not a historical one
+
+The consequence of costing by sale rather than by wire: COGS reads *today's*
+cost sheet, so revising one changes cost of goods sold in periods already
+reported. Usually what you want — every period on the best cost known today —
+but not what a reader assumes about a statement. Now said on the document: a
+view **as at** a date, not a frozen record.
+
+### The contractor split needs no new category
+
+`production` is already built in and already excluded from opex. Manufacturing
+labour goes there; everyone else stays in `contractors`. `set_txn_category`
+accepts a description match, so the split is a bulk refile through Enigma rather
+than a transaction-by-transaction job.
+
+`gauntlet/pltiming.js` — 15 assertions, 13 of which fail against Build 440. The
+two that pass are the ones proving the matching was already correct.

@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '440';
+  const BUILD = '441';
   const BUILD_DATE = '2026.08.30';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35262,6 +35262,37 @@ function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 // where "not yet classified" is a to-do; the statement is a claim about a
 // period. So the document carries the line, includes it in the total, and says
 // so in the notes — a stated difference, with the amount on the page.
+// WHERE THE TIMING MISMATCH GOES: INVENTORY.
+//
+// Manufacturing cash and cost of goods sold are NOT the same money in the same
+// year, and they are not supposed to be. A garment cut in 2025 and sold in 2026
+// takes its cost into 2026 with it, because the cost belongs to the SALE, not
+// to the wire. That is the whole reason COGS is landed cost of units sold
+// rather than what left the bank.
+//
+// So the gap between the two is not an error to reconcile away — it is stock.
+// Cash paid for goods that have not sold yet is an ASSET sitting on a shelf,
+// and this is the number that says how much. Without it the founder sees money
+// leave and no expense appear, and has to take on faith that it went somewhere.
+//
+// Units are valued at the style's landed cost. Units of a style with no cost
+// sheet CANNOT be valued and are counted separately rather than valued at zero,
+// which would quietly understate the shelf.
+function finInventoryAtCost(){
+  let value = 0, units = 0, styles = 0, uncostedUnits = 0, uncostedStyles = 0;
+  (STATE.styles || []).forEach(function(st){
+    if (!st) return;
+    const u = (typeof invStockEffective === 'function' ? (invStockEffective(st).units || 0) : (st.stock || 0));
+    if (!(u > 0)) return;
+    const lc = (typeof landedCost === 'function' ? (landedCost(st) || 0) : 0);
+    if (lc > 0) { value += lc * u; units += u; styles++; }
+    else { uncostedUnits += u; uncostedStyles++; }
+  });
+  return { value: value, units: units, styles: styles,
+           uncostedUnits: uncostedUnits, uncostedStyles: uncostedStyles };
+}
+window.finInventoryAtCost = finInventoryAtCost;
+
 function finPLStatement(){
   const d = cmdMoneyData();
   const now = new Date();
@@ -35400,6 +35431,51 @@ function finPLStatement(){
           + 'production, or leave them and do not cost those styles — either is defensible, both is not.'
         : 'Nothing is sitting in a category that would double-count.'));
   }
+  // THE PERIOD A COST BELONGS TO.
+  //
+  // The question this answers: 2026's manufacturing spend has almost nothing to
+  // do with what sold in 2026. Goods sold this year may have been paid for last
+  // year, or the year before. Charging the P&L by the date on the wire would put
+  // one year's factory bills against another year's revenue.
+  const inv = (typeof finInventoryAtCost === 'function') ? finInventoryAtCost() : null;
+  const mfgCash = Math.round(d.mfgViaCogs || 0);
+  notes.push('THE PERIOD A COST BELONGS TO. Manufacturing cash and cost of goods sold are not the '
+    + 'same money in the same year, and they are not meant to be. A garment cut last season and sold '
+    + 'this one carries its cost into THIS period, because a cost belongs to the sale it made possible, '
+    + 'not to the date the factory was paid. That is why cost of goods sold above is the landed cost of '
+    + 'units actually sold rather than what left the bank, and why manufacturing payments are kept out '
+    + 'of operating expenses. '
+    + '$' + mfgCash.toLocaleString() + ' of manufacturing cash left the bank in this period and $'
+    + Math.round(cogs).toLocaleString() + ' of cost reached this statement through cost of goods sold. '
+    + 'THE TWO ARE NOT EXPECTED TO MATCH: the difference is stock moving on or off the shelf, which is '
+    + 'an asset, not a profit or a loss.');
+  if (inv && (inv.value > 0 || inv.uncostedUnits > 0)) {
+    notes.push('INVENTORY ON HAND. ' + (inv.value > 0
+        ? '$' + Math.round(inv.value).toLocaleString() + ' of stock at landed cost — '
+          + inv.units.toLocaleString() + ' unit' + (inv.units === 1 ? '' : 's')
+          + ' across ' + inv.styles + ' style' + (inv.styles === 1 ? '' : 's') + '. '
+          + 'This is where manufacturing money paid but not yet sold has gone. It is an asset and '
+          + 'appears nowhere in the profit above; it becomes cost of goods sold as those units sell, '
+          + 'in whatever period that happens. '
+        : '')
+      + (inv.uncostedUnits > 0
+        ? inv.uncostedUnits.toLocaleString() + ' unit' + (inv.uncostedUnits === 1 ? '' : 's')
+          + ' across ' + inv.uncostedStyles + ' style' + (inv.uncostedStyles === 1 ? '' : 's')
+          + ' cannot be valued, because those styles have no cost sheet. They are counted here rather '
+          + 'than valued at zero, which would understate the shelf.'
+        : ''));
+  }
+  // A COST SHEET IS A CURRENT FACT, NOT A HISTORICAL ONE.
+  //
+  // The consequence of costing by sale rather than by wire: COGS reads today's
+  // cost sheet, so revising one moves cost of goods sold in periods already
+  // reported. That is usually what you want — but it is not what a reader
+  // assumes about a statement, so it is said out loud.
+  notes.push('Cost of goods sold is charged at each style\'s CURRENT cost sheet, whenever the units '
+    + 'were made. Revising a cost sheet therefore changes cost of goods sold in periods already '
+    + 'reported, including this one. That keeps every period on the best cost known today rather than '
+    + 'on a stale one, but it means this statement is a view as at ' + now.toLocaleDateString('en-US',
+      { month: 'long', day: 'numeric', year: 'numeric' }) + ', not a frozen record.');
   // The margin is the loudest number on the page and the easiest to misread
   // when the cost side is empty. Say what it is measuring.
   const grossPctNow = revenue > 0 ? Math.round((gross / revenue) * 1000) / 10 : null;
@@ -35445,11 +35521,15 @@ function finPLStatement(){
       { label: 'Accounts receivable outstanding', amount: (d.arOpen || []).reduce(function(t, a){ return t + (a.open || 0); }, 0) },
       { label: 'Paid to factories in period', amount: d.poPaidYtd || 0 },
       { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0 },
+      // The counterweight to the two lines above: what that money turned into
+      // and has not yet become an expense.
+      { label: 'Inventory on hand at landed cost', amount: (inv && inv.value) || 0 },
     ],
     notes: notes,
     // Named on the object too, so the chat card and the gauntlet read the same
     // answer the printed notes do.
     uncostedCount: uncosted.length, uncostedRevenue: uncostedRev, wsUncostedUnits: wsUncostedUnits,
+    inventory: inv,
     // Carried so the gauntlet can assert the document and the screen agree.
     _src: { revYtd: d.revYtd, cogsYtd: d.cogsYtd, opexYtd: d.opexYtd, opexUncat: uncat,
             bankOpex: d.bankOpex, screenOperating: d.operating },
