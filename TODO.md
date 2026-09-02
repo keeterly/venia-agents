@@ -3751,3 +3751,41 @@ recording the action IS present.
 
 `gauntlet/agenthistory.js` — 10 assertions, all failing against 449.
 `gauntlet/txnfile.js` — now 11, the 4 new ones failing against 449.
+
+---
+
+## Build 451 — the third statement, and the only one with nothing inferred in it
+
+A lender's pack is three documents. The P&L (440–447) is a mixed basis; the
+balance sheet (448) has no double entry behind it. This one is neither: every
+line is money that actually moved through the bank, so **nothing in it is
+accrued, estimated or inferred**. It is the statement a lender can lean on
+hardest, and it says so — leaving all three looking equally soft would have been
+the wrong impression to give.
+
+**Direct method, because it is derivable.** An indirect reconciliation starts
+from net profit and adjusts for non-cash items, which needs a general ledger this
+company does not keep. Listing what came in and went out needs only the bank.
+
+### The two traps it must not fall into
+
+**Factory money belongs here.** The P&L deliberately keeps fabric and production
+out of operating expenses, because their cost arrives through COGS as garments
+sell. Cash flow has the opposite job — that money left the bank whatever the P&L
+does with it. The two statements are MEANT to disagree about this, and the note
+says why, otherwise it looks like one of them is wrong.
+
+**Transfers between our own accounts are not cash flow.** Counting one leg as
+money leaving the business is how a healthy month reads as a bad one. They are
+netted, reported apart, and if they do not net to zero the note says what that
+means: only one side is in the ledger, usually because the other account is not
+connected.
+
+### Which end of the reconciliation it actually knows
+
+Closing cash is the bank's own figure. **Opening is derived by subtracting the
+movements from it** — this app was not connected on 1 January and never observed
+that balance. Said outright, along with where the error lands if a movement is
+missing: entirely on the opening balance.
+
+`gauntlet/cashflow.js` — 20 assertions, all failing against Build 450.
