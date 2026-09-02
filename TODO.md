@@ -3588,3 +3588,58 @@ is not. The opex loop discarded every inflow.
   and guessing would be worse than the current state.
 
 `gauntlet/plfinancing.js` — 14 assertions, all failing against Build 446.
+
+---
+
+## Build 448 — the feed could not tell an imported row was the same payment
+
+Checked the real ledger after a full Chase history import. **It worked**: 1,445
+transactions, nothing trimmed, imported rows reaching **2024-08-31** — two years
+the feed was never going to supply. The feed's own earliest is 2026-03-02, 184
+days back, confirming the ~180-day window against live data rather than docs.
+
+### But it exposed a bug: 9 transactions counted twice, $5,725
+
+The import deduped against the ledger. **The sync never did** — it matched on the
+Stripe id alone, and an imported row has no Stripe id, so every sync after a
+history import re-added the overlap period as new transactions.
+
+Two flavours, both live:
+- exact matches the sync simply could not see (5 rows)
+- **same payment, different text**: Chase writes `ORIG CO NAME:GUSTO CO ENTRY
+  DESCR:…`, Stripe writes `ORIG CO NAME:GUSTO ORIG ID:…` (4 rows)
+
+**Matched on date + amount, not description.** Both sources get date and amount
+right; neither agrees on ACH descriptor text. Counting keeps it safe where a set
+would not — two genuine $300 payments on one day match two-for-two and both
+survive, while the Gusto pair becomes one.
+
+The arriving feed row **upgrades** the imported row in place: it takes the real
+id and live status, and **keeps any category filed by hand**. Ledgers already
+damaged get a reviewed `bankMergeDupes()` behind a banner naming the count and
+the value — never automatic, because it deletes financial records.
+
+### And the balance sheet — the other half of the pack
+
+Cash, receivables, inventory at landed cost and factory prepayments; cards and
+factory commitments as liabilities; net position, working capital, and owner and
+financing movements. Same chrome as the P&L so they read as one pack.
+
+**It cannot balance by construction and says so.** There is no double-entry
+ledger underneath, so equity is stated as assets less liabilities rather than
+carried forward and reconciled — the first note says exactly that. A statement
+quietly implying a reconciliation nobody performed would be worse than one
+explaining why it cannot.
+
+It also names what it is missing: uncosted stock excluded rather than valued at
+zero, no bad-debt allowance, no write-downs for old or out-of-season stock, and
+no supplier debt, accrued tax or lease obligation in the liabilities.
+
+### Still needing the founders
+
+**860 of 1,200 imported rows are uncategorised.** The P&L cannot be trusted until
+that is done. Zelle payments *from* the founders are `owner_invest`, not income;
+Zelle payments to sewing contractors need the production/contractors split.
+
+`gauntlet/bankdupe.js` — 11 assertions, 8 failing against 447.
+`gauntlet/balancesheet.js` — 20 assertions, 19 failing against 447.
