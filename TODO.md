@@ -4062,3 +4062,36 @@ Three changes, none of them silent re-tagging of someone's books:
 
 `gauntlet/zelleequity.js` — 19 assertions, fails on 454 (the function and the
 issue do not exist).
+
+## Build 456 — the same mistake in a second category, and a loan filed as a cost
+
+Measured the morning after 455 shipped:
+
+- **62 Zelle receipts from the co-founder, $92,935, filed as "rent".** Rent
+  all-time reads +$10,459 — as if the landlord pays VENIA. The P&L was safe
+  (inflows never reach opex) but the cash flow statement counted $93k of
+  capital as operating receipts, and the balance sheet saw none of it.
+- **16 Upgrade loan repayments, $7,257, in a custom category "loan-repayment".**
+  Only the built-in `loan` is routed below the operating line, so principal
+  repaid was reported as a cost of running the brand.
+
+Build 455 looked for founder money in "transfer" only. Now:
+
+- **Every category.** Zelle receipts from a person in any category except
+  income (a customer paying by Zelle is income), owner investment and loan get
+  their own audit line — who, how many, which category, how much — with the
+  two honest answers as buttons, scoped to that category. The sign check no
+  longer double-reports the same rows.
+- **A custom category whose name says financing** (loan / repay / principal,
+  draw / distribution, invest / capital / equity / contribution) is named with
+  its total and moved to the matching built-in in one click. The emptied custom
+  category is retired; Undo brings both the rows and the category back.
+- Built-in sources are refused — those have select-all already and do not
+  disappear.
+
+Noted, not changed: the five "taxes" rows are sales tax remitted to CDTFA and
+tax-prep fees, not income tax; there is no income tax in the ledger (pass-
+through entity), so the "income tax sitting in opex" item from the queue is
+moot.
+
+`gauntlet/personreceipts.js` — 21 assertions, fails on 455.
