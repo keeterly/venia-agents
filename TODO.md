@@ -4437,3 +4437,23 @@ given 34mm of air above it.
 (working and lender P&L, balance sheet, cash flow), each checked for the same
 print contract and then actually rendered to a PDF to confirm it still
 paginates. Fails 8 on 463.
+
+## Build 465 — no signature block on the P&L
+
+Removed from both P&L documents, working and lender. An interim profit and loss
+is management's own statement of a period, not something anyone counter-signs,
+and a blank rule at the foot of the page invites the question of whose
+signature is missing.
+
+The entity line stays — `VENIA Collection · Los Angeles, California` — in a
+`.foot-id` block carrying the same air and the same break rule the signature
+had, so the foot of the page does not suddenly ride up.
+
+**The balance sheet and the cash flow keep theirs**, and that is deliberate
+rather than an oversight: a balance sheet is a position as at a date, which is
+the thing somebody attests to. Flagged to the founder in case they want those
+removed too.
+
+Asserted in `gauntlet/stmtprint.js`: neither P&L carries a signature block or a
+"Prepared by" rule, both still carry the entity line, and all four other
+statements still have theirs.
