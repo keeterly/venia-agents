@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '455';
+  const BUILD = '456';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -28224,6 +28224,9 @@ window.agentUndoTxnCats = function(){
   const prev = window.__agPrevTxnCats; if (!prev) return;
   (STATE.finTxns||[]).forEach(t => { if (t.id in prev) t.category = prev[t.id]; });
   window.__agPrevTxnCats = null;
+  // A custom category retired by finRefileCategory comes back with its rows.
+  const cc = window.__agPrevCustomCat; window.__agPrevCustomCat = null;
+  if (cc && (STATE.finCats || []).indexOf(cc) < 0) STATE.finCats = (STATE.finCats || []).concat([cc]);
   save();
   try { cmdRenderBank(); } catch(e){}
   showToast('Category changes undone', 'info');
@@ -38753,27 +38756,54 @@ window.finFileMerchant = function(key, cat){
 // equity or loan it is. Receipts only: a Zelle OUT to the founder is a draw or
 // a reimbursement, and that is a question, not a rule. Only the two honest
 // answers are accepted, and it is undoable like every other filing.
-window.finRefilePersonTransfers = function(cat){
+window.finRefilePersonReceipts = function(cat, fromCat){
   if (['owner_invest', 'loan'].indexOf(cat) < 0) {
     showToast('Money from a person is owner investment or a loan — not ' + cat, 'warning'); return 0;
   }
+  fromCat = fromCat || 'transfer';
+  if (fromCat === cat || fromCat === 'income') return 0;
   const prev = {}; let n = 0, total = 0;
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void') return;
-    if (finTxnCat(t) !== 'transfer' || (t.amount||0) <= 0) return;
+    if (finTxnCat(t) !== fromCat || (t.amount||0) <= 0) return;
     if (!/ZELLE PAYMENT FROM/i.test(t.desc || '')) return;
     prev[t.id] = t.category || '';
     t.category = cat; n++; total += t.amount || 0;
   });
-  if (!n) { showToast('No Zelle receipts are filed as transfer', 'info'); return 0; }
-  window.__agPrevTxnCats = prev;
+  if (!n) { showToast('No Zelle receipts are filed as ' + finCatLabel(fromCat), 'info'); return 0; }
+  window.__agPrevTxnCats = prev; window.__agPrevCustomCat = null;
   window.__lastCatSet = Date.now();
   save();
   try { cmdRenderBank(); } catch(e){}
   try { if (document.getElementById('fin-review-body')) finReviewRender(); } catch(e){}
   showToast(n + ' Zelle receipt' + (n === 1 ? '' : 's') + ' ($' + Math.round(total).toLocaleString()
-    + ') refiled as ' + finCatLabel(cat) + ' — Undo above the list', 'success');
-  try { logActivity('Refiled ' + n + ' Zelle receipts from transfer to ' + cat); } catch(e){}
+    + ') refiled from ' + finCatLabel(fromCat) + ' to ' + finCatLabel(cat) + ' — Undo above the list', 'success');
+  try { logActivity('Refiled ' + n + ' Zelle receipts from ' + fromCat + ' to ' + cat); } catch(e){}
+  return n;
+};
+window.finRefilePersonTransfers = function(cat){ return finRefilePersonReceipts(cat, 'transfer'); };
+// Every row of a CUSTOM category moved to a built-in one, and the custom
+// category retired. For the case where a founder typed "loan-repayment" and the
+// statements never knew it meant loan. Built-in sources are refused: those are
+// bulk edits with a select-all button already, and they do not disappear.
+window.finRefileCategory = function(from, to){
+  if (finCustomCats().indexOf(from) < 0) { showToast('"' + from + '" is not a custom category', 'warning'); return 0; }
+  if (finAllCats().indexOf(to) < 0 || to === from) { showToast('No category called "' + to + '"', 'error'); return 0; }
+  const prev = {}; let n = 0;
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void' || finTxnCat(t) !== from) return;
+    prev[t.id] = t.category || ''; t.category = to; n++;
+  });
+  if (!n) { showToast('Nothing is filed as ' + from, 'info'); return 0; }
+  STATE.finCats = (STATE.finCats || []).filter(c => c !== from);
+  window.__agPrevTxnCats = prev; window.__agPrevCustomCat = from;
+  window.__lastCatSet = Date.now();
+  save();
+  try { cmdRenderBank(); } catch(e){}
+  try { if (document.getElementById('fin-review-body')) finReviewRender(); } catch(e){}
+  showToast(n + ' row' + (n === 1 ? '' : 's') + ' moved from "' + from + '" to ' + finCatLabel(to)
+    + ' — Undo above the list', 'success');
+  try { logActivity('Moved ' + n + ' rows from custom category ' + from + ' to ' + to); } catch(e){}
   return n;
 };
 
@@ -38805,9 +38835,24 @@ function finTagAudit(){
   // accounts" to the statements, so $75k of equity appeared nowhere and the
   // cash flow statement was wrong by exactly that. Named here, fixed in one
   // click below, never silently: whether it is investment or a loan is theirs.
-  const personIn = live.filter(t => finTxnCat(t) === 'transfer' && (t.amount||0) > 0
-    && /ZELLE PAYMENT FROM/i.test(t.desc || ''));
-  const personInTotal = sum(personIn, t => t.amount||0);
+  // Build 456 found the same mistake in a second category: 62 Zelle receipts
+  // from the co-founder, $92,935, filed as "rent" — so rent read as if the
+  // landlord paid VENIA, and the cash flow statement counted $93k of capital as
+  // operating receipts. So: every category, not just transfer. Income is left
+  // alone — a customer paying by Zelle is income — and so are the two answers.
+  const PERSON_OK = { '': 1, income: 1, owner_invest: 1, loan: 1 };
+  const personByCat = {};
+  live.forEach(t => {
+    const c = finTxnCat(t);
+    if (PERSON_OK[c] || (t.amount||0) <= 0 || !/ZELLE PAYMENT FROM/i.test(t.desc || '')) return;
+    const g = personByCat[c] || (personByCat[c] = { rows: [], total: 0, byWho: {} });
+    g.rows.push(t); g.total += t.amount || 0;
+    const k = finMerchantKey(t.desc).replace(/^Zelle from /, '');
+    g.byWho[k] = (g.byWho[k] || 0) + (t.amount || 0);
+  });
+  const personFlagged = {};
+  Object.keys(personByCat).forEach(c => { if (personByCat[c].total > 500) personFlagged[c] = 1; });
+  const personInTotal = personFlagged.transfer ? personByCat.transfer.total : 0;
   if (Math.abs(tNet) > 500) issues.push({ key: 'transfer', level: 'check',
     label: 'Transfers do not cancel — $' + Math.round(Math.abs(tNet)).toLocaleString() + ' net',
     detail: 'Money moved between your own accounts should net to zero. A net this size means one '
@@ -38815,28 +38860,53 @@ function finTagAudit(){
       + 'is filed as one. Either way the cash flow statement is wrong by this much.'
       + (personInTotal > 500 ? ' $' + Math.round(personInTotal).toLocaleString()
           + ' of it is Zelle receipts from a person filed as transfer — see the next line.' : '') });
-  if (personIn.length && personInTotal > 500) {
-    const byWho = {};
-    personIn.forEach(t => { const k = finMerchantKey(t.desc); byWho[k] = (byWho[k] || 0) + (t.amount||0); });
-    const who = Object.keys(byWho).sort((a, b) => byWho[b] - byWho[a])
-      .map(k => k.replace(/^Zelle from /, ''));
-    issues.push({ key: 'person_transfer', level: 'check',
-      label: personIn.length + ' Zelle receipt' + (personIn.length === 1 ? '' : 's') + ' from '
+  Object.keys(personFlagged).sort((x, y) => personByCat[y].total - personByCat[x].total).forEach(c => {
+    const g = personByCat[c];
+    const who = Object.keys(g.byWho).sort((x, y) => g.byWho[y] - g.byWho[x]);
+    const isXfer = c === 'transfer';
+    issues.push({ key: 'person_' + c, level: 'check',
+      label: g.rows.length + ' Zelle receipt' + (g.rows.length === 1 ? '' : 's') + ' from '
         + who.slice(0, 2).join(' and ') + (who.length > 2 ? ' and others' : '')
-        + ' filed as transfer — $' + Math.round(personInTotal).toLocaleString(),
-      detail: '"Transfer" means money moved between VENIA\'s own accounts, and the statements '
-        + 'ignore it. Money arriving from a person is owner investment (equity) or a loan (a '
-        + 'liability VENIA repays). Filed as transfer it sits on neither the balance sheet nor '
-        + 'the cash flow statement, so equity is understated by this much. Pick investment unless '
-        + 'VENIA is expected to pay it back. Undoable from Money → Cash.',
-      actions: [{ label: 'Refile as owner investment', fn: "finRefilePersonTransfers('owner_invest')", primary: true },
-                { label: 'Refile as loan', fn: "finRefilePersonTransfers('loan')" }] });
-  }
-  // A category with a sign it should never have.
+        + ' filed as ' + finCatLabel(c) + ' — $' + Math.round(g.total).toLocaleString(),
+      detail: (isXfer
+          ? '"Transfer" means money moved between VENIA\'s own accounts, and the statements ignore it. '
+          : '"' + finCatLabel(c) + '" is an expense category, and this is money coming IN — on the '
+            + 'statements it reads as if someone paid VENIA\'s ' + finCatLabel(c) + ', and the cash '
+            + 'flow statement counts it as operating receipts. ')
+        + 'Money arriving from a person is owner investment (equity) or a loan (a liability VENIA '
+        + 'repays). Filed here it sits on neither the balance sheet nor the cash flow statement '
+        + 'where it belongs, so equity is understated by this much. Pick investment unless VENIA '
+        + 'is expected to pay it back. Undoable from Money → Cash.',
+      actions: [{ label: 'Refile as owner investment', fn: "finRefilePersonReceipts('owner_invest', '" + c + "')", primary: true },
+                { label: 'Refile as loan', fn: "finRefilePersonReceipts('loan', '" + c + "')" }] });
+  });
+  // A custom category whose NAME says financing is counted as an operating
+  // expense, because only the built-in owner_draw / owner_invest / loan are
+  // routed below the operating line. "loan-repayment", 16 rows, $7,257 on the
+  // live ledger — principal repaid, reported as a cost of running the brand.
+  const CUSTOM_FIN = [[/loan|repay|principal/i, 'loan'], [/draw|distribution/i, 'owner_draw'],
+                      [/invest|capital|equity|contribution/i, 'owner_invest']];
+  finCustomCats().forEach(cc => {
+    const hit = CUSTOM_FIN.find(x => x[0].test(cc)); if (!hit) return;
+    const rows = live.filter(t => finTxnCat(t) === cc); if (!rows.length) return;
+    const total = sum(rows, t => Math.abs(t.amount || 0));
+    issues.push({ key: 'custom_financing', level: 'check',
+      label: 'Custom category "' + cc + '" is counted as an operating expense — '
+        + rows.length + ' row' + (rows.length === 1 ? '' : 's') + ', $' + Math.round(total).toLocaleString(),
+      detail: 'Only the built-in ' + finCatLabel(hit[1]) + ' category is reported as financing, below '
+        + 'the operating line. Rows filed under "' + cc + '" are treated as a cost of running the '
+        + 'brand, so operating expenses are overstated by this much and the balance sheet does not '
+        + 'see the ' + (hit[1] === 'loan' ? 'debt going down' : hit[1] === 'owner_draw' ? 'draw' : 'capital') + '. '
+        + 'Moving them is one click and undoable; the empty custom category is removed.',
+      actions: [{ label: 'Refile as ' + finCatLabel(hit[1]), fn: "finRefileCategory('" + cc.replace(/'/g, "\\'") + "', '" + hit[1] + "')", primary: true }] });
+  });
+  // A category with a sign it should never have. Person receipts already named
+  // above are not reported twice.
   const wrongSign = [];
   live.forEach(t => {
     const c = finTxnCat(t); const a = t.amount || 0;
     if (!c) return;
+    if (personFlagged[c] && a > 0 && /ZELLE PAYMENT FROM/i.test(t.desc || '')) return;
     if (c === 'income' && a < 0) wrongSign.push(t);
     if (['payroll','rent','software','fabric','production','contractors','shipping','marketing','fees','taxes','insurance']
         .indexOf(c) >= 0 && a > 0) wrongSign.push(t);
