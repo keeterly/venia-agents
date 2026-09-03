@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '468';
+  const BUILD = '469';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36172,13 +36172,15 @@ function finPLStatement(opts){
   // OPEX by category, biggest first, with the unclassified remainder named
   // rather than dropped.
   const cats = Object.keys(d.opexBy || {})
-    .map(function(c){ return { key: c, label: (typeof finCatLabel === 'function' ? finCatLabel(c) : c), amount: d.opexBy[c] }; })
+    .map(function(c){ return { key: c, label: (typeof finCatLabel === 'function' ? finCatLabel(c) : c),
+                               amount: Math.round(d.opexBy[c] || 0) }; })
     .filter(function(r){ return r.amount > 0; })
     .sort(function(a, b){ return b.amount - a.amount; });
 
   const uncat = d.opexUncat || 0;
-  const opexClassified = d.bankOpex ? (d.opexYtd || 0) : (d.opexTotal || 0);
-  const opexTotal = opexClassified + (d.bankOpex ? uncat : 0);
+  // From the rounded lines the reader can see, not from the ledger behind them.
+  const opexTotal = cats.reduce(function(t, r){ return t + r.amount; }, 0)
+    + (d.bankOpex && uncat > 0 ? Math.round(uncat) : 0);
   // GROSS MARGIN BELONGS TO THE PRODUCT.
   //
   // With service income folded into revenue, gross profit was total revenue
@@ -36192,10 +36194,23 @@ function finPLStatement(opts){
   // and other income sits after gross profit — still inside operating income,
   // because it was earned running the business. Net income does not move; this
   // changes where the number is shown, not what it is.
-  const otherIncome = d.otherIncome || 0;
-  const revenue = d.revYtd || 0;                    // everything earned
-  const productRevenue = revenue - otherIncome;     // what carries a cost of goods
-  const cogs = d.cogsYtd || 0;
+  // A DOCUMENT THAT IS TALLIED HAS TO SURVIVE BEING TALLIED.
+  //
+  // Every line was rounded for display and every TOTAL was computed from the
+  // unrounded figures beneath it, so a submitted statement printed gross profit
+  // 27,122 + other income 21,196 - expenses 58,064 and called it (9,747). Those
+  // three numbers make (9,746). A dollar changes no lending decision; a
+  // statement that does not add up changes what an underwriter thinks of every
+  // other number on it.
+  //
+  // So the rounding happens ONCE, here, and every total is the sum of the
+  // rounded figures the reader can see. The statement is now internally exact
+  // rather than exact against a ledger the reader does not have.
+  const R = function(n){ return Math.round(Number(n) || 0); };
+  const otherIncome = R(d.otherIncome);
+  const productRevenue = R((d.revYtd || 0) - (d.otherIncome || 0));
+  const revenue = productRevenue + otherIncome;     // everything earned
+  const cogs = R(d.cogsYtd);
   const gross = productRevenue - cogs;
   const operating = gross + otherIncome - opexTotal;
 
@@ -36462,13 +36477,13 @@ function finPLStatement(opts){
     preparedAt: now,
     currency: 'USD',
     revenue: [
-      { label: 'Wholesale', amount: d.wsYtd || 0, note: 'booked orders' },
-      { label: 'Direct-to-consumer', amount: d.dtcRev || 0, note: 'settled online sales' },
+      { label: 'Wholesale', amount: R(d.wsYtd), note: 'booked orders' },
+      { label: 'Direct-to-consumer', amount: R(d.dtcRev), note: 'settled online sales' },
       // Earned outside the two channels and only visible in the bank: a service
       // invoice, a client paying directly, a cash sale. Listed separately
       // because it is the line a reader will ask about, and hiding it inside
       // "other" is what kept it off the statement in the first place.
-      { label: 'Other income received', amount: d.otherIncome || 0,
+      { label: 'Other income received', amount: otherIncome,
         note: 'banked receipts outside the sales channels' },
     ].filter(function(r){ return r.amount !== 0 || !/other income/i.test(r.label); }),
     revenueTotal: revenue,
@@ -36477,8 +36492,8 @@ function finPLStatement(opts){
     productRevenue: productRevenue,
     otherIncome: otherIncome,
     cogs: [
-      { label: 'Wholesale — landed cost of goods sold', amount: d.wsCogsYtd || 0 },
-      { label: 'Direct-to-consumer — landed cost of goods sold', amount: d.dtcCogsYtd || 0 },
+      { label: 'Wholesale — landed cost of goods sold', amount: R(d.wsCogsYtd) },
+      { label: 'Direct-to-consumer — landed cost of goods sold', amount: R(d.dtcCogsYtd) },
     ],
     cogsTotal: cogs,
     gross: gross,
@@ -36581,6 +36596,41 @@ window.finPLPeriodNote = finPLPeriodNote;
 // which is where the choice is actually made. It lives in the action bar, so
 // it is hidden on paper by the same rule that hides the buttons — and it does
 // NOT name the URL, because printing it in the document would be the leak.
+// THE BUTTON HAS TO CARRY THE WARNING, NOT THE PAGE BESIDE IT.
+//
+// Build 468 put a line of text in the action bar: turn off "Headers and
+// footers" or the browser stamps this tool's address on every page. A second
+// PDF came back with the address on all three pages. Advice next to a button
+// is read after the button is pressed, and by then the person is in the print
+// dialog looking at something else.
+//
+// So the button opens the reminder and the reminder opens the dialog. One
+// extra press, on the only path to paper, in the window that produces the
+// document. It names the setting and not the address it is protecting —
+// printing that here would be the leak it exists to prevent.
+const PRINT_STEP_JS =
+    '<script>function finPrintStep(go){'
+  +   'var o=document.getElementById("print-step");'
+  +   'if(go===1){if(o)o.remove();window.print();return;}'
+  +   'if(go===0){if(o)o.remove();return;}'
+  +   'if(o)return;'
+  +   'o=document.createElement("div");o.id="print-step";'
+  +   'o.setAttribute("role","dialog");o.setAttribute("aria-modal","true");'
+  +   'o.style.cssText="position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);'
+  +     'display:flex;align-items:center;justify-content:center;padding:24px;'
+  +     'font-family:Helvetica,Arial,sans-serif";'
+  +   'o.innerHTML=\'<div style="background:#fff;max-width:430px;padding:26px 28px;border:1px solid #111">\''
+  +     '+\'<div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a5a00;font-weight:700;margin-bottom:10px">Before you save</div>\''
+  +     '+\'<div style="font-size:13px;line-height:1.65;color:#111">In the print dialog, turn <b>off</b> \''
+  +     '+\'&ldquo;Headers and footers&rdquo;.<br><br>Left on, the browser prints this tool&rsquo;s web address and the \''
+  +     '+\'time across every page &mdash; on a statement you are handing to a lender.</div>\''
+  +     '+\'<div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">\''
+  +     '+\'<button onclick="finPrintStep(0)" style="background:#fff;color:#111;border:1px solid #111;padding:0 18px;min-height:42px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit">Back</button>\''
+  +     '+\'<button onclick="finPrintStep(1)" style="background:#111;color:#fff;border:none;padding:0 18px;min-height:42px;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit">Continue to print</button>\''
+  +     '+\'</div></div>\';'
+  +   'document.body.appendChild(o);'
+  +   'o.addEventListener("click",function(e){if(e.target===o)finPrintStep(0);});'
+  + '}<' + '/script>';
 const PRINT_HEADER_WARNING =
     '<span class="hint">Before saving: turn off <b>Headers and footers</b> in the print dialog — '
   + 'the browser otherwise stamps this tool&rsquo;s address and the time on every page.</span>';
@@ -36648,11 +36698,11 @@ function finLenderChrome(title, heading, meta, tables, notes){
     + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
     +   'VENIA Collection · Los Angeles, California</div>'
     + '<div class="bar">'
-    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button onclick="finPrintStep()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
     +   PRINT_HEADER_WARNING
-    + '</div>'
+    + '</div>' + PRINT_STEP_JS
     + '<' + '/body></html>';
 }
 function finLenderOpen(html){
@@ -36790,11 +36840,11 @@ window.finPrintCF = function(opts){
     + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
     +   'VENIA Collection · Los Angeles, California</div>'
     + '<div class="bar">'
-    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button onclick="finPrintStep()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
     +   PRINT_HEADER_WARNING
-    + '</div><' + '/body></html>';
+    + '</div>' + PRINT_STEP_JS + '<' + '/body></html>';
 
   const w = window.open('', '_blank', 'width=900,height=1000');
   if (!w) { showToast('Allow pop-ups to open the statement', 'warning'); return null; }
@@ -36873,11 +36923,11 @@ window.finPrintBS = function(opts){
     + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
     +   'VENIA Collection · Los Angeles, California</div>'
     + '<div class="bar">'
-    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button onclick="finPrintStep()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
     +   PRINT_HEADER_WARNING
-    + '</div>'
+    + '</div>' + PRINT_STEP_JS
     + '<' + '/body></html>';
 
   const w = window.open('', '_blank', 'width=900,height=1000');
@@ -37038,11 +37088,11 @@ function finPrintPLLender(st){
     // signature is missing. The balance sheet and cash flow keep theirs.
     + '<div class="foot-id">VENIA Collection · Los Angeles, California</div>'
     + '<div class="bar">'
-    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button onclick="finPrintStep()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
     +   PRINT_HEADER_WARNING
-    + '</div>'
+    + '</div>' + PRINT_STEP_JS
     + '<' + '/body></html>';
   const w = window.open('', '_blank');
   if (!w) { try { showToast('Allow pop-ups to open the statement', 'warning'); } catch(e){} return false; }
@@ -37337,11 +37387,11 @@ window.finPrintPL = function(opts){
     // fallback for a browser that refuses, and the link is the fallback for one
     // that refuses both.
     + '<div class="bar">'
-    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button onclick="finPrintStep()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
     +   PRINT_HEADER_WARNING
-    + '</div>'
+    + '</div>' + PRINT_STEP_JS
     + '<' + '/body></html>';
 
   const w = window.open('', '_blank', 'width=900,height=1000');
