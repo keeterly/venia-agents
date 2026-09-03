@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '467';
+  const BUILD = '468';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36179,10 +36179,25 @@ function finPLStatement(opts){
   const uncat = d.opexUncat || 0;
   const opexClassified = d.bankOpex ? (d.opexYtd || 0) : (d.opexTotal || 0);
   const opexTotal = opexClassified + (d.bankOpex ? uncat : 0);
-  const revenue = d.revYtd || 0;
+  // GROSS MARGIN BELONGS TO THE PRODUCT.
+  //
+  // With service income folded into revenue, gross profit was total revenue
+  // less cost of goods sold — and a service invoice carries no cost of goods,
+  // so the margin climbed to 91.5%. True arithmetic, wrong number: an apparel
+  // lender comparing VENIA against other apparel businesses reads 91.5% and
+  // either disbelieves it or misjudges the line. The garments' own margin is
+  // 85.8%, and that is the figure that means anything.
+  //
+  // So the cost of goods and the margin belong to PRODUCT revenue, and service
+  // and other income sits after gross profit — still inside operating income,
+  // because it was earned running the business. Net income does not move; this
+  // changes where the number is shown, not what it is.
+  const otherIncome = d.otherIncome || 0;
+  const revenue = d.revYtd || 0;                    // everything earned
+  const productRevenue = revenue - otherIncome;     // what carries a cost of goods
   const cogs = d.cogsYtd || 0;
-  const gross = revenue - cogs;
-  const operating = gross - opexTotal;
+  const gross = productRevenue - cogs;
+  const operating = gross + otherIncome - opexTotal;
 
   const notes = [];
   notes.push('Unaudited management accounts prepared by VENIA Collection from its own records. '
@@ -36457,13 +36472,18 @@ function finPLStatement(opts){
         note: 'banked receipts outside the sales channels' },
     ].filter(function(r){ return r.amount !== 0 || !/other income/i.test(r.label); }),
     revenueTotal: revenue,
+    // Named separately so both documents, and the gauntlets, read the same
+    // split rather than each re-deriving it.
+    productRevenue: productRevenue,
+    otherIncome: otherIncome,
     cogs: [
       { label: 'Wholesale — landed cost of goods sold', amount: d.wsCogsYtd || 0 },
       { label: 'Direct-to-consumer — landed cost of goods sold', amount: d.dtcCogsYtd || 0 },
     ],
     cogsTotal: cogs,
     gross: gross,
-    grossPct: revenue > 0 ? Math.round((gross / revenue) * 1000) / 10 : null,
+    // On PRODUCT revenue — the denominator a lender is comparing.
+    grossPct: productRevenue > 0 ? Math.round((gross / productRevenue) * 1000) / 10 : null,
     opex: cats.concat(d.bankOpex && uncat > 0
       ? [{ key: '_uncat', label: 'Unclassified', amount: uncat, flag: true }] : []),
     opexTotal: opexTotal,
@@ -36544,6 +36564,26 @@ window.finPLPeriodNote = finPLPeriodNote;
 // Declared once here and spliced into every statement: five copies of a print
 // rule is five chances for one of them to be forgotten, which is how a
 // document ends up cut off in the first place.
+// THE BROWSER PRINTS ITS OWN HEADER, AND IT NAMES THE TOOL.
+//
+// A P&L saved to PDF and sent to an SBA underwriter came back with the app's
+// URL and "9/3/26, 2:51 PM · Page 1 of 4" across every page. That is Chrome's
+// and Safari's own print header and footer, not anything in the document —
+// added unless the person saving unticks "Headers and footers", and there is
+// no CSS that can switch them off.
+//
+// It matters more here than it usually would: the creator host is an internal
+// tool and is not named outside the company. A statement handed to a lender
+// with the admin URL stamped on every page is a disclosure nobody chose to
+// make, and by the time it is a PDF it has already been sent.
+//
+// So the window says so, next to the button that opens the print dialog,
+// which is where the choice is actually made. It lives in the action bar, so
+// it is hidden on paper by the same rule that hides the buttons — and it does
+// NOT name the URL, because printing it in the document would be the leak.
+const PRINT_HEADER_WARNING =
+    '<span class="hint">Before saving: turn off <b>Headers and footers</b> in the print dialog — '
+  + 'the browser otherwise stamps this tool&rsquo;s address and the time on every page.</span>';
 const STMT_PRINT_CSS =
     '@page{size:A4 portrait;margin:16mm 15mm}'
   + '@media print{'
@@ -36594,6 +36634,9 @@ function finLenderChrome(title, heading, meta, tables, notes){
     + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
     +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
     + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '.bar{flex-wrap:wrap}'
+    + '.bar .hint{flex-basis:100%;text-align:center;font-size:10.5px;color:#8a5a00;'
+    +   'line-height:1.5;max-width:640px;margin:0 auto}'
     + 'body{padding-bottom:104px}'
     + STMT_PRINT_CSS
     + '</style></head><body>'
@@ -36608,6 +36651,7 @@ function finLenderChrome(title, heading, meta, tables, notes){
     +   '<button onclick="window.print()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    +   PRINT_HEADER_WARNING
     + '</div>'
     + '<' + '/body></html>';
 }
@@ -36733,6 +36777,9 @@ window.finPrintCF = function(opts){
     + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
     +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
     + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '.bar{flex-wrap:wrap}'
+    + '.bar .hint{flex-basis:100%;text-align:center;font-size:10.5px;color:#8a5a00;'
+    +   'line-height:1.5;max-width:640px;margin:0 auto}'
     + STMT_PRINT_CSS
     + '</style></head><body>'
     + '<h1>' + esc(cf.entity) + '</h1><h2>' + esc(cf.title) + '</h2>'
@@ -36746,6 +36793,7 @@ window.finPrintCF = function(opts){
     +   '<button onclick="window.print()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    +   PRINT_HEADER_WARNING
     + '</div><' + '/body></html>';
 
   const w = window.open('', '_blank', 'width=900,height=1000');
@@ -36811,6 +36859,9 @@ window.finPrintBS = function(opts){
     + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
     +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
     + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '.bar{flex-wrap:wrap}'
+    + '.bar .hint{flex-basis:100%;text-align:center;font-size:10.5px;color:#8a5a00;'
+    +   'line-height:1.5;max-width:640px;margin:0 auto}'
     + STMT_PRINT_CSS
     + '</style></head><body>'
     + '<h1>' + esc(bs.entity) + '</h1>'
@@ -36825,6 +36876,7 @@ window.finPrintBS = function(opts){
     +   '<button onclick="window.print()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    +   PRINT_HEADER_WARNING
     + '</div>'
     + '<' + '/body></html>';
 
@@ -36877,7 +36929,11 @@ function finPrintPLLender(st){
     const hit = map.find(function(x){ return x[0].test(r.label); });
     return { label: hit ? hit[1] : r.label, amount: r.amount };
   };
+  // Product only in the revenue block: the cost of goods and the margin below
+  // it belong to these lines. Service and other income is shown after gross
+  // profit, where it does not distort a margin it did not earn.
   const revLines  = inOrder(st.revenue, [/consumer/i, /wholesale/i])
+    .filter(function(r){ return !/other income/i.test(r.label); })
     .map(function(r){ return relabel(r, LENDER_REV_LABEL); });
   const cogsLines = inOrder(st.cogs, [/consumer/i, /wholesale/i])
     .map(function(r){ return relabel(r, LENDER_COGS_LABEL); });
@@ -36889,7 +36945,7 @@ function finPrintPLLender(st){
   const body =
       sec('Revenue')
     + revLines.map(function(r){ return row(r.label, r.amount); }).join('')
-    + row('Total revenue', st.revenueTotal, 'tot')
+    + row('Total product revenue', st.productRevenue, 'tot')
     + sec('Cost of goods sold')
     + cogsLines.map(function(r){ return row(r.label, r.amount); }).join('')
     + row('Total cost of goods sold', st.cogsTotal, 'tot')
@@ -36899,8 +36955,16 @@ function finPrintPLLender(st){
     // $92 of margin on $52,816 of revenue — the exact misreading this document
     // exists to prevent. (The hazard was written down here a build ago and the
     // number was left as it was; noticing a fault is not fixing it.)
-    + '<tr><td>Gross margin</td><td class="n">'
+    + '<tr><td>Gross margin on product revenue</td><td class="n">'
       + esc(st.grossPct != null ? st.grossPct + '%' : '—') + '</td></tr>'
+    // After gross profit and before expenses: earned running the business, so
+    // inside operating income, but carrying no cost of goods and therefore no
+    // business in the margin above.
+    + (st.otherIncome
+        ? sec('Other income')
+          + row('Service and other income', st.otherIncome)
+          + row('Total revenue', st.revenueTotal, 'tot')
+        : '')
     + sec('Operating expenses')
     + opex.map(function(r){ return row(r.label, r.amount); }).join('')
     + (opex.length ? '' : '<tr><td colspan="2">None recorded in the period.</td></tr>')
@@ -36953,6 +37017,9 @@ function finPrintPLLender(st){
     + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
     +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
     + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '.bar{flex-wrap:wrap}'
+    + '.bar .hint{flex-basis:100%;text-align:center;font-size:10.5px;color:#8a5a00;'
+    +   'line-height:1.5;max-width:640px;margin:0 auto}'
     + 'body{padding-bottom:104px}'
     + STMT_PRINT_CSS
     + '</style></head><body>'
@@ -36974,6 +37041,7 @@ function finPrintPLLender(st){
     +   '<button onclick="window.print()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    +   PRINT_HEADER_WARNING
     + '</div>'
     + '<' + '/body></html>';
   const w = window.open('', '_blank');
@@ -37182,11 +37250,21 @@ window.finPrintPL = function(opts){
   const body =
       section('Revenue')
     + st.revenue.map(function(r){ return row(r.label, r.amount, { note: r.note }); }).join('')
-    + row('Total revenue', st.revenueTotal, { cls: 'tot' })
+    + row(st.otherIncome ? 'Total product revenue' : 'Total revenue',
+          st.otherIncome ? st.productRevenue : st.revenueTotal, { cls: 'tot' })
     + section('Cost of goods sold')
     + st.cogs.map(function(r){ return row(r.label, r.amount); }).join('')
     + row('Total cost of goods sold', st.cogsTotal, { cls: 'tot' })
-    + row('Gross profit' + (st.grossPct != null ? '  ·  ' + st.grossPct + '% of revenue' : ''), st.gross, { cls: 'big' })
+    + row('Gross profit' + (st.grossPct != null
+            ? '  ·  ' + st.grossPct + '% of ' + (st.otherIncome ? 'product revenue' : 'revenue') : ''),
+          st.gross, { cls: 'big' })
+    // Earned running the business, so inside operating profit — but carrying no
+    // cost of goods, so it has no business in the margin above.
+    + (st.otherIncome
+        ? section('Other income')
+          + row('Service and other income', st.otherIncome, { note: 'no cost of goods' })
+          + row('Total revenue', st.revenueTotal, { cls: 'tot' })
+        : '')
     + section('Operating expenses')
     + st.opex.map(function(r){ return row(r.label, r.amount, { cls: r.flag ? 'flag' : '' }); }).join('')
     + (st.opex.length ? '' : '<tr><td colspan="2" class="sub">None recorded in the period.</td></tr>')
@@ -37237,6 +37315,9 @@ window.finPrintPL = function(opts){
     + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
     +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
     + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + '.bar{flex-wrap:wrap}'
+    + '.bar .hint{flex-basis:100%;text-align:center;font-size:10.5px;color:#8a5a00;'
+    +   'line-height:1.5;max-width:640px;margin:0 auto}'
     + 'body{padding-bottom:110px}'
     + STMT_PRINT_CSS
     + '</style></head><body>'
@@ -37259,6 +37340,7 @@ window.finPrintPL = function(opts){
     +   '<button onclick="window.print()">Print / Save PDF</button>'
     +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
     +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    +   PRINT_HEADER_WARNING
     + '</div>'
     + '<' + '/body></html>';
 
