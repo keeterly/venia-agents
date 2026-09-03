@@ -2742,7 +2742,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '458';
+  const BUILD = '461';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6200,7 +6200,12 @@ const MODULES = {
     label: 'Money', space: 'cmd', nav: true,
     owns: 'money — cash, P&L, margins, AR, the bank feed, factory payment schedules, budgets, pricing',
     keys: ['finBank', 'finTxns', 'finWatch', 'finWatchBrief', 'finPlan', 'finPlanJob',
-           'finCats', 'bizSnap'],
+           'finCats', 'bizSnap',
+           // Who confirmed that contractors and shipping carry no manufacturing
+           // cost, and when. A statement note that turns a caveat into a
+           // confirmation has to be attributable, and it has to reach the other
+           // founder's device — otherwise two people print two different pages.
+           'finMfgConfirmed'],
     ls: ['VENIA_REV_GOALS', 'venia_budget'],
   },
   brainstorm: {
@@ -24057,6 +24062,17 @@ async function plmSalesRefresh() {
         if (!map[k]) map[k] = { u: 0, r: 0, uY: 0, rY: 0, last: '' };
         map[k].u += liQty; map[k].r += liRev;
         if (isY) { map[k].uY = (map[k].uY || 0) + liQty; map[k].rY = (map[k].rY || 0) + liRev; }
+        // PER MONTH, so a statement can close on a month end.
+        // Everything downstream held DTC as a year-to-date and an all-time
+        // total with nothing in between, which is why the P&L could only ever
+        // say "year to date, whatever today is". A lender wants a closed
+        // period. The orders are already in hand here (the pull spans from
+        // January of last year), so bucketing them costs one line and makes an
+        // exact 31-August close possible instead of a dated guess.
+        var mk = String(o.created_at || '').slice(0, 7);
+        if (mk) { if (!map[k].m) map[k].m = {};
+          if (!map[k].m[mk]) map[k].m[mk] = { u: 0, r: 0 };
+          map[k].m[mk].u += liQty; map[k].m[mk].r += liRev; }
         if ((o.created_at || '') > map[k].last) map[k].last = o.created_at;
         // A custom sale or a deleted product has no product_id — it stays in the
         // title total and simply cannot be linked, which is the truth about it.
@@ -24075,7 +24091,7 @@ async function plmSalesRefresh() {
     const jan1 = new Date(new Date().getFullYear(), 0, 1).getTime();
     const pJan1 = new Date(new Date().getFullYear() - 1, 0, 1).getTime(), pCut = pJan1 + (now - jan1);
     const m0 = new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime();
-    const pulse = { at: new Date().toISOString(), r30: 0, n30: 0, rPrev: 0, nPrev: 0, ytd: 0, ytdN: 0, prevYtd: 0, mtd: 0, mtdN: 0 };
+    const pulse = { at: new Date().toISOString(), r30: 0, n30: 0, rPrev: 0, nPrev: 0, ytd: 0, ytdN: 0, prevYtd: 0, mtd: 0, mtdN: 0, byMonth: {} };
     live.forEach(o => {
       const v = parseFloat(o.total_price || 0) || 0, ts = new Date(o.created_at).getTime();
       if (ts >= d30) { pulse.r30 += v; pulse.n30++; }
@@ -24083,7 +24099,10 @@ async function plmSalesRefresh() {
       if (ts >= m0)   { pulse.mtd += v; pulse.mtdN++; }
       if (ts >= jan1) { pulse.ytd += v; pulse.ytdN++; }
       else if (ts >= pJan1 && ts < pCut) { pulse.prevYtd += v; }
+      var mk = String(o.created_at || '').slice(0, 7);
+      if (mk) pulse.byMonth[mk] = (pulse.byMonth[mk] || 0) + v;
     });
+    pulse.since = min;
     STATE.bizPulse = pulse;
     try { if (typeof cpRenderPulse === 'function') cpRenderPulse(); } catch(e){}
     // Live views re-draw once the numbers land.
@@ -35445,7 +35464,39 @@ function slOrderBookedAt(o){ return (o && (o.createdAt || o.updatedAt)) || ''; }
 // from net profit and adjusts for non-cash items, which needs a general ledger
 // this app does not have. Listing what actually came in and went out needs only
 // the bank.
-function finCashFlow(){
+// THE POSITION ON A DATE THAT IS NOT TODAY.
+//
+// A bank balance is a live number: it is what the account holds now. A lender
+// asks for the position on 31 August. Every transaction carries the account it
+// belongs to, so the balance on a past date is the balance today less whatever
+// moved since — arithmetic, not an estimate.
+//
+// Cash: a deposit after the date has to come back out. Debt: a card purchase
+// after the date raised what is owed, so it comes back out the same way (the
+// charge is negative and debt is carried positive, so it ADDS).
+function finCashAt(end){
+  const bank = (typeof finBankData === 'function') ? finBankData() : null;
+  const cashNow = bank && bank.connected ? (bank.bal || 0) : 0;
+  const debtNow = bank && bank.connected ? (bank.debt || 0) : 0;
+  if (!end) return { cash: cashNow, debt: debtNow, rolled: false, rows: 0 };
+  const accts = ((bank && bank.accounts) || (STATE.finBank && STATE.finBank.accounts) || []);
+  const kind = {};
+  accts.forEach(function(a){ if (a) kind[a.id] = (a.category || ''); });
+  let dCash = 0, dDebt = 0, rows = 0;
+  (STATE.finTxns || []).forEach(function(t){
+    if (!t || t.status === 'void' || t.status === 'pending') return;
+    if (!t.date || t.date <= end) return;
+    const k = kind[t.acct];
+    if (k === 'cash')        { dCash += (t.amount || 0); rows++; }
+    else if (k === 'credit') { dDebt += (t.amount || 0); rows++; }
+  });
+  return { cash: cashNow - dCash, debt: debtNow + dDebt, rolled: true, rows: rows };
+}
+window.finCashAt = finCashAt;
+
+function finCashFlow(opts){
+  const _o = opts || {};
+  const end = _o.end || null;
   const now = new Date();
   const yr = now.getFullYear();
   const jan1 = yr + '-01-01';
@@ -35465,6 +35516,7 @@ function finCashFlow(){
     if (!t || t.status === 'void' || t.status === 'pending') return;
     const d = String(t.date || '');
     if (!d || d < jan1) return;
+    if (end && d > end) return;                       // after the reporting date
     const amt = t.amount || 0;
     if (!amt) return;
     rows++;
@@ -35502,7 +35554,7 @@ function finCashFlow(){
   // Closing cash is the bank's own figure. Opening is therefore DERIVED, not
   // observed — the app never saw the balance on 1 January. Stated as derived,
   // because a reader would otherwise take it for a fact.
-  const closing = bank && bank.connected ? (bank.bal || 0) : null;
+  const closing = bank && bank.connected ? finCashAt(end).cash : null;
   const opening = closing == null ? null : closing - netMovement;
 
   const line = (label, amount, note) => ({ label: label, amount: amount, note: note || '' });
@@ -35511,8 +35563,12 @@ function finCashFlow(){
   return {
     entity: 'VENIA Collection',
     title: 'Statement of Cash Flows',
-    periodLabel: 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
-      { month: 'long', day: 'numeric', year: 'numeric' }),
+    periodEnd: end,
+    periodLabel: (end
+      ? 'January 1, ' + yr + ' – ' + new Date(end + 'T12:00:00').toLocaleDateString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric' })
+      : 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric' })),
     preparedAt: now, currency: 'USD',
     operatingIn: sortBy(inBy).filter(k => !FIN_CATS[k]).map(k => line(
       k === '_uncat' ? 'Unclassified receipts' : (typeof finCatLabel === 'function' ? finCatLabel(k) : k),
@@ -35529,6 +35585,15 @@ function finCashFlow(){
     transfersIn: transferIn, transfersOut: transferOut, netTransfers: netTransfers,
     netMovement: netMovement,
     opening: opening, closing: closing,
+    lenderNotes: [
+      'Unaudited management-prepared financial statement based on company financial records.',
+      'Prepared using the direct method from company bank and credit card activity.',
+      'Transfers between company-owned accounts are presented separately and are not included in '
+        + 'operating activities.',
+      'Payments to manufacturers for production and fabric are presented within operating '
+        + 'activities and represent the working capital required to produce merchandise for sale.',
+      'Owner contributions and owner draws are presented as financing activities.',
+    ],
     rows: rows, from: earliest,
     uncatOut: uncatOut, uncatIn: uncatIn,
     notes: finCashFlowNotes(bank, netTransfers, transferIn, transferOut, uncatOut, uncatIn, earliest, jan1),
@@ -35580,13 +35645,24 @@ function finCashFlowNotes(bank, netTransfers, tIn, tOut, uncatOut, uncatIn, earl
 }
 window.finCashFlowNotes = finCashFlowNotes;
 
-function finBalanceSheet(){
+// opts.asAt — an inclusive 'YYYY-MM-DD' reporting date.
+//
+// Only two lines can honestly be dated. Cash and card balances roll back from
+// the ledger exactly. Inventory, receivables and open factory orders cannot:
+// no history of stock levels or open orders is kept, so those are the CURRENT
+// recorded position whatever date is on the page. Marked `current` and said
+// once in a note — dating them silently would be inventing a figure, which is
+// the one thing a statement handed to an underwriter must never do.
+function finBalanceSheet(opts){
+  const _o = opts || {};
+  const asAt = _o.asAt || null;
   const now = new Date();
-  const d = cmdMoneyData();
+  const d = cmdMoneyData({ end: asAt });
   const bank = (typeof finBankData === 'function') ? finBankData() : null;
   const inv = (typeof finInventoryAtCost === 'function') ? finInventoryAtCost() : null;
+  const at = finCashAt(asAt);
 
-  const cash = bank && bank.connected ? (bank.bal || 0) : 0;
+  const cash = bank && bank.connected ? at.cash : 0;
   const ar = (d.arOpen || []).reduce(function(t, a){ return t + (a.open || 0); }, 0);
   const stock = (inv && inv.value) || 0;
   // Deposits already paid to factories buy goods that do not exist yet: not
@@ -35597,20 +35673,22 @@ function finBalanceSheet(){
     { label: 'Cash at bank', amount: cash,
       note: bank && bank.connected ? (bank.cashAccts || []).length + ' account'
         + (((bank.cashAccts || []).length) === 1 ? '' : 's') : 'no bank connected' },
-    { label: 'Accounts receivable', amount: ar, note: 'wholesale invoiced, not yet collected' },
+    { label: 'Accounts receivable', amount: ar, note: 'wholesale invoiced, not yet collected',
+      current: !!asAt },
     { label: 'Inventory at landed cost', amount: stock,
-      note: inv ? inv.units.toLocaleString() + ' units across ' + inv.styles + ' styles' : '' },
+      note: inv ? inv.units.toLocaleString() + ' units across ' + inv.styles + ' styles' : '',
+      current: !!asAt },
   ];
   if (prepaid > 0) assets.push({ label: 'Paid to factories, goods not yet received',
-    amount: prepaid, note: 'deposits against open production' });
+    amount: prepaid, note: 'deposits against open production', current: !!asAt });
 
   // Card and loan balances the bank reports, as a positive debt figure.
-  const cardDebt = bank && bank.connected ? (bank.debt || 0) : 0;
+  const cardDebt = bank && bank.connected ? at.debt : 0;
   const liabilities = [
     { label: 'Cards and credit lines', amount: cardDebt,
       note: bank && bank.connected ? '' : 'no bank connected' },
     { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0,
-      note: 'open purchase orders' },
+      note: 'open purchase orders', current: !!asAt },
   ];
 
   const assetsTotal = assets.reduce(function(t, r){ return t + r.amount; }, 0);
@@ -35620,9 +35698,12 @@ function finBalanceSheet(){
   return {
     entity: 'VENIA Collection',
     title: 'Statement of Financial Position',
-    asAt: now,
-    asAtLabel: 'As at ' + now.toLocaleDateString('en-US',
+    asAt: asAt ? new Date(asAt + 'T12:00:00') : now,
+    asAtDate: asAt,
+    asAtLabel: 'As at ' + (asAt ? new Date(asAt + 'T12:00:00') : now).toLocaleDateString('en-US',
       { month: 'long', day: 'numeric', year: 'numeric' }),
+    // Which lines the reporting date actually governs. See the note.
+    rolled: at.rolled, rolledRows: at.rows,
     currency: 'USD',
     assets: assets, assetsTotal: assetsTotal,
     liabilities: liabilities, liabilitiesTotal: liabTotal,
@@ -35637,9 +35718,91 @@ function finBalanceSheet(){
     // here rather than left to them.
     workingCapital: (cash + ar + stock) - liabTotal,
     notes: finBalanceSheetNotes(d, bank, inv, cash, ar, stock),
+    inventoryNote: inv && inv.units
+      ? 'Inventory comprises ' + inv.units.toLocaleString() + ' units across ' + inv.styles
+        + ' styles, carried at landed production cost.'
+      : '',
+    lenderNotes: (function(){
+      const n = [
+        'Unaudited management-prepared financial statement based on company financial records.',
+        'Cash and credit balances are stated as reported by the company\'s financial institutions'
+          + (asAt ? ' at the reporting date.' : '.'),
+        'Inventory is carried at landed production cost, being the delivered cost of merchandise '
+          + 'on hand.',
+        'Liabilities comprise credit card and credit line balances reported by the company\'s '
+          + 'financial institutions together with unpaid purchase orders issued to manufacturers.',
+      ];
+      // The one limitation that changes how a number should be read. Cash and
+      // card balances were rolled back to the reporting date from the ledger;
+      // stock levels and open orders are not kept historically, so those lines
+      // are the current recorded position. Said once, plainly, rather than not
+      // at all — and rather than five paragraphs of it.
+      if (asAt) n.push('Cash and credit balances are stated at the reporting date. Inventory, '
+        + 'accounts receivable and purchase order commitments are stated at their current '
+        + 'recorded position.');
+      return n;
+    })(),
   };
 }
 window.finBalanceSheet = finBalanceSheet;
+
+// WHAT TO ASK THE FOUNDERS BEFORE ANY OF THIS GOES TO AN UNDERWRITER.
+//
+// A lender pack should not carry an argument with itself — but the things a
+// tidy document leaves out do not stop being true. These are the questions the
+// numbers raise, put to the people who can answer them, and kept out of the
+// document until they have.
+window.finReconcileFlags = function(){
+  const out = [];
+  const money = function(n){ return '$' + Math.round(Math.abs(n || 0)).toLocaleString(); };
+  const d = cmdMoneyData();
+  const live = (STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; });
+  const yr = new Date().getFullYear();
+  const inYear = live.filter(function(t){ return (t.date || '') >= yr + '-01-01'; });
+  const sum = function(a){ return a.reduce(function(s, t){ return s + (t.amount || 0); }, 0); };
+
+  // Deposits filed as income against revenue recognised from orders. Both can
+  // be right — a payout settles days after the sale, a wholesale invoice from
+  // last year is collected this one — but the gap is the first thing an
+  // underwriter circles, and it should be explained before they ask.
+  const receipts = sum(inYear.filter(function(t){ return finTxnCat(t) === 'income' && (t.amount || 0) > 0; }));
+  const revenue = d.revYtd || 0;
+  if (Math.abs(receipts - revenue) > Math.max(500, revenue * 0.05)) {
+    out.push({ key: 'receipts_vs_revenue', level: 'ask',
+      label: money(receipts) + ' of receipts filed as income against ' + money(revenue) + ' of revenue',
+      detail: 'The profit and loss recognises revenue from orders; the bank shows what arrived. A '
+        + 'gap of ' + money(receipts - revenue) + ' is normal when payouts settle after the sale or '
+        + 'when a prior-year invoice is collected this year — but it needs an answer in one '
+        + 'sentence before an underwriter asks for it, because on paper it reads as unreported '
+        + 'revenue or as double counting.' });
+  }
+  // Owner draws are equity, not wages — unless some of it was reimbursement or
+  // pay, in which case the P&L is understating cost and the equity is wrong.
+  const draws = Math.abs(sum(inYear.filter(function(t){ return finTxnCat(t) === 'owner_draw'; })));
+  if (draws > 0) {
+    out.push({ key: 'owner_draw', level: 'ask',
+      label: money(draws) + ' classified as owner draws',
+      detail: 'Draws sit outside the trading result, which is correct for money taken as an owner. '
+        + 'If any of it was reimbursement of a business cost, or compensation for work, it belongs '
+        + 'in operating expenses instead — and leaving it here overstates profit by that much. '
+        + 'Confirm the whole figure is genuinely owner money.' });
+  }
+  // The balance sheet knows about the debts the bank reports and the factory
+  // orders recorded here. It cannot know about a lease, a personal guarantee,
+  // an EIDL or a card that was never connected — and an SBA file is where an
+  // unrecorded liability does the most damage.
+  const bank = (typeof finBankData === 'function') ? finBankData() : null;
+  out.push({ key: 'liabilities', level: 'ask',
+    label: 'Liabilities are limited to what is connected or recorded here',
+    detail: 'The statement carries the card and credit-line balances the bank reports'
+      + (bank && bank.connected ? ' (' + ((bank.debtAccts || []).length || 0) + ' account'
+          + (((bank.debtAccts || []).length || 0) === 1 ? '' : 's') + ')' : '')
+      + ' plus unpaid factory orders entered here. A lease, an equipment loan, an EIDL, a personal '
+      + 'guarantee or a card that was never connected would not appear. List anything missing '
+      + 'before this goes out — an omitted liability found later is the one that costs you the '
+      + 'application.' });
+  return out;
+};
 
 // Every limitation the figures above carry, on the same page as the figures.
 function finBalanceSheetNotes(d, bank, inv, cash, ar, stock){
@@ -35776,8 +35939,24 @@ function finInventoryAtCost(){
 }
 window.finInventoryAtCost = finInventoryAtCost;
 
-function finPLStatement(){
-  const d = cmdMoneyData();
+// The month ends this year that a statement can close on: every completed
+// month, newest first. A lender asks for "through 31 August", never "through
+// last Tuesday", and a close date you type by hand is a close date you can get
+// wrong — so they are offered, not entered.
+function finPLMonthEnds(){
+  const now = new Date(), yr = now.getFullYear(), out = [];
+  for (let mo = now.getMonth() - 1; mo >= 0; mo--) {
+    const d = new Date(yr, mo + 1, 0);
+    out.push({ iso: yr + '-' + String(mo + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'),
+               label: d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) });
+  }
+  return out;
+}
+window.finPLMonthEnds = finPLMonthEnds;
+
+function finPLStatement(opts){
+  const _o = opts || {};
+  const d = cmdMoneyData({ end: _o.end || null });
   const now = new Date();
   const yr = now.getFullYear();
 
@@ -36040,16 +36219,21 @@ function finPLStatement(){
     // The period the DOCUMENT can stand behind, not the one that was asked for.
     // Heading a statement "1 January" when the ledger starts in March is the
     // claim, not the note that corrects it further down.
-    periodLabel: 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
-      { month: 'long', day: 'numeric', year: 'numeric' })
+    periodLabel: (_o.end
+      ? 'January 1, ' + yr + ' – ' + new Date(_o.end + 'T12:00:00').toLocaleDateString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric' })
+      : 'Year to date — 1 January ' + yr + ' to ' + now.toLocaleDateString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric' }))
       + ((d.bankOpex && cov && cov.any && cov.materialGap)
           ? '  ·  expenses from ' + covShort(cov.from) + ' only' : ''),
+    // What the document can stand behind, carried so the printer can refuse.
+    period: { start: yr + '-01-01', end: _o.end || null, dtcBounded: d.dtcBounded !== false },
     coverage: cov,
     preparedAt: now,
     currency: 'USD',
     revenue: [
       { label: 'Wholesale', amount: d.wsYtd || 0, note: 'booked orders' },
-      { label: 'Direct-to-consumer', amount: (d.p && d.p.ytd) || 0, note: 'settled online sales' },
+      { label: 'Direct-to-consumer', amount: d.dtcRev || 0, note: 'settled online sales' },
     ],
     revenueTotal: revenue,
     cogs: [
@@ -36116,8 +36300,124 @@ window.finPLPeriodNote = finPLPeriodNote;
 // The document. Print → Save as PDF is the submission format everyone accepts.
 // The printed statement of financial position. Same chrome as the P&L on
 // purpose — a lender receives both together and they should look like one pack.
-window.finPrintCF = function(){
-  const cf = finCashFlow();
+// The lender balance sheet and cash flow. Same numbers as the working
+// statements, same arithmetic, one page each, and none of the internal
+// hedging: "no general ledger", "derived, not observed", "the most reliable of
+// the three" are true things the founders need and an underwriter reads as a
+// warning label. What stays is the one limitation that changes how a figure
+// should be read — which lines are a current position rather than a dated one.
+const LENDER_BASIS = 'Unaudited management-prepared financial statement based on company '
+  + 'financial records.';
+function finLenderChrome(title, heading, meta, tables, notes){
+  const esc = function(v){ return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + esc(title) + '</title><style>'
+    + 'body{font-family:Georgia,"Times New Roman",serif;color:#111;padding:52px 60px;max-width:720px;margin:0 auto}'
+    + 'h1{font-size:15px;letter-spacing:5px;text-transform:uppercase;margin:0 0 2px;font-family:Helvetica,Arial,sans-serif}'
+    + 'h2{font-size:12px;letter-spacing:1px;margin:0 0 2px;font-weight:400;color:#333}'
+    + '.meta{font-size:10.5px;color:#666;line-height:1.7;margin-bottom:20px}'
+    + 'table{width:100%;border-collapse:collapse;margin-top:4px}'
+    + 'td{padding:6px 2px;font-size:12px;vertical-align:baseline}'
+    + 'td.n{text-align:right;font-family:"DM Mono",Menlo,Consolas,monospace;white-space:nowrap;font-size:12px}'
+    + '.sub{color:#777;font-size:10px;font-style:italic}'
+    + 'tr.sec td{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;'
+    +   'color:#666;padding:18px 2px 4px;border-bottom:1px solid #111}'
+    + 'tr.tot td{border-top:1px solid #bbb;font-weight:700}'
+    + 'tr.big td{border-top:2px solid #111;border-bottom:2px solid #111;font-weight:700;font-size:13.5px;padding:10px 2px}'
+    + '.notes{margin-top:26px;border-top:1px solid #111;padding-top:12px}'
+    + '.notes h3{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;margin:0 0 8px}'
+    + '.notes ol{margin:0;padding-left:18px}'
+    + '.notes li{font-size:10px;line-height:1.7;color:#333;margin-bottom:6px}'
+    + '.sign{margin-top:28px;font-size:10.5px;color:#555;line-height:1.9}'
+    + '.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;justify-content:center;'
+    +   'padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);'
+    +   'border-top:1px solid #ddd;font-family:Helvetica,Arial,sans-serif}'
+    + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
+    +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
+    + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + 'body{padding-bottom:104px}'
+    + '@media print{body{padding:22px 0}.bar{display:none}}'
+    + '</style></head><body>'
+    + '<h1>VENIA Collection</h1>'
+    + '<h2>' + esc(heading) + '</h2>'
+    + '<div class="meta">' + esc(meta) + '<br>All figures in US dollars.<br>' + esc(LENDER_BASIS) + '</div>'
+    + tables
+    + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
+    + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
+    +   'VENIA Collection · Los Angeles, California</div>'
+    + '<div class="bar">'
+    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
+    +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    + '</div>'
+    + '<' + '/body></html>';
+}
+function finLenderOpen(html){
+  const w = window.open('', '_blank');
+  if (!w) { try { showToast('Allow pop-ups to open the statement', 'warning'); } catch(e){} return false; }
+  w.document.write(html); w.document.close();
+  return true;
+}
+function finPrintBSLender(bs){
+  const esc = function(v){ return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  const m = function(n){ const v = Math.round(Number(n) || 0);
+    return (v < 0 ? '(' + Math.abs(v).toLocaleString('en-US') + ')' : v.toLocaleString('en-US')); };
+  const row = function(l, a, cls){ return '<tr class="' + (cls || '') + '"><td>' + esc(l)
+    + '</td><td class="n">' + m(a) + '</td></tr>'; };
+  const sec = function(t){ return '<tr class="sec"><td colspan="2">' + esc(t) + '</td></tr>'; };
+  const inv = bs.inventoryNote || '';
+  const tables = '<table>'
+    + sec('Assets')
+    + (bs.assets || []).map(function(r){ return row(r.label, r.amount); }).join('')
+    + row('Total assets', bs.assetsTotal, 'tot')
+    + sec('Liabilities')
+    + (bs.liabilities || []).map(function(r){ return row(r.label, r.amount); }).join('')
+    + row('Total liabilities', bs.liabilitiesTotal, 'tot')
+    + sec('Equity')
+    + row('Net equity', bs.equity, 'big')
+    + '</table>'
+    + (inv ? '<table>' + sec('Supplemental information')
+        + '<tr><td colspan="2" class="sub">' + esc(inv) + '</td></tr></table>' : '');
+  const notes = (bs.lenderNotes || []).map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+  return finLenderOpen(finLenderChrome('VENIA Collection — Balance Sheet',
+    'Balance Sheet', bs.asAtLabel, tables, notes));
+}
+function finPrintCFLender(cf){
+  const esc = function(v){ return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  const m = function(n){ const v = Math.round(Number(n) || 0);
+    return (v < 0 ? '(' + Math.abs(v).toLocaleString('en-US') + ')' : v.toLocaleString('en-US')); };
+  const row = function(l, a, cls){ return '<tr class="' + (cls || '') + '"><td>' + esc(l)
+    + '</td><td class="n">' + m(a) + '</td></tr>'; };
+  const sec = function(t){ return '<tr class="sec"><td colspan="2">' + esc(t) + '</td></tr>'; };
+  const fin = (cf.financing || []).concat(cf.financingOut || []);
+  const tables = '<table>'
+    + sec('Cash flows from operating activities')
+    + (cf.operatingIn || []).map(function(r){ return row('Receipts — ' + r.label, r.amount); }).join('')
+    + (cf.operatingOut || []).map(function(r){ return row('Payments — ' + r.label, -r.amount); }).join('')
+    + row('Net cash from operating activities', cf.netOperating, 'tot')
+    + sec('Cash flows from financing activities')
+    + (fin.length ? fin.map(function(r){ return row(r.label, r.amount); }).join('')
+                  : '<tr><td colspan="2">None in the period.</td></tr>')
+    + row('Net cash from financing activities', cf.netFinancing, 'tot')
+    + sec('Transfers between company-owned accounts')
+    + row('Transfers in', cf.transfersIn || 0)
+    + row('Transfers out', -(cf.transfersOut || 0))
+    + row('Net transfers', cf.netTransfers || 0, 'tot')
+    + sec('Change in cash')
+    + row('Cash at beginning of period', cf.opening || 0)
+    + row('Net change in cash', (cf.closing || 0) - (cf.opening || 0))
+    + row('Cash at end of period', cf.closing || 0, 'big')
+    + '</table>';
+  const notes = (cf.lenderNotes || []).map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+  return finLenderOpen(finLenderChrome('VENIA Collection — Statement of Cash Flows',
+    'Statement of Cash Flows', cf.periodLabel, tables, notes));
+}
+window.finPrintCF = function(opts){
+  const _o = opts || {};
+  const cf = finCashFlow({ end: _o.end || null });
+  if (_o.lender) return finPrintCFLender(cf);
   const esc = (t) => String(t == null ? '' : t)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   const money = (n) => n == null ? '—'
@@ -36197,7 +36497,10 @@ window.finPrintCF = function(){
   return cf;
 };
 
-window.finPrintBS = function(){
+window.finPrintBS = function(opts){
+  const _o = opts || {};
+  if (_o.lender) return finPrintBSLender(finBalanceSheet({ asAt: _o.asAt || null }));
+
   const bs = finBalanceSheet();
   const esc = (t) => String(t == null ? '' : t)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -36273,8 +36576,288 @@ window.finPrintBS = function(){
   return bs;
 };
 
-window.finPrintPL = function(){
-  const st = finPLStatement();
+function finPrintPLLender(st){
+  const esc = function(v){ return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); };
+  const m = function(n){
+    const v = Math.round(Number(n) || 0);
+    return (v < 0 ? '(' + Math.abs(v).toLocaleString('en-US') + ')' : v.toLocaleString('en-US'));
+  };
+  const row = function(label, amount, cls){
+    return '<tr class="' + (cls || '') + '"><td>' + esc(label) + '</td>'
+      + '<td class="n">' + m(amount) + '</td></tr>';
+  };
+  const sec = function(t){ return '<tr class="sec"><td colspan="2">' + esc(t) + '</td></tr>'; };
+  const dtc = (st.revenue || []).find(function(r){ return /consumer/i.test(r.label); }) || { amount: 0 };
+  const ws  = (st.revenue || []).find(function(r){ return /wholesale/i.test(r.label); }) || { amount: 0 };
+  const dtcC = (st.cogs || []).find(function(r){ return /consumer/i.test(r.label); }) || { amount: 0 };
+  const wsC  = (st.cogs || []).find(function(r){ return /wholesale/i.test(r.label); }) || { amount: 0 };
+  const opex = finLenderOpex(st);
+  const fin = st.financing || [];
+  const inv = st.inventory || {};
+  const invLine = (st.memo || []).find(function(r){ return /Inventory on hand/i.test(r.label); });
+
+  const body =
+      sec('Revenue')
+    + row('Direct-to-consumer sales', dtc.amount)
+    + row('Wholesale sales', ws.amount)
+    + row('Total revenue', st.revenueTotal, 'tot')
+    + sec('Cost of goods sold')
+    + row('Direct-to-consumer landed cost of goods sold', dtcC.amount)
+    + row('Wholesale landed cost of goods sold', wsC.amount)
+    + row('Total cost of goods sold', st.cogsTotal, 'tot')
+    + sec('Gross profit')
+    + row('Gross profit', st.gross, 'big')
+    + row('Gross margin', st.grossPct != null ? st.grossPct : 0)
+    + sec('Operating expenses')
+    + opex.map(function(r){ return row(r.label, r.amount); }).join('')
+    + (opex.length ? '' : '<tr><td colspan="2">None recorded in the period.</td></tr>')
+    + row('Total operating expenses', st.opexTotal, 'tot')
+    + sec('Operating income (loss)')
+    + row('Operating income (loss)', st.operating, 'big')
+    + sec('Interest and net result')
+    + row('Interest expense', st.interest || 0)
+    + row('Net income (loss)', st.netProfit, 'big');
+
+  const financing = fin.length
+    ? '<table>' + sec('Financing and ownership — not included in net income')
+      + fin.map(function(r){ return row(r.label, r.amount); }).join('') + '</table>'
+    : '';
+  const supp = '<table>' + sec('Supplemental information')
+    + row('Inventory on hand at landed cost', invLine ? invLine.amount : (inv.value || 0))
+    + (inv.units != null
+        ? '<tr><td colspan="2" class="sub">' + esc(Number(inv.units).toLocaleString() + ' units across '
+            + Number(inv.styles || 0).toLocaleString() + ' styles') + '</td></tr>'
+        : '')
+    + '</table>';
+  const notes = finLenderNotes(st).map(function(n){ return '<li>' + esc(n) + '</li>'; }).join('');
+
+  // The gross-margin row is a percentage in a column of dollars. Rendered as a
+  // number it reads as $86 of margin on $31,620 of revenue, which is the kind
+  // of misreading a document like this exists to prevent.
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+    + esc(st.entity) + ' — Statement of Operations</title><style>'
+    + 'body{font-family:Georgia,"Times New Roman",serif;color:#111;padding:52px 60px;max-width:720px;margin:0 auto}'
+    + 'h1{font-size:15px;letter-spacing:5px;text-transform:uppercase;margin:0 0 2px;font-family:Helvetica,Arial,sans-serif}'
+    + 'h2{font-size:12px;letter-spacing:1px;margin:0 0 2px;font-weight:400;color:#333}'
+    + '.meta{font-size:10.5px;color:#666;line-height:1.7;margin-bottom:20px}'
+    + 'table{width:100%;border-collapse:collapse;margin-top:4px}'
+    + 'td{padding:6px 2px;font-size:12px;vertical-align:baseline}'
+    + 'td.n{text-align:right;font-family:"DM Mono",Menlo,Consolas,monospace;white-space:nowrap;font-size:12px}'
+    + '.sub{color:#777;font-size:10px;font-style:italic}'
+    + 'tr.sec td{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;'
+    +   'color:#666;padding:18px 2px 4px;border-bottom:1px solid #111}'
+    + 'tr.tot td{border-top:1px solid #bbb;font-weight:700}'
+    + 'tr.big td{border-top:2px solid #111;border-bottom:2px solid #111;font-weight:700;font-size:13.5px;padding:10px 2px}'
+    + '.notes{margin-top:26px;border-top:1px solid #111;padding-top:12px}'
+    + '.notes h3{font-family:Helvetica,Arial,sans-serif;font-size:9.5px;letter-spacing:2px;text-transform:uppercase;color:#666;margin:0 0 8px}'
+    + '.notes ol{margin:0;padding-left:18px}'
+    + '.notes li{font-size:10px;line-height:1.7;color:#333;margin-bottom:6px}'
+    + '.sign{margin-top:28px;font-size:10.5px;color:#555;line-height:1.9}'
+    + '.bar{position:fixed;left:0;right:0;bottom:0;display:flex;gap:10px;justify-content:center;'
+    +   'padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);'
+    +   'border-top:1px solid #ddd;font-family:Helvetica,Arial,sans-serif}'
+    + '.bar button{background:#111;color:#fff;border:none;padding:0 20px;min-height:46px;font-size:11px;'
+    +   'letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer;font-family:inherit}'
+    + '.bar button.ghost{background:#fff;color:#111;border:1px solid #111}'
+    + 'body{padding-bottom:104px}'
+    + '@media print{body{padding:22px 0}.bar{display:none}}'
+    + '</style></head><body>'
+    + '<h1>' + esc(st.entity) + '</h1>'
+    + '<h2>Statement of Operations</h2>'
+    + '<div class="meta">' + esc(st.periodLabel) + '<br>'
+    +   'All figures in US dollars. Prepared ' + esc(st.preparedAt.toLocaleDateString('en-US',
+          { month: 'long', day: 'numeric', year: 'numeric' })) + '. Unaudited.</div>'
+    + '<table>' + body + '</table>'
+    + financing
+    + supp
+    + '<div class="notes"><h3>Notes</h3><ol>' + notes + '</ol></div>'
+    + '<div class="sign">Prepared by ______________________________  Date __________________<br>'
+    +   'VENIA Collection · Los Angeles, California</div>'
+    + '<div class="bar">'
+    +   '<button onclick="window.print()">Print / Save PDF</button>'
+    +   '<button class="ghost" onclick="try{window.close()}catch(e){};'
+    +     'setTimeout(function(){try{history.back()}catch(e){}},60)">Close</button>'
+    + '</div>'
+    + '<' + '/body></html>';
+  const w = window.open('', '_blank');
+  if (!w) { try { showToast('Allow pop-ups to open the statement', 'warning'); } catch(e){} return false; }
+  w.document.write(html); w.document.close();
+  return st;
+}
+window.finPrintPLLender = finPrintPLLender;
+
+// WHICH DOCUMENT, AND FOR WHICH PERIOD.
+//
+// The same ledger, the same arithmetic, two audiences. The working statement
+// is for the two people running the brand and says everything it doubts. The
+// statement of operations is for someone underwriting a loan: one page, their
+// row order, a closed month. The chooser exists so nobody has to know that
+// finPrintPL takes options.
+// One chooser for all three statements: the working version, or the closed
+// period a lender asks for. `which` decides which statement the buttons open —
+// the dialog is the same either way, because a founder assembling an SBA file
+// needs all three carrying the same date, and the reconciliation questions
+// belong beside the export rather than buried somewhere else.
+window.finPLExport = function(which){
+  const w = ({ pl: 1, bs: 1, cf: 1 })[which] ? which : 'pl';
+  const DOC = {
+    pl: { label: 'Profit and loss', lender: 'Statement of operations — for a lender',
+          open: 'finPrintPL({lender:true,end:V})', plain: 'finPrintPL()',
+          blurb: 'Year to date, with every caveat and the full notes.' },
+    bs: { label: 'Balance sheet', lender: 'Balance sheet — for a lender',
+          open: 'finPrintBS({lender:true,asAt:V})', plain: 'finPrintBS()',
+          blurb: 'As at today, with every caveat and the full notes.' },
+    cf: { label: 'Cash flow', lender: 'Statement of cash flows — for a lender',
+          open: 'finPrintCF({lender:true,end:V})', plain: 'finPrintCF()',
+          blurb: 'Year to date, with every caveat and the full notes.' },
+  }[w];
+  const flags = (typeof finReconcileFlags === 'function') ? finReconcileFlags() : [];
+  const ends = finPLMonthEnds();
+  const ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'fin-pl-export';
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  const c = STATE.finMfgConfirmed;
+  ov.innerHTML = '<div class="modal" onclick="event.stopPropagation()">'
+    + '<div class="modal-head"><div class="modal-title">' + slEsc(DOC.label) + '</div>'
+    +   '<button class="modal-close" onclick="document.getElementById(\'fin-pl-export\').remove()" aria-label="Close">&times;</button></div>'
+    + '<div class="modal-body">'
+    +   '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:16px">'
+    +     'Same ledger, same arithmetic, two documents. The working statement names everything '
+    +     'it is unsure of — right for you, wrong for an underwriter. The statement of operations '
+    +     'is one page in the order a lender reads, closed on a month end.'
+    +   '</div>'
+    +   '<div class="ag-sec-head"><h2 class="ag-sec-title">Working statement</h2></div>'
+    +   '<div style="font-size:10.5px;color:var(--muted);line-height:1.65;margin:6px 0 10px">'
+    +     slEsc(DOC.blurb) + '</div>'
+    +   '<button class="ag-btn ag-btn-sm" style="margin-bottom:20px" '
+    +     'onclick="document.getElementById(\'fin-pl-export\').remove();' + DOC.plain + '">Open working statement</button>'
+    +   '<div class="ag-sec-head"><h2 class="ag-sec-title">' + slEsc(DOC.lender) + '</h2></div>'
+    +   '<div style="font-size:10.5px;color:var(--muted);line-height:1.65;margin:6px 0 8px">'
+    +     'Closed on a month end, because that is what a lender asks for. Online sales are read '
+    +     'from the monthly figures — if they have not been pulled yet this will say so rather '
+    +     'than date a year-to-date number.</div>'
+    +   '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px">'
+    +     '<select class="fs" id="fin-pl-end" style="min-height:auto;padding:6px 8px;font-size:11px">'
+    +       (ends.length ? ends.map(function(e, i){ return '<option value="' + e.iso + '"'
+              + (i === 0 ? ' selected' : '') + '>Through ' + slEsc(e.label) + '</option>'; }).join('')
+            : '<option value="">No completed month yet this year</option>')
+    +     '</select>'
+    +     '<button class="ag-btn ag-btn-primary ag-btn-sm"' + (ends.length ? '' : ' disabled')
+    +       ' onclick="var v=document.getElementById(\'fin-pl-end\').value;'
+    +       'if(' + DOC.open.replace('V', 'v') + '!==false){document.getElementById(\'fin-pl-export\').remove();}">Open statement</button>'
+    +   '</div>'
+    +   '<label style="display:flex;gap:8px;align-items:flex-start;font-size:10.5px;color:var(--muted);'
+    +     'line-height:1.65;cursor:pointer;border-top:1px solid var(--border);padding-top:12px">'
+    +     '<input type="checkbox" id="fin-pl-mfg" style="margin-top:2px"' + (c ? ' checked' : '')
+    +       ' onchange="finMfgConfirm(this.checked)">'
+    +     '<span>Contractors are not production costs, and shipping is outbound customer shipping. '
+    +     'Ticking this replaces the caveat about duplicated manufacturing cost with a confirmation '
+    +     'in the notes. Only tick it if it is true — it is a statement to a lender.'
+    +     (c ? '<br><strong>Confirmed ' + slEsc(new Date(c.at).toLocaleDateString('en-US',
+              { month: 'long', day: 'numeric', year: 'numeric' })) + (c.by ? ' by ' + slEsc(c.by) : '') + '.</strong>' : '')
+    +     '</span></label>'
+    +   (flags.length
+        ? '<div class="ag-sec-head" style="margin-top:20px"><h2 class="ag-sec-title">'
+          + 'Answer these before it goes out</h2></div>'
+          + '<div style="font-size:10.5px;color:var(--muted);line-height:1.65;margin:6px 0 10px">'
+          + 'These are not on the statements. They are the questions the numbers raise, and an '
+          + 'underwriter will ask them.</div>'
+          + flags.map(function(f){ return '<div style="border-left:2px solid var(--amber);'
+              + 'padding:6px 0 6px 10px;margin-bottom:10px">'
+              + '<div style="font-size:11.5px;font-weight:600">' + slEsc(f.label) + '</div>'
+              + '<div style="font-size:10px;color:var(--muted);line-height:1.65;margin-top:2px">'
+              + slEsc(f.detail) + '</div></div>'; }).join('')
+        : '')
+    + '</div></div>';
+  document.body.appendChild(ov);
+};
+window.finMfgConfirm = function(on){
+  if (on) {
+    let by = ''; try { by = (getGConfig().authorName) || ''; } catch(e){}
+    STATE.finMfgConfirmed = { at: new Date().toISOString(), by: by };
+  } else {
+    STATE.finMfgConfirmed = null;
+  }
+  save();
+  try { showToast(on ? 'Recorded — the notes will state it as confirmed'
+                     : 'Removed — the caveat returns to the notes', 'info'); } catch(e){}
+};
+
+// THE LENDER PACK.
+//
+// The internal P&L is a working document: it names every doubt, flags what
+// might be misfiled, and runs to a page of notes. That is right for the two
+// people running the brand and wrong for the people underwriting it. An
+// underwriter at Newtek or Celtic or AmPac wants one page they can reconcile,
+// in the order they read every other statement in the pile, for a CLOSED
+// period. Same ledger, same arithmetic, same net income — different document.
+//
+// The categories in the order a lender expects them, largest structural costs
+// first rather than sorted by size, so two months of this statement can be
+// laid side by side and read down the same rows.
+const LENDER_OPEX_ORDER = ['payroll','software','rent','contractors','taxes','marketing','dining',
+  'insurance','office-supplies','fees','internet','shipping','electricity','travel','donation',
+  'parking','rnd'];
+function finLenderOpex(st){
+  const rest = (st.opex || []).slice();
+  const out = [];
+  LENDER_OPEX_ORDER.forEach(function(key){
+    const label = (typeof finCatLabel === 'function' ? finCatLabel(key) : key).toLowerCase();
+    const i = rest.findIndex(function(r){ return String(r.label).toLowerCase() === label; });
+    if (i >= 0) out.push(rest.splice(i, 1)[0]);
+  });
+  // Anything the list did not anticipate keeps its place rather than vanishing:
+  // a statement that silently drops a category is a statement that does not add
+  // up, and the first thing an underwriter does is add it up.
+  return out.concat(rest.sort(function(a, b){ return b.amount - a.amount; }));
+}
+// The five notes an interim statement carries, plus the two answers management
+// has given about this ledger. Nothing here is a hedge — a caveat that has been
+// resolved should be stated as resolved, and one that has not must stay.
+function finLenderNotes(st){
+  const n = [
+    'Unaudited management-prepared interim financial statements.',
+    'Direct-to-consumer revenue reflects settled sales for the reporting period.',
+    'Cost of goods sold represents landed production cost attributable to merchandise sold '
+      + 'during the period. Manufacturing costs attributable to unsold merchandise are carried '
+      + 'as inventory and are shown under supplemental information.',
+    'Owner contributions and owner draws are excluded from operating results and are presented '
+      + 'under financing and ownership.',
+    'Interest expense is presented below operating income.',
+  ];
+  const c = STATE.finMfgConfirmed;
+  if (c) {
+    n.push('Management has confirmed that contractor costs are not production-related and that '
+      + 'shipping represents outbound customer shipping; neither is included in landed '
+      + 'production cost, so no manufacturing cost is duplicated between cost of goods sold '
+      + 'and operating expenses.');
+  } else if ((st.opex || []).some(function(r){ return /contractor|shipping|material/i.test(r.label); })) {
+    // Not deleted. Until someone says otherwise, a reader is entitled to know
+    // that two of these lines could carry manufacturing cost already counted in
+    // cost of goods sold.
+    n.push('Contractors and shipping may contain manufacturing costs that are also carried in '
+      + 'landed cost of goods sold. Management has not yet confirmed the split.');
+  }
+  if ((st.opex || []).some(function(r){ return /payroll/i.test(r.label); })) {
+    n.push('Historical payroll includes staff compensation that is no longer part of the '
+      + "company's current fixed operating structure. This statement has not been adjusted to "
+      + 'remove those costs.');
+  }
+  return n;
+}
+window.finPrintPL = function(opts){
+  const _o = opts || {};
+  const st = finPLStatement({ end: _o.end || null });
+  // A dated heading over a year-to-date number is the one thing this document
+  // must never be. If the month buckets are not there, say what is missing and
+  // print nothing.
+  if (_o.end && st.period && !st.period.dtcBounded) {
+    try { showToast('Online sales are not yet broken down by month, so a close at '
+      + _o.end + ' cannot be produced. Refresh in Money to pull them, then try again.', 'warning', 6000); } catch(e){}
+    return false;
+  }
+  if (_o.lender) return finPrintPLLender(st);
   const esc = function(v){ return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;'); };
   const m = function(n){
     const v = Math.round(Number(n) || 0);
@@ -36382,10 +36965,25 @@ window.finPrintPL = function(){
   return st;
 };
 
-function cmdMoneyData() {
+// opts.end — an inclusive 'YYYY-MM-DD' close date. Omitted, everything below
+// behaves exactly as it always has: year to date, up to this moment.
+//
+// Bank rows and wholesale orders carry dates and always could be windowed.
+// DTC could not, which is why there was never a date picker: a custom range
+// would have put a correct wholesale figure beside a year-to-date DTC figure
+// and called the sum a period. Now that the Shopify pull is bucketed by month
+// (see the sales sync), a MONTH-END close is exact — and when those buckets
+// are missing, dtcBounded comes back false and the lender document refuses to
+// print rather than date a year-to-date number.
+function cmdMoneyData(opts) {
+  const _o = opts || {};
+  const end = _o.end || null;                        // 'YYYY-MM-DD', inclusive
+  const endT = end ? end + 'T23:59:59.999Z' : null;
+  const endMonth = end ? end.slice(0, 7) : null;
   const p = STATE.bizPulse || {};
   const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
-  const orders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled');
+  const orders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled')
+    .filter(o => !endT || slOrderBookedAt(o) <= endT);
   const wsYtd = orders.filter(o => slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
   const wsAll = orders.reduce((s,o) => s + (o.total||0), 0);
   const quotes = STATE.slQuotes || [];
@@ -36430,7 +37028,25 @@ function cmdMoneyData() {
   // sold; the honest treatment is to count the units ONCE against the average
   // landed cost of the matching styles, and tell the CFO the split is
   // unknown rather than implying precision.
+  // DTC, bounded to the close when one is asked for. Both halves come from the
+  // same month buckets, so revenue and the units behind COGS always describe
+  // the same period — a revenue figure cut at August against units counted to
+  // today would overstate cost and understate margin, which is exactly the
+  // kind of quietly wrong number a lender pack must not contain.
+  const _months = (STATE.bizPulse && STATE.bizPulse.byMonth) || null;
+  const _inPeriod = (mk) => mk >= (jan1iso.slice(0,7)) && (!endMonth || mk <= endMonth);
+  let dtcBounded = true, dtcRev = (p.ytd || 0);
+  if (end) {
+    if (_months && Object.keys(_months).length) {
+      dtcRev = Object.keys(_months).filter(_inPeriod).reduce((t,k) => t + (_months[k] || 0), 0);
+    } else { dtcBounded = false; }
+  }
   const map = (STATE.styleSales && STATE.styleSales.map) || {};
+  const _unitsFor = (m) => {
+    if (!end) return m.uY || 0;
+    if (!m.m) { dtcBounded = false; return m.uY || 0; }
+    return Object.keys(m.m).filter(_inPeriod).reduce((t,k) => t + ((m.m[k] || {}).u || 0), 0);
+  };
   const byName = {};
   (STATE.styles || []).forEach(s => {
     const k = typeof plmSalesNorm === 'function' ? plmSalesNorm(s.name) : '';
@@ -36444,7 +37060,7 @@ function cmdMoneyData() {
     const costs = group.map(s => (typeof landedCost === 'function' ? landedCost(s) : 0) || 0).filter(c => c > 0);
     const lc = costs.length ? costs.reduce((a,b) => a+b, 0) / costs.length : 0;
     if (group.length > 1) dtcAmbiguous++;
-    const uY = m.uY || 0, rY = m.rY || 0;
+    const uY = _unitsFor(m), rY = m.rY || 0;
     dtcCogsYtd += lc * uY;
     rows.push({ name: group[0].name, styleId: group.map(s => s.styleId).filter(Boolean).join(' / '),
                 u: m.u, rev: m.r, uY, rY, cogs: lc * m.u, gp: m.r - lc * m.u,
@@ -36504,6 +37120,7 @@ function cmdMoneyData() {
     if (!t || t.status === 'void' || t.status === 'pending') return;
     const amt = t.amount || 0;
     if (!t.date || t.date < jan1iso.slice(0,10)) return;
+    if (end && t.date > end) return;                  // after the close date
     const c = (typeof finTxnCat === 'function' ? finTxnCat(t) : (t.category||'')) || '';
     // INFLOWS FIRST, because two of them are not revenue and the loop below has
     // always thrown every inflow away. Capital the founders put in and a loan
@@ -36530,7 +37147,7 @@ function cmdMoneyData() {
   // so its "spent" column is NOT subtracted as well — that would charge
   // marketing twice. Without a feed it stays the only expense signal there is.
   const opexTotal = bankOpex ? opexYtd : spend;
-  const revYtd = (p.ytd || 0) + wsYtd;
+  const revYtd = dtcRev + wsYtd;
   const cogsYtd = dtcCogsYtd + wsCogsYtd;
   // Production cash (POs): what's been paid to factories this year and what's
   // still committed. Cash-flow lines — NOT subtracted from operating, because
@@ -36601,7 +37218,11 @@ function cmdMoneyData() {
            mfgViaCogs, mfgViaOpex, mfgOpexBy,
            ownerDraw, ownerInvest, loanOut, loanIn, interestPaid,
            revYtd, cogsYtd, operating: revYtd - cogsYtd - opexTotal, rows, poPaidYtd, poCommitted,
-           hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at) };
+           hasDtc: !!p.at, hasSales: !!(STATE.styleSales && STATE.styleSales.at),
+           // The period this data actually describes, and whether DTC could be
+           // held to it. dtcBounded false means the month buckets are missing
+           // and any dated heading would be a claim, not a fact.
+           periodEnd: end, dtcBounded: dtcBounded, dtcRev: dtcRev };
 }
 window.cmdRenderMoney = function() {
   const el = document.getElementById('cmd-money-body');
@@ -36630,7 +37251,7 @@ window.cmdRenderMoney = function() {
     <div class="money-cols">
     <section>
     <div class="ag-sec-head"><h2 class="ag-sec-title">P&amp;L — this year</h2>
-      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintPL()" title="A submittable statement — unaudited management accounts, with its basis and limitations stated on the page">↓ P&amp;L statement</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintBS()" title="What the business is worth on a day — the other half of a lender's pack">↓ Balance sheet</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPrintCF()" title="Where the money actually went — built entirely from bank movements, nothing estimated">↓ Cash flow</button></div>
+      <div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPLExport()" title="Two versions of the same numbers — the working statement, or a closed-period statement of operations for a lender">↓ P&amp;L statement</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPLExport('bs')" title="What the business is worth on a day — the other half of a lender's pack">↓ Balance sheet</button><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finPLExport('cf')" title="Where the money actually went — built entirely from bank movements, nothing estimated">↓ Cash flow</button></div>
     </div>
     <div class="money-block">
       ${line('DTC revenue', d.p.ytd||0, 'Shopify, live')}
@@ -41894,6 +42515,70 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return id;
   }
   function who(){ try { return (getGConfig().authorName)||'Someone'; } catch(e){ return 'Someone'; } }
+  // A WRITE IS NOT SAVED UNTIL THE CLOUD HAS IT.
+  //
+  // pushNow had six ways out and only ONE of them (Build 454's refused module
+  // row) tried again. The others just returned: the client not ready, the
+  // first sync decision not made, a blob error, anything thrown. In every one
+  // the edit sat on the device and nothing would ever carry it up. A founder
+  // who keeps typing never notices — state is cumulative, so the next edit
+  // takes it. A founder who tags one row and puts the phone down loses it.
+  // A phone in a lift, a laptop waking from sleep, a token refreshing: all a
+  // normal Tuesday, all silently dropping the write.
+  //
+  // So every exit arms a retry, and the app can say out loud that it is
+  // holding work the cloud has not accepted.
+  var pushDirty = false, retryTimer = null, retryStep = 0;
+  var RETRY_MS = [3000, 8000, 20000, 45000, 90000];
+  // A retry nobody can see is still a silent failure while it runs. While this
+  // device holds work the cloud has not accepted, it says so — appended to
+  // <body> and above the fixed screens, so no repaint and no space can hide
+  // it. It appears only after a push has actually FAILED: a healthy save is
+  // momentary, and a badge that flickers on every keystroke gets ignored.
+  function pendingBadge(on){
+    var el = document.getElementById('sync-pending');
+    if (!on) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('button');
+      el.id = 'sync-pending';
+      el.type = 'button';
+      el.title = 'This device is holding a change the cloud has not accepted yet. Retrying — tap for detail.';
+      el.onclick = function(){ try { showSyncStatus(); } catch(e){} };
+      el.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);'
+        + 'bottom:calc(18px + var(--sab,0px));z-index:9600;'
+        + 'background:#8a5a00;color:#fff;border:none;border-radius:0;'
+        + 'padding:8px 14px;font-size:11px;font-weight:600;cursor:pointer;'
+        + 'box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:auto;'
+        + "font-family:'Helvetica Neue',Helvetica,Arial,sans-serif";
+      el.textContent = '⇡ Not saved to the cloud yet — retrying';
+      document.body.appendChild(el);
+    } else if (!el.isConnected) {
+      document.body.appendChild(el);
+    }
+  }
+  // `quiet` is for "not ready yet", not "tried and failed": on boot, save()
+  // runs during init and schedules a push before the first sync decision has
+  // been made. Retry it — the edit still has to go up — but do not announce a
+  // problem that has not happened. A badge that flashes on every launch is a
+  // badge nobody reads on the day it matters.
+  function pushFailed(why, quiet){
+    pushDirty = true;
+    window.__syncRetryArmed = true;
+    if (!quiet) { try { pendingBadge(true); } catch(e){} }
+    var wait = RETRY_MS[Math.min(retryStep, RETRY_MS.length - 1)];
+    retryStep++;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(function(){ pushNow(); }, wait);
+    window.__syncStat.retry = { t: new Date().toISOString(), why: why || '', inMs: wait, attempt: retryStep };
+  }
+  function pushLanded(){
+    pushDirty = false; retryStep = 0;
+    window.__syncRetryArmed = false;
+    try { pendingBadge(false); } catch(e){}
+    clearTimeout(retryTimer); retryTimer = null;
+  }
+  // True while this device holds a change the cloud has not accepted.
+  window.__syncPending = function(){ return !!pushDirty; };
   // The last state we know both devices agreed on — the common ancestor the
   // 3-way merge diffs against to tell additions from deletions.
   function setBase(snap){ try { localStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
@@ -41994,8 +42679,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // Never push before the first pull decision: a fresh browser seeds demo
     // data and save()s during init — pushing that would clobber the real
     // workspace before we've even looked at it.
-    if (!window.__sbSyncDone) return;
-    var c = sb(); if (!c) return;
+    if (!window.__sbSyncDone) { pushFailed('sync not started', true); return; }
+    var c = sb(); if (!c) { pushFailed('no client', true); return; }
     var rev = Date.now();
     try {
       var localSnap = snapshot();
@@ -42082,7 +42767,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           via: 'module rows refused — base NOT advanced' };
         // Try again shortly rather than waiting for the next edit: an unpushed
         // change that nothing retries is a change that gets reverted later.
-        clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 20000);
+        pushFailed('modules: ' + modErr);
         return;
       }
       if (!res || !res.error) {
@@ -42098,12 +42783,21 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
         if (adopted) { applySnapshot(toPush); setBase(snapshot()); }
         else { setBase(localSnap); }
+        pushLanded();
         window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
           via: !writesBlob ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
       } else {
         syncFail('push', res.error.message || res.error.code);
+        window.__syncStat.push = { t: new Date().toISOString(), ok: false,
+          err: res.error.message || res.error.code, via: 'blob refused — base NOT advanced' };
+        pushFailed('blob: ' + (res.error.message || res.error.code));
       }
-    } catch(e){ syncFail('push', e && e.message); }
+    } catch(e){
+      syncFail('push', e && e.message);
+      window.__syncStat.push = { t: new Date().toISOString(), ok: false,
+        err: (e && e.message) || 'threw', via: 'push threw — base NOT advanced' };
+      pushFailed((e && e.message) || 'threw');
+    }
   }
   function schedulePush(){
     if (applyingRemote) return;                 // don't echo a state we just pulled

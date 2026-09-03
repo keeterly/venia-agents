@@ -4172,3 +4172,139 @@ hidden, which the gauntlet holds.
 
 `gauntlet/railback.js` — 17 assertions driven on the Money space, where it was
 buried. 6 fail on 457.
+
+## Build 459 — a write is not saved until the cloud has it
+
+"Sometimes my writes don't save. For instance in Product when setting a
+season, or in Money with the category tag."
+
+Two findings, one of them a dead end worth recording.
+
+**Tested and disproved first.** The obvious suspect was a tap landing during
+a push: `pushNow` snapshots local, then AWAITS a network read, and everything
+after that await was thought to operate on the pre-tap snapshot. Driven
+through the real `pushNow` against a fake Supabase client, with a partner row
+in the cloud so the adopt branch actually runs — the tap survives. `snapshot()`
+stores references, not copies, so the array the push serialises IS the live
+one. Safe by construction. Kept as `gauntlet/pushrace.js` (9 assertions) so it
+stays that way; it passes on 458 and that is the point of it.
+
+**The real hole.** `pushNow` has six ways out and Build 454 made exactly ONE
+of them retry. The rest returned in silence:
+
+| exit | before |
+|---|---|
+| client not ready | return, no retry |
+| first sync decision not made | return, no retry |
+| blob write returned an error | toast, no retry |
+| anything threw (dropped connection) | toast, no retry |
+| module row refused | retry (454) |
+
+In each silent case the edit is on the device and nowhere else, and nothing
+will ever carry it up. A founder who keeps working never notices — state is
+cumulative, so the next edit takes it. A founder who tags one row and puts the
+phone down loses it. A phone in a lift, a laptop waking from sleep, a token
+refreshing: a normal Tuesday.
+
+- Every exit now arms a retry with backoff (3s, 8s, 20s, 45s, 90s), and the
+  base still only advances on the write that landed.
+- `__syncPending()` says whether this device is holding unaccepted work.
+- A badge says it on screen — appended to `<body>` at z-index 9600, so no
+  repaint and no fixed screen can hide it, and tapping it opens sync status.
+- It appears only after a push has actually FAILED. "Not ready yet" (boot,
+  before the first sync decision) retries quietly: a badge that flashes on
+  every launch is a badge nobody reads on the day it matters.
+
+`gauntlet/pushretry.js` — 11 assertions, hard-fails on 458.
+`gauntlet/pendingbadge.js` — 11 assertions, hard-fails on 458.
+
+## Build 460 — the statement a lender reads, closed on a real period
+
+An outside review of the P&L asked for a second, lender-facing version. Most
+of it was presentation. One part of it was not possible yet, and that part
+mattered most.
+
+**The period end.** The request was for January 1 – August 31, 2026. Bank rows
+and wholesale orders carry dates and always could be windowed. DTC could not:
+Shopify was held as a year-to-date and an all-time aggregate per product with
+nothing in between, which is why `finPLPeriodNote()` said, in the code, that a
+custom range "would mix one period with another". Printing a year-to-date
+figure under a heading that says 31 August is the one thing a submitted
+document must never do.
+
+So the Shopify pull — which already spans from January of LAST year — is now
+bucketed by month, in both places it lands: revenue on `bizPulse.byMonth`, and
+units sold on `styleSales.map[k].m`. Both halves, deliberately: revenue cut at
+August against units counted to today would overstate cost and understate
+margin. `cmdMoneyData({end})` bounds everything else by date.
+
+**And it refuses.** If those buckets are missing — a workspace that has not
+re-synced since this build — `dtcBounded` comes back false and the lender
+document prints nothing, saying what to do instead. A refusal is the feature.
+
+**The document.** One page, the lender's row order (payroll, software, rent,
+contractors, taxes … rather than sorted by size, so two months can be read
+down the same rows), gross margin as a percentage, interest below operating,
+then three sections outside net income: Financing and Ownership, Supplemental
+Information (inventory at landed cost, units, styles), and five short notes.
+The working statement is untouched and still carries every caveat.
+
+**The manufacturing caveat is answered, not deleted.** Management confirmed
+contractors are not production and shipping is outbound. That confirmation is
+recorded in `STATE.finMfgConfirmed` with who and when, syncs to the other
+founder's device, and turns the caveat into a stated confirmation. Untick it
+and the caveat returns. A safeguard that can be silently removed is not a
+safeguard; one that records who answered it is.
+
+Historical payroll is kept in full, with a management note that it is no
+longer part of the fixed operating structure — a note, never an add-back.
+
+`gauntlet/lenderpl.js` — 25 assertions, including that both documents report
+identical totals for the same period. Presentation changed; arithmetic did not.
+
+## Build 461 — the balance sheet and cash flow, dated and plain
+
+Same brief as 460, applied to the other two statements: one page each, a real
+reporting date, and the internal hedging out. "No general ledger", "derived,
+not observed", "the most reliable of the three" are true and useful to the
+founders; an underwriter reads them as a warning label.
+
+**Taking hedging out is not hiding a limitation, and the line between them is
+the work.**
+
+- **Cash and card balances can be dated exactly.** Every row carries its
+  account, so the position on 31 August is the position today less what moved
+  since. On the live ledger that is six rows and $4,856. `finCashAt(end)` does
+  it: cash less post-date cash movement, debt plus post-date card movement
+  (a charge is negative and debt is carried positive).
+- **Inventory, receivables and factory commitments cannot.** No history of
+  stock levels or open orders is kept, so those are the current recorded
+  position whatever date is on the page. They are marked `current` and said
+  once in a note. Dating them silently would be inventing a figure.
+
+The cash flow was already right in structure — direct method, transfers netted
+separately, financing apart from operating — so it needed the period bound and
+the plain presentation, nothing more. Production and fabric payments stay
+inside operating, visible, because they are the working-capital story a lender
+is trying to see.
+
+**Nothing unresolved was deleted.** `finReconcileFlags()` raises the three
+items to the founders, beside the export where they will be read, and they do
+NOT appear in the lender pack:
+
+1. Receipts filed as income against revenue recognised from orders. Both can
+   be right; the gap needs one sentence of explanation before it is asked for.
+2. Owner draws. Correct outside the trading result if it really is owner money
+   — and overstating profit by that much if any of it was reimbursement or pay.
+3. Liabilities are limited to what is connected or recorded. A lease, an
+   equipment loan, an EIDL, a personal guarantee or an unconnected card would
+   not appear at all. This is the one that costs an application when found
+   later.
+
+One chooser now serves all three statements — working version or closed
+period, same month ends on each, because an SBA file needs all three carrying
+the same date.
+
+`gauntlet/lenderbscf.js` — 32 assertions, including that the statement adds up
+(opening + operating + financing + transfers = closing) and that the
+reconciliation items reach the founders and not the pack.
