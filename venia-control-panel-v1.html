@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '465';
+  const BUILD = '466';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35952,11 +35952,38 @@ window.finReconcileFlags = function(){
   if (Math.abs(receipts - revenue) > Math.max(500, revenue * 0.05)) {
     out.push({ key: 'receipts_vs_revenue', level: 'ask',
       label: money(receipts) + ' of receipts filed as income against ' + money(revenue) + ' of revenue',
-      detail: 'The profit and loss recognises revenue from orders; the bank shows what arrived. A '
-        + 'gap of ' + money(receipts - revenue) + ' is normal when payouts settle after the sale or '
-        + 'when a prior-year invoice is collected this year — but it needs an answer in one '
-        + 'sentence before an underwriter asks for it, because on paper it reads as unreported '
-        + 'revenue or as double counting.' });
+      detail: 'The bank shows what arrived; the statement recognises the sale. Since Build 466 the '
+        + 'receipts that are NOT processor settlements are on the statement as other income, so '
+        + 'what is left of this gap is timing — a payout settling days after the sale it belongs '
+        + 'to, or a prior-year invoice collected this year. It still needs one sentence of answer '
+        + 'before an underwriter asks, because on paper a gap reads as unreported revenue.' });
+  }
+  // A CASH DEPOSIT IS NOT SELF-EXPLANATORY. It is a cash sale, or it is the
+  // founder banking their own money — and those two answers put it on opposite
+  // sides of the statement. Counted as revenue today, because that is what
+  // "income" was filed as, which is exactly why it has to be asked.
+  const cashDep = inYear.filter(function(t){ return finTxnCat(t) === 'income' && (t.amount||0) > 0
+    && /CASH DEPOSIT|ATM (?:CASH )?DEP/i.test(t.desc || ''); });
+  if (cashDep.length) {
+    out.push({ key: 'cash_deposits', level: 'ask',
+      label: cashDep.length + ' cash deposit' + (cashDep.length === 1 ? '' : 's') + ' filed as income — '
+        + money(sum(cashDep)),
+      detail: 'These are counted as revenue because that is the category on them. If any of it was '
+        + 'your own cash going in rather than a sale, it is owner investment and belongs off the '
+        + 'profit and loss entirely — leaving it here overstates revenue and understates equity by '
+        + 'the same amount. Confirm each one, or refile it.' });
+  }
+  // The one way the new revenue line could double count: a wholesale invoice is
+  // recognised when the ORDER is booked, so the customer's later payment must
+  // not be counted again on its way through the bank.
+  if ((d.wsCollectedYtd || 0) > 0) {
+    out.push({ key: 'wholesale_collections', level: 'ask',
+      label: money(d.wsCollectedYtd) + ' of wholesale invoices collected in the period',
+      detail: 'Wholesale revenue is recognised when the order is booked, so a customer paying that '
+        + 'invoice must not also be counted as other income. Processor settlements are excluded '
+        + 'automatically; a wholesale payment arriving by ACH or Zelle is not, because nothing in '
+        + 'the descriptor says which invoice it is. Check that no receipt of this size is filed as '
+        + 'income, or file it as transfer against the invoice.' });
   }
   // Owner draws are equity, not wages — unless some of it was reimbursement or
   // pay, in which case the P&L is understating cost and the equity is wrong.
@@ -36167,6 +36194,12 @@ function finPLStatement(opts){
     + 'direct-to-consumer revenue is taken from settled Shopify sales; operating expenses are '
     + 'recognised when they left the bank account (cash basis). Cost of goods sold is the landed '
     + 'cost of units actually sold, not units produced.');
+  // WHAT IS COUNTED ONCE. The line a reader compares against the bank.
+  if (d.otherIncome > 0 || d.channelSettled > 0) {
+    notes.push(finIncomeBasisNote(d)
+      || 'Other income received is money earned outside the sales channels, identified from bank '
+       + 'receipts.');
+  }
   if (d.bankOpex && uncat > 0) {
     notes.push('$' + Math.round(uncat).toLocaleString() + ' of bank outflows have not yet been '
       + 'assigned to a category. They are INCLUDED in total operating expenses above, as '
@@ -36416,7 +36449,13 @@ function finPLStatement(opts){
     revenue: [
       { label: 'Wholesale', amount: d.wsYtd || 0, note: 'booked orders' },
       { label: 'Direct-to-consumer', amount: d.dtcRev || 0, note: 'settled online sales' },
-    ],
+      // Earned outside the two channels and only visible in the bank: a service
+      // invoice, a client paying directly, a cash sale. Listed separately
+      // because it is the line a reader will ask about, and hiding it inside
+      // "other" is what kept it off the statement in the first place.
+      { label: 'Other income received', amount: d.otherIncome || 0,
+        note: 'banked receipts outside the sales channels' },
+    ].filter(function(r){ return r.amount !== 0 || !/other income/i.test(r.label); }),
     revenueTotal: revenue,
     cogs: [
       { label: 'Wholesale — landed cost of goods sold', amount: d.wsCogsYtd || 0 },
@@ -37025,6 +37064,15 @@ window.finMfgConfirm = function(on){
 const LENDER_OPEX_ORDER = ['payroll','software','rent','contractors','taxes','marketing','dining',
   'insurance','office-supplies','fees','internet','shipping','electricity','travel','donation',
   'parking','rnd'];
+// One sentence of basis, used by both statements so they cannot drift.
+function finIncomeBasisNote(d){
+  if (!d || !(d.channelSettled > 0)) return '';
+  return 'Other income received is money earned outside the sales channels and identified from '
+    + 'bank receipts. $' + Math.round(d.channelSettled).toLocaleString() + ' of payment-processor '
+    + 'settlements received in the period are excluded from it, because the sales they settle are '
+    + 'already recognised as direct-to-consumer revenue; counting the payout as well would report '
+    + 'the same sale twice.';
+}
 function finLenderOpex(st){
   const rest = (st.opex || []).slice();
   const out = [];
@@ -37044,7 +37092,10 @@ function finLenderOpex(st){
 function finLenderNotes(st){
   const n = [
     'Unaudited management-prepared interim financial statements.',
-    'Direct-to-consumer revenue reflects settled sales for the reporting period.',
+    'Direct-to-consumer revenue reflects settled sales for the reporting period. Other income '
+      + 'received represents amounts earned outside the direct-to-consumer and wholesale channels '
+      + 'and identified from bank receipts; payment-processor settlements of direct-to-consumer '
+      + 'sales are excluded from it to avoid recognising the same sale twice.',
     'Cost of goods sold represents landed production cost attributable to merchandise sold '
       + 'during the period. Manufacturing costs attributable to unsold merchandise are carried '
       + 'as inventory and are shown under supplemental information.',
@@ -37343,6 +37394,10 @@ function cmdMoneyData(opts) {
   // amount that vanishes from a statement is not the same as one that is
   // explained on it.
   let ownerDraw = 0, ownerInvest = 0, loanOut = 0, loanIn = 0, interestPaid = 0;
+  // Earned and banked outside the sales channels, and the payouts of the
+  // channels that ARE counted — kept apart so the second can be named as an
+  // exclusion instead of vanishing.
+  let otherIncome = 0, channelSettled = 0;
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void' || t.status === 'pending') return;
     const amt = t.amount || 0;
@@ -37353,9 +37408,26 @@ function cmdMoneyData(opts) {
     // always thrown every inflow away. Capital the founders put in and a loan
     // that lands are cash the business now HAS and did not EARN — invisible on
     // a P&L, which is correct, and invisible everywhere else, which is not.
+    //
+    // MONEY THE BUSINESS EARNED THAT NO CHANNEL KNOWS ABOUT. Revenue was
+    // Shopify DTC plus wholesale orders booked here, and everything else that
+    // was earned — a service invoice paid by ACH, a client paying by Zelle,
+    // a cash sale banked — was filed as income on the bank screen and then
+    // dropped by this return. Measured on the live ledger for Jan–Aug 2026:
+    // $21,196 of it, against $31,620 of reported revenue.
+    //
+    // The reason it was dropped is real and is kept: a Shopify or Stripe
+    // PAYOUT lands in the bank as well, and counting that would double the DTC
+    // revenue already recognised from the orders themselves. So the rule is
+    // not "count every inflow" but "count every inflow except the settlement
+    // of a channel already counted" — and report what was set aside, so the
+    // exclusion is a stated basis rather than a silent one.
     if (amt >= 0) {
       if (c === 'owner_invest') ownerInvest += amt;
       else if (c === 'loan') loanIn += amt;
+      else if (c === 'income') {
+        if (finIsSettlement(t.desc)) channelSettled += amt; else otherIncome += amt;
+      }
       return;
     }
     if (!c) { opexUncat += -amt; return; }              // can't classify it yet — reported, never guessed
@@ -37374,7 +37446,7 @@ function cmdMoneyData(opts) {
   // so its "spent" column is NOT subtracted as well — that would charge
   // marketing twice. Without a feed it stays the only expense signal there is.
   const opexTotal = bankOpex ? opexYtd : spend;
-  const revYtd = dtcRev + wsYtd;
+  const revYtd = dtcRev + wsYtd + otherIncome;
   const cogsYtd = dtcCogsYtd + wsCogsYtd;
   // Production cash (POs): what's been paid to factories this year and what's
   // still committed. Cash-flow lines — NOT subtracted from operating, because
@@ -37449,7 +37521,8 @@ function cmdMoneyData(opts) {
            // The period this data actually describes, and whether DTC could be
            // held to it. dtcBounded false means the month buckets are missing
            // and any dated heading would be a claim, not a fact.
-           periodEnd: end, dtcBounded: dtcBounded, dtcRev: dtcRev };
+           periodEnd: end, dtcBounded: dtcBounded, dtcRev: dtcRev,
+           otherIncome: otherIncome, channelSettled: channelSettled };
 }
 window.cmdRenderMoney = function() {
   const el = document.getElementById('cmd-money-body');
@@ -39556,6 +39629,16 @@ window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
 // since a third word is a store number as often as a name — and the review
 // screen shows the longest name all of a group's rows agree on, because
 // "CA DEPT" is not a vendor anyone can file.
+// A PAYOUT, NOT A SALE. Shopify, Stripe, Square, PayPal and the buy-now-pay-
+// later processors settle into the bank days after the order they belong to.
+// Those orders are already revenue — recognised from the channel, where the
+// gross figure and the date both live — so the settlement is the same money
+// arriving, not more of it. Named here rather than inline so the one rule that
+// decides double counting is in one place and can be read.
+const FIN_SETTLEMENT_RE = /\bSHOPIFY\b|\bSTRIPE\b|\bSQUARE\b|\bSQ ?\*|PAYPAL|SHOP ?PAY|AFTERPAY|AFFIRM|KLARNA|\bSHOPPAY\b/i;
+function finIsSettlement(desc){ return FIN_SETTLEMENT_RE.test(String(desc || '')); }
+window.finIsSettlement = finIsSettlement;
+
 function finMerchantFull(desc){
   const d = String(desc || '').toUpperCase();
   let m = d.match(/ZELLE PAYMENT (?:TO|FROM)\s+([A-Z' -]{2,40})/);
