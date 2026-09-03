@@ -2726,7 +2726,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '456';
+  const BUILD = '457';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -38681,12 +38681,17 @@ window.bankSelectClear = function(){ FIN_TX_SEL = {}; cmdRenderBank(); };
 // counterparty, ACH names the originator, and a card charge just runs the
 // merchant and a city together. Each is pulled out where it lives rather than
 // hoping a common prefix exists.
-function finMerchantKey(desc){
+// The cleaned name in full: a prefix ("Zelle from ") and every word of it.
+// finMerchantKey takes the first two words — the right thing to GROUP on,
+// since a third word is a store number as often as a name — and the review
+// screen shows the longest name all of a group's rows agree on, because
+// "CA DEPT" is not a vendor anyone can file.
+function finMerchantFull(desc){
   const d = String(desc || '').toUpperCase();
   let m = d.match(/ZELLE PAYMENT (?:TO|FROM)\s+([A-Z' -]{2,40})/);
   if (m) {
     const dir = /ZELLE PAYMENT FROM/.test(d) ? 'from ' : 'to ';
-    return 'Zelle ' + dir + m[1].trim().split(/\s+/).slice(0, 2).join(' ');
+    return { pre: 'Zelle ' + dir, words: m[1].trim().split(/\s+/).filter(Boolean) };
   }
   m = d.match(/ORIG CO NAME:\s*([A-Z0-9&.' -]{2,40})/);
   if (m) {
@@ -38696,8 +38701,8 @@ function finMerchantKey(desc){
     // Taking two words blind yields "GUSTO CO" and "GUSTO ORIG": one vendor
     // split in two. Cut at the first field marker instead.
     const name = m[1].split(/\b(?:CO ENTRY|ENTRY DESCR|ORIG ID|IND ID|DESC|SEC|TRACE|PPD|CCD|WEB|TEL)\b/)[0];
-    const t2 = name.trim().split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
-    if (t2) return t2;
+    const w = name.trim().split(/\s+/).filter(Boolean);
+    if (w.length) return { pre: '', words: w };
   }
   // A card descriptor: strip the payment-network prefix and the trailing phone
   // number, city and state that make every month look like a different vendor.
@@ -38709,7 +38714,25 @@ function finMerchantKey(desc){
   const clean = base.replace(/^(SQ|TST|PY|PAYPAL|POS DEBIT|RECURRING CARD|CARD PURCHASE)\s*\*?\s*/i, '')
     .replace(/\b\d{3}[- ]?\d{3}[- ]?\d{4}\b/g, ' ')
     .replace(/[^A-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  return clean.split(' ').slice(0, 2).join(' ') || 'Unnamed';
+  return { pre: '', words: clean.split(' ').filter(Boolean) };
+}
+function finMerchantKey(desc){
+  const f = finMerchantFull(desc);
+  return (f.pre + f.words.slice(0, 2).join(' ')).trim() || 'Unnamed';
+}
+// The longest run of leading words every descriptor in the group shares —
+// at least the key, at most six words, and never a bare number or a date.
+function finMerchantLabel(fulls, key){
+  if (!fulls || !fulls.length) return key;
+  let common = fulls[0].words.slice(0, 6);
+  fulls.forEach(f => {
+    let i = 0;
+    while (i < common.length && i < f.words.length && common[i] === f.words[i]) i++;
+    common = common.slice(0, i);
+  });
+  while (common.length > 2 && /^[\d/#-]+$/.test(common[common.length - 1])) common.pop();
+  const label = (fulls[0].pre + common.join(' ')).trim();
+  return label.length > key.length ? label : key;
 }
 function finUnfiledByMerchant(){
   const groups = {};
@@ -38718,8 +38741,11 @@ function finUnfiledByMerchant(){
     if (finTxnCat(t)) return;                       // already filed, or inferable
     const k = finMerchantKey(t.desc);
     const g = groups[k] = groups[k] || { merchant: k, rows: 0, out: 0, in: 0,
-                                         from: '', to: '', ids: [], sample: t.desc || '' };
+                                         from: '', to: '', ids: [], sample: t.desc || '', fulls: [] };
     g.rows++;
+    g.fulls.push(finMerchantFull(t.desc));
+    // The sample is the row with the most in it — the one a reader can place.
+    if (String(t.desc || '').length > g.sample.length) g.sample = t.desc || '';
     const a = t.amount || 0;
     if (a < 0) g.out += -a; else g.in += a;
     if (!g.from || (t.date && t.date < g.from)) g.from = t.date || '';
@@ -38727,7 +38753,8 @@ function finUnfiledByMerchant(){
     g.ids.push(t.id);
   });
   return Object.values(groups)
-    .map(g => Object.assign(g, { value: g.out + g.in }))
+    .map(g => Object.assign(g, { value: g.out + g.in, label: finMerchantLabel(g.fulls, g.merchant) }))
+    .map(g => { delete g.fulls; return g; })
     .sort((a, b) => b.value - a.value);
 }
 window.finUnfiledByMerchant = finUnfiledByMerchant;
@@ -38987,8 +39014,11 @@ window.finReviewRender = function(){
     return '<div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;'
       + 'padding:9px 0;border-bottom:1px solid var(--border)">'
       + '<div style="min-width:0">'
-      +   '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'
-      +     slEsc(g.merchant) + '</div>'
+      +   '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="'
+      +     slEsc(g.sample || g.merchant) + '">' + slEsc(g.label || g.merchant) + '</div>'
+      +   (g.sample && String(g.sample).toUpperCase() !== String(g.label || g.merchant).toUpperCase()
+          ? '<div style="font-size:9.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="'
+            + slEsc(g.sample) + '">' + slEsc(String(g.sample).slice(0, 110)) + '</div>' : '')
       +   '<div style="font-size:10px;color:var(--muted);font-family:\'DM Mono\',monospace;margin-top:2px">'
       +     g.rows + ' row' + (g.rows === 1 ? '' : 's') + ' · '
       +     (g.out ? money(g.out) + ' out' : '') + (g.out && g.in ? ' · ' : '')
@@ -41846,6 +41876,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // 3-way merge diffs against to tell additions from deletions.
   function setBase(snap){ try { localStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
   function getBase(){ try { var s = localStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
+  // EVERY PULL COMES THROUGH HERE, and the base it leaves behind is what the
+  // CLOUD held — never our own unpublished edits.
+  //
+  // "I keep setting season tags but they keep getting undone." Build 454
+  // stopped the push advancing the base past what actually landed; the pulls
+  // still did: merge, apply, then setBase(snapshot()). The merge keeps the
+  // local edit — correct — and the base then carries it too. The next push
+  // merges base=SS27, local=SS27, cloud=CORE, reads "only the cloud changed",
+  // takes CORE, publishes it and adopts it on screen. Anything that pulls in
+  // the second and a half between the tap and the push does it: a partner's
+  // realtime write, the four-minute poll, switching tabs and back.
+  //
+  // A three-way merge's base is the last state both sides agreed on. After a
+  // pull that is the cloud as we just saw it. Then a push sees exactly the
+  // edits we have not published, and a deletion we made stays a deletion
+  // instead of coming back as "the cloud added it".
+  function absorbRemote(row, via){
+    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
+    setBase(row.data);
+    window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: via || 'pull' };
+  }
+  window.__syncAbsorb = absorbRemote;
+  window.__syncSnapshot = function(){ return snapshot(); };
+  window.__syncBase = function(snap){ if (arguments.length) setBase(snap); return getBase(); };
 
   // Lossless snapshot: tech-pack fields all hang off the style objects.
   function snapshot(){
@@ -42081,8 +42135,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var el = document.activeElement;
     var editing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
     if (editing){ showReloadPill(row); return; }                       // don't clobber a live edit
-    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));     // 3-way merge, not wholesale replace
-    setBase(snapshot());
+    absorbRemote(row, 'realtime');                                      // 3-way merge, not wholesale replace
     rerender();
     if (typeof showToast === 'function') showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
   }
@@ -42095,7 +42148,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     b.id = id;
     b.textContent = (row.data._who||'Partner') + ' updated — tap to load';
     b.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + var(--sab,0px));z-index:99998;background:#111;color:#fff;border:none;border-radius:0;padding:10px 18px;font-size:12px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.35);cursor:pointer;font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
-    b.onclick = function(){ applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data)); setBase(snapshot()); b.remove(); rerender(); };
+    b.onclick = function(){ absorbRemote(row, 'pill'); b.remove(); rerender(); };
     document.body.appendChild(b);
   }
 
@@ -42135,9 +42188,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.getClientRects().length > 0) return;
     var row = await pullRow();
     if (row && row.data && row.updated_by !== clientId()){
-      applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
-      setBase(snapshot());
-      window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: 'poll' };
+      absorbRemote(row, 'poll');
       rerender();
     }
   }
@@ -42204,19 +42255,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           // Fresh browser holds only seed data → let cloud win wholesale. A
           // returning device has real local work → 3-way merge so unpushed local
           // edits survive alongside the cloud's.
-          if (FRESH_BROWSER) applySnapshot(row.data);
-          else applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
-          setBase(snapshot());
+          if (FRESH_BROWSER) { applySnapshot(row.data); setBase(row.data); }
+          else absorbRemote(row, 'boot');
           rerender();
         } else {
           // Last cloud write was ours — but that is not proof our copy matches
           // it, so merge rather than assume. Cheap, and it closes the loop that
           // left this device permanently short of records.
-          var mine = snapshot(), merged = mergeSnapshots(getBase(), mine, row.data);
+          var mine = ''; try { mine = _mStr(snapshot()); } catch (e) { mine = ''; }
+          absorbRemote(row, 'boot (ours)');
           var differs = false;
-          try { differs = _mStr(merged) !== _mStr(mine); } catch (e) { differs = false; }
-          if (differs) { applySnapshot(merged); rerender(); }
-          setBase(snapshot());
+          try { differs = _mStr(snapshot()) !== mine; } catch (e) { differs = false; }
+          if (differs) rerender();
         }
       } else {
         pushNow();                    // our local is newer → push it (pushNow sets base)
@@ -42259,7 +42309,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!sb()){ if (typeof showToast==='function') showToast('Connect to Supabase first','warning'); return; }
     if (typeof showToast==='function') showToast('Pulling latest from cloud…','info');
     var row = await pullRow();
-    if (row && row.data){ applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data)); setBase(snapshot()); rerender(); showToast('Synced ✓','success'); }
+    if (row && row.data){ absorbRemote(row, 'manual'); rerender(); showToast('Synced ✓','success'); }
     else showToast('Nothing in the cloud yet','info');
   };
 

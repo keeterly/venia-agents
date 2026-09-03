@@ -4095,3 +4095,48 @@ through entity), so the "income tax sitting in opex" item from the queue is
 moot.
 
 `gauntlet/personreceipts.js` — 21 assertions, fails on 455.
+
+## Build 457 — a season set on a style is undone by the next pull
+
+"I keep setting season tags here but they keep getting undone." Same family
+as the ledger reverts of Build 454, a different door.
+
+454 stopped the **push** advancing the merge base past what actually landed.
+Every **pull** path still did `applySnapshot(merge(base, local, cloud));
+setBase(snapshot())`. The merge keeps the local edit — correct — and the base
+then carries it too. The next push merges base=SS27, local=SS27, cloud=CORE,
+reads "only the cloud changed", takes CORE, publishes it and adopts it on
+screen. Anything that pulls in the second and a half between the tap and the
+push does it: a partner's realtime write (the Money tab being used on the
+other phone is enough), the four-minute poll, switching tabs and back.
+
+A three-way merge's base is the last state both sides agreed on. After a pull
+that is the cloud as we just saw it. So: one `absorbRemote(row)` for all six
+pull sites (realtime, the reload pill, the poll, both boot branches, manual
+pull), and it sets the base to `row.data`. A push then sees exactly the edits
+it has not published, and a deletion made locally stays a deletion instead of
+coming back as "the cloud added it". The push path's own base advance is
+unchanged — after a successful push the cloud *is* what was pushed.
+
+The seams (`__syncAbsorb`, `__syncSnapshot`, `__syncBase`) exist so the
+sequence can be replayed against the real functions instead of a re-typed
+copy of them.
+
+`gauntlet/seasonrevert.js` — 11 assertions: the arithmetic straight out of
+the file, then the tap → pull → push sequence end to end, for a style season,
+a style deletion and a ledger filing. Fails on 456.
+
+### Build 457, continued — "some info here is getting cut off"
+
+The review screen named vendors by their merchant **key** — the first two
+words of the cleaned descriptor. Right thing to group on (a third word is a
+store number as often as a name), wrong thing to show: "CA DEPT" for CA DEPT
+TAX FEE, "NON CHASE" for NON-CHASE ATM WITHDRAW FEE, "I AM", "APPLICATION
+USER". The founder cannot file what they cannot read.
+
+The key is unchanged, so grouping and File are unchanged. Each group now also
+carries the longest name every one of its rows agrees on (at least the key,
+at most six words, never ending in a bare number), and the longest raw
+descriptor in the group sits under it, in full on hover.
+
+`gauntlet/merchantlabel.js` — 9 assertions, 6 failing before.
