@@ -3944,3 +3944,91 @@ Gusto is already a payroll rule, and the neutral name picked to replace it turne
 out to be a transfer rule. It now asserts the key function directly.
 
 `gauntlet/tagreview.js` — 17 assertions, all failing against Build 452.
+
+---
+
+## Build 454 — a filing is never undone by a sync
+
+Reported four times, each time as *"I set a tag and another expense lost its
+tag."* Every previous attempt looked in the wrong place. **The categorisation
+logic was never the problem** — `bankSetCategory` only touches its target, the
+live ledger has no duplicate ids, and the bulk path was proven correct. The loss
+happens in the SYNC, and it is reproducible in nine lines.
+
+### Two faults, either of which reverts a filing on its own
+
+**1. The push read the wrong result.**
+
+```js
+var res = !writesBlob ? … : await c.from('venia_workspace').upsert(…);
+if (!res || !res.error) { … setBase(localSnap); }
+```
+
+`res` is the BLOB's result. For a founder the blob almost always writes, so a
+module row that did **not** land — RLS, a dropped connection, a payload the
+server refused — was recorded in `__syncStat` and then **ignored**, and the merge
+base advanced as though everything had been published.
+
+**2. The three-way merge then reverts.** With the base level with local and the
+cloud holding older values, `_mArray` reads every unpublished edit as "only the
+cloud changed" and takes the cloud copy — blanking categories one row at a time,
+silently. Which is exactly what the founder saw.
+
+Measured against the pre-fix code: base level with local, stale cloud,
+**0 of 3 filings survived**.
+
+### The fix, in two parts
+
+**The base only advances when what was pushed landed.** A failed module write now
+fails the whole push, says so, and retries in twenty seconds — an unpushed change
+that nothing retries is a change that gets reverted later.
+
+**And the merge is allowed to change a category, never to blank one.** Emptying a
+category is a rare deliberate act; losing one to a race is a bug. If this device
+holds a category and the merge came back without it, it is put back. A partner
+recategorising still wins, a deliberate clear still clears (that device is the
+one holding the empty value), and nothing changes about which records exist.
+
+`gauntlet/tagsync.js` — 9 assertions, 5 failing against Build 453. Runs the merge
+machinery directly out of the file: this is arithmetic, not a screen.
+
+### Build 454, continued — the dropdown lost tags and the bulk button did not
+
+*"Changing the tag here doesn't set the tag sometimes. Changing a tag may remove
+a tag of another still. Setting the category through the bulk action works
+though."* That last sentence is the whole diagnosis.
+
+They share every line of the write. The dropdown's handler ran INSIDE the
+select's change event and **synchronously rebuilt the list, destroying the
+element still delivering the event**. On iOS the picker stays bound to its
+element until it closes; a picker whose element was torn out can deliver a
+second change — to the detached element, whose value reads `""`, or to the new
+element rendered into the same spot, which is a **different row**. The first is
+"the tag did not stick"; the second is "changing this one cleared that one". A
+button click has no picker and no second event, so bulk was fine.
+
+Replayed deterministically against 453: **both symptoms reproduce.**
+
+Three defences: an unrecognised value is rejected, not turned into a clear
+(the old line made anything the list did not know into `""`); the element is
+blurred and the re-render deferred past the end of the event; and an empty
+value within 600ms of a real change is the echo, not a decision.
+
+**The period pills scope the whole screen now.** They scoped the spend chart
+and left the list on all-time, so "Uncategorized" showed two years of rows under
+a pill that said 90d. One `finPeriodSince()` for both; the count says which it
+is; select-all-matching inherits it, so "file all" never sweeps rows in another
+year.
+
+`gauntlet/tagdropdown.js` — 8 assertions, 7 failing against Build 453.
+
+### Build 454, continued — two right asks that collided
+
+The period pill now scopes the list (asked for), and "Select all matching"
+exists to file a vendor across its whole history (built the build before). Under
+the default 90-day pill the second silently became "file the last 90 days of
+it" — `bulkfile.js` caught it in the sweep: 2 rows selected where 15 were meant.
+
+Neither ask is wrong, so the control offers both and the founder chooses:
+**"Select all 2 matching 'INXPRESS' in this period · or all 15 across all
+time."** The list honours the pill; nothing about a vendor's history is hidden.
