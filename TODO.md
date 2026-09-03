@@ -4533,3 +4533,46 @@ not fixing it.
 The assertion added is the invariant, not the symptom: **every listed line in a
 revenue section sums to the total printed beneath it**, in both documents. "Is
 other income on the page" would have passed the next time a line went missing.
+
+## Build 468 — the print header leak, and gross margin belongs to the product
+
+### The internal URL on every page of a lender document
+
+A P&L saved to PDF and shown to an SBA underwriter came back with the app's
+address and "9/3/26, 2:51 PM · Page 1 of 4" across all four pages. That is the
+browser's own print header and footer — Chrome and Safari add them unless the
+person saving unticks "Headers and footers", and **no CSS can switch them off**.
+
+It matters more here than it usually would: the creator host is an internal
+tool and is not named outside the company. A statement handed to a lender with
+the admin URL stamped on every page is a disclosure nobody chose to make, and
+by the time it is a PDF it has already been sent.
+
+So every statement window says so, in the action bar beside the button that
+opens the print dialog, where the choice is actually made. It is hidden on
+paper by the same rule that hides the buttons, and it does **not** name the URL
+— printing it in the document would be the leak.
+
+`gauntlet/printleak.js` — 7 assertions across all six statements.
+
+### Gross margin belongs to the product
+
+With service income folded into revenue, gross profit was total revenue less
+cost of goods sold — and a service invoice carries no cost of goods, so the
+margin read **91.5%**. True arithmetic, wrong number: an apparel lender
+comparing VENIA against other apparel businesses reads that and either
+disbelieves it or misjudges the line. The garments' own margin is **85.8%**.
+
+- Revenue block is product only (DTC + wholesale) and foots to **Total product
+  revenue**; the cost of goods and the margin belong to it.
+- **Service and other income** sits after gross profit and before expenses —
+  still inside operating income, because it was earned running the business,
+  but out of a margin it did not earn. **Total revenue** foots there.
+- Net income does not move. This changes where the number is shown, not what
+  it is, and the gauntlet asserts exactly that.
+
+The footing invariant from Build 467 was widened rather than relaxed: a page
+can add up in one place and not the other, so both totals are now checked, in
+both documents.
+
+`gauntlet/productmargin.js` — 15 assertions.
