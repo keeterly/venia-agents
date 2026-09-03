@@ -4140,3 +4140,35 @@ at most six words, never ending in a bare number), and the longest raw
 descriptor in the group sits under it, in full on hover.
 
 `gauntlet/merchantlabel.js` — 9 assertions, 6 failing before.
+
+## Build 458 — the way back from a hidden sidebar was painted, buried and unclickable
+
+"I also hid the sidebar, but don't know how to bring it back."
+
+There WAS a way back: a 20px unlabelled "›" sliver on the left edge, plus ⌘\.
+Both failed, for different reasons.
+
+**The sliver was unclickable on half the app.** Today, Money and Brainstorm
+are `.cp-screen` panels — `position:fixed`, `z-index:400`, covering everything
+below the global bar. `#rail-open` sat at `z-index:320`. It was PAINTED on
+those spaces and buried: the founder could see a hairline, tap it, and have
+nothing happen. Measured: `elementFromPoint` at its centre returned
+`cpl-hero` on Today, `page-band` on Money, and only on Product — a legacy
+`.main` layout, no fixed panel — did it return the button itself. So on the
+space they were actually in, the control did nothing at all.
+
+**And ⌘\ is unknowable.** The one action whose undo you cannot see afterwards
+is hiding your own navigation, because the thing that would tell you how is
+the thing you just hid.
+
+- `z-index:450` — clears the screens (400), stays under the global bar (500)
+  and the phone drawer (585).
+- A labelled control, not a hairline: 38×96 with a vertical "MENU", a shadow,
+  and a tooltip naming both shortcuts.
+- Hiding it now says, on screen for five seconds, exactly how to undo it.
+
+Phones are unaffected — the drawer is the navigation there and the tab stays
+hidden, which the gauntlet holds.
+
+`gauntlet/railback.js` — 17 assertions driven on the Money space, where it was
+buried. 6 fail on 457.
