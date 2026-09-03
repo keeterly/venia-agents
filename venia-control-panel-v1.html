@@ -67,7 +67,20 @@
   outline: none; transition: border .2s;
   font-family: inherit;
 }
+/* Room for both controls: the eye, then the arrow. */
+.vag-input { padding-right: 84px; }
 .vag-input::placeholder { color: rgba(255,255,255,.25); letter-spacing: 1px; }
+/* THE ACCESS CODE IS 320px OF DOTS ON A BLACK SCREEN.
+   Typed on a phone with no way to check it, and the only feedback for one
+   wrong character is a cleared field. 40px so a thumb can find it. */
+.vag-eye {
+  position: absolute; right: 44px; top: 50%; transform: translateY(-50%);
+  width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;
+  background: none; border: none; cursor: pointer; padding: 0;
+  color: rgba(255,255,255,.4); transition: color .2s;
+}
+.vag-eye:hover { color: #fff; }
+.vag-eye svg { width: 19px; height: 19px; display: block; }
 .vag-input:focus { border-color: rgba(255,255,255,.4); }
 .vag-btn {
   position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
@@ -2717,6 +2730,15 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     <input class="vag-input" id="vag-pw-input" type="password"
       placeholder="Enter access code"
       onkeydown="if(event.key==='Enter')vagSubmit()">
+    <!-- type="button": a button inside a field is a submit button unless it is
+         told otherwise, and revealing the code is not entering it. -->
+    <button class="vag-eye" id="vag-eye" type="button" aria-label="Show access code"
+      aria-pressed="false" onclick="vagReveal()">
+      <svg id="vag-eye-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/></svg>
+      <svg id="vag-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+        stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3.2"/><path d="M4.5 19.5 19.5 4.5"/></svg>
+    </button>
     <button class="vag-btn" onclick="vagSubmit()">→</button>
   </div>
   <div class="vag-error" id="vag-error">Incorrect access code</div>
@@ -2742,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '462';
+  const BUILD = '463';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2876,6 +2898,27 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   };
 
   // ── Passcode submit ──
+  // Reveal, and put the caret back where it was. Changing `type` re-creates the
+  // text node, so the browser drops the selection to the end (or the start, on
+  // some engines) — and a cursor that moves without being asked is worse than
+  // no reveal at all, because the next character lands somewhere you cannot
+  // see and you have no reason to look.
+  window.vagReveal = function(show) {
+    const i = $('vag-pw-input'), e = $('vag-eye');
+    if (!i || !e) return;
+    const on = (show === undefined) ? (i.type === 'password') : !!show;
+    const start = i.selectionStart, end = i.selectionEnd;
+    const had = document.activeElement === i;
+    i.type = on ? 'text' : 'password';
+    e.setAttribute('aria-pressed', on ? 'true' : 'false');
+    e.setAttribute('aria-label', on ? 'Hide access code' : 'Show access code');
+    const onIcon = $('vag-eye-on'), offIcon = $('vag-eye-off');
+    if (onIcon && offIcon) { onIcon.style.display = on ? 'none' : 'block';
+                             offIcon.style.display = on ? 'block' : 'none'; }
+    if (had || show === undefined) {
+      try { i.focus(); if (start != null) i.setSelectionRange(start, end); } catch (err) {}
+    }
+  };
   window.vagSubmit = async function() {
     const val = $('vag-pw-input').value;
     if ((await sha256(val)) === HASH) {
@@ -2885,6 +2928,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
       // re-prompting. Founder devices only; the code was already typed here.
       window.__ac = val;
       try { localStorage.setItem('venia_ac', val); } catch (e) {}
+      vagReveal(false);
       const canFace = await platformAuth();
       if (canFace && !localStorage.getItem(CRED) && !localStorage.getItem(SKIP)) {
         // Offer Face ID enrollment before entering
@@ -2898,6 +2942,10 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     } else {
       toast('Incorrect access code');
       $('vag-pw-input').value = '';
+      // Back to dots. A revealed code left on the gate — through the Face-ID
+      // step, or the next time the gate is shown — is a shoulder-surf nobody
+      // asked for, and every attempt should start from the same place.
+      vagReveal(false);
     }
   };
 

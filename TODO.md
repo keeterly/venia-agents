@@ -4371,3 +4371,30 @@ its frame.
 `gauntlet/linesheetframe.js` — 21 assertions. `slVlsPrint` split into
 `slVlsDoc()` (builds) and `slVlsPrint()` (opens), so the document can be
 asserted rather than the dialog that produces it.
+
+## Build 463 — see what you typed
+
+The access code is 320px of dots on a black screen, entered on a phone with no
+way to check it. One wrong character and the only feedback is "Incorrect access
+code" and a cleared field, so you type the whole thing again, blind. Every
+login on the internet has an eye for this reason.
+
+An eye button inside the field, left of the arrow, 40px so a thumb can find it.
+Three things beyond "it toggles":
+
+- **The caret stays put.** Changing `type` re-creates the text node and the
+  browser drops the selection, so it is saved and restored. A cursor that moves
+  without being asked is worse than no reveal at all: the next character lands
+  somewhere you cannot see and you have no reason to look.
+- **It resets to dots** on a wrong code and on a successful unlock. A revealed
+  code left on the gate — through the Face-ID enrollment step, or the next time
+  the gate is shown — is a shoulder-surf nobody asked for.
+- **`type="button"`.** A button inside a field is a submit button unless told
+  otherwise, and revealing the code is not entering it.
+
+Drawn, not a character that depends on a font. The crossed-out state was
+redrawn after looking at it: partial arcs plus a slash read as a squiggle at
+19px, so it is now the full eye with a clean line through it.
+
+`gauntlet/pwreveal.js` — 17 assertions, driven at 393×852 with no auth stub,
+because the gate is the thing under test.
