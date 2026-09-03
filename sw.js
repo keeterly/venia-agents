@@ -1,7 +1,7 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v454';
+const CACHE = 'venia-shell-v455';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {

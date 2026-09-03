@@ -2726,8 +2726,8 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '454';
-  const BUILD_DATE = '2026.08.30';
+  const BUILD = '455';
+  const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -37859,7 +37859,10 @@ window.finBriefMarkSeen = function(){
 const FIN_CATEGORIES = ['income','fabric','production','contractors','rent','payroll','software','shipping','marketing','rnd','fees','taxes','transfer','other','owner_draw','owner_invest','loan','interest'];
 // Display labels where the stored token isn't self-explanatory.
 const FIN_CAT_LABEL = { rnd: 'R&D', owner_draw: 'owner draw', owner_invest: 'owner investment',
-                        loan: 'loan principal', interest: 'interest' };
+                        loan: 'loan principal', interest: 'interest',
+                        // "transfer" read as "from my account" to the person filing it and as
+                        // "between VENIA's accounts" to the statements; the label says which.
+                        transfer: 'transfer (own accounts)' };
 // The built-in list is a starting point, not the whole vocabulary — every
 // business spends on something the list did not anticipate. Custom categories
 // live in STATE (so they sync across devices) and are valid everywhere a
@@ -38746,6 +38749,33 @@ window.finFileMerchant = function(key, cat){
   try { logActivity('Filed ' + n + ' ' + key + ' transactions as ' + cat); } catch(e){}
   return n;
 };
+// Every Zelle RECEIPT from a person that is filed as transfer, refiled as the
+// equity or loan it is. Receipts only: a Zelle OUT to the founder is a draw or
+// a reimbursement, and that is a question, not a rule. Only the two honest
+// answers are accepted, and it is undoable like every other filing.
+window.finRefilePersonTransfers = function(cat){
+  if (['owner_invest', 'loan'].indexOf(cat) < 0) {
+    showToast('Money from a person is owner investment or a loan — not ' + cat, 'warning'); return 0;
+  }
+  const prev = {}; let n = 0, total = 0;
+  (STATE.finTxns || []).forEach(t => {
+    if (!t || t.status === 'void') return;
+    if (finTxnCat(t) !== 'transfer' || (t.amount||0) <= 0) return;
+    if (!/ZELLE PAYMENT FROM/i.test(t.desc || '')) return;
+    prev[t.id] = t.category || '';
+    t.category = cat; n++; total += t.amount || 0;
+  });
+  if (!n) { showToast('No Zelle receipts are filed as transfer', 'info'); return 0; }
+  window.__agPrevTxnCats = prev;
+  window.__lastCatSet = Date.now();
+  save();
+  try { cmdRenderBank(); } catch(e){}
+  try { if (document.getElementById('fin-review-body')) finReviewRender(); } catch(e){}
+  showToast(n + ' Zelle receipt' + (n === 1 ? '' : 's') + ' ($' + Math.round(total).toLocaleString()
+    + ') refiled as ' + finCatLabel(cat) + ' — Undo above the list', 'success');
+  try { logActivity('Refiled ' + n + ' Zelle receipts from transfer to ' + cat); } catch(e){}
+  return n;
+};
 
 // WHAT STILL STANDS BETWEEN THIS LEDGER AND A SUBMITTABLE STATEMENT.
 //
@@ -38768,11 +38798,40 @@ function finTagAudit(){
   // be present and cancel. A large net means one side is missing or something
   // that is not a transfer is filed as one.
   const tNet = sum(live.filter(t => finTxnCat(t) === 'transfer'), t => (t.amount||0));
+  // THE MISTAKE THAT ACTUALLY HAPPENED. Measured after the founder's own filing
+  // pass: 68 Zelle receipts from the founder, $75,857, every one filed as
+  // "transfer" — and transfers netted to +$75,818. Same number. "Transfer"
+  // meant "from my account" to the person filing and "between VENIA's own
+  // accounts" to the statements, so $75k of equity appeared nowhere and the
+  // cash flow statement was wrong by exactly that. Named here, fixed in one
+  // click below, never silently: whether it is investment or a loan is theirs.
+  const personIn = live.filter(t => finTxnCat(t) === 'transfer' && (t.amount||0) > 0
+    && /ZELLE PAYMENT FROM/i.test(t.desc || ''));
+  const personInTotal = sum(personIn, t => t.amount||0);
   if (Math.abs(tNet) > 500) issues.push({ key: 'transfer', level: 'check',
     label: 'Transfers do not cancel — $' + Math.round(Math.abs(tNet)).toLocaleString() + ' net',
     detail: 'Money moved between your own accounts should net to zero. A net this size means one '
       + 'leg is missing (the other account is not connected) or something that is not a transfer '
-      + 'is filed as one. Either way the cash flow statement is wrong by this much.' });
+      + 'is filed as one. Either way the cash flow statement is wrong by this much.'
+      + (personInTotal > 500 ? ' $' + Math.round(personInTotal).toLocaleString()
+          + ' of it is Zelle receipts from a person filed as transfer — see the next line.' : '') });
+  if (personIn.length && personInTotal > 500) {
+    const byWho = {};
+    personIn.forEach(t => { const k = finMerchantKey(t.desc); byWho[k] = (byWho[k] || 0) + (t.amount||0); });
+    const who = Object.keys(byWho).sort((a, b) => byWho[b] - byWho[a])
+      .map(k => k.replace(/^Zelle from /, ''));
+    issues.push({ key: 'person_transfer', level: 'check',
+      label: personIn.length + ' Zelle receipt' + (personIn.length === 1 ? '' : 's') + ' from '
+        + who.slice(0, 2).join(' and ') + (who.length > 2 ? ' and others' : '')
+        + ' filed as transfer — $' + Math.round(personInTotal).toLocaleString(),
+      detail: '"Transfer" means money moved between VENIA\'s own accounts, and the statements '
+        + 'ignore it. Money arriving from a person is owner investment (equity) or a loan (a '
+        + 'liability VENIA repays). Filed as transfer it sits on neither the balance sheet nor '
+        + 'the cash flow statement, so equity is understated by this much. Pick investment unless '
+        + 'VENIA is expected to pay it back. Undoable from Money → Cash.',
+      actions: [{ label: 'Refile as owner investment', fn: "finRefilePersonTransfers('owner_invest')", primary: true },
+                { label: 'Refile as loan', fn: "finRefilePersonTransfers('loan')" }] });
+  }
   // A category with a sign it should never have.
   const wrongSign = [];
   live.forEach(t => {
@@ -38846,6 +38905,10 @@ window.finReviewRender = function(){
     + ';padding:6px 0 6px 10px;margin-bottom:10px">'
     + '<div style="font-size:11.5px;font-weight:600">' + slEsc(i.label) + '</div>'
     + '<div style="font-size:10px;color:var(--muted);line-height:1.65;margin-top:2px">' + slEsc(i.detail) + '</div>'
+    + ((i.actions && i.actions.length) ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:7px">'
+        + i.actions.map(x => '<button class="ag-btn ag-btn-sm' + (x.primary ? ' ag-btn-primary' : '')
+            + '" onclick="' + slEsc(x.fn) + '">' + slEsc(x.label) + '</button>').join('')
+        + '</div>' : '')
     + '</div>').join('') || '<div style="font-size:11px;color:var(--green)">Nothing is standing in the way — '
       + 'every transaction is categorised and no figure contradicts itself.</div>';
 
