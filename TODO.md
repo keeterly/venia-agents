@@ -4576,3 +4576,41 @@ can add up in one place and not the other, so both totals are now checked, in
 both documents.
 
 `gauntlet/productmargin.js` — 15 assertions.
+
+## Build 469 — a document that is tallied has to survive being tallied
+
+Both faults found by adding up a real submitted PDF.
+
+### The statement was a dollar out
+
+Printed: gross profit 27,122, other income 21,196, operating expenses 58,064,
+operating income **(9,747)**. Those three numbers make **(9,746)**. Every line
+was rounded for display and every total was computed from the unrounded
+figures beneath it, so the page added up to something the page did not say.
+
+A dollar changes no lending decision. A statement that does not foot changes
+what an underwriter thinks of every other number on it.
+
+Rounding now happens **once**, in `finPLStatement`, and every total is the sum
+of the rounded figures the reader can see — revenue lines, cost lines, the
+seventeen expense lines, gross profit, operating income, net income. The
+statement is internally exact rather than exact against a ledger the reader
+does not have.
+
+### The Print button now carries the warning
+
+Build 468 put a line of text in the action bar: turn off "Headers and footers"
+or the browser stamps this tool's address on every page. **A second PDF came
+back with the address on all three pages.** Advice beside a button is read
+after the button is pressed, and by then the person is in the print dialog
+looking at something else.
+
+So the button opens the reminder and the reminder opens the dialog — one extra
+press, on the only path to paper, in the window that produces the document. It
+names the setting and not the address it is protecting, because printing that
+here would be the leak it exists to prevent.
+
+`gauntlet/stmtfoot.js` — 18 assertions. The footing ones read the printed rows
+the way a person with a calculator would, and the test data lands every line
+on a half dollar so the drift is unmistakable; the live ledger was out by one
+dollar, and one dollar is easy to pass by accident.
