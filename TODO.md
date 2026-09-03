@@ -4308,3 +4308,66 @@ the same date.
 `gauntlet/lenderbscf.js` — 32 assertions, including that the statement adds up
 (opening + operating + financing + transfers = closing) and that the
 reconciliation items reach the founders and not the pack.
+
+## Build 462 — the garment is the point of the page
+
+From a printed SS27 sheet: "a bit truncated and cropped… ensure the images are
+portrait framing and do not crop the actual clothes", then "I'd rather have the
+product info sit closer to the bottom and the image take up more of the
+vertical space."
+
+Three complaints, one cause. The photo band was a **fixed height per column
+count** — 64mm at 3-up inside a 196mm page — so a landscape-ish frame sat in
+the middle of the sheet with the spec under it and the rest of the page empty.
+And because a wide frame leaves white margin around a tall garment, the image
+was scaled 1.16 with the overflow clipped: a 7% crop into every edge. On a
+packshot with a tight bounding box that lands on the garment. The ISOLDE TOP
+lost its hem.
+
+- The band **takes the slack** (`flex:1`), the grid row fills the page
+  (`1fr`, not an auto track centred in leftover space), and the card hugs the
+  bottom. At 3-up the frame is now 121mm tall in a 90mm column — portrait,
+  and capped at 1.34× the column width so a narrow column does not get a band
+  three times its own width with a stamp floating in it.
+- **Nothing is scaled.** Contained on white, whole garment, always.
+- The alignment the fixed height was protecting is kept a better way: every
+  card gets the same spec band (`min-height` per density), so every photo gets
+  the same remainder and the names still sit on one line across the sheet. A
+  card whose spec overruns borrows from its own photo and nobody else's.
+
+Text size is unchanged — asked for, then withdrawn in favour of the above.
+
+**Two filters and a switch**, because a line sheet is not one document:
+
+- **Made in** and **Factory**, from the values actually present in the line
+  with counts, blanks excluded. Every filter narrows: Japan + Kaneta is what
+  Kaneta makes in Japan, never the union. A filtered sheet says so in the
+  header on every page — a buyer holding "the SS27 sheet" that is really the
+  Japan-made half of it is how a style gets ordered that was never offered.
+- **Show retail price**, on by default. Off leaves the figure off the page
+  entirely rather than merely unlabelled, because a PDF is searched as often
+  as it is read.
+- A facet with one value offers no control at all.
+
+**The existing `vls.js` caught a real regression before this shipped** — cards
+286.8mm tall on a 182mm page at 2-up. Two causes, both from making the frame
+flexible:
+
+- `max-height:1.34 × column` is 185mm when the column is 138mm wide (2-up).
+  Capped at 112mm as well, so the spec band and footer keep their room.
+- A percentage `max-height` on the image had no definite parent to resolve
+  against once `.ph` stopped having a fixed height, so a tall shot grew the
+  band instead of fitting in it. The page is now a definite `height:196mm`
+  (growth comes out of the photo, which is the flexible part) and the image is
+  absolutely positioned and centred by auto margins.
+
+Two of that gauntlet's assertions were deliberately superseded and rewritten
+rather than deleted: the card's children are now `ph → info` (same reading
+order, one level deeper), and there is no leftover page to split above and
+below the block because the block fills it. In their place: the frame is
+portrait, the photo outweighs its own spec, and the image is never larger than
+its frame.
+
+`gauntlet/linesheetframe.js` — 21 assertions. `slVlsPrint` split into
+`slVlsDoc()` (builds) and `slVlsPrint()` (opens), so the document can be
+asserted rather than the dialog that produces it.
