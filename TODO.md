@@ -4457,3 +4457,52 @@ removed too.
 Asserted in `gauntlet/stmtprint.js`: neither P&L carries a signature block or a
 "Prepared by" rule, both still carry the entity line, and all four other
 statements still have theirs.
+
+## Build 466 — earned money that never reached the P&L
+
+"Does the P&L account for income that is not DTC? For instance this contract
+work we did here." **It did not.**
+
+Revenue was Shopify DTC plus wholesale orders booked in the app, and the
+transaction loop threw away every inflow except owner investment and a loan:
+
+```js
+if (amt >= 0) { ...owner_invest / loan...; return; }
+```
+
+So an $8,712 service invoice paid by ACH, filed as `income`, sat on the bank
+screen and appeared nowhere on the statement. Measured on the live ledger,
+Jan–Aug 2026: **$49,621 of banked income, of which $28,425 are Shopify payouts
+and $21,196 is not.** Against $31,620 of reported revenue. A statement handed
+to an underwriter that understates revenue by two thirds is not conservative,
+it is wrong — and it is the answer to the receipts-versus-revenue gap flagged
+in Build 461, which I had put down to timing.
+
+**The reason it was excluded is real and is kept.** A Shopify or Stripe payout
+lands in the bank too, and counting it would double the DTC revenue already
+recognised from the orders. So the rule is not "count every inflow" but "count
+every inflow except the settlement of a channel already counted":
+`finIsSettlement()` — one regex, one place, because it is the rule that decides
+double counting.
+
+- New revenue line, **Other income received**, noted as "banked receipts
+  outside the sales channels". Absent when zero.
+- Both statements carry the basis in a sentence, naming the excluded
+  settlement total, so the exclusion is stated rather than silent.
+
+**Three questions raised, not answered:**
+
+1. `cash_deposits` — $5,434 of ATM cash deposits are filed as income and now
+   count as revenue. If any of it was the founder banking their own cash it is
+   owner investment, and leaving it here overstates revenue and understates
+   equity by the same amount.
+2. `wholesale_collections` — wholesale is recognised when the order is booked,
+   so a customer's later payment must not be counted again. Processor
+   settlements are excluded automatically; an ACH or Zelle payment against an
+   invoice is not, because nothing in the descriptor says which invoice it is.
+   ($0 today — no wholesale collections on the ledger.)
+3. `receipts_vs_revenue` — reframed: what is left of that gap is timing, not
+   missing revenue.
+
+`gauntlet/otherincome.js` — 16 assertions, built from the real descriptor
+shapes on the ledger.
