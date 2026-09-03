@@ -4398,3 +4398,42 @@ redrawn after looking at it: partial arcs plus a slash read as a squiggle at
 
 `gauntlet/pwreveal.js` — 17 assertions, driven at 393×852 with no auth stub,
 because the gate is the thing under test.
+
+## Build 464 — the page a lender actually holds
+
+From a printed P&L: the totals row split across a page break, the type ran to
+the edge of the sheet, and the signature block was cut off at the bottom. A
+statement with the signature line sliced in half is not a document anyone will
+accept.
+
+Three faults, and **all five statement stylesheets had them**, because each
+carried its own copy of the print CSS:
+
+- **No `@page` rule**, so the paper margin was whatever the browser chose, and
+  `@media print{body{padding:24px 0}}` set the SIDE padding to zero — which is
+  why the type ran into the edge.
+- **Nothing kept a table row together**, so a two-line total could be cut
+  through the middle.
+- **Nothing protected the signature block**, which is the last thing on the
+  page and therefore the first thing to be orphaned.
+
+One `STMT_PRINT_CSS` now, spliced into every statement: `@page` at 16mm × 15mm,
+`break-inside:avoid` on rows, notes and the signature, `break-after:avoid` on
+section headings and titles so a heading is never left alone at the foot of a
+page, and `thead` repeating on any table that does break. Five copies of a
+print rule is five chances for one to be forgotten, which is how a document
+ends up cut off in the first place.
+
+The body keeps a **6mm × 5mm floor** in print rather than dropping to zero.
+`@page` supplies the paper margin, but the browser's print dialog lets a reader
+choose "Margins: None" — and type against the edge of the sheet is the same
+fault arrived at a different way.
+
+More room throughout: row padding 6–7px → 8–8.5px, screen margins 52/56px →
+56/60px with 66px sides, note leading and spacing up, and the signature block
+given 34mm of air above it.
+
+`gauntlet/stmtprint.js` — 11 assertions across all six statement documents
+(working and lender P&L, balance sheet, cash flow), each checked for the same
+print contract and then actually rendered to a PDF to confirm it still
+paginates. Fails 8 on 463.
