@@ -4506,3 +4506,30 @@ double counting.
 
 `gauntlet/otherincome.js` — 16 assertions, built from the real descriptor
 shapes on the ledger.
+
+## Build 467 — the lender statement did not foot
+
+"So the P&L doesn't have the other income listed. Is that correct?" No — and
+the missing line was the smaller half of it. The page showed **$31,620 of
+listed revenue over a $52,816 total**. A statement that does not add up is
+worse than one that is merely incomplete: it tells an underwriter the numbers
+cannot be trusted, and adding the column is the first thing they do.
+
+**Cause: a section that NAMES its rows instead of rendering them.** The lender
+document hard-coded two revenue lines and two cost-of-goods lines and printed
+`st.revenueTotal` beneath them. The working statement maps over `st.revenue`,
+so it was correct all along — the fault was in the lender layout only, and it
+appeared the moment Build 466 added a third revenue line.
+
+Both sections now render from the statement, in the lender's order, with
+anything the order does not anticipate kept rather than dropped — the same
+rule already used for operating expenses.
+
+**Also fixed: gross margin printed as a bare number in a column of dollars**,
+reading as $92 of margin on $52,816 of revenue. The hazard was written down in
+a comment in Build 460 and the number was left as it was. Noticing a fault is
+not fixing it.
+
+The assertion added is the invariant, not the symptom: **every listed line in a
+revenue section sums to the total printed beneath it**, in both documents. "Is
+other income on the page" would have passed the next time a line went missing.

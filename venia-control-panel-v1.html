@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '466';
+  const BUILD = '467';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36849,10 +36849,38 @@ function finPrintPLLender(st){
       + '<td class="n">' + m(amount) + '</td></tr>';
   };
   const sec = function(t){ return '<tr class="sec"><td colspan="2">' + esc(t) + '</td></tr>'; };
-  const dtc = (st.revenue || []).find(function(r){ return /consumer/i.test(r.label); }) || { amount: 0 };
-  const ws  = (st.revenue || []).find(function(r){ return /wholesale/i.test(r.label); }) || { amount: 0 };
-  const dtcC = (st.cogs || []).find(function(r){ return /consumer/i.test(r.label); }) || { amount: 0 };
-  const wsC  = (st.cogs || []).find(function(r){ return /wholesale/i.test(r.label); }) || { amount: 0 };
+  // THE DOCUMENT HAS TO ADD UP, and a section that NAMES its rows cannot.
+  //
+  // Revenue and cost of goods were rendered as two hard-coded lines each,
+  // direct-to-consumer and wholesale, with st.revenueTotal printed beneath
+  // them. The moment a third revenue line existed — other income received,
+  // Build 466 — the page showed $31,620 of listed revenue over a $52,816
+  // total. The first thing an underwriter does is add the column, and a
+  // statement that does not foot is worse than one that is merely incomplete:
+  // it says the numbers cannot be trusted.
+  //
+  // So the sections are RENDERED from the statement, in the lender's order,
+  // with anything the order does not anticipate kept rather than dropped.
+  const inOrder = function(list, order){
+    const rest = (list || []).slice(), out = [];
+    order.forEach(function(re){
+      const i = rest.findIndex(function(r){ return re.test(r.label); });
+      if (i >= 0) out.push(rest.splice(i, 1)[0]);
+    });
+    return out.concat(rest);
+  };
+  const LENDER_REV_LABEL = [[/consumer/i, 'Direct-to-consumer sales'],
+                            [/wholesale/i, 'Wholesale sales']];
+  const LENDER_COGS_LABEL = [[/consumer/i, 'Direct-to-consumer landed cost of goods sold'],
+                             [/wholesale/i, 'Wholesale landed cost of goods sold']];
+  const relabel = function(r, map){
+    const hit = map.find(function(x){ return x[0].test(r.label); });
+    return { label: hit ? hit[1] : r.label, amount: r.amount };
+  };
+  const revLines  = inOrder(st.revenue, [/consumer/i, /wholesale/i])
+    .map(function(r){ return relabel(r, LENDER_REV_LABEL); });
+  const cogsLines = inOrder(st.cogs, [/consumer/i, /wholesale/i])
+    .map(function(r){ return relabel(r, LENDER_COGS_LABEL); });
   const opex = finLenderOpex(st);
   const fin = st.financing || [];
   const inv = st.inventory || {};
@@ -36860,16 +36888,19 @@ function finPrintPLLender(st){
 
   const body =
       sec('Revenue')
-    + row('Direct-to-consumer sales', dtc.amount)
-    + row('Wholesale sales', ws.amount)
+    + revLines.map(function(r){ return row(r.label, r.amount); }).join('')
     + row('Total revenue', st.revenueTotal, 'tot')
     + sec('Cost of goods sold')
-    + row('Direct-to-consumer landed cost of goods sold', dtcC.amount)
-    + row('Wholesale landed cost of goods sold', wsC.amount)
+    + cogsLines.map(function(r){ return row(r.label, r.amount); }).join('')
     + row('Total cost of goods sold', st.cogsTotal, 'tot')
     + sec('Gross profit')
     + row('Gross profit', st.gross, 'big')
-    + row('Gross margin', st.grossPct != null ? st.grossPct : 0)
+    // A PERCENTAGE IN A COLUMN OF DOLLARS. Printed as a bare number it read as
+    // $92 of margin on $52,816 of revenue — the exact misreading this document
+    // exists to prevent. (The hazard was written down here a build ago and the
+    // number was left as it was; noticing a fault is not fixing it.)
+    + '<tr><td>Gross margin</td><td class="n">'
+      + esc(st.grossPct != null ? st.grossPct + '%' : '—') + '</td></tr>'
     + sec('Operating expenses')
     + opex.map(function(r){ return row(r.label, r.amount); }).join('')
     + (opex.length ? '' : '<tr><td colspan="2">None recorded in the period.</td></tr>')
