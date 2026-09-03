@@ -4032,3 +4032,33 @@ it" — `bulkfile.js` caught it in the sweep: 2 rows selected where 15 were mean
 Neither ask is wrong, so the control offers both and the founder chooses:
 **"Select all 2 matching 'INXPRESS' in this period · or all 15 across all
 time."** The list honours the pill; nothing about a vendor's history is hidden.
+
+## Build 455 — the transfer imbalance was the founder's equity
+
+Measured on the live ledger after the founder's own filing pass: 68 Zelle
+receipts from the founder, $75,857, every one filed as **transfer**. Transfers
+netted to **+$75,818**. Owner investment on the balance sheet: one row, $500.
+The two big numbers are the same number.
+
+"Transfer" meant "from my account" to the person filing it, and "between
+VENIA's own accounts" to the statements. So $75k of equity appeared on neither
+the balance sheet nor the cash flow statement, and the "transfers do not
+cancel" line reported exactly that amount as a missing leg. Nothing in the
+review screen suggested transfer — the dropdown defaulted to "Choose…" — but
+nothing said what transfer meant either, and nothing noticed afterwards.
+
+Three changes, none of them silent re-tagging of someone's books:
+
+- The audit names it: **"68 Zelle receipts from KEETER LY filed as transfer —
+  $75,857"**, with the plain-words difference between transfer, owner
+  investment (equity) and loan (a liability VENIA repays). The transfer
+  imbalance line points at it as the explanation.
+- One click: **Refile as owner investment** / **Refile as loan** on that line.
+  Receipts only — a Zelle *out* to the founder is a draw or a reimbursement,
+  which is a question, not a rule. Anything but those two answers is refused.
+  Undoable like every other filing.
+- The dropdown label reads **transfer (own accounts)** so the next person
+  filing a founder Zelle does not pick it.
+
+`gauntlet/zelleequity.js` — 19 assertions, fails on 454 (the function and the
+issue do not exist).
