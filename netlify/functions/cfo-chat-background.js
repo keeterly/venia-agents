@@ -128,10 +128,37 @@ export default async (req) => {
     });
     return out;
   };
+  // A FAILED SEARCH RETURNS HTTP 200. Anthropic's server tools do not raise:
+  // an error comes back as a web_search_tool_result whose `content` is a single
+  // error OBJECT, where a success is a LIST of results. So the fallback ladder
+  // below never fires on these -- the request "succeeded" -- and the model is
+  // left looking at an error block and guessing what it means out loud. It
+  // guessed "hit a hard usage limit", which may or may not be what happened.
+  // Read the code and say it.
+  const SEARCH_WHY = {
+    max_uses_exceeded: 'the per-turn search limit was reached — ask for fewer stores at a time',
+    too_many_requests: 'Anthropic is rate limiting web search right now — try again shortly',
+    unavailable: 'web search is not available on this account — check that it is enabled for the '
+      + 'organisation in the Anthropic Console, and that no spend limit has been reached',
+    invalid_input: 'that search query was rejected as malformed',
+    query_too_long: 'that search query was too long — ask for one store at a time',
+  };
+  const searchErrors = (blocks) => {
+    const out = [];
+    (blocks || []).forEach((b) => {
+      if (!b || b.type !== 'web_search_tool_result') return;
+      const c = b.content;
+      if (!c || Array.isArray(c)) return;          // a list is a normal result set
+      const code = String(c.error_code || 'unknown');
+      if (out.indexOf(code) < 0) out.push(code);
+    });
+    return out;
+  };
   const attempt = async (tools) => {
     const body = { model: 'claude-sonnet-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
     if (tools) body.tools = tools;
     let text = '', sources = [], rounds = 0;
+    const errs = [];
     while (rounds++ < 4) {
       const r = await post(body);
       if (!r.ok) {
@@ -143,6 +170,7 @@ export default async (req) => {
       const blocks = data.content || [];
       text += (text ? '\n' : '') + blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
       sources = sources.concat(sourcesOf(blocks));
+      searchErrors(blocks).forEach((c) => { if (errs.indexOf(c) < 0) errs.push(c); });
       // A server-tool turn can run long enough that the API hands it back
       // paused rather than finished. Continuing is the whole answer arriving;
       // stopping here would truncate mid-search and read as a short reply.
@@ -151,6 +179,12 @@ export default async (req) => {
     }
     text = text.trim();
     if (!text) throw new Error('empty reply');
+    // Say which wall, in the reply, so the founder is not relying on the model's
+    // reading of an error block it was never given the vocabulary for.
+    if (errs.length) {
+      text += '\n\n\u26a0 WEB SEARCH DID NOT RUN (' + errs.join(', ') + ')'
+        + errs.map((c) => SEARCH_WHY[c] ? '\n\u2014 ' + SEARCH_WHY[c] : '').join('');
+    }
     if (sources.length) {
       const seen = new Set();
       const lines = sources.filter((s2) => !seen.has(s2.url) && seen.add(s2.url)).slice(0, 12)

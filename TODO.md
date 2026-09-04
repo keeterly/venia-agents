@@ -4884,3 +4884,36 @@ Only web search survives the filter, one tool per turn, the ceiling is set
 server-side, and `tool_choice` is stripped — a paid tool is never mandatory.
 
 `gauntlet/websearch.js` — 25 assertions.
+
+## Build 477 — a failed search is not an error, and the model was left guessing
+
+Hours after 476 shipped, asked to validate the buyer list, Enigma reported:
+*"web search is dead for me right now — hit a hard usage limit, not a fluke
+(tried three times, three different queries, same wall)."*
+
+Honest, and unverifiable. **Anthropic's server tools do not raise.** A failed
+web search returns **HTTP 200**, with the failure inside a
+`web_search_tool_result` block whose `content` is a single error *object* where
+a success is a *list* of results. So 476's careful fallback ladder — current
+tool version, then older, then none — never fired: nothing threw, the request
+"succeeded", and the code handed back the text. The model saw an error block it
+had never been given the vocabulary for and described it in prose. *"Hard usage
+limit"* was its inference, not a diagnosis, and it reached a founder looking
+like one.
+
+The five codes say very different things, which is exactly why guessing between
+them was the wrong move:
+
+- `max_uses_exceeded` — **our own** per-turn cap. Ask for fewer stores at once.
+- `too_many_requests` — rate limiting, clears on its own.
+- `unavailable` — **a setting on the account.** No amount of retrying moves it:
+  web search has to be enabled for the organisation in the Anthropic Console,
+  and no spend limit reached.
+- `invalid_input` / `query_too_long` — the query itself.
+
+Both paths now branch on object-vs-list, collect the codes, and end the reply
+with **"⚠ WEB SEARCH DID NOT RUN"** and the sentence for each — the same
+discipline as `driveWhy` in 473, for the same reason: a bare wall is not
+actionable, and a model asked to interpret one will oblige.
+
+`gauntlet/websearch.js` — 37 assertions.
