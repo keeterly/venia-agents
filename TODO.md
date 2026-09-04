@@ -4722,4 +4722,11 @@ many it set aside.
   It records an approach; it never sends one. The founder sends from their own
   address, as with every other desk.
 
+**`agentperm.js` caught a real gap in this build before it shipped:**
+`log_outreach` had no entry in the action→module map, which means it would
+have been offered to **every** role rather than to Sales. Mapped to `sales`,
+and added to that gauntlet's list of actions-added-since-424 — a tripwire that
+exists so a new verb has to be a deliberate edit rather than something that
+drifts into everyone's hands.
+
 `gauntlet/wholesaledesk.js` — 26 assertions.
