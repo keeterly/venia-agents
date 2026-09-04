@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '469';
+  const BUILD = '470';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -43044,6 +43044,30 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     retryTimer = setTimeout(function(){ pushNow(); }, wait);
     window.__syncStat.retry = { t: new Date().toISOString(), why: why || '', inMs: wait, attempt: retryStep };
   }
+  // A RETRY IS ONLY AS GOOD AS ITS NEXT CHANCE TO RUN.
+  //
+  // The backoff runs out to 90 seconds, and iOS suspends timers in a
+  // backgrounded tab — so on the device where switching apps is the normal
+  // thing to do, a pending write waits out a timer that was frozen while the
+  // founder was away. Returning to the app already triggered a PULL; it must
+  // trigger the push it owes as well. And the network coming back is the one
+  // event that makes a retry certain to work.
+  //
+  // Both are guarded on pushDirty: a wake is not an excuse to write.
+  function pushWake(why){
+    if (!pushDirty) return;
+    clearTimeout(retryTimer);
+    // Back to the front of the backoff: the condition that was failing has
+    // changed, so the next attempt is not the fifth failure, it is the first
+    // of a new situation.
+    retryStep = 0;
+    window.__syncStat.wake = { t: new Date().toISOString(), why: why };
+    pushNow();
+  }
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible') pushWake('returned to the app');
+  });
+  window.addEventListener('online', function(){ pushWake('network came back'); });
   function pushLanded(){
     pushDirty = false; retryStep = 0;
     window.__syncRetryArmed = false;
@@ -43140,8 +43164,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // founders, cross-device) can see exactly where sync is stuck.
   window.__syncStat = { build: (window.VENIA_BUILD || '?'), pull: null, push: null, apply: null, realtime: 'not started', decision: null };
   var _syncErrToasted = false;
+  // "TypeError: Load failed" is Safari's phrasing for "the request never left
+  // the device", and "Failed to fetch" is Chrome's. Both are the truth in the
+  // wrong language, on the screen a founder reads when something has gone
+  // wrong. Say what happened; keep the original where a developer can find it.
+  function syncReason(msg){
+    var t = String(msg == null ? '' : msg);
+    if (/load failed|failed to fetch|networkerror|network request failed|err_(?:internet|network|connection)/i.test(t)) {
+      return 'no network connection — the change is safe on this device and will go up on its own';
+    }
+    if (/timeout|timed out|aborted/i.test(t)) return 'the connection timed out — retrying';
+    if (/jwt|expired|401|403|not authenticated/i.test(t)) return 'signed out — sign in again to save this';
+    return t.slice(0, 140);
+  }
   function syncFail(kind, msg){
-    window.__syncStat[kind] = { t: new Date().toISOString(), ok: false, err: String(msg || 'unknown').slice(0, 140) };
+    window.__syncStat[kind] = { t: new Date().toISOString(), ok: false,
+      err: syncReason(msg), raw: String(msg || 'unknown').slice(0, 140) };
     if (!_syncErrToasted && typeof showToast === 'function'){
       _syncErrToasted = true;
       showToast('⇅ Sync ' + kind + ' failed — ' + String(msg || '').slice(0, 80) + (/(jwt|auth|policy|denied|401|403)/i.test(String(msg)) ? ' · try signing in again' : ''), 'error');
@@ -43236,8 +43274,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       if (modErr && ids.length) {
         syncFail('push', 'module write failed (' + modErr + ') — your last change is still only on '
           + 'this device. It will be retried; do not clear the app until the next sync succeeds.');
-        window.__syncStat.push = { t: new Date().toISOString(), ok: false, err: modErr,
-          via: 'module rows refused — base NOT advanced' };
+        window.__syncStat.push = { t: new Date().toISOString(), ok: false, err: syncReason(modErr),
+          raw: String(modErr).slice(0, 140), via: 'module rows refused — base NOT advanced' };
         // Try again shortly rather than waiting for the next edit: an unpushed
         // change that nothing retries is a change that gets reverted later.
         pushFailed('modules: ' + modErr);
@@ -43262,13 +43300,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       } else {
         syncFail('push', res.error.message || res.error.code);
         window.__syncStat.push = { t: new Date().toISOString(), ok: false,
-          err: res.error.message || res.error.code, via: 'blob refused — base NOT advanced' };
+          err: syncReason(res.error.message || res.error.code),
+          raw: String(res.error.message || res.error.code).slice(0, 140),
+          via: 'blob refused — base NOT advanced' };
         pushFailed('blob: ' + (res.error.message || res.error.code));
       }
     } catch(e){
       syncFail('push', e && e.message);
       window.__syncStat.push = { t: new Date().toISOString(), ok: false,
-        err: (e && e.message) || 'threw', via: 'push threw — base NOT advanced' };
+        err: syncReason((e && e.message) || 'threw'),
+        raw: String((e && e.message) || 'threw').slice(0, 140),
+        via: 'push threw — base NOT advanced' };
       pushFailed((e && e.message) || 'threw');
     }
   }

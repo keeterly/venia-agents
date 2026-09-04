@@ -4614,3 +4614,33 @@ here would be the leak it exists to prevent.
 the way a person with a calculator would, and the test data lands every line
 on a half dollar so the drift is unmistakable; the live ledger was out by one
 dollar, and one dollar is easy to pass by accident.
+
+## Build 470 — a retry is only as good as its next chance to run
+
+From a phone on 5G: **Push ✗ TypeError: Load failed**, with the badge showing
+"Not saved to the cloud yet — retrying". That is Build 459 working — the
+network dropped, the edit is on the device, a retry is armed. Two things about
+it were still wrong, and both are about *when* the retry gets its chance.
+
+- **The backoff runs to 90 seconds, and iOS suspends timers in a backgrounded
+  tab.** The screenshot came from someone switching back from another app — so
+  on the device where app-switching is the normal thing to do, a pending write
+  waits out a timer that was frozen while they were away. Returning to the app
+  already triggered a PULL; it now triggers the push it owes as well.
+- **The network coming back is the one event that makes a retry certain to
+  work**, and nothing was listening for it.
+
+Both go through `pushWake()`, guarded on `pushDirty` — a wake is not an excuse
+to write — and both reset the backoff to the front, because the condition that
+was failing has changed: the next attempt is not the fifth failure, it is the
+first of a new situation.
+
+**And the error is in English now.** "TypeError: Load failed" is Safari's
+phrasing for "the request never left the device" ("Failed to fetch" is
+Chrome's). `syncReason()` translates the ones a founder will actually meet —
+no network, timed out, signed out — and keeps the original in `raw` for
+debugging. Every push failure path routes through it; three of them were
+assigning `err` directly and overwriting the translation.
+
+`gauntlet/pushwake.js` — 7 assertions, driven at phone size against a fake
+client that throws the real `TypeError: Load failed`.
