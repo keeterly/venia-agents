@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '477';
+  const BUILD = '478';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -27893,6 +27893,20 @@ function agentRunAction(key, action, chatBody) {
     } catch (e) {}
     return { denied: true, type: action.type, module: mod };
   }
+  // TICK WHAT YOU WANT. "If Enigma suggests changes, maybe it gives me a list
+  // of actions and I can tick off the ones I want done. Replying in text for
+  // actionables is tedious."
+  //
+  // Exactly right, and it was all-or-nothing before: an action carrying twelve
+  // corrections applied twelve corrections. Disagreeing with one of them meant
+  // writing a paragraph explaining which, and getting back a fresh block that
+  // might drop two others. So a multi-item action is now shown as a checklist
+  // and applied on a tap. A SINGLE item still applies straight away with an
+  // Undo — a one-row checklist is friction, not control.
+  if (!action.__reviewed) {
+    const held = agentReviewList(key, action, chatBody);
+    if (held) return held;
+  }
   // Dispatch on the action itself, not the screen it was asked from — "add a
   // store" works from Today just as well as from Sales.
   if (action.type === 'create_pull') return agentRunCreatePull(action, chatBody);
@@ -28612,6 +28626,105 @@ function agentFindStyle(ref){
 }
 // btnLabel/mark are optional: a handoff has not happened yet, so it must not
 // wear a ✓ or offer to undo something nobody did.
+// WHICH ACTIONS CARRY A LIST, and how to say one of its rows out loud. An
+// action not named here is applied as it always was: the checklist is for the
+// bulk verbs, where disagreeing with one row used to cost a paragraph.
+const ACTION_LIST = {
+  add_buyers:     { field: 'buyers',  verb: 'Add',    label: function(x){ return (x.name || 'unnamed')
+                      + ((x.city || x.location) ? ' \u2014 ' + (x.city || x.location) : ''); } },
+  update_buyers:  { field: 'updates', verb: 'Update', label: function(x){
+                      const ks = Object.keys(x.set || {}).filter(function(k){ return String(x.set[k] || '').trim(); });
+                      const bits = ks.slice(0, 4).join(', ');
+                      const extra = (x.addContacts ? ' +contact' : '') + (x.fixContacts ? ' fix contact' : '');
+                      return (x.name || 'unnamed') + (bits ? ' \u2014 ' + bits : '') + extra; } },
+  log_outreach:   { field: 'touches', verb: 'Log',    label: function(x){ return (x.name || 'unnamed')
+                      + ' \u2014 ' + (x.note || 'approached'); } },
+  log_owed:       { field: 'owed',    verb: 'Record', label: function(x){ return (x.name || 'unnamed')
+                      + ' \u2014 ' + (x.what || 'a request'); } },
+  add_vendors:    { field: 'vendors', verb: 'Add',    label: function(x){ return (x.name || 'unnamed')
+                      + (x.location ? ' \u2014 ' + x.location : ''); } },
+  update_vendors: { field: 'updates', verb: 'Update', label: function(x){
+                      const ks = Object.keys(x.set || {}).filter(function(k){ return String(x.set[k] || '').trim(); });
+                      return (x.name || 'unnamed') + (ks.length ? ' \u2014 ' + ks.slice(0, 4).join(', ') : ''); } },
+  add_styles:     { field: 'styles',  verb: 'Add',    label: function(x){ return x.name || x.styleId || 'unnamed'; } },
+  update_styles:  { field: 'updates', verb: 'Update', label: function(x){
+                      const ks = Object.keys(x.set || {}).filter(function(k){ return String(x.set[k] || '').trim(); });
+                      return (x.name || x.styleId || 'unnamed') + (ks.length ? ' \u2014 ' + ks.slice(0, 4).join(', ') : ''); } },
+};
+window.__agHold = {};
+// Render the rows and wait. Returns a marker when it took over, nothing when
+// the action should run as before.
+function agentReviewList(key, action, chatBody){
+  const spec = ACTION_LIST[action && action.type];
+  if (!spec || !chatBody) return null;
+  const items = Array.isArray(action[spec.field]) ? action[spec.field] : null;
+  if (!items || items.length < 2) return null;          // one row is not a list
+  const id = 'rv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  window.__agHold[id] = { key: key, action: action, spec: spec, body: chatBody };
+  const rows = items.map(function(it, i){
+    let text = '';
+    try { text = String(spec.label(it) || ''); } catch(e){ text = 'item ' + (i + 1); }
+    return '<label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;'
+      + 'border-bottom:1px solid var(--border);cursor:pointer">'
+      + '<input type="checkbox" class="agrv-' + id + '" data-i="' + i + '" checked '
+      +   'style="margin-top:2px;flex:none;width:15px;height:15px;accent-color:var(--ink)">'
+      + '<span style="font-size:11.5px;line-height:1.5">' + escHtml(text.slice(0, 160)) + '</span></label>';
+  }).join('');
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.id = 'agrv-card-' + id;
+  card.innerHTML = '<div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);'
+    +   'font-weight:700;margin-bottom:6px">\u2192 ' + escHtml(spec.verb) + ' ' + items.length
+    +   ' \u2014 untick anything you do not want</div>'
+    + rows
+    + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+    +   '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentReviewApply(\'' + id + '\')">Apply ticked</button>'
+    +   '<button class="ag-btn ag-btn-sm" onclick="agentReviewAll(\'' + id + '\',true)">Tick all</button>'
+    +   '<button class="ag-btn ag-btn-sm" onclick="agentReviewAll(\'' + id + '\',false)">Untick all</button>'
+    +   '<button class="ag-btn ag-btn-sm" onclick="agentReviewCancel(\'' + id + '\')">Cancel</button>'
+    + '</div></div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+  return { held: true, id: id, count: items.length };
+}
+window.agentReviewAll = function(id, on){
+  document.querySelectorAll('.agrv-' + id).forEach(function(el){ el.checked = !!on; });
+};
+window.agentReviewCancel = function(id){
+  delete window.__agHold[id];
+  const c = document.getElementById('agrv-card-' + id);
+  if (c) c.innerHTML = '<div class="ag-msg-meta">Action</div><div class="ag-msg-bubble">'
+    + '<div style="font-size:11px;color:var(--muted)">Nothing was applied.</div></div>';
+};
+window.agentReviewApply = function(id){
+  const h = window.__agHold[id]; if (!h) return;
+  const picked = [];
+  document.querySelectorAll('.agrv-' + id).forEach(function(el){
+    if (el.checked) picked.push(Number(el.getAttribute('data-i')));
+  });
+  const all = h.action[h.spec.field] || [];
+  if (!picked.length){
+    const c0 = document.getElementById('agrv-card-' + id);
+    if (c0) c0.innerHTML = '<div class="ag-msg-meta">Action</div><div class="ag-msg-bubble">'
+      + '<div style="font-size:11px;color:var(--muted)">Nothing ticked \u2014 nothing was applied.</div></div>';
+    delete window.__agHold[id];
+    return;
+  }
+  // A COPY, carrying only what was ticked. The original block is left alone so
+  // a mis-tap cannot quietly rewrite what the agent actually proposed.
+  const next = {};
+  Object.keys(h.action).forEach(function(k){ next[k] = h.action[k]; });
+  next[h.spec.field] = picked.map(function(i){ return all[i]; });
+  next.__reviewed = true;
+  const c = document.getElementById('agrv-card-' + id);
+  if (c) c.remove();
+  delete window.__agHold[id];
+  try { agentRunAction(h.key, next, h.body); }
+  catch(e){ try { appendAgentNote(h.body, '\u26a0 That change did NOT save \u2014 '
+    + (e && e.message || 'something went wrong') + '.'); } catch(_){} }
+};
 function agentActionCard(chatBody, headline, lines, undoCall, btnLabel, mark){
   const pending = !!btnLabel;
   const card = document.createElement('div');
@@ -29800,8 +29913,10 @@ function agentRunUpdateBuyers(action, chatBody) {
       adds.forEach(c => {
         const nm = String(c && c.name || '').trim(), em = String(c && c.email || '').trim(), rl = String(c && c.role || '').trim();
         if (!nm && !em) return;
-        if (em && cs.some(x => String(x.email||'').toLowerCase() === em.toLowerCase())) return;   // dedupe by email
-        cs.push({ name: nm, email: em, role: rl }); added++;
+        // Clean on the way IN, so a doubled-up contact stops being created at all.
+        const cl = (typeof slContactClean === 'function') ? slContactClean(nm, em) : { name: nm, email: em };
+        if (cl.email && cs.some(x => String(x.email||'').toLowerCase() === cl.email.toLowerCase())) return;   // dedupe by email
+        cs.push({ name: cl.name, email: cl.email, role: rl }); added++;
       });
       if (added){ b.contacts = cs; b.contactName = cs[0].name || ''; b.email = cs[0].email || ''; applied.push('+' + added + ' contact' + (added > 1 ? 's' : '')); }
     }
@@ -33516,6 +33631,91 @@ function slRefreshBuyers() {
 // ── Multiple contacts per store ──────────────────────────────────────────────
 // A store can hold several buyers/emails: b.contacts = [{name,email,role}].
 // Legacy single contactName/email records read transparently and migrate on save.
+// APPEND-ONLY WAS THE SAFEGUARD, AND THE SAFEGUARD WAS THE BUG.
+//
+// "Antonioli and Lynx Store have a formatting bug in their contact field (name
+// and email doubled-up, like `Helene Uccello <Helene Uccello
+// <helene.uccello@antonioli.eu>>`) - cosmetic, but I can't overwrite an
+// existing contact, only append, so that one needs a manual edit on your end."
+//
+// addContacts appends and dedupes by email; nothing repaired. On a hundred
+// accounts that is a hundred hand-edits, and a wrong contact is worse than a
+// missing one because it looks filled in. The append-only rule was there for a
+// real reason - never silently destroy a verified contact - and that reason
+// survives: this only ever rewrites a record it can prove is malformed, and it
+// is undoable.
+const SL_MAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+function slContactClean(name, email){
+  let n = String(name == null ? '' : name).replace(/\s+/g, ' ').trim();
+  let e = String(email == null ? '' : email).replace(/\s+/g, '').trim();
+  // The address may be buried in the name, at any depth of angle brackets.
+  if (!e) { const m = n.match(SL_MAIL_RE); if (m) e = m[0]; }
+  // Strip every bracketed section out of the name, however many deep.
+  n = n.replace(/<[^<>]*>/g, ' ');
+  for (let i = 0; i < 4 && /[<>]/.test(n); i++) n = n.replace(/<[^<>]*>/g, ' ');
+  n = n.replace(/[<>]/g, ' ').replace(/\s+/g, ' ').trim();
+  // An address left loose in the name is not a name.
+  n = n.replace(SL_MAIL_RE, '').replace(/\s+/g, ' ').trim();
+  // "Helene Uccello Helene Uccello" -> "Helene Uccello".
+  const w = n.split(' ').filter(Boolean);
+  if (w.length && w.length % 2 === 0) {
+    const half = w.length / 2;
+    if (w.slice(0, half).join(' ').toLowerCase() === w.slice(half).join(' ').toLowerCase()) {
+      n = w.slice(0, half).join(' ');
+    }
+  }
+  return { name: n, email: e };
+}
+window.slContactClean = slContactClean;
+// Only a record that CHANGES under the cleaner is malformed. Anything the
+// cleaner would leave alone is left alone.
+function slContactBad(c){
+  const cl = slContactClean(c && c.name, c && c.email);
+  return cl.name !== String((c && c.name) || '').trim() || cl.email !== String((c && c.email) || '').trim();
+}
+window.slContactsAudit = function(){
+  const out = [];
+  (STATE.slBuyers || []).forEach(function(b){
+    (slContactsOf(b) || []).forEach(function(c, i){
+      if (slContactBad(c)) out.push({ buyerId: b.id, buyer: b.name || 'buyer', index: i,
+                                      was: String((c && c.name) || ''), now: slContactClean(c.name, c.email) });
+    });
+  });
+  return out;
+};
+window.slContactsRepair = function(){
+  const bad = window.slContactsAudit();
+  if (!bad.length) return 0;
+  const snap = {};
+  let n = 0;
+  bad.forEach(function(r){
+    const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === r.buyerId; });
+    if (!b) return;
+    if (!snap[b.id]) snap[b.id] = JSON.parse(JSON.stringify(b));
+    const cs = slContactsOf(b).slice();
+    const c = cs[r.index]; if (!c) return;
+    const cl = slContactClean(c.name, c.email);
+    cs[r.index] = { name: cl.name, email: cl.email, role: c.role || '' };   // role is theirs, not ours
+    b.contacts = cs;
+    b.contactName = cs[0].name || '';
+    b.email = cs[0].email || '';
+    b.updatedAt = new Date().toISOString();
+    n++;
+  });
+  if (n) { window.__slPrevContacts = snap; save(); }
+  return n;
+};
+window.slContactsUndo = function(){
+  const snap = window.__slPrevContacts; if (!snap) return false;
+  Object.keys(snap).forEach(function(id){
+    const i = (STATE.slBuyers || []).findIndex(function(x){ return x && x.id === id; });
+    if (i >= 0) STATE.slBuyers[i] = snap[id];
+  });
+  window.__slPrevContacts = null;
+  save();
+  try { showToast('Contact repair undone', 'info'); } catch(e){}
+  return true;
+};
 function slContactsOf(b){
   if (b && Array.isArray(b.contacts) && b.contacts.length) return b.contacts;
   if (b && (b.contactName || b.email)) return [{ name:b.contactName||'', email:b.email||'', role:'' }];
