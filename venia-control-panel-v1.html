@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '472';
+  const BUILD = '474';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18615,8 +18615,21 @@ window.drivePick = async function(opts){
     } else {
       view = new google.picker.DocsView().setIncludeFolders(true).setEnableDrives(true);
     }
+    // THE APP ID IS WHAT GRANTS THE FILE.
+    //
+    // `drive.file` is per-file access to the files a person PICKS, and the
+    // association between "this file" and "this app" is made here, by the
+    // Picker, from the appId it is given. Without one the picker still returns
+    // a file id and the file is never granted — so the first read of it comes
+    // back 403, which is exactly what picking a Sheet did. It survived because
+    // files the app CREATED are granted by authorship instead, so every
+    // round-trip we had written ourselves worked.
+    //
+    // The appId is the Cloud project number, which the app already derives
+    // from the OAuth client ID for its settings links. No new credential.
     new google.picker.PickerBuilder()
       .setOAuthToken(tok)
+      .setAppId(typeof googleProjectNo === 'function' ? googleProjectNo() : '')
       .setDeveloperKey(driveApiKey())
       .addView(view)
       .enableFeature(google.picker.Feature.SUPPORT_DRIVES)
@@ -19171,6 +19184,33 @@ const DRIVE_EXPORT = {
   'application/vnd.google-apps.document':    'text/plain',
   'application/vnd.google-apps.presentation':'text/plain',
 };
+// WHY GOOGLE SAID NO, in the words the answer depends on.
+//
+// "HTTP 403" told the founder nothing, and the three things that produce a 403
+// here have three different answers: a file that was never granted, a sheet too
+// large to export, and a scope that is missing. Read the reason out of the body
+// and say the one that applies; keep the status for the case where the body is
+// not JSON at all.
+async function driveWhy(r, what){
+  let reason = '', msg = '';
+  try {
+    const j = JSON.parse(await r.text());
+    reason = String((((j.error || {}).errors || [])[0] || {}).reason || '');
+    msg = String((j.error || {}).message || '');
+  } catch (e) {}
+  const K = {
+    appNotAuthorizedToFile: 'this app has not been granted that file — pick it again in the '
+      + 'Drive window, and if it still refuses, disconnect and reconnect Google in Settings',
+    insufficientFilePermissions: 'you do not have permission to read that file in Drive',
+    insufficientPermissions: 'the Google connection is missing the Drive scope — reconnect Google in Settings',
+    exportSizeLimitExceeded: 'that file is too large for Google to export — split it, or download it and import the file',
+    rateLimitExceeded: 'Google is rate limiting us — try again in a moment',
+    userRateLimitExceeded: 'Google is rate limiting us — try again in a moment',
+    notFound: 'that file no longer exists, or was never shared with this account',
+  };
+  const said = K[reason] || (msg ? msg.slice(0, 160) : '');
+  return what + ' failed (HTTP ' + r.status + ')' + (said ? ' — ' + said : '');
+}
 window.driveReadDoc = async function(doc){
   if (!doc || !doc.id) throw new Error('no file');
   const tok = await driveTokenSmart();
@@ -19180,7 +19220,7 @@ window.driveReadDoc = async function(doc){
   if (DRIVE_EXPORT[mime]) {
     const to = DRIVE_EXPORT[mime];
     const r = await fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '/export?mimeType=' + encodeURIComponent(to) + '&supportsAllDrives=true', { headers: H });
-    if (!r.ok) throw new Error('Drive export failed (HTTP ' + r.status + ')');
+    if (!r.ok) throw new Error(await driveWhy(r, 'Drive export'));
     const text = await r.text();
     // Sheets export gives the FIRST tab only — say so rather than silently
     // handing over a partial line list.
@@ -19189,7 +19229,7 @@ window.driveReadDoc = async function(doc){
   }
   // Everything else → download bytes
   const r = await fetch('https://www.googleapis.com/drive/v3/files/' + doc.id + '?alt=media&supportsAllDrives=true', { headers: H });
-  if (!r.ok) throw new Error('Drive download failed (HTTP ' + r.status + ')');
+  if (!r.ok) throw new Error(await driveWhy(r, 'Drive download'));
   if (/^image\//.test(mime)) {
     const blob = await r.blob();
     return { kind:'image', name: doc.name || 'image', blob };
@@ -50787,6 +50827,7 @@ function skToggle(force){
     skClearUnread();
     if (!SK.greeted) skGreet();
     try { skRestorePending(); } catch(e){}
+    try { skRestoreFileSet(); } catch(e){}
     const f = document.getElementById('sk-field');
     if (f) setTimeout(()=>{ f.focus(); skViewportFit(); }, 60);
     // The keyboard animates in after focus; re-fit once it has settled and put
@@ -50809,6 +50850,7 @@ function skRenderHistory(){
   (SK.history||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.disp || m.content, m.img));
   // Redrawing throws away any working bubble, so put back the ones still running.
   try { skRestorePending(); } catch(e){}
+  try { skRestoreFileSet(); } catch(e){}
 }
 function skAppend(who, text, img){
   const body = document.getElementById('sk-body'); if (!body) return;
@@ -50923,6 +50965,71 @@ async function skFilePick(input){
 // agent can act on in one batch. When rows remain, a Continue button feeds
 // the next window. Small calls, no timeouts, nothing lost.
 const SK_ROW_WINDOW = 50;
+// THE FILE OUTLIVES THE APP. SK.fileSet used to be memory only, which put it
+// in direct contradiction with what the dock tells the founder: a cloud turn
+// says "you can close the app". Closing it destroyed every row that had not
+// been sent — a 1,001-row buyer list came back as "rows 1-50 are filed, rows
+// 51-1001 haven't come through", with no way to reach them again but to
+// re-upload. The queue is stored, keeps its place, and is offered back.
+const SK_FILE_KEY = 'venia_sk_fileset';
+const SK_FILE_MAX = 2000000;      // ~2MB of CSV; beyond that, stay in memory
+function skFileSave(){
+  const F = SK.fileSet;
+  if (!F){ try { localStorage.removeItem(SK_FILE_KEY); } catch(e){} return; }
+  if (F.vol) return;                                    // too big to store — say so, don't fail
+  try {
+    const blob = JSON.stringify({ name: F.name, icon: F.icon, header: F.header,
+      rows: F.rows, total: F.total, sent: F.sent, at: Date.now() });
+    if (blob.length > SK_FILE_MAX){ F.vol = true; try { localStorage.removeItem(SK_FILE_KEY); } catch(e){} return; }
+    localStorage.setItem(SK_FILE_KEY, blob);
+  } catch(e){ F.vol = true; }                            // quota — degrade to the old behaviour
+}
+function skFileLoad(){
+  try {
+    const j = JSON.parse(localStorage.getItem(SK_FILE_KEY) || 'null');
+    if (!j || !Array.isArray(j.rows) || !j.rows.length) return null;
+    // A queue nobody came back to inside a week is stale — the founder has
+    // moved on and being handed rows from last month is worse than nothing.
+    if (j.at && (Date.now() - j.at) > 7 * 864e5){ localStorage.removeItem(SK_FILE_KEY); return null; }
+    if ((j.sent || 0) >= j.rows.length){ localStorage.removeItem(SK_FILE_KEY); return null; }
+    return { name: j.name || 'file', icon: j.icon || '\u25a4', header: j.header || '',
+      rows: j.rows, total: j.total || j.rows.length, sent: j.sent || 0 };
+  } catch(e){ return null; }
+}
+// Put the rest of the file back in front of the founder when they return.
+// NOT auto-continued: hands-off mode ends at the reload, because resuming a
+// 20-batch run nobody is watching is how a mis-click spends the budget.
+function skRestoreFileSet(){
+  if (SK.fileSet) return;                       // already live this session
+  const F = skFileLoad(); if (!F) return;
+  SK.fileSet = F; SK.autoRows = false;
+  if (!skQueueWindow()) { SK.fileSet = null; return; }
+  const body = document.getElementById('sk-body'); if (!body) return;
+  if (document.getElementById('sk-rows-back')) return;
+  const left = F.total - F.sent;
+  const el = document.createElement('div');
+  el.id = 'sk-rows-back';
+  el.className = 'ag-msg from-agent';
+  el.innerHTML = '<div class="ag-msg-bubble"><div style="font-size:11px;color:var(--ink);margin-bottom:7px">'
+    + '\u25a4 <strong>' + escHtml(F.name) + '</strong> is still going \u2014 ' + F.sent + ' of ' + F.total
+    + ' rows done, <strong>' + left + ' row' + (left>1?'s':'') + ' left</strong>. Picked it back up where you left off.</div>'
+    + '<button class="btn btn-gold btn-sm" onclick="skSendNextRows(this)">Send next ' + Math.min(SK_ROW_WINDOW, left) + ' rows \u2192</button>'
+    + ' <button class="btn btn-ghost btn-sm" onclick="skAutoRows(this)">Work through all ' + left + ' \u2192</button>'
+    + ' <button class="btn btn-ghost btn-sm" onclick="skFileClear();var b=this.closest(\'.ag-msg-bubble\');if(b)b.innerHTML=\'<div style=&quot;font-size:11px;color:var(--muted)&quot;>Dropped the rest of that file.</div>\'">Drop it</button>'
+    + '</div>';
+  body.appendChild(el); body.scrollTop = body.scrollHeight;
+}
+// "continue", typed by hand with nothing attached. Without this the words go
+// to the model on their own and it answers, correctly and uselessly, that no
+// rows came through -- which is exactly what happened.
+function skContinueRows(msg){
+  const F = SK.fileSet;
+  if (!F || SK.pendingFile) return false;
+  if (F.sent >= F.total) return false;
+  if (!/^\s*(continue|next|keep going|go on|carry on|more|next batch|next rows|resume)\b/i.test(String(msg || ''))) return false;
+  return skQueueWindow();
+}
+window.skContinueRows = skContinueRows;
 function skAttachRows(name, text, icon){
   const lines = String(text||'').replace(/\r\n?/g,'\n').split('\n').filter(function(l){ return l.trim() !== ''; });
   if (!lines.length){ if (typeof showToast==='function') showToast('That file looks empty','warning'); return; }
@@ -50931,6 +51038,7 @@ function skAttachRows(name, text, icon){
   if (!rows.length){ if (typeof showToast==='function') showToast('That file has a header but no rows','warning'); return; }
   SK.fileSet = { name, icon: icon || '▤', header, rows, total: rows.length, sent: 0 };
   skQueueWindow();
+  skFileSave();
   // A product line list is structured data: parsing it beats transcribing it
   // (colour vs material, prices per fabrication). Offer the importer instead
   // of letting the chat re-read the same rows batch after batch.
@@ -50980,6 +51088,7 @@ function skOfferNextRows(){
   const F = SK.fileSet; if (!F) return;
   F.sent = F.pending || F.sent;
   const left = F.total - F.sent;
+  skFileSave();      // the place is kept the moment it moves, not at the end
   const body = document.getElementById('sk-body'); if (!body) return;
   if (left <= 0){
     const done = document.createElement('div');
@@ -50987,6 +51096,8 @@ function skOfferNextRows(){
     done.innerHTML = '<div class="ag-msg-bubble" style="font-size:11px;color:var(--muted)">✓ All ' + F.total + ' rows of ' + escHtml(F.name) + ' have been sent.</div>';
     body.appendChild(done); body.scrollTop = body.scrollHeight;
     SK.fileSet = null;
+    skFileSave();                                   // finished — let the storage go
+    const back = document.getElementById('sk-rows-back'); if (back) back.remove();
     return;
   }
   const el = document.createElement('div');
@@ -51069,6 +51180,8 @@ function skFileClear(){
   SK.pendingFile = null;
   SK.fileSet = null;
   SK.autoRows = false;
+  skFileSave();                                     // and forget it on disk
+  const _rb = document.getElementById('sk-rows-back'); if (_rb) _rb.remove();
   const chip = document.getElementById('sk-file-chip');
   if (chip){ chip.style.display = 'none'; chip.innerHTML = ''; }
 }
@@ -51168,6 +51281,9 @@ async function skSend(preset, opts){
   const rawMsg = (preset!=null ? String(preset) : (field?field.value:'')).trim();
   // A photo or a file can be sent on its own — any one of the three is enough.
   const photo = (preset==null) ? SK.pendingPhoto : null;
+  // A bare "continue" with the queue restored but nothing attached: pull the
+  // next window in behind it, rather than asking the model to act on no rows.
+  if (preset == null && !SK.pendingFile) { try { skContinueRows(rawMsg); } catch(e){} }
   const fileAtt = (preset==null) ? SK.pendingFile : null;
   if (!rawMsg && !photo && !fileAtt) return;
   // A file sent with no words used to be told "if it is a list of stores or

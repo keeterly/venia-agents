@@ -4730,3 +4730,68 @@ exists so a new verb has to be a deliberate edit rather than something that
 drifts into everyone's hands.
 
 `gauntlet/wholesaledesk.js` — 26 assertions.
+
+## Build 473 — the Drive picker was handing back files it had no right to read
+
+Picking a Google Sheet in the Drive window returned **HTTP 403** on the very
+next step. The export URL was right; the *grant* was missing.
+
+We ask Google for the `drive.file` scope — the narrow one, which never gives
+the app a view of the whole Drive. Under that scope a file becomes readable
+one of two ways: the app created it, or **the Picker granted it**. The Picker
+only issues that grant if it is told which app to grant to, via `setAppId`.
+Ours never called it. So the Picker returned a file id, no grant was ever
+created, and the first read bounced. It went unnoticed for as long as it did
+because files the app wrote itself are readable by authorship — the failure
+only shows up on a file the founders made.
+
+- `.setAppId(googleProjectNo())` on the PickerBuilder. `googleProjectNo()`
+  already existed — it reads the Cloud project number off the front of the
+  OAuth client id — so this needs no new credential and nothing pasted into a
+  dashboard.
+- `driveWhy(r, what)` — every Drive failure now says what to do about it.
+  Google puts a machine-readable `reason` in the error body and we were
+  throwing away the whole body: `appNotAuthorizedToFile`,
+  `insufficientFilePermissions`, `insufficientPermissions`,
+  `exportSizeLimitExceeded`, the two rate-limit reasons, and `notFound` each
+  map to a sentence naming the next move. Anything unrecognised falls back to
+  Google's own message, and a non-JSON body still yields the status code
+  rather than a bare "failed".
+
+`gauntlet/drivegrant.js` — 10 assertions.
+
+## Build 474 — the app invited the founder to close it, then threw away their file
+
+Ships in the same deploy as 473's Drive fix.
+
+"I uploaded a spreadsheet but it looks like it was capped."
+
+A 1,001-row buyer list attaches as 21 windows of 50 rows, so no single call
+times out. Rows 1–50 went out, the turn ran in the cloud, and the dock said —
+correctly, by design — **"you can close the app"**. `SK.fileSet`, which holds
+the other 951 rows, lived in memory only. Closing the app is what destroyed
+it. On return the reply was there, the Continue button was not, and typing
+"continue" reached Enigma with nothing attached: *"rows 51–1001 haven't come
+through in this chat yet."* The only way back was to upload the file again and
+re-do the first fifty.
+
+**The invitation and the storage disagreed, and the invitation was the honest
+half.** So the queue is stored now.
+
+- `skFileSave()` / `skFileLoad()` — the queued file and its place are written
+  to storage the moment the place moves, not at the end. A queue older than a
+  week is dropped rather than handed back: the founder has moved on, and rows
+  from last month are worse than none.
+- `skRestoreFileSet()` — on return, the rest of the file is offered back with
+  its count, the chip re-queued to the right window, and a **Drop it** button
+  for when the answer is "not any more". It never auto-resumes: hands-off mode
+  ends at the reload, because silently restarting a twenty-batch run nobody is
+  watching is how a mis-click spends the budget.
+- `skContinueRows()` — **"continue" typed by hand now attaches the next
+  window.** That is what the founder actually did, and the words went to the
+  model alone, which answered correctly and uselessly that no rows had come
+  through. An ordinary question does not drag the file in behind it.
+- Over ~2MB, or on a storage quota error, it degrades to the old in-memory
+  behaviour instead of failing the attach.
+
+`gauntlet/rowsurvive.js` — 19 assertions, 11 of which failed against 473.
