@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '474';
+  const BUILD = '475';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23531,6 +23531,17 @@ function buildTodayFocus() {
     const days = Math.floor((now - new Date(b.nextDate + 'T00:00:00')) / 86400000);
     items.push({key:'buyer|'+b.id, pri: days >= 7 ? 'high' : 'med', text:`Follow up ${b.name}${b.nextAction ? ' — ' + b.nextAction : ''} (${days}d overdue)`});
   });
+  // 2b. WHAT WE OWE A BUYER. Not a move we planned -- a thing they asked us
+  // for and have not received. This is the one that went missing for four
+  // months, because nothing in the app could hold an inbound request.
+  try {
+    (window.slOwedOpen ? slOwedOpen() : []).forEach(function(o){
+      if (o.days < SL_OWED_LOUD) return;              // asked today is not yet a failure
+      items.push({ key: 'owed|' + o.id, pri: o.days >= 14 ? 'high' : 'med',
+                   text: 'Owed ' + o.buyer + ': ' + o.what + ' \u2014 ' + o.days + ' days waiting',
+                   act: "cpGoto('sl')" });
+    });
+  } catch(e){}
   // 3. Sample rounds past their ETA with no result logged.
   (STATE.styles||[]).forEach(s => {
     try {
@@ -26986,6 +26997,7 @@ function escHtml(str) {
 // be allowed to save.
 const ACTION_MODULE = {
   add_buyers: 'sales', update_buyers: 'sales', record_payment: 'sales', log_outreach: 'sales',
+  log_owed: 'sales',
   add_vendors: 'product', update_vendors: 'product', add_material: 'product',
   add_styles: 'product', update_styles: 'product', apply_style_specs: 'product',
   generate_care_label: 'product', log_sample_round: 'product', set_forecast: 'product',
@@ -27064,7 +27076,15 @@ function agentActionSpec(key) {
       + 'out and when the follow-up is owed. It moves the buyer\'s stage, stamps the contact date, '
       + 'appends a line of history and sets nextDate. It does NOT send anything — the founder sends '
       + 'from their own address, then you record it. "note" is what was actually sent, in one line. '
-      + 'nextDays defaults to 7. Never log an approach you were not told was made.\n'
+      + 'nextDays defaults to 7. Never log an approach you were not told was made.\n'      + '```\n'
+      + '{"type":"log_owed","owed":[{"name":"Exact store name","what":"The SS27 line sheet","since":"2026-05-04"}]}\n'
+      + '```\n'
+      + 'Rules for log_owed: use it when a BUYER ASKED US for something and has not received it \u2014 '
+      + 'a lookbook, a line sheet, prices, an appointment. This is the opposite direction to '
+      + 'log_outreach: that records what we sent, this records what we owe. "since" is the date THEY '
+      + 'ASKED, not today \u2014 read it off the email or the message and backdate it, because the age '
+      + 'is the whole point and a four-month-old promise must read as four months old. Omit "since" '
+      + 'only if you genuinely cannot tell. It ages on the Today list until it is marked delivered.\n'
       + 'Rules for update_buyers: put ONLY the fields you are changing inside "set" — allowed keys: location, country, type, stage, tier, phone, address, website, notes, fit, nextDate, nextAction. Blank values are ignored (this action never clears a field). "stage" takes To Reach / Talking / Quoted / Stockist / Ordered / Dormant; "tier" is dream / strong / reach. "addContacts" appends people, never replaces. AT MOST 20 updates per block — same continue pattern as add_buyers. Use this instead of asking the user to fix records by hand.';
   }
   if (key === 'plm') {
@@ -27827,6 +27847,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'add_buyers')  return agentRunAddBuyers(action, chatBody);
   if (action.type === 'update_buyers') return agentRunUpdateBuyers(action, chatBody);
   if (action.type === 'log_outreach') return agentRunLogOutreach(action, chatBody);
+  if (action.type === 'log_owed') return agentRunLogOwed(action, chatBody);
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
   if (action.type === 'add_styles') return agentRunAddStyles(action, chatBody);
@@ -29616,6 +29637,44 @@ function agentBuildBuyers(action) {
 // Execute update_buyers: edit existing CRM accounts in place. Matches by name
 // (exact first, then contains), applies only whitelisted non-blank fields,
 // stamps updatedAt for the cross-device merge, and offers a full Undo.
+// THE OTHER DIRECTION. log_outreach records what we sent; this records what a
+// buyer asked us for and has not received. Reading it out of a mail thread is
+// exactly the job an agent should do, because it is the thing a person forgets:
+// an inbound request creates no task anywhere, which is how a lookbook a buyer
+// asked for in May went out in September.
+function agentRunLogOwed(action, chatBody) {
+  const list = Array.isArray(action.owed) ? action.owed : [];
+  const buyers = STATE.slBuyers || [];
+  const snap = {}, done = [], missed = [];
+  list.slice(0, 20).forEach(function(t){
+    const q = String(t && t.name || '').trim().toLowerCase();
+    const what = String(t && t.what || '').trim();
+    if (!q || !what) return;
+    const b = buyers.find(function(x){ return String(x.name||'').toLowerCase() === q; })
+           || buyers.find(function(x){ return String(x.name||'').toLowerCase().indexOf(q) >= 0; });
+    if (!b) { missed.push(t.name); return; }
+    if (!snap[b.id]) snap[b.id] = JSON.parse(JSON.stringify(b));
+    const since = /^\d{4}-\d{2}-\d{2}$/.test(String(t.since || '')) ? t.since : '';
+    if (slOwe(b.id, what, since ? { since: since } : {})) {
+      const age = since ? Math.max(0, Math.round(
+        (new Date() - new Date(since + 'T00:00:00')) / 86400000)) : 0;
+      done.push((b.name || 'buyer') + ' — ' + what + (age >= 3 ? ' (' + age + 'd)' : ''));
+    }
+  });
+  if (!done.length) {
+    appendAgentNote(chatBody, '\u26a0 Nothing was recorded'
+      + (missed.length ? ' — no buyer matched: ' + missed.join(', ') : '') + '.');
+    return;
+  }
+  window.__agPrevBuyers = snap;
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  agentActionCard(chatBody, 'Recorded ' + done.length + ' outstanding request' + (done.length === 1 ? '' : 's'),
+    done.map(function(n){ return escHtml(n); }).join(' · ')
+    + (missed.length ? '<div style="margin-top:6px;color:var(--amber)">No match: ' + escHtml(missed.join(', ')) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Sales \u2192 Buyers \u2192 Desk</div>',
+    'agentUndoOutreach()');
+}
+
 // THE DESK'S OWN ACTION. An agent working the queue proposes the touches it
 // made sense of; the founder applies them in one tap. It records what was sent
 // — it does not send anything, which is the same line every other desk holds.
@@ -32830,10 +32889,71 @@ function slBuyerReachable(b){
   return !!(b && (String(b.email || '').trim() || String(b.website || '').trim()));
 }
 // Dormant is a decision someone made; it is not today's work.
+// Nor is an account the agent is working: approaching a buyer our showroom is
+// already talking to confuses the buyer and damages the one relationship worth
+// more than the whole list. Owned elsewhere means not ours to cold-approach.
+function slBuyerAgentHeld(b){ return !!b && b.owner === 'agent'; }
 function slBuyerWorkable(b){
   return !!b && b.stage !== 'inactive' && b.stage !== 'closed' && b.stage !== 'active'
-    && slBuyerReachable(b);
+    && !slBuyerAgentHeld(b) && slBuyerReachable(b);
 }
+
+// WHAT WE OWE THEM, WHICH IS NOT THE SAME AS WHAT WE PLANNED.
+//
+// The follow-up machinery was working the whole time: Focus surfaces any buyer
+// whose nextDate has passed, with the overdue count on it. But nextDate is set
+// only by slLogTouch -- an approach WE made. A buyer writing to ask US for
+// something is inbound: there is no touch to log, so no date is set, and no
+// timer ever runs. That is how "we would love to receive the lookbook once
+// available" waited seventeen weeks. The reminder was never the gap. A promise
+// made to someone else had nowhere to live.
+const SL_OWED_LOUD = 3;          // days before an unmet promise starts asking
+window.slOwe = function(id, what, opts){
+  const o = opts || {};
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) { try { showToast('No buyer with that id', 'error'); } catch(e){} return false; }
+  const text = String(what || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!text) return false;
+  if (!Array.isArray(b.owed)) b.owed = [];
+  // SINCE IS WHEN THEY ASKED, not when we noticed. Backdating is the whole
+  // point: a promise found four months late is four months old, and saying so
+  // is the only way the number argues for itself.
+  const since = /^\d{4}-\d{2}-\d{2}$/.test(String(o.since || '')) ? o.since
+              : new Date().toISOString().slice(0, 10);
+  let who = ''; try { who = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
+  b.owed.push({ id: 'ow' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                what: text, since: since, by: who, done: '' });
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Wholesale: owe ' + (b.name || 'buyer') + ' — ' + text); } catch(e){}
+  return true;
+};
+window.slOwedDone = function(id, owedId){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return false;
+  const rec = (b.owed || []).find(function(x){ return x && x.id === owedId; });
+  if (!rec || rec.done) return false;
+  rec.done = new Date().toISOString();          // kept, not deleted: how long we took is the lesson
+  b.updatedAt = rec.done;
+  save();
+  return true;
+};
+// Every promise still outstanding, oldest first, with its age in days.
+window.slOwedOpen = function(){
+  const today = new Date().toISOString().slice(0, 10);
+  const out = [];
+  (STATE.slBuyers || []).forEach(function(b){
+    if (!b || b.stage === 'inactive') return;
+    (b.owed || []).forEach(function(o){
+      if (!o || o.done) return;
+      const days = Math.max(0, Math.round(
+        (new Date(today + 'T00:00:00') - new Date(String(o.since) + 'T00:00:00')) / 86400000));
+      out.push({ id: o.id, buyerId: b.id, buyer: b.name || 'buyer', what: o.what,
+                 since: o.since, days: days });
+    });
+  });
+  return out.sort(function(a, b2){ return b2.days - a.days; });
+};
 // WHAT STANDS BETWEEN THIS LIST AND A FIRST ORDER.
 // Deliberately shaped like finTagAudit: the founders already read that one, and
 // a second audit that reported differently would be a second thing to learn.
@@ -32855,6 +32975,25 @@ window.slDeskAudit = function(){
       + 'an approach written to a buyer with no address is work that cannot be sent. Find an address '
       + 'or a site for the ones worth keeping and let the rest go; a list you cannot write to is not '
       + 'a pipeline, and it makes the pipeline look larger than it is.' });
+
+  // Not a fault -- a boundary. Said out loud so the desk's smaller number
+  // reads as deliberate rather than as buyers having gone missing.
+  const agentHeld = live.filter(slBuyerAgentHeld);
+  if (agentHeld.length) issues.push({ key: 'agent_held', level: 'check',
+    label: agentHeld.length + ' account' + (agentHeld.length === 1 ? ' is' : 's are')
+      + ' held by the agent, not the desk',
+    detail: 'The showroom is working these, so the desk leaves them alone: two approaches into the '
+      + 'same buyer reads as a brand that does not talk to its own agent. Log what the agent reports '
+      + 'against the account so the history stays in one place.' });
+
+  const owedOpen = (typeof slOwedOpen === 'function') ? slOwedOpen() : [];
+  const owedLate = owedOpen.filter(function(o){ return o.days >= 14; });
+  if (owedLate.length) issues.push({ key: 'owed', level: 'block',
+    label: owedLate.length + ' buyer request' + (owedLate.length === 1 ? '' : 's')
+      + ' still unanswered after two weeks',
+    detail: 'A buyer asked us for something and has not received it \u2014 the oldest has been waiting '
+      + owedLate[0].days + ' days. This is the most expensive thing on the list: they already raised '
+      + 'their hand, and every week of silence spends the interest they arrived with.' });
 
   const untouched = workable.filter(function(b){ return !(b.log || []).length; });
   if (untouched.length) issues.push({ key: 'untouched', level: 'check',
@@ -32882,6 +33021,7 @@ window.slDeskAudit = function(){
 
   return { all: all.length, total: live.length,
            reachable: reachable.length, unreachable: unreachable.length,
+           agentHeld: agentHeld.length, owed: owedOpen.length, owedLate: owedLate.length,
            workable: workable.length, untouched: untouched.length, quotes: quotes, orders: orders,
            issues: issues,
            ready: issues.filter(function(i){ return i.level === 'block'; }).length === 0 };
@@ -32934,7 +33074,11 @@ window.slLogTouch = function(id, opts){
   b.lastContact = now.toISOString();
   if (!Array.isArray(b.log)) b.log = [];
   let who = ''; try { who = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
-  b.log.push({ at: now.toISOString(), by: who,
+  // WHICH DOOR was used. Without it there is no way to learn that the shop
+  // inbox never answers and the owner's Instagram does.
+  const CH = { email:1, ig:1, whatsapp:1, phone:1, post:1, agent:1, meeting:1 };
+  const chan = CH[String(o.channel || '').toLowerCase()] ? String(o.channel).toLowerCase() : '';
+  b.log.push({ at: now.toISOString(), by: who, channel: chan,
                note: String(o.note || 'Approached').replace(/\s+/g, ' ').trim().slice(0, 400) });
   if (o.nextAction) b.nextAction = String(o.nextAction).replace(/\s+/g, ' ').trim().slice(0, 200);
   // A touch without a next date is how a conversation quietly ends.
@@ -33007,8 +33151,27 @@ window.slDeskRender = function(){
       +   (b.email ? '<a class="ag-btn ag-btn-sm" href="mailto:' + slEsc(b.email) + '" target="_blank" rel="noopener">Email</a>' : '')
       +   (b.website ? '<a class="ag-btn ag-btn-sm" href="' + slEsc(b.website) + '" target="_blank" rel="noopener">Site</a>' : '')
       +   '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slDeskTouch(\'' + slEsc(b.id) + '\')">Log approach</button>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskOwe(\'' + slEsc(b.id) + '\')">They asked for\u2026</button>'
       + '</div></div>';
   }).join('');
+
+  // WHAT THEY ASKED US FOR comes first, above the cold queue. A buyer who
+  // already raised their hand is worth more than any door we are about to
+  // knock on, and the age is printed because the age is the argument.
+  const owed = (typeof slOwedOpen === 'function') ? slOwedOpen() : [];
+  const owedHtml = owed.length ? owed.map(function(o){
+    const hot = o.days >= 14;
+    return '<div style="display:flex;gap:10px;align-items:baseline;justify-content:space-between;'
+      + 'padding:9px 0;border-bottom:1px solid var(--border)">'
+      + '<div style="min-width:0"><div style="font-size:12.5px;font-weight:600">' + slEsc(o.buyer) + '</div>'
+      +   '<div style="font-size:11px;color:var(--muted);line-height:1.5">' + slEsc(o.what) + '</div></div>'
+      + '<div style="text-align:right;white-space:nowrap">'
+      +   '<div style="font-family:\'DM Mono\',monospace;font-size:11px;font-weight:700;color:'
+      +     (hot ? 'var(--red)' : 'var(--amber)') + '">' + o.days + 'd</div>'
+      +   '<button class="ag-btn ag-btn-sm" style="margin-top:4px" onclick="slDeskDelivered(\''
+      +     slEsc(o.buyerId) + '\',\'' + slEsc(o.id) + '\')">Delivered</button>'
+      + '</div></div>';
+  }).join('') : '';
 
   el.innerHTML =
       '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">'
@@ -33017,12 +33180,42 @@ window.slDeskRender = function(){
     +   'is what stands between the list and a first invoice.'
     + '</div>'
     + '<div style="margin-bottom:16px">' + issues + '</div>'
+    + (owedHtml
+        ? '<div class="ag-sec-head"><h2 class="ag-sec-title">They asked \u2014 we have not sent it</h2></div>'
+          + owedHtml
+          + '<div style="font-size:10px;color:var(--muted);margin:8px 0 16px;line-height:1.7">'
+          + 'These are worth more than anything in the queue below: they came to us. '
+          + 'Send it, then mark it delivered.</div>'
+        : '')
     + (rows ? '<div class="ag-sec-head"><h2 class="ag-sec-title">Approach today</h2></div>' + rows
             : '<div style="font-size:11px;color:var(--green)">Nothing to approach today — every reachable buyer has been worked or is parked until a later date.</div>')
     + '<div style="font-size:10px;color:var(--muted);margin-top:14px;line-height:1.7">'
     +   'Logging an approach moves the buyer, stamps the date and sets the follow-up a week out. '
     +   'Nothing here sends an email — you send it, from your own address.'
     + '</div>';
+};
+window.slDeskDelivered = function(id, owedId){
+  if (slOwedDone(id, owedId)) {
+    try { showToast('Marked delivered', 'success'); } catch(e){}
+    slDeskRender();
+  }
+};
+// Recording an inbound ask. "When did they ask" is the question that matters
+// and the one nobody thinks to record, so it is prompted for rather than
+// assumed to be today -- a promise found late is old, and should read as old.
+window.slDeskOwe = function(id){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  const what = prompt('What did ' + (b.name || 'they') + ' ask us for?', 'The SS27 line sheet');
+  if (what === null || !String(what).trim()) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const since = prompt('When did they ask? (YYYY-MM-DD)', today);
+  if (since === null) return;
+  if (slOwe(id, what, { since: String(since).trim() })) {
+    try { showToast('Recorded \u2014 it will keep asking until it is sent', 'success'); } catch(e){}
+    if (typeof buildTodayFocus === 'function') try { buildTodayFocus(); } catch(e){}
+    slDeskRender();
+  }
 };
 // One prompt, because the note is the thing worth capturing and everything
 // else has a sensible default.
