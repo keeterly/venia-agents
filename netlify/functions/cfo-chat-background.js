@@ -97,20 +97,76 @@ export default async (req) => {
   while (msgs.length && msgs[msgs.length - 1].role !== 'user') msgs.pop();   // must close on a user turn
   if (!msgs.length) { await complete(id, secret, 'error', 'no usable conversation to send'); return new Response('', { status: 200 }); }
 
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 16384, system: sysBlocks, messages: msgs }),
+  // WEB SEARCH IN THE DOCK. Asked to check a buyer list store by store, the
+  // dock answered — correctly — that it had no live browser: the tool was
+  // wired into Brainstorm's delegation and into the background worker, and
+  // never into the conversation the founders actually work in. Validating a
+  // stale contact is exactly the job that needs it, and it is the job that was
+  // being asked for.
+  //
+  // The model decides whether to search; max_uses caps what one turn can spend.
+  const searchTool = (v) => [{ type: v, name: 'web_search', max_uses: 6 }];
+  const post = (body) => fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify(body),
+  });
+  // Every URL the answer actually rested on, in the order they were cited.
+  // A contact filed off a web search is only worth having if the founder can
+  // see where it came from — an invented email address is worse than a blank
+  // one, because it looks like progress.
+  const sourcesOf = (blocks) => {
+    const seen = new Set(), out = [];
+    (blocks || []).forEach((b) => {
+      if (!b || b.type !== 'text') return;
+      (b.citations || []).forEach((c) => {
+        const u = c && (c.url || c.source);
+        if (!u || seen.has(u)) return;
+        seen.add(u);
+        out.push({ url: u, title: String((c && c.title) || '').slice(0, 90) });
+      });
     });
-    if (!r.ok) {
-      let d = 'HTTP ' + r.status;
-      try { const e = await r.json(); if (e && e.error && e.error.message) d = e.error.message; } catch (_) {}
-      throw new Error(d);
+    return out;
+  };
+  const attempt = async (tools) => {
+    const body = { model: 'claude-sonnet-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
+    if (tools) body.tools = tools;
+    let text = '', sources = [], rounds = 0;
+    while (rounds++ < 4) {
+      const r = await post(body);
+      if (!r.ok) {
+        let d = 'HTTP ' + r.status;
+        try { const e = await r.json(); if (e && e.error && e.error.message) d = e.error.message; } catch (_) {}
+        throw new Error(d);
+      }
+      const data = await r.json();
+      const blocks = data.content || [];
+      text += (text ? '\n' : '') + blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      sources = sources.concat(sourcesOf(blocks));
+      // A server-tool turn can run long enough that the API hands it back
+      // paused rather than finished. Continuing is the whole answer arriving;
+      // stopping here would truncate mid-search and read as a short reply.
+      if (data.stop_reason !== 'pause_turn') break;
+      body.messages = body.messages.concat([{ role: 'assistant', content: blocks }]);
     }
-    const data = await r.json();
-    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    text = text.trim();
     if (!text) throw new Error('empty reply');
+    if (sources.length) {
+      const seen = new Set();
+      const lines = sources.filter((s2) => !seen.has(s2.url) && seen.add(s2.url)).slice(0, 12)
+        .map((s2) => '- ' + (s2.title ? s2.title + ' — ' : '') + s2.url);
+      text += '\n\nSOURCES\n' + lines.join('\n');
+    }
+    return text;
+  };
+
+  try {
+    let text = null;
+    try { text = await attempt(searchTool('web_search_20260209')); }
+    catch (e1) {
+      try { text = await attempt(searchTool('web_search_20250305')); }
+      catch (e2) { text = await attempt(null); }   // no search rather than no answer
+    }
     await complete(id, secret, 'done', text);
     // WHO TO PUSH IS THE SERVER'S QUESTION, NOT THE BROWSER'S. This used to
     // send only to the list the client attached, read from venia_push_subs in

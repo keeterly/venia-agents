@@ -95,6 +95,25 @@ export default async (req) => {
   if (typeof payload.max_tokens !== 'number' || payload.max_tokens > 16384) payload.max_tokens = 16384;
   if (!ALLOWED_MODELS.has(payload.model)) payload.model = DEFAULT_MODEL;   // pin model server-side
 
+  // TOOLS ARE SPEND, so the relay decides which ones exist rather than the
+  // caller. The body was passed through whole: anything that got past the gate
+  // could have asked for a tool we never intended to pay for, or for a hundred
+  // searches in one turn. Only web search is allowed through, and its ceiling
+  // is set here — a client asking for more gets the ceiling, not an error,
+  // because failing the turn would be worse than capping it.
+  if (payload.tools !== undefined) {
+    const MAX_USES = 8;
+    const OK_TYPES = /^web_search_\d{8}$/;
+    const tools = Array.isArray(payload.tools) ? payload.tools.filter(
+      (t) => t && typeof t.type === 'string' && OK_TYPES.test(t.type)) : [];
+    if (!tools.length) delete payload.tools;
+    else payload.tools = tools.slice(0, 1).map((t) => ({
+      type: t.type, name: 'web_search',
+      max_uses: Math.max(1, Math.min(MAX_USES, Number(t.max_uses) || 5)),
+    }));
+    if (payload.tool_choice) delete payload.tool_choice;   // never force a paid tool
+  }
+
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {

@@ -4795,3 +4795,92 @@ half.** So the queue is stored now.
   behaviour instead of failing the attach.
 
 `gauntlet/rowsurvive.js` — 19 assertions, 11 of which failed against 473.
+
+## Build 475 — the system tracked what we planned, never what we promised
+
+"My biggest challenge with buyers is getting them to respond."
+
+The mailbox held the answer. On **4 May** a buyer at one of the most important
+accounts in the segment wrote *"we would love to receive the lookbook once
+available."* It was sent on **1 September**. Seventeen weeks — from an account
+that had raised its own hand, cc'ing four colleagues.
+
+**The follow-up machinery was working the whole time.** Focus has surfaced any
+buyer whose `nextDate` has passed, with the overdue count on it, for many
+builds. But `nextDate` is set only by `slLogTouch` — an approach *we* made. A
+buyer writing to ask *us* for something is inbound: there is no touch to log,
+so no date is set, and no timer ever runs. The reminder was never the gap. **A
+promise made to someone else had nowhere to live.**
+
+- `slOwe(id, what, {since})` — records an inbound request. `since` is when
+  **they asked**, not when we noticed, and backdating is the entire point: a
+  promise found four months late has to read as four months old, because the
+  age is the argument. `slOwedDone()` marks it delivered and **keeps** the
+  record — how long we took is the lesson. `slOwedOpen()` lists what is
+  outstanding, oldest first.
+- Focus source 2b: an unmet promise reaches Today with its age, high priority
+  past a fortnight. Under three days it stays quiet — a promise made this
+  morning is not yet a failure, and a list that cries wolf gets ignored.
+- The desk shows them **above** the cold queue, because a buyer who came to us
+  outranks any door we are about to knock on, with a Delivered button and a
+  **They asked for…** control on every queue row.
+- `log_owed` — the agent's verb for the same thing, and the natural way to use
+  it: reading a mail thread and noticing the ask nobody logged.
+
+**Ownership, because the agent relationship is worth more than the list.**
+VENIA's showroom runs outreach in Paris. Approaching a buyer they are already
+talking to confuses the buyer and damages the one relationship that matters
+most, so `owner: 'agent'` takes an account out of the desk's queue entirely and
+the audit says how many are held that way — stated out loud, so the smaller
+queue reads as deliberate rather than as buyers having gone missing.
+
+**Channel on every touch** — email, IG DM, WhatsApp, phone, post, agent,
+meeting. Without it there is no way to learn that the shop inbox never answers
+and the owner's Instagram does.
+
+`agentperm.js` caught `log_owed` before it shipped, as it is built to: a new
+verb has to be a deliberate edit rather than something that drifts into every
+role's hands. Mapped to `sales` beside its sibling.
+
+`gauntlet/owed.js` — 25 assertions, all 25 failing against 474.
+
+## Build 476 — the one place they ask for research was the one place that could not do any
+
+"Can you go through store by store and validate the info and or find the info
+that is available?"
+
+Enigma answered honestly: *"I don't have a live browser in this seat."* True,
+and absurd. Web search had been wired into Brainstorm's delegation and into the
+background worker since Build 393 — everywhere except the dock, which is the
+conversation the founders actually work in. Meanwhile the showroom had just
+emailed ~200 invitations, nearly all of them to `info@` and `contact@` inboxes,
+and 59 of 81 CRM buyers had no address at all. Validating a stale contact was
+exactly the job being asked for.
+
+- The dock's turns now offer the search tool on both paths — the cloud worker
+  where most turns run, and the streaming fallback. Both try the current tool
+  version, then the older one, then no tool at all: which version an account is
+  on is not knowable from here, and a rejected tool must never cost the answer.
+- **A paused server-tool turn is continued, not truncated.** A long research
+  turn comes back with `pause_turn` partway through; stopping there would have
+  read as a short, confident, half-researched reply.
+- **Sources come back with the answer.** Citations were being dropped on the
+  floor by the SSE parser. For a contact detail that is the difference between
+  a fact and a guess.
+
+**Searching is the easy half.** This is about to be pointed at a CRM with 59
+missing email addresses, so the rule matters more than the capability: never
+file a contact that was not seen on a named source; `first.last@domain` is a
+guess, not a finding; never carry a contact across from one store's record to
+another (which has already happened in this data); and **"I could not find one"
+is a complete answer** — a blank field costs an hour, an invented one costs the
+account, because nobody re-checks a field that is already filled. A search
+never silently overwrites a record that was already verified.
+
+**The relay decides what tools cost, not the caller.** It had been passing the
+request body through whole, so anything past the access gate could have asked
+for a tool we never intended to pay for, or a hundred searches in one turn.
+Only web search survives the filter, one tool per turn, the ceiling is set
+server-side, and `tool_choice` is stripped — a paid tool is never mandatory.
+
+`gauntlet/websearch.js` — 25 assertions.
