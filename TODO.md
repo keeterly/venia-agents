@@ -4644,3 +4644,48 @@ assigning `err` directly and overwriting the translation.
 
 `gauntlet/pushwake.js` — 7 assertions, driven at phone size against a fake
 client that throws the real `TypeError: Load failed`.
+
+## Build 471 — a daily pull, uncategorised as work, and a list you can add to
+
+Three things from one screenshot of Today.
+
+### The ledger should be today's without being asked
+
+The feed only moved when somebody pressed Refresh, so Money was as current as
+the last time anyone thought about it — and a P&L is only as good as the day
+its ledger stops. `bankDailySync()` runs on boot and whenever the app is
+returned to: if the last sync was yesterday or older, pull.
+
+**Deliberately not a timer.** A phone suspends timers in a backgrounded tab
+(the same fact behind Build 470), so "every 24 hours" on a device opened twice
+a day means whenever the OS feels like it. Opening the app is the reliable
+event, and it is also the moment the numbers are about to be looked at. Once
+per calendar day, silent, never in a share or portal view, and a failure leaves
+`lastSync` alone so the next open tries again rather than pretending.
+
+### Uncategorised rows are work, not a number problem
+
+Source 11 on Today: "N transactions need a category — $X of spending". High
+when it is ten or more rows or over $2,000, because that is when it distorts
+the statement rather than merely annoying somebody. Tapping goes to Money →
+Cash. It disappears when everything is filed — work, not a widget.
+
+Together these close the loop the founder asked for: the pull brings rows in,
+and anything it cannot file lands on the list instead of three screens down.
+
+### "I don't know how to add tasks there"
+
+Correct, and by construction: all twelve sources DERIVE their items, so nothing
+a person typed could appear. The only verb was assigning something the app had
+already decided to show — and the ＋ in each row is the assign chip, which is
+why it reads as an add button and is not one.
+
+`todayTasks` now sits alongside the derived items and behaves like them: same
+key shape, assignable, ordered by priority, gone when done. **Done, not
+deleted** — a list that forgets what was on it cannot answer "did we do that".
+An ＋ Add control in the Focus header, a tick on each manual row, blank refused,
+long text cut to 200 characters. Owned by the Today module, so it syncs: one
+founder's list is the other's.
+
+`gauntlet/bankdaily.js` — 10 assertions. `gauntlet/todaytask.js` — 14.
+The SYNC_KEYS tripwire moves 78 → 79, deliberately.

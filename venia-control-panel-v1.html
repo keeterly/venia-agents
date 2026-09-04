@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '470';
+  const BUILD = '471';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6212,7 +6212,11 @@ const MODULES = {
     owns: 'the day — what needs attention, the activity log, what the founders asked for',
     // Always granted: every person with any access at all sees Today, so the
     // cross-cutting keys (the log, the assistant's memory) live here.
-    keys: ['todayAssign', 'activityLog', 'eniMemory'],
+    keys: ['todayAssign', 'activityLog', 'eniMemory',
+           // What the founders put on Today themselves. Everything else on that
+           // screen is derived, which is why there was no way to add a task —
+           // and these have to sync, or one founder's list is not the other's.
+           'todayTasks'],
     ls: [],
   },
   product: {
@@ -23666,7 +23670,30 @@ function buildTodayFocus() {
   // 10. Money Watch — the CFO's own alerts (cash floor, runway, burn spike,
   //     margin floor, budget overrun). They join the ONE brief, so they also
   //     ride the 7 AM push digest without a second notification channel.
-  try { if (typeof finWatchAlerts === 'function') finWatchAlerts().forEach(i => items.push(i)); } catch(e){}
+  // 11. Transactions the ledger cannot file. An uncategorised row is not a
+  //     number problem, it is a piece of work — and left three screens down it
+  //     is the reason a P&L goes out with an "Unclassified" line on it. High
+  //     when the money involved is real, because that is when it distorts the
+  //     statement rather than merely annoying somebody.
+  try {
+    const unfiled = (STATE.finTxns || []).filter(function(t){
+      return t && t.status !== 'void' && !(typeof finTxnCat === 'function' ? finTxnCat(t) : t.category); });
+    if (unfiled.length) {
+      const out = unfiled.reduce(function(v, t){ return v + ((t.amount || 0) < 0 ? -(t.amount || 0) : 0); }, 0);
+      items.push({ key: 'uncat', pri: (unfiled.length >= 10 || out >= 2000) ? 'high' : 'med',
+        text: unfiled.length + ' transaction' + (unfiled.length === 1 ? '' : 's') + ' need a category'
+          + (out > 0 ? ' — $' + Math.round(out).toLocaleString() + ' of spending' : ''),
+        act: "cmdGoMoney();setTimeout(function(){try{cmdShowSection('cmd-bank',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-bank]'))}catch(e){}},160)" });
+    }
+  } catch(e){}
+  // 12. What the founders put there themselves. Everything above is DERIVED —
+  //     the app noticing a condition — which is why there was no way to add a
+  //     task and no way to tick one off. These are the manual ones, and they
+  //     behave like the rest: assignable, and gone when they are done.
+  (STATE.todayTasks || []).forEach(function(t){
+    if (!t || t.done) return;
+    items.push({ key: 'task|' + t.id, pri: t.pri || 'med', text: t.text, task: t.id });
+  });
   const order = { high: 0, med: 1, low: 2 };
   items.sort((a,b) => (order[a.pri] ?? 2) - (order[b.pri] ?? 2));
   const colMap = {high:'var(--red)', med:'var(--amber)', low:'var(--muted)'};
@@ -23677,6 +23704,7 @@ function buildTodayFocus() {
   // is done — assignment is who's on it, not a separate checklist to groom.
   const who = (typeof veniaWho === 'function') ? veniaWho() : '';
   const asg = STATE.todayAssign || {};
+  window.__todayItems = items;
   const view = (who && localStorage.getItem('venia-today-view') === 'mine') ? 'mine' : 'all';
   const mineN = who ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who).length : 0;
   const shown = view === 'mine' ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who) : items;
@@ -23691,7 +23719,13 @@ function buildTodayFocus() {
       <button onclick="todayView('all')" style="${segS(view==='all')}">ALL ${items.length}</button>
       <button onclick="todayView('mine')" style="${segS(view==='mine')}">MINE ${mineN}</button>
     </div>` : '';
-  const header = `<div style="display:flex;gap:10px;align-items:center;padding:0 0 10px">${seg}${needBadge}</div>`;
+  // The way to put something on this list yourself. Everything else here is
+  // the app noticing a condition; this is the founder saying one.
+  const addBtn = `<button onclick="todayTaskPrompt()" title="Add your own item to today"
+      style="margin-left:auto;background:none;border:1px solid var(--border-mid);color:var(--ink);
+      cursor:pointer;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
+      padding:5px 10px;flex-shrink:0">＋ Add</button>`;
+  const header = `<div style="display:flex;gap:10px;align-items:center;padding:0 0 10px">${seg}${needBadge}${addBtn}</div>`;
   const chipCol = { keeter:'var(--gold)', christine:'var(--blue)' };
   const chip = (i) => {
     if (!i.key) return '';
@@ -23708,6 +23742,7 @@ function buildTodayFocus() {
         `<div class="focus-row" style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)${i.act?';cursor:pointer':''}"${i.act?` onclick="${i.act.replace(/"/g,'&quot;')}"`:''}>
           <div style="width:3px;min-height:16px;background:${colMap[i.pri]};flex-shrink:0;border-radius:2px"></div>
           <div style="font-size:13px;color:var(--ink);line-height:1.5;flex:1">${i.text}</div>
+          ${i.task ? `<button onclick="event.stopPropagation();todayTaskDone('${slEsc(i.task)}')" title="Mark done" style="background:none;border:1px solid var(--border-mid);color:var(--muted);cursor:pointer;font-size:12px;line-height:1;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%">✓</button>` : ''}
           ${who ? chip(i) : ''}
           ${i.act?`<div style="font-size:10px;color:var(--muted);flex-shrink:0">→</div>`:''}
           ${i.nag?`<button onclick="event.stopPropagation();dismissNag('${i.nag}')" title="Dismiss — reconnect any time in Settings" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;flex-shrink:0">✕</button>`:''}
@@ -23733,6 +23768,44 @@ function veniaWho(){
   } catch(e){}
   return '';
 }
+// A LIST YOU CANNOT ADD TO IS NOT A LIST.
+//
+// Every other source on Today DERIVES its items: an overdue pull, a late
+// sample, a cash floor breached. Nothing a person typed could appear, so the
+// only verb available was assigning something the app had already decided to
+// show — and the "+" in each row is the assign chip, which is why it reads as
+// an add button and is not one.
+//
+// These behave like the derived items on purpose: same key shape, same
+// assignment, same disappearance when the work is done. Done, not deleted —
+// a list that forgets what was on it cannot answer "did we do that".
+window.todayTaskAdd = function(text){
+  const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (!t) return false;
+  if (!Array.isArray(STATE.todayTasks)) STATE.todayTasks = [];
+  let by = ''; try { by = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
+  STATE.todayTasks.push({ id: 'tt' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                          text: t.slice(0, 200), at: new Date().toISOString(), by: by, done: false });
+  save();
+  try { buildTodayFocus(); } catch(e){}
+  try { logActivity('Added to Today: ' + t.slice(0, 80)); } catch(e){}
+  return true;
+};
+window.todayTaskDone = function(id){
+  const t = (STATE.todayTasks || []).find(function(x){ return x && x.id === id; });
+  if (!t || t.done) return false;
+  t.done = true; t.doneAt = new Date().toISOString();
+  save();
+  try { buildTodayFocus(); } catch(e){}
+  return true;
+};
+// The prompt, from the + beside FOCUS.
+window.todayTaskPrompt = function(){
+  const v = prompt('Add to today:');
+  if (v === null) return;
+  if (!todayTaskAdd(v)) { try { showToast('Nothing to add', 'info'); } catch(e){} return; }
+  try { showToast('Added to today', 'success'); } catch(e){}
+};
 window.todayAssign = function(key){
   if (!key) return;
   if (!STATE.todayAssign) STATE.todayAssign = {};
@@ -39641,6 +39714,35 @@ window.bankMergeDupes = function(){
   return pairs.length;
 };
 
+// THE LEDGER SHOULD BE TODAY'S WITHOUT BEING ASKED.
+//
+// The feed only moved when somebody pressed Refresh, so the Money tab was as
+// current as the last time anyone thought about it — and a P&L is only as good
+// as the day its ledger stops. This runs on boot and whenever the app is
+// returned to: if the last sync was yesterday or older, pull.
+//
+// Deliberately not a timer. A phone suspends timers in a backgrounded tab (see
+// Build 470), so "every 24 hours" on a device that is opened twice a day means
+// whenever the OS feels like it. Opening the app is the reliable event, and it
+// is also the moment the numbers are about to be looked at.
+//
+// Quiet by construction: silent sync, once per calendar day, never in a share
+// or portal view, and a failure leaves lastSync alone so the next open tries
+// again rather than pretending it succeeded.
+window.bankDailySync = async function(){
+  if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;
+  const fb = STATE.finBank || {};
+  if (!(fb.accounts || []).some(function(a){ return a && a.status === 'active'; })) return;
+  const today = new Date().toISOString().slice(0, 10);
+  if (window.__bankDailyRan === today) return;          // once per day per session
+  const last = String(fb.lastSync || '');
+  if (last.slice(0, 10) === today) { window.__bankDailyRan = today; return; }
+  window.__bankDailyRan = today;
+  try { await bankSyncTxns(true); } catch (e) {
+    // Leave lastSync as it was: an open that failed is not a day that synced.
+    window.__bankDailyRan = 0;
+  }
+};
 window.bankSyncTxns = async function(silent){
   const fb = STATE.finBank || {}; const accounts = fb.accounts || [];
   if (!accounts.length) return;
@@ -43065,7 +43167,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     pushNow();
   }
   document.addEventListener('visibilitychange', function(){
-    if (document.visibilityState === 'visible') pushWake('returned to the app');
+    if (document.visibilityState !== 'visible') return;
+    pushWake('returned to the app');
+    // Opening the app is the reliable moment to refresh the ledger: a phone
+    // suspends timers in the background, and this is when the numbers are
+    // about to be looked at.
+    try { if (typeof bankDailySync === 'function') bankDailySync(); } catch(e){}
   });
   window.addEventListener('online', function(){ pushWake('network came back'); });
   function pushLanded(){
@@ -43523,7 +43630,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     startRealtime();
     // Flag when the first cloud snapshot has landed — the ?tag boot path waits
     // for this so a fresh Safari session decides against real data, not seeds.
-    initialSync().finally(function(){ window.__sbSyncDone = true; });
+    initialSync().finally(function(){
+      window.__sbSyncDone = true;
+      // After the workspace has landed, so a pull cannot race the merge.
+      try { if (typeof bankDailySync === 'function') setTimeout(bankDailySync, 2500); } catch(e){}
+    });
   };
 
   // Re-patch save() to also push the full blob (debounced).
