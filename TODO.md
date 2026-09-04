@@ -4971,3 +4971,48 @@ verified contact. That reason survives.
 
 `gauntlet/actionpick.js` — 14 assertions. `gauntlet/contactfix.js` — 17
 assertions, all 17 failing against 477.
+
+## Build 479 — the same two tools Product has, on the accounts
+
+*"We should implement a flagging system like we have in product and hideable
+columns."*
+
+### One list for the header and the cell
+
+The buyers table hand-wrote eleven `<th>` in one place and eleven `<td>` in
+another — the exact drift the styles table carries a comment warning against.
+Bolting a hide onto that would have meant two lists to keep in step, and the
+first mismatch is a header whose column still renders, which is worse than no
+feature.
+
+`SL_COLS` is one registry where a column owns **both** its header and its cell,
+mirroring `STYLE_COLS`. `slColOn` / `slColsVisible` / `slColToggle` /
+`slColReset`, a chooser in the corner of the header, and a stored 0/1 that beats
+the shipped default — so a later change to a default cannot silently override a
+deliberate choice. Flag and Name are locked. **Owner** is a new column, off by
+default: direct, or the agent working it.
+
+Hidden columns are a **device** preference: what one founder hides on their
+laptop is not a decision for the other founder's phone.
+
+### Flags: same mechanism, own vocabulary
+
+Same five colours and the same behaviour as the styles board — not a stage and
+not a priority, a marker you put on an account because *you* are working it, and
+tapping the flag already there clears it.
+
+**Deliberately not the same labels.** "Waiting on factory" is meaningless on a
+store, and one shared label map would mean renaming a flag for a buyer silently
+renamed it for a style. Buyers get *Blocked · Waiting on reply · Ready to quote ·
+Needs research · Agent working it*, renameable exactly as Product's are, stored
+separately in `STATE.slFlagLabels`. The last two are load-bearing: "Needs
+research" is the queue for the web validation, "Agent working it" sits beside
+the ownership boundary from 475.
+
+The flag shows in the **pipeline** view as well as the table — a marker only
+visible in one of two views is invisible in whichever one you happen to use — and
+a **⚑ Flagged** chip filters to it, carrying the count.
+
+`gauntlet/buyercols.js` — 21 assertions. Three of them started as false passes:
+the suite rendered into a missing element and cheerfully asserted against an
+empty string. It now proves the table rendered before believing anything else.
