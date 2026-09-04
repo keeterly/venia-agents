@@ -4917,3 +4917,57 @@ discipline as `driveWhy` in 473, for the same reason: a bare wall is not
 actionable, and a model asked to interpret one will oblige.
 
 `gauntlet/websearch.js` — 37 assertions.
+
+## Build 478 — tick what you want, and let a wrong contact be corrected
+
+Two asks, one root: Enigma proposing corrections the founder could not act on.
+
+### "Replying in text for actionables is tedious"
+
+*"If ENIGMA suggests changes, maybe it gives me a list of actions and I can tick
+off the ones I want done."*
+
+It was all-or-nothing. An action block carrying twelve corrections applied
+twelve corrections. Disagreeing with one meant writing a paragraph saying which,
+and getting back a fresh block that might silently drop two others — so the cost
+of refusing a single row was re-reading all twelve.
+
+A multi-item action is now a **checklist**, applied on a tap. Ticked by default,
+so accepting everything stays one tap; untick the one you disagree with and the
+rest still land. Tick all / untick all / cancel. **Nothing is written before the
+tap** — that is the whole point. A *single*-item action still applies straight
+away with an Undo, because a one-row checklist is friction, not control.
+
+Applying builds a **copy** carrying only the ticked rows; the original block is
+left untouched, so a mis-tap cannot quietly rewrite what the agent proposed.
+Covers every bulk verb that writes records — buyers, vendors, styles, outreach,
+owed — and each row says what it would do (an update names the fields, not just
+the store).
+
+### Append-only was the safeguard, and the safeguard was the bug
+
+*"Antonioli and Lynx Store have a formatting bug in their contact field (name
+and email doubled-up, like `Helene Uccello <Helene Uccello
+<helene.uccello@antonioli.eu>>`) — cosmetic, but I can't overwrite an existing
+contact, only append, so that one needs a manual edit on your end."*
+
+`addContacts` appends and dedupes by email. Nothing repaired. On a hundred-plus
+accounts that is a hundred hand-edits — and **a wrong contact is worse than a
+missing one, because it looks filled in.**
+
+The append-only rule was there for a real reason: never silently destroy a
+verified contact. That reason survives.
+
+- `slContactClean()` — unwraps angle brackets to any depth, recovers the address
+  buried inside, and collapses a name repeated twice. A **clean** contact passes
+  through untouched, accents intact; an empty one stays empty; a name with no
+  address never gets one.
+- `slContactBad()` — malformed means *the cleaner would change it*, so nothing
+  else is ever rewritten.
+- `slContactsAudit()` / `slContactsRepair()` / `slContactsUndo()` — repair across
+  the whole book, reporting the count, keeping the role the record already had,
+  idempotent, and undoable.
+- New contacts are cleaned **on the way in**, so this stops being created.
+
+`gauntlet/actionpick.js` — 14 assertions. `gauntlet/contactfix.js` — 17
+assertions, all 17 failing against 477.
