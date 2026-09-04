@@ -4689,3 +4689,44 @@ founder's list is the other's.
 
 `gauntlet/bankdaily.js` — 10 assertions. `gauntlet/todaytask.js` — 14.
 The SYNC_KEYS tripwire moves 78 → 79, deliberately.
+
+## Build 472 — the Wholesale Desk
+
+The first of the six desks, and the one with the revenue on it. Measured on the
+live CRM: **81 buyers, 21 with an email, 22 reachable at all** (email or
+website), one with a next action, four with any contact history — and in the
+whole history of the brand, **zero quotes issued and zero orders booked.**
+That is not a pipeline, it is a list.
+
+**The gate is reachability.** 59 of the 81 have neither an email nor a website,
+so an outreach agent pointed at the whole list produces 59 drafts that cannot
+be sent. Everything here refuses to queue a buyer it cannot reach and says how
+many it set aside.
+
+- `slDeskAudit()` — what stands between the list and a first invoice. Shaped
+  like `finTagAudit()` on purpose: the founders already read that one, and a
+  second audit that reported differently would be a second thing to learn.
+  Blocks on unreachable buyers and on **"no quote has ever been issued"** —
+  the first quote matters more than the first order, because it is what proves
+  the path from buyer to invoice to cash connects at all.
+- `slDeskQueue(n)` — today's approaches, capped, ordered by how close to money
+  (quoted → talking → new), then by the quality of the door, then by who has
+  waited longest. Excludes anyone worked today or parked until a later date.
+- `slLogTouch()` — records what was sent. **This is what makes it a pipeline:**
+  without it the queue offers the same buyer tomorrow. Moves the stage, stamps
+  the date, appends history, and always sets a next date, because a
+  conversation with no next step is a conversation that ends. Undoable.
+- The desk screen, reachable from Sales → Buyers → **Desk**, and two Today
+  items: the day's approaches, and the gate with its number.
+- `log_outreach` — the agent's verb for the same thing, batched and undoable.
+  It records an approach; it never sends one. The founder sends from their own
+  address, as with every other desk.
+
+**`agentperm.js` caught a real gap in this build before it shipped:**
+`log_outreach` had no entry in the action→module map, which means it would
+have been offered to **every** role rather than to Sales. Mapped to `sales`,
+and added to that gauntlet's list of actions-added-since-424 — a tripwire that
+exists so a new verb has to be a deliberate edit rather than something that
+drifts into everyone's hands.
+
+`gauntlet/wholesaledesk.js` — 26 assertions.
