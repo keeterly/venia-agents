@@ -4843,3 +4843,44 @@ verb has to be a deliberate edit rather than something that drifts into every
 role's hands. Mapped to `sales` beside its sibling.
 
 `gauntlet/owed.js` — 25 assertions, all 25 failing against 474.
+
+## Build 476 — the one place they ask for research was the one place that could not do any
+
+"Can you go through store by store and validate the info and or find the info
+that is available?"
+
+Enigma answered honestly: *"I don't have a live browser in this seat."* True,
+and absurd. Web search had been wired into Brainstorm's delegation and into the
+background worker since Build 393 — everywhere except the dock, which is the
+conversation the founders actually work in. Meanwhile the showroom had just
+emailed ~200 invitations, nearly all of them to `info@` and `contact@` inboxes,
+and 59 of 81 CRM buyers had no address at all. Validating a stale contact was
+exactly the job being asked for.
+
+- The dock's turns now offer the search tool on both paths — the cloud worker
+  where most turns run, and the streaming fallback. Both try the current tool
+  version, then the older one, then no tool at all: which version an account is
+  on is not knowable from here, and a rejected tool must never cost the answer.
+- **A paused server-tool turn is continued, not truncated.** A long research
+  turn comes back with `pause_turn` partway through; stopping there would have
+  read as a short, confident, half-researched reply.
+- **Sources come back with the answer.** Citations were being dropped on the
+  floor by the SSE parser. For a contact detail that is the difference between
+  a fact and a guess.
+
+**Searching is the easy half.** This is about to be pointed at a CRM with 59
+missing email addresses, so the rule matters more than the capability: never
+file a contact that was not seen on a named source; `first.last@domain` is a
+guess, not a finding; never carry a contact across from one store's record to
+another (which has already happened in this data); and **"I could not find one"
+is a complete answer** — a blank field costs an hour, an invented one costs the
+account, because nobody re-checks a field that is already filled. A search
+never silently overwrites a record that was already verified.
+
+**The relay decides what tools cost, not the caller.** It had been passing the
+request body through whole, so anything past the access gate could have asked
+for a tool we never intended to pay for, or a hundred searches in one turn.
+Only web search survives the filter, one tool per turn, the ceiling is set
+server-side, and `tool_choice` is stripped — a paid tool is never mandatory.
+
+`gauntlet/websearch.js` — 25 assertions.

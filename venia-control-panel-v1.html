@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '475';
+  const BUILD = '476';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23082,11 +23082,11 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 // Retry wrapper: Anthropic's servers intermittently answer 529 "Overloaded"
 // (and the odd 500/503/429) — transient by nature, so absorb up to two
 // automatic retries with backoff before surfacing anything to the user.
-async function callClaude(system, userMsg, history, model) {
+async function callClaude(system, userMsg, history, model, opts) {
   let lastErr = null, askedCode = false;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise(r => setTimeout(r, attempt === 1 ? 2500 : 7000));
-    try { return await _callClaudeOnce(system, userMsg, history || [], model); }
+    try { return await _callClaudeOnce(system, userMsg, history || [], model, opts); }
     catch (e) {
       lastErr = e;
       const em = String(e && e.message);
@@ -23119,15 +23119,29 @@ function veniaSysBlocks(system){
     return [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }];
   return system;
 }
-async function _callClaudeOnce(system, userMsg, history=[], model) {
+async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // Stream-first: the SSE relay isn't subject to the buffered-function time
   // window, so long generations (day plans, reshapes, adjustments) stop
   // 504ing. Any streaming failure falls through to the buffered path below,
   // which also covers the browser-key direct fallback.
   // 16384, not 4096: adaptive thinking counts against max_tokens, and long
   // tasks (bulk buyer lists) were hitting the cap mid-thought with zero text.
-  try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384 }); }
-  catch (e) { /* fall back to buffered */ }
+  // A search-capable turn goes down the streaming path twice: once asking for
+  // the current tool version, once for the older one, because which version an
+  // account is on is not knowable from here and a rejected tool must not cost
+  // the answer. Then plain, then buffered.
+  const _tools = (opts && opts.search)
+    ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || 6) }] : null;
+  try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384, tools: _tools }); }
+  catch (e) {
+    if (_tools) {
+      try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: (opts.maxSearch || 6) }] }); }
+      catch (e2) { /* fall through */ }
+      try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384 }); }
+      catch (e3) { /* fall back to buffered */ }
+    }
+  }
   const key = getKey('anthropic');
   // Strip history turns to {role, content} — stored turns carry UI metadata
   // (disp, img) and the API strict-rejects unknown fields with a 400.
@@ -23243,6 +23257,7 @@ async function callClaudeStream(system, userMsg, opts) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '', out = '';
+    const cites = [], citeT = {};
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -23256,10 +23271,20 @@ async function callClaudeStream(system, userMsg, opts) {
         if (!raw || raw === '[DONE]') continue;
         let ev; try { ev = JSON.parse(raw); } catch (e) { continue; }
         if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') out += ev.delta.text;
+        // WHERE IT CAME FROM. A searched answer arrives with citations riding
+        // alongside the text, and we were dropping them on the floor — which
+        // for a contact detail is the difference between a fact and a guess.
+        if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'citations_delta') {
+          const c = ev.delta.citation || {};
+          const u = c.url || c.source;
+          if (u && cites.indexOf(u) < 0) { cites.push(u); citeT[u] = String(c.title || '').slice(0, 90); }
+        }
         if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
       }
     }
     if (!out.trim()) throw new Error('Enigma replied with no text');
+    if (cites.length) out += '\n\nSOURCES\n' + cites.slice(0, 12).map(function(u){
+      return '- ' + (citeT[u] ? citeT[u] + ' \u2014 ' : '') + u; }).join('\n');
     return out;
   } catch (e) {
     if (timedOut) throw new Error('The connection went quiet (the app may have been asleep)');
@@ -50841,6 +50866,24 @@ try {
 // stays here is only the instruction about how to USE the context it is handed.
 const SK_ANSWER_RULE = `ANSWER FROM WHAT YOU WERE HANDED. The context below carries the line — every current-season style with its retail and wholesale price, plus a per-season economics line (average, median, range, booked, sell-in goal) for EVERY season, including any whose styles are not listed individually. So a question like "how many units to reach $25k of wholesale this season" is arithmetic you already have everything for: answer it with a number, show the division, and name the assumption (average price vs median, and what an average hides when the range is wide). Never ask the founder to go and fetch prices, style counts, or season totals that are already in your context, and never price off a single style you happened to see — check which season it belongs to first. If something genuinely is missing, say precisely which field, for which season, and why it blocks the answer — then give the best figure you can with what you do have, clearly labelled as an estimate.
 
+LOOKING THINGS UP. You can search the web, so when a question turns on a fact
+about the outside world — is this store still trading, who buys for them, what
+do they stock, what is their address — go and check rather than answering from
+memory or declining. Read what the page actually says.
+
+WHAT YOU MAY WRITE DOWN FROM A SEARCH. A contact detail is a fact or it is
+nothing. Never file an email address, a phone number, a handle or a named buyer
+unless you SAW it on a source you can name, and say which source. Do not
+assemble an address from a pattern (first.last@domain is a guess, not a
+finding), do not carry a contact across from one store's record to another, and
+do not upgrade "this looks like their format" into a saved field. "I could not
+find one" is a complete and useful answer — a blank field costs an hour, an
+invented one costs the account, because nobody re-checks a field that is
+already filled. The same holds for whether a shop is still open: say what the
+evidence is and how old it is. Where a source contradicts what the CRM holds,
+report both and let the founder decide; do not overwrite a verified record with
+something you read once.
+
 WEAK SPOTS — be proactive on these: publicity, press releases, and sales. Celebrity placements happen but rarely get turned into press, distribution, or online sales. Help capture and convert every moment.`;
 
 // ── context: where is the user right now? ────────────────────
@@ -51585,7 +51628,7 @@ async function skSend(preset, opts){
       if (body) body.scrollTop = body.scrollHeight;
       return;
     }
-    const reply = await callClaude(system, null, callHist);
+    const reply = await callClaude(system, null, callHist, undefined, { search: true });
     let shown = reply, action = null, unbacked = false;
     if (hasActions) {
       const parsed = agentExtractAction(reply);
