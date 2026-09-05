@@ -5112,3 +5112,101 @@ five now"* opener, so the test now uses the text that actually reached a founder
 today* for 23 hours out of 24. Run at 00:18 UTC it failed a build it had no
 quarrel with. The contract is once per calendar day, so the fixture now uses a
 time that is unambiguously today.
+
+## Build 482 — replacing a contact who no longer works there
+
+> *"Position by Kling, Wolfensson (wrong contacts, need manual replace) …
+> needing your manual hand rather than mine."*
+
+Enigma had now said this about four dream-tier accounts in a row. 478 gave it a
+repair for **malformed** contacts — a doubled-up name it could prove was broken —
+but not the ordinary case: the person on file is real, well-formed, and simply
+gone. There was no route through append-only for that, so accounts kept getting
+parked.
+
+**And 478 left a dangling reference.** It put `fixContacts` into the review
+card's label and never implemented it, so a row could read *"fix contact"* for a
+field that did nothing at all. That is mine, from the build before.
+
+- `fixContacts: [{match, name, email, role}]` on `update_buyers`. **`match` must
+  be a contact really on the record** — by address or by name — and when it
+  matches nothing it changes nothing. A replace that quietly becomes an append
+  is how a contact list doubles.
+- A field left out keeps its current value, so you can correct only the address
+  and keep the name.
+- The replacement is cleaned like any other write, so a fix cannot reintroduce
+  the doubled-up shape 478 removed. The clean happens **before** the fallback:
+  doing it the other way round meant an address buried in the supplied name was
+  never extracted — the name tidied up and the stale address stayed.
+- The account headline follows the first contact, and the whole thing is
+  undoable like every other buyer write.
+- Documented in the action spec, because a verb the model is not told about is a
+  verb it will keep saying it does not have.
+
+The append-only default stands. It was never wrong — it just had no door in it.
+
+`gauntlet/contactswap.js` — 13 assertions, 8 of which failed against 481 (the
+other five passed only because nothing happened at all).
+
+## Build 483 — the app noticed, so the app should fix it
+
+*"Once again nothing was actually saved."*
+
+Second time in one evening. Six new prospects researched against real criteria —
+RESTIR, I.T, Kapok, Neighbour, Table of Contents, Modes Bruxelles — described in
+full, *"Adding all six as new prospects"*, *"All six are in as New"*. No block.
+Nothing written.
+
+481 fixed the truncation case, and this was not that: the reply ends cleanly. The
+model simply did not emit the block. And the app's entire answer was **"Ask me
+again and I'll file it properly"** — handing the recovery to the person who had
+just been told their work vanished, for the second time, after paying to research
+it.
+
+The app is what noticed the mismatch. It should be what fixes it.
+
+- **A "File it now" button** on every reply that claimed a save and did not make
+  one — the unbacked claim, and a truncation with nothing salvageable.
+- One tap sends the turn itself. Nothing is retyped, and nothing is re-decided:
+  the retry asks for **the action block only, the same records, the same values,
+  no prose, no searching**. The findings are already in the conversation and the
+  history note appended on a failed turn already tells the model what went
+  wrong, so the shortest possible turn is also the one least likely to run out of
+  room — which is what lost the block in the first place.
+- It goes **direct** rather than back through the cloud queue, since the path
+  that just failed is not worth a second try.
+
+`gauntlet/refile.js` — 14 assertions.
+
+## Build 484 — a suggestion should arrive with the option to take it
+
+> *"Why did it take so many steps just to add these stores even though it was
+> already suggested? When they were proposed, I should have had the option to
+> add them already."*
+
+Right, and the cause was a rule of mine that had quietly gone stale:
+
+> *"Emit the block ONLY when the user wants stores saved — if they only asked to
+> see ideas, list them and offer to add the best fits."*
+
+**That was correct before Build 478.** Emitting a block meant it applied
+immediately, so withholding one on a mere suggestion was proper caution. Since
+478, nothing applies until the founder ticks — **the review card is the "do you
+want these?" step.** The rule survived the change that made it obsolete, and
+went on causing exactly the harm it was written to prevent: six well-chosen
+stores described, wanted, and then asked for again. Six times.
+
+A proposal now carries its block. The founder ticks what they want; a suggestion
+costs one tap instead of another whole turn.
+
+**That is only safe because a proposal is now always reviewed.** 478 let a
+single-item action through unreviewed, on the grounds that a one-row checklist
+is friction rather than control — sound while the model only emitted a block for
+a change the founder had *asked for*. With proposals carrying blocks, one
+suggested store would land in the CRM with nobody agreeing to it. So the
+**creating** verbs (`add_buyers`, `add_vendors`, `add_styles`) always ask,
+however few they name, and a **correction** the founder asked for still applies
+straight away.
+
+`gauntlet/actionpick.js` — 17 assertions, now covering both directions of that
+distinction.
