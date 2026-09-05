@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '478';
+  const BUILD = '481';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23123,14 +23123,26 @@ function veniaSysBlocks(system){
 // and they say very different things: one is our own per-turn cap, one is rate
 // limiting that clears on its own, and one is a setting on the account that no
 // amount of retrying will move.
+// CORRECTED IN 480 against the published tool reference. Two of these were
+// wrong: the code for a bad query is invalid_tool_input, and `unavailable` is
+// an internal error on Anthropic's side, NOT the organisation setting -- web
+// search disabled for the org fails the whole request with a 400 that says so,
+// never an error code inside a result. Pointing a founder at the Console for a
+// transient server error is a wasted trip.
 const SEARCH_WHY = {
   max_uses_exceeded: 'the per-turn search limit was reached \u2014 ask for fewer stores at a time',
   too_many_requests: 'Anthropic is rate limiting web search right now \u2014 try again shortly',
-  unavailable: 'web search is not available on this account \u2014 check that it is enabled for the '
-    + 'organisation in the Anthropic Console, and that no spend limit has been reached',
-  invalid_input: 'that search query was rejected as malformed',
+  unavailable: 'web search hit an internal error at Anthropic \u2014 not your account, and worth one retry',
+  invalid_tool_input: 'that search query was rejected as malformed',
+  request_too_large: 'that search request was too large to send',
   query_too_long: 'that search query was too long \u2014 ask for one store at a time',
 };
+// $10 per 1,000 searches: one cent each, and an error is not billed. Six was
+// set before that price was known, and six is two or three stores -- which is
+// why validating a buyer list kept stopping half way. Anthropic's own guidance
+// is that multi-entity research "can use 10 or more". Twenty costs 20c in the
+// worst case, against a list that has to be usable before a Paris showroom.
+const SEARCH_MAX = 20;
 async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // Stream-first: the SSE relay isn't subject to the buffered-function time
   // window, so long generations (day plans, reshapes, adjustments) stop
@@ -23143,12 +23155,12 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // account is on is not knowable from here and a rejected tool must not cost
   // the answer. Then plain, then buffered.
   const _tools = (opts && opts.search)
-    ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || 6) }] : null;
+    ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) }] : null;
   try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384, tools: _tools }); }
   catch (e) {
     if (_tools) {
       try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: (opts.maxSearch || 6) }] }); }
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) }] }); }
       catch (e2) { /* fall through */ }
       try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384 }); }
       catch (e3) { /* fall back to buffered */ }
@@ -26959,7 +26971,7 @@ async function agentSend(key, message) {
       : await callClaude(sysPrompt, null, SK.history);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
-    const { clean, action, parseError, unbackedClaim, extraBlocks } = agentExtractAction(reply);
+    const { clean, action, parseError, unbackedClaim, extraBlocks, truncated } = agentExtractAction(reply);
     let shown = parseError
       ? (clean ? clean + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.'
                : '⚠ I couldn\'t complete that change — nothing was saved. Please try once more.')
@@ -26967,7 +26979,11 @@ async function agentSend(key, message) {
     // Said it filed something, filed nothing. Left alone the sentence reads as
     // a confirmation and the founder stops checking — which is how a vendor
     // goes missing for a week.
-    if (!action && !parseError && unbackedClaim) {
+    if (action && truncated) {
+      shown += '\n\n⚠ That reply ran out of room part-way through — what arrived was saved, but the last few may be missing. Ask for the rest and check the count.';
+    } else if (!action && truncated) {
+      shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
+    } else if (!action && !parseError && unbackedClaim) {
       shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it. Ask me again and I\'ll file it properly, or add it by hand.';
     }
     if (extraBlocks) {
@@ -27731,6 +27747,12 @@ const AGENT_CLAIM_RE = new RegExp([
   // "Filed — same three merchants." A sentence that OPENS with a past-tense
   // verb of writing is an assertion with nothing after it to qualify.
   "(?:^|[\\n.!?]\\s*)(filed|saved|logged|recorded|categori[sz]ed|updated)\\b\\s*[—,.-]",
+  // "That's filed — DSM London, LN-CC and Maxfield all updated." The most
+  // natural way a model confirms a write, and it escaped every pattern above:
+  // no opening past-tense verb, no pronoun AFTER the verb to satisfy the first
+  // rule. It reached a founder as an unwarned claim, which is the dangerous
+  // shape -- a warned one costs a sentence, an unwarned one costs the record.
+  "\\b(?:that|this|those|these|they|it)(?:'s|s|'re| is| are| was| were| have been| has been)?\\s+(?:all\\s+|now\\s+|been\\s+)*(?:filed|saved|logged|recorded|updated|added|created|categori[sz]ed|entered|onboarded)\\b",
 ].join('|'), 'i');
 // WHAT THE MODEL SEES OF ITS OWN LAST TURN.
 //
@@ -27762,11 +27784,51 @@ function agentHistoryText(shown, action, unbacked){
 }
 window.agentHistoryText = agentHistoryText;
 
+// Close a JSON object that was cut off mid-write. Each candidate is one guess
+// at the missing tail; the first that parses into something with a type wins,
+// and nothing is invented -- a row that did not fully arrive is dropped, not
+// completed.
+function agentSalvageAction(raw){
+  const txt = String(raw || '').trim();
+  if (!txt) return null;
+  const tries = [txt];
+  const last = txt.lastIndexOf('}');
+  if (last > 0) {
+    const head = txt.slice(0, last + 1);
+    tries.push(head + ']}', head + '}', head + ']', head);
+  }
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      const o = JSON.parse(tries[i]);
+      if (o && typeof o === 'object' && !Array.isArray(o) && o.type) return o;
+    } catch (e) { /* try the next tail */ }
+  }
+  return null;
+}
+window.agentSalvageAction = agentSalvageAction;
+
 function agentExtractAction(text) {
   const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
   if (!m) {
     const t = String(text || '');
-    return { clean: t, action: null, parseError: false, unbackedClaim: AGENT_CLAIM_RE.test(t) };
+    // A REPLY CUT OFF MID-SAVE IS NOT A REPLY THAT FORGOT TO SAVE.
+    //
+    // The block is written LAST, so a turn that runs out of room loses exactly
+    // that -- and with the closing fence gone the pattern above matches
+    // nothing, which read to the founder as "there was no save action behind
+    // it". They said "file it", were told nothing happened, said "file it"
+    // again, and were told the same. The half-written block was sitting in the
+    // text the whole time. An opening fence with no close is the fingerprint.
+    const m2 = t.match(/```venia:action\s*([\s\S]*)$/);
+    if (!m2) return { clean: t, action: null, parseError: false, unbackedClaim: AGENT_CLAIM_RE.test(t) };
+    // SALVAGE WHAT ARRIVED. Brainstorm's workParse has done this since 393:
+    // a block cut off mid-array is still mostly valid JSON, and the rows that
+    // made it are real work. Trim back to the last complete object and close
+    // the structure. Losing the tail row is a fair price; losing all ten and
+    // telling the founder nothing was saved is not.
+    const salvaged = agentSalvageAction(m2[1]);
+    return { clean: t.slice(0, m2.index).trim(), action: salvaged, parseError: !salvaged,
+             truncated: true, unbackedClaim: false };
   }
   let action = null, parseError = false;
   try { action = JSON.parse(m[1].trim()); } catch (e) { action = null; parseError = true; }
@@ -33398,7 +33460,7 @@ window.slDeskTouch = function(id){
   }
 };
 
-let SL_FILTER = { q: '', stage: '', tier: '', due: false, sort: 'pipeline' };
+let SL_FILTER = { q: '', stage: '', tier: '', due: false, flagged: false, sort: 'pipeline' };
 let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier)
 // Buyers CRM view: the phase-grouped pipeline, or a flat spreadsheet-style
 // table with click-to-sort column headers. Device preference, not synced.
@@ -33421,7 +33483,7 @@ function slSortComparator() {
 }
 function slBuyerFilterActive() {
   const f = SL_FILTER;
-  return !!(f.q || f.stage || f.tier || f.due);
+  return !!(f.q || f.stage || f.tier || f.due || f.flagged);
 }
 function slBuyerMatches(b) {
   const f = SL_FILTER;
@@ -33432,6 +33494,9 @@ function slBuyerMatches(b) {
     const od = slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today;
     if (!od) return false;
   }
+  // Only the accounts you have marked as yours to work right now. A specific
+  // colour narrows it further -- "show me everything blocked".
+  if (f.flagged) { if (!b.flag) return false; if (f.flagged !== true && b.flag !== f.flagged) return false; }
   if (f.q) {
     const cs = slContactsOf(b).map(c => (c.name||'') + ' ' + (c.email||'') + ' ' + (c.role||'')).join(' ');
     const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, b.address, b.phone, cs]
@@ -33456,11 +33521,150 @@ function slTblVal(b, key){
     case 'contact':  { const c=slContactsOf(b)[0]||{}; return String(c.name||'').toLowerCase(); }
     case 'email':    { const c=slContactsOf(b)[0]||{}; return String(c.email||b.email||'').toLowerCase(); }
     case 'phone':    return String(b.phone||'').toLowerCase();
+    case 'flag':     { const i = (typeof FLAGS!=='undefined'?FLAGS:[]).findIndex(f=>f.id===b.flag); return i<0?99:i; }
+    case 'owner':    return b.owner === 'agent' ? String(b.agentName||'agent').toLowerCase() : '';
     case 'next':     return String(b.nextDate||'');
     case 'last':     return String(b.lastContact||'');
     default:         return '';
   }
 }
+// ── WORKING FLAGS ON ACCOUNTS ────────────────────────────────────────
+// The same five colours and the same behaviour as the styles board: not a
+// stage and not a priority, a marker you put on an account because YOU are
+// working it. Deliberately NOT the same labels -- "Waiting on factory" is
+// meaningless on a store, and one shared label map would mean renaming a flag
+// for a buyer silently renamed it for a style. Same mechanism, own vocabulary.
+const SL_FLAG_LABEL = {
+  red: 'Blocked', amber: 'Waiting on reply', green: 'Ready to quote',
+  blue: 'Needs research', purple: 'Agent working it',
+};
+window.slFlagLabel = function(id){
+  const custom = ((window.STATE && STATE.slFlagLabels) || {})[id];
+  return String(custom || SL_FLAG_LABEL[id] || '');
+};
+window.slFlagCount = function(id){
+  return (STATE.slBuyers || []).filter(function(b){ return b && b.flag === id; }).length;
+};
+// Tapping the flag already on an account clears it, exactly as it does on a style.
+window.slSetFlag = function(id, flag){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return false;
+  b.flag = (b.flag === flag) ? '' : String(flag || '');
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { slRenderBuyerList(); } catch(e){}
+  return true;
+};
+function slFlagDot(b){
+  const f = (typeof FLAGS !== 'undefined') ? FLAGS.find(function(x){ return x.id === (b && b.flag); }) : null;
+  if (!f) return '<span style="display:inline-block;width:11px;height:11px;border:1px solid var(--border)"></span>';
+  return '<span title="' + slEsc(slFlagLabel(f.id)) + '" style="display:inline-block;width:11px;height:11px;'
+    + 'background:' + f.hex + '"></span>';
+}
+
+// ── ONE LIST FOR HEADER AND CELL ─────────────────────────────────────
+// The table used to hand-write eleven <th> in one place and eleven <td> in
+// another -- the exact drift the styles table carries a comment warning
+// against. A column now owns both, so adding or hiding one cannot leave the
+// header and the body disagreeing. lock: never hideable. def:false: off until
+// asked for.
+const SL_COLS = [
+  { key:'flag',    label:'\u2691',      sort:'flag',     lock:true,     cell:function(b){
+      return '<td onclick="event.stopPropagation();slFlagCycle(\'' + b.id + '\')" title="Working flag" '
+        + 'style="text-align:center;cursor:pointer">' + slFlagDot(b) + '</td>'; } },
+  { key:'name',    label:'Name',     sort:'name',     lock:true,     cell:function(b){
+      return '<td style="font-weight:600;color:var(--ink);white-space:nowrap">' + (slEsc(b.name) || '\u2014') + '</td>'; } },
+  { key:'type',    label:'Type',     sort:'type',     cell:function(b){ return '<td>' + (slEsc(b.type) || '') + '</td>'; } },
+  { key:'location',label:'Location', sort:'location', cell:function(b){ return '<td>' + (slEsc(b.location) || '') + '</td>'; } },
+  { key:'country', label:'Country',  sort:'country',  cell:function(b){ return '<td>' + (slEsc(b.country) || '') + '</td>'; } },
+  { key:'stage',   label:'Stage',    sort:'stage',    cell:function(b){
+      return '<td><span style="font-size:10px;font-weight:600;color:' + (SL_STAGE_COLORS[slBuyerStage(b)] || 'var(--muted)')
+        + ';text-transform:uppercase;letter-spacing:1px;white-space:nowrap">'
+        + (SL_STAGES[slBuyerStage(b)] || 'To Reach') + '</span></td>'; } },
+  { key:'tier',    label:'Tier',     sort:'tier',     cell:function(b){
+      return '<td>' + (AGENT_TIER_LABEL[b.tier] ? '<span style="font-size:10px;letter-spacing:1px;'
+        + 'text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px">'
+        + AGENT_TIER_LABEL[b.tier] + '</span>' : '') + '</td>'; } },
+  { key:'owner',   label:'Owner',    sort:'owner',    def:false, cell:function(b){
+      return '<td style="white-space:nowrap;color:var(--muted)">'
+        + (b.owner === 'agent' ? slEsc(b.agentName || 'Agent') : 'Direct') + '</td>'; } },
+  { key:'contact', label:'Contact',  sort:'contact',  cell:function(b){
+      const c = slContactsOf(b), c0 = c[0] || {};
+      return '<td style="white-space:nowrap">' + (slEsc(c0.name) || '')
+        + (c.length > 1 ? ' <span style="color:var(--muted)">+' + (c.length - 1) + '</span>' : '') + '</td>'; } },
+  { key:'email',   label:'Email',    sort:'email',    cell:function(b){
+      const c0 = slContactsOf(b)[0] || {}; const em = c0.email || b.email || '';
+      return '<td onclick="event.stopPropagation()" style="white-space:nowrap">'
+        + (em ? '<a href="mailto:' + slEsc(em) + '" style="color:var(--gold)">' + slEsc(em) + '</a>' : '') + '</td>'; } },
+  { key:'phone',   label:'Phone',    sort:'phone',    cell:function(b){
+      return '<td style="white-space:nowrap">' + (slEsc(b.phone) || '') + '</td>'; } },
+  { key:'next',    label:'Next',     sort:'next',     cell:function(b){
+      const today = new Date().toISOString().slice(0, 10);
+      const od = slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today;
+      return '<td style="white-space:nowrap;color:' + (od ? 'var(--red)' : 'var(--muted)') + ';font-weight:'
+        + (od ? '700' : '400') + '">' + (od ? '\u2691 ' : '') + (slEsc(b.nextDate) || '') + '</td>'; } },
+  { key:'last',    label:'Last',     sort:'last',     cell:function(b){
+      return '<td style="white-space:nowrap;color:var(--muted)">' + (slEsc(b.lastContact) || '') + '</td>'; } },
+];
+window.SL_COLS = SL_COLS;
+// Device preference, like the styles board's: what one founder hides on their
+// laptop is not a decision for the other founder's phone.
+let SL_COL_HIDDEN = {};
+try { SL_COL_HIDDEN = JSON.parse(localStorage.getItem('venia-sl-cols') || '{}') || {}; } catch(e){ SL_COL_HIDDEN = {}; }
+function slColSave(){ try { localStorage.setItem('venia-sl-cols', JSON.stringify(SL_COL_HIDDEN)); } catch(e){} }
+// Stored 0/1 beats the shipped default, so a later change to a default cannot
+// silently override a deliberate choice.
+function slColOn(c){
+  if (!c) return false;
+  if (c.lock) return true;
+  const v = SL_COL_HIDDEN[c.key];
+  if (v === 1) return false;
+  if (v === 0) return true;
+  return c.def !== false;
+}
+window.slColOn = slColOn;
+function slColsVisible(){ return SL_COLS.filter(slColOn); }
+window.slColToggle = function(key, on){
+  const c = SL_COLS.find(function(x){ return x.key === key; });
+  if (!c || c.lock) return;                       // a locked column refuses
+  SL_COL_HIDDEN[key] = on ? 0 : 1;
+  slColSave();
+  try { slRenderBuyerList(); slColMenuRender(); } catch(e){}
+};
+window.slColReset = function(){
+  SL_COL_HIDDEN = {}; slColSave();
+  try { slRenderBuyerList(); slColMenuRender(); } catch(e){}
+};
+window.slFlagCycle = function(id){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  const ids = FLAGS.map(function(f){ return f.id; });
+  const i = ids.indexOf(b.flag || '');
+  const next = (i < 0) ? ids[0] : (i + 1 >= ids.length ? '' : ids[i + 1]);
+  b.flag = next; b.updatedAt = new Date().toISOString(); save();
+  try { slRenderBuyerList(); } catch(e){}
+};
+function slColMenuRender(){
+  const m = document.getElementById('sl-col-menu'); if (!m) return;
+  const shown = slColsVisible().length;
+  m.innerHTML = '<div style="padding:2px 14px 8px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;'
+      + 'color:var(--muted);font-weight:700">Columns \u00b7 ' + shown + ' of ' + SL_COLS.length + '</div>'
+    + SL_COLS.map(function(c){
+        return '<label style="display:flex;align-items:center;gap:9px;padding:6px 14px;font-size:11px;'
+          + 'color:var(--ink);cursor:' + (c.lock ? 'default' : 'pointer') + ';opacity:' + (c.lock ? '.5' : '1') + '">'
+          + '<input type="checkbox" ' + (slColOn(c) ? 'checked' : '') + (c.lock ? ' disabled' : '')
+          + ' onchange="slColToggle(\'' + c.key + '\', this.checked)" style="accent-color:var(--ink)">'
+          + '<span>' + (c.key === 'flag' ? 'Flag' : slEsc(c.label)) + '</span></label>';
+      }).join('')
+    + '<div style="border-top:1px solid var(--border);margin-top:6px;padding:8px 14px 2px">'
+    + '<a onclick="slColReset()" style="font-size:11px;color:var(--ink);cursor:pointer;text-decoration:underline">Reset columns</a></div>';
+}
+window.slColMenuToggle = function(){
+  const m = document.getElementById('sl-col-menu'); if (!m) return;
+  const open = m.style.display === 'block';
+  m.style.display = open ? 'none' : 'block';
+  if (!open) slColMenuRender();
+};
 function slBuyersTableHTML(){
   const rows = (STATE.slBuyers||[]).filter(slBuyerMatches).slice().sort((a,b)=>{
     const va=slTblVal(a,SL_TBL.key), vb=slTblVal(b,SL_TBL.key);
@@ -33472,28 +33676,21 @@ function slBuyersTableHTML(){
   if (!rows.length) return `<div style="padding:30px 18px;text-align:center;color:var(--muted);font-size:11px">No accounts match this filter.<br><a onclick="slClearBuyerFilter()" style="color:var(--ink);cursor:pointer;text-decoration:underline;display:inline-block;margin-top:8px">Clear filters</a></div>`;
   const today = new Date().toISOString().slice(0,10);
   const th = (key,label) => `<th onclick="slTableSort('${key}')" title="Sort by ${label}">${label}${SL_TBL.key===key?(SL_TBL.dir>0?' ▲':' ▼'):''}</th>`;
+  // One pass over the visible columns builds the header AND the cells, so the
+  // two cannot drift out of step.
+  const cols = slColsVisible();
   const body = rows.map(b=>{
-    const c = slContactsOf(b); const c0 = c[0]||{};
-    const od = slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today;
-    const email = c0.email || b.email || '';
-    return `<tr onclick="slOpenBuyerDetail('${b.id}')">
-      <td onclick="event.stopPropagation()"><input type="checkbox" class="sl-row-chk" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="cursor:pointer"></td>
-      <td style="font-weight:600;color:var(--ink);white-space:nowrap">${slEsc(b.name)||'—'}</td>
-      <td>${slEsc(b.type)||''}</td>
-      <td>${slEsc(b.location)||''}</td>
-      <td>${slEsc(b.country)||''}</td>
-      <td><span style="font-size:10px;font-weight:600;color:${SL_STAGE_COLORS[slBuyerStage(b)]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px;white-space:nowrap">${SL_STAGES[slBuyerStage(b)]||'To Reach'}</span></td>
-      <td>${AGENT_TIER_LABEL[b.tier]?`<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px">${AGENT_TIER_LABEL[b.tier]}</span>`:''}</td>
-      <td style="white-space:nowrap">${slEsc(c0.name)||''}${c.length>1?` <span style="color:var(--muted)">+${c.length-1}</span>`:''}</td>
-      <td onclick="event.stopPropagation()" style="white-space:nowrap">${email?`<a href="mailto:${slEsc(email)}" style="color:var(--gold)">${slEsc(email)}</a>`:''}</td>
-      <td style="white-space:nowrap">${slEsc(b.phone)||''}</td>
-      <td style="white-space:nowrap;color:${od?'var(--red)':'var(--muted)'};font-weight:${od?'700':'400'}">${od?'⚑ ':''}${slEsc(b.nextDate)||''}</td>
-      <td style="white-space:nowrap;color:var(--muted)">${slEsc(b.lastContact)||''}</td>
-      <td onclick="event.stopPropagation()"><button class="ag-btn ag-btn-ghost ag-btn-sm" style="min-height:0;padding:4px 9px" onclick="slOpenBuyerModal('${b.id}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg></button></td>
-    </tr>`;
+    return `<tr onclick="slOpenBuyerDetail('${b.id}')">`
+      + `<td onclick="event.stopPropagation()"><input type="checkbox" class="sl-row-chk" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="cursor:pointer"></td>`
+      + cols.map(c => { try { return c.cell(b); } catch(e){ return '<td></td>'; } }).join('')
+      + `<td onclick="event.stopPropagation()"><button class="ag-btn ag-btn-ghost ag-btn-sm" style="min-height:0;padding:4px 9px" onclick="slOpenBuyerModal('${b.id}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg></button></td>`
+      + `</tr>`;
   }).join('');
   return `<div class="sl-tbl-wrap"><table class="sl-tbl">
-    <thead><tr><th></th>${th('name','Name')}${th('type','Type')}${th('location','Location')}${th('country','Country')}${th('stage','Stage')}${th('tier','Tier')}${th('contact','Contact')}${th('email','Email')}${th('phone','Phone')}${th('next','Next')}${th('last','Last')}<th></th></tr></thead>
+    <thead><tr><th></th>${cols.map(c => th(c.sort || c.key, c.label)).join('')}<th style="position:relative;text-align:right">`
+    + `<button class="ag-btn ag-btn-ghost ag-btn-sm" title="Choose columns" style="min-height:0;padding:2px 7px" onclick="event.stopPropagation();slColMenuToggle()">\u229e</button>`
+    + `<div id="sl-col-menu" style="display:none;position:absolute;right:0;top:100%;z-index:9000;background:var(--white);border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.16);padding:8px 0;width:210px;text-align:left"></div>`
+    + `</th></tr></thead>
     <tbody>${body}</tbody>
   </table></div>`;
 }
@@ -33511,6 +33708,10 @@ function slBuyersListHTML() {
   const row = (b) => {
     const od = isOverdue(b);
     const tier = AGENT_TIER_LABEL[b.tier] ? `<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px;margin-left:6px">${AGENT_TIER_LABEL[b.tier]}</span>` : '';
+    // The flag rides in the pipeline view too — a marker only visible in the
+    // table would be invisible in the view most people actually work in.
+    const fl = (typeof FLAGS !== 'undefined') ? FLAGS.find(x => x.id === b.flag) : null;
+    const flag = fl ? `<span title="${slEsc(slFlagLabel(fl.id))}" style="display:inline-block;width:9px;height:9px;background:${fl.hex};margin-right:6px;vertical-align:middle"></span>` : '';
     // The last cell answers "what's next with this store" at a glance: the
     // planned follow-up (flagged red when overdue), else the last touch.
     const next = b.nextDate
@@ -33519,7 +33720,7 @@ function slBuyersListHTML() {
     // Type lives in the sub-line under the name (type · location) — no separate
     // TYPE column, which only duplicated it.
     return `<div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
-        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0"><input type="checkbox" class="sl-row-chk" title="Select for bulk tier" onclick="event.stopPropagation()" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="margin-top:3px;flex-shrink:0;cursor:pointer"><div style="min-width:0"><div class="ag-lr-name">${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}${b.country?' · '+slEsc(b.country):''}</div></div></div>
+        <div style="display:flex;align-items:flex-start;gap:10px;min-width:0"><input type="checkbox" class="sl-row-chk" title="Select for bulk tier" onclick="event.stopPropagation()" onchange="slToggleSelect('${b.id}',this.checked)" ${SL_SELECTED.has(b.id)?'checked':''} style="margin-top:3px;flex-shrink:0;cursor:pointer"><div style="min-width:0"><div class="ag-lr-name">${flag}${slEsc(b.name)||'Unnamed Account'}${tier}</div><div class="ag-lr-sub">${slEsc(b.type)||''}${b.type&&b.location?' · ':''}${slEsc(b.location)||''}${b.country?' · '+slEsc(b.country):''}</div></div></div>
         <div><span style="font-size:10px;font-weight:600;color:${SL_STAGE_COLORS[slBuyerStage(b)]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${SL_STAGES[slBuyerStage(b)]||'To Reach'}</span></div>
         <div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;font-size:10px;font-family:'DM Mono',monospace">${next}<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenBuyerModal('${b.id}')">Edit</button></div>
       </div>`;
@@ -33563,6 +33764,7 @@ function slFilterBarHTML() {
       <button class="sl-chip${SL_VIEW==='pipeline'?' on':''}" onclick="slSetView('pipeline')" title="Phase-grouped pipeline view">☰ Pipeline</button>
       <button class="sl-chip${SL_VIEW==='table'?' on':''}" onclick="slSetView('table')" title="Flat spreadsheet view — click column headers to sort">▦ Table</button>
       <button class="sl-chip sl-chip-due${SL_FILTER.due?' on':''}" onclick="slToggleDueFilter()" title="Only accounts with an overdue follow-up">⚑ Due</button>
+      <button class="sl-chip${SL_FILTER.flagged?' on':''}" onclick="slToggleFlagFilter()" title="Only accounts you have flagged">⚑ Flagged${(typeof slFlaggedCount==='function'&&slFlaggedCount())?' '+slFlaggedCount():''}</button>
       </div>
     </div>
     <div class="sl-filter-chips">
@@ -33578,7 +33780,9 @@ function slSetSort(v) { SL_FILTER.sort = v; slRenderBuyerList(); }
 // Stage / due toggles rebuild the bar (to flip chip states) then the list.
 function slSetStageFilter(k) { SL_FILTER.stage = (SL_FILTER.stage === k ? '' : k); slRerenderFilterBar(); }
 function slToggleDueFilter() { SL_FILTER.due = !SL_FILTER.due; slRerenderFilterBar(); }
-function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false, sort: SL_FILTER.sort || 'pipeline' }; slRerenderFilterBar(); }
+window.slFlaggedCount = function(){ return (STATE.slBuyers || []).filter(function(b){ return b && b.flag; }).length; };
+function slToggleFlagFilter() { SL_FILTER.flagged = SL_FILTER.flagged ? false : true; slRerenderFilterBar(); }
+function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false, flagged:false, sort: SL_FILTER.sort || 'pipeline' }; slRerenderFilterBar(); }
 function slRenderBuyerList() { const el = document.getElementById('sl-buyers-list'); if (el) el.innerHTML = slBuyersListHTML(); }
 function slRerenderFilterBar() { const bar = document.getElementById('sl-filter-bar'); if (bar) bar.innerHTML = ((STATE.slBuyers||[]).length ? slFilterBarHTML() : ''); slRenderBuyerList(); }
 function slUpdateFilterCount() {
@@ -39625,12 +39829,14 @@ function cfoChatApply(status, result, job){
     if (live.workKey) agentEndWork(live.workKey, false);
     return;
   }
-  const { clean, action, parseError, unbackedClaim, extraBlocks } = agentExtractAction(result);
+  const { clean, action, parseError, unbackedClaim, extraBlocks, truncated } = agentExtractAction(result);
   let shown = parseError
     ? ((clean ? clean + '\n\n' : '') + '\u26a0 I couldn\u2019t complete that change \u2014 nothing was saved. Please try once more.')
     : (clean || (action ? 'Done \u2014 here\u2019s what I set up:' : result));
   if (!action && !parseError && unbackedClaim) {
-    shown += '\n\n\u26a0 Nothing was actually saved \u2014 that reply had no save action behind it. Ask me again and I\u2019ll file it properly, or add it by hand.';
+    shown += truncated
+      ? '\n\n\u26a0 Nothing was saved \u2014 the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.'
+      : '\n\n\u26a0 Nothing was actually saved \u2014 that reply had no save action behind it. Ask me again and I\u2019ll file it properly, or add it by hand.';
   }
   if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
   SK.history = SK.history || [];
@@ -51864,7 +52070,9 @@ async function skSend(preset, opts){
       shown = parsed.parseError
         ? ((parsed.clean || '') + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.').trim()
         : (parsed.clean || (action ? "Done — here's what I set up:" : reply));
-      if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
+      if (parsed.truncated && action) shown += '\n\n⚠ That reply ran out of room part-way through — what arrived was saved, but the last few may be missing. Ask for the rest and check the count.';
+      else if (parsed.truncated) shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
+      else if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
     }
     SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked)});
     skSaveHistory();

@@ -4971,3 +4971,144 @@ verified contact. That reason survives.
 
 `gauntlet/actionpick.js` — 14 assertions. `gauntlet/contactfix.js` — 17
 assertions, all 17 failing against 477.
+
+## Build 479 — the same two tools Product has, on the accounts
+
+*"We should implement a flagging system like we have in product and hideable
+columns."*
+
+### One list for the header and the cell
+
+The buyers table hand-wrote eleven `<th>` in one place and eleven `<td>` in
+another — the exact drift the styles table carries a comment warning against.
+Bolting a hide onto that would have meant two lists to keep in step, and the
+first mismatch is a header whose column still renders, which is worse than no
+feature.
+
+`SL_COLS` is one registry where a column owns **both** its header and its cell,
+mirroring `STYLE_COLS`. `slColOn` / `slColsVisible` / `slColToggle` /
+`slColReset`, a chooser in the corner of the header, and a stored 0/1 that beats
+the shipped default — so a later change to a default cannot silently override a
+deliberate choice. Flag and Name are locked. **Owner** is a new column, off by
+default: direct, or the agent working it.
+
+Hidden columns are a **device** preference: what one founder hides on their
+laptop is not a decision for the other founder's phone.
+
+### Flags: same mechanism, own vocabulary
+
+Same five colours and the same behaviour as the styles board — not a stage and
+not a priority, a marker you put on an account because *you* are working it, and
+tapping the flag already there clears it.
+
+**Deliberately not the same labels.** "Waiting on factory" is meaningless on a
+store, and one shared label map would mean renaming a flag for a buyer silently
+renamed it for a style. Buyers get *Blocked · Waiting on reply · Ready to quote ·
+Needs research · Agent working it*, renameable exactly as Product's are, stored
+separately in `STATE.slFlagLabels`. The last two are load-bearing: "Needs
+research" is the queue for the web validation, "Agent working it" sits beside
+the ownership boundary from 475.
+
+The flag shows in the **pipeline** view as well as the table — a marker only
+visible in one of two views is invisible in whichever one you happen to use — and
+a **⚑ Flagged** chip filters to it, carrying the count.
+
+`gauntlet/buyercols.js` — 21 assertions. Three of them started as false passes:
+the suite rendered into a missing element and cheerfully asserted against an
+empty string. It now proves the table rendered before believing anything else.
+
+## Build 480 — the search cap was set blind, and two error messages were wrong
+
+*"What is this search cap?"*
+
+Mine, not Anthropic's. `max_uses: 6` per turn, set in 476 **before the price was
+known**. Validating one store takes about two searches — find it, then check the
+contact against a source — so six is two or three stores, which is exactly why
+"got two of the four done" kept happening.
+
+The published rate is **$10 per 1,000 searches: one cent each**, plus tokens for
+what comes back, and **an error is not billed**. Anthropic's own guidance is that
+simple lookups take 1–3 searches while "comparative or multientity research can
+use 10 or more" — which is precisely a buyer list. The cap is now **20**: twenty
+cents in the worst case for a turn that validates ten stores, against a list that
+has to be usable before a Paris showroom. The relay ceiling moves to **24**, above
+what the client asks for, because a ceiling below the request is a silent
+truncation of the answer rather than a limit.
+
+The cost is written next to the number, so the next person to weigh it has the
+figure and not just the value.
+
+### Two of 477's messages were wrong
+
+Checked against the published tool reference rather than memory:
+
+- **`unavailable` is an internal error at Anthropic — retryable — not the
+  organisation setting.** Web search disabled for an org fails the *whole
+  request* with a 400 that says so, never an error code inside a result. The old
+  message sent a founder to the Console for a transient server-side blip.
+- The bad-query code is **`invalid_tool_input`**, not `invalid_input`, so that
+  branch never matched.
+- **`request_too_large`** was missing entirely.
+
+`gauntlet/websearch.js` — 42 assertions. One of them had pinned the literal `6`,
+so it failed on the build that corrected it; a tripwire that breaks when the
+value is deliberately improved is testing the wrong thing, and it now asserts
+that a cap exists and is overridable, with the value checked once beside the
+cost that justifies it.
+
+## Build 481 — a reply cut off mid-save is not a reply that forgot to save
+
+> *"Filing all five now. That's filed — Joan Shepp, Hotoveli, DSM New York, DSM
+> Los Angeles, and Machine-A all updated in the CRM."*
+> *"⚠ Nothing was actually saved — that reply had no save action behind it."*
+
+The founder said **"file it"**, was told nothing happened, said **"file it"**
+again, and was told the same. Ten dream-tier accounts researched across two turns
+of web search, and none of it landed.
+
+**The action block is written last**, so a turn that runs out of room loses
+exactly that. With the closing fence gone, the extractor's pattern matched
+nothing at all — so a *half-written save* read identically to *no save*. The
+block was sitting in the text the whole time, holding rows that were real work.
+
+Brainstorm's `workParse` has salvaged truncated fences since Build 393. The same
+thing here:
+
+- `agentSalvageAction()` — trims back to the last complete object and closes the
+  structure, trying each candidate tail until one parses into something with an
+  action type. **Nothing is invented**: a row that did not fully arrive is
+  dropped, not completed, and a stub with no type yields no action rather than a
+  guess. Losing the tail row is a fair price; losing all ten and reporting
+  nothing saved is not.
+- An opening fence with no close is the fingerprint of truncation, so the two
+  cases are now told apart. A partial save says **some rows may be missing and
+  to check the count**; a total loss says **ask for fewer at a time**. The old
+  "no save action behind it" sentence stays for what it was written for — prose
+  that claims a save with no block at all — and that guard still fires.
+- All three reporting paths carry it: the dock, the workspace cards, and the
+  cloud apply.
+
+This is 480's other half. Raising the search cap to 20 made turns longer, and a
+longer turn is exactly the one that runs out of room before it can save.
+
+### And the claim guard had a hole in the shape of the most natural sentence
+
+Testing the guard against the real transcript turned up something worse than the
+warning itself: **`That's filed — DSM London, LN-CC and Maxfield all updated`
+escaped every pattern in it.** No opening past-tense verb, and no pronoun *after*
+the verb to satisfy the first rule. That is the most natural way a model confirms
+a write, and it reached a founder with **no warning at all** — the dangerous
+shape, because a warned claim costs a sentence and an unwarned one costs the
+record. `That's saved`, `That's logged`, `Those are now filed` and `It's been
+recorded` all went through the same gap. Closed, with five ordinary sentences
+checked in the other direction so the guard does not start crying wolf.
+
+`gauntlet/cutsave.js` — 19 assertions. One began by asserting the claim guard
+against a phrase it never matched; the real reply was caught by its *"Filing all
+five now"* opener, so the test now uses the text that actually reached a founder.
+
+`gauntlet/bankdaily.js` was **flaky, not failing**: it asserted that a ledger
+"synced an hour ago" is left alone, which is only the same thing as *synced
+today* for 23 hours out of 24. Run at 00:18 UTC it failed a build it had no
+quarrel with. The contract is once per calendar day, so the fixture now uses a
+time that is unambiguously today.

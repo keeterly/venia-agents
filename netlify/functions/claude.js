@@ -102,7 +102,10 @@ export default async (req) => {
   // is set here — a client asking for more gets the ceiling, not an error,
   // because failing the turn would be worse than capping it.
   if (payload.tools !== undefined) {
-    const MAX_USES = 8;
+    // 24, not 8: at $10/1,000 searches one turn's worst case is 24 cents,
+    // and the client asks for 20. A ceiling below what the app requests is
+    // just a silent truncation of the answer.
+    const MAX_USES = 24;
     const OK_TYPES = /^web_search_\d{8}$/;
     const tools = Array.isArray(payload.tools) ? payload.tools.filter(
       (t) => t && typeof t.type === 'string' && OK_TYPES.test(t.type)) : [];
