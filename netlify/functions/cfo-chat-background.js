@@ -105,7 +105,10 @@ export default async (req) => {
   // being asked for.
   //
   // The model decides whether to search; max_uses caps what one turn can spend.
-  const searchTool = (v) => [{ type: v, name: 'web_search', max_uses: 6 }];
+  // $10 per 1,000 searches -- a cent each, errors unbilled. Six was set before
+  // that price was known and is two or three stores; multi-entity research
+  // routinely wants ten or more.
+  const searchTool = (v) => [{ type: v, name: 'web_search', max_uses: 20 }];
   const post = (body) => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
@@ -138,9 +141,9 @@ export default async (req) => {
   const SEARCH_WHY = {
     max_uses_exceeded: 'the per-turn search limit was reached — ask for fewer stores at a time',
     too_many_requests: 'Anthropic is rate limiting web search right now — try again shortly',
-    unavailable: 'web search is not available on this account — check that it is enabled for the '
-      + 'organisation in the Anthropic Console, and that no spend limit has been reached',
-    invalid_input: 'that search query was rejected as malformed',
+    unavailable: 'web search hit an internal error at Anthropic — not your account, worth one retry',
+    invalid_tool_input: 'that search query was rejected as malformed',
+    request_too_large: 'that search request was too large to send',
     query_too_long: 'that search query was too long — ask for one store at a time',
   };
   const searchErrors = (blocks) => {

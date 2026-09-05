@@ -5016,3 +5016,42 @@ a **⚑ Flagged** chip filters to it, carrying the count.
 `gauntlet/buyercols.js` — 21 assertions. Three of them started as false passes:
 the suite rendered into a missing element and cheerfully asserted against an
 empty string. It now proves the table rendered before believing anything else.
+
+## Build 480 — the search cap was set blind, and two error messages were wrong
+
+*"What is this search cap?"*
+
+Mine, not Anthropic's. `max_uses: 6` per turn, set in 476 **before the price was
+known**. Validating one store takes about two searches — find it, then check the
+contact against a source — so six is two or three stores, which is exactly why
+"got two of the four done" kept happening.
+
+The published rate is **$10 per 1,000 searches: one cent each**, plus tokens for
+what comes back, and **an error is not billed**. Anthropic's own guidance is that
+simple lookups take 1–3 searches while "comparative or multientity research can
+use 10 or more" — which is precisely a buyer list. The cap is now **20**: twenty
+cents in the worst case for a turn that validates ten stores, against a list that
+has to be usable before a Paris showroom. The relay ceiling moves to **24**, above
+what the client asks for, because a ceiling below the request is a silent
+truncation of the answer rather than a limit.
+
+The cost is written next to the number, so the next person to weigh it has the
+figure and not just the value.
+
+### Two of 477's messages were wrong
+
+Checked against the published tool reference rather than memory:
+
+- **`unavailable` is an internal error at Anthropic — retryable — not the
+  organisation setting.** Web search disabled for an org fails the *whole
+  request* with a 400 that says so, never an error code inside a result. The old
+  message sent a founder to the Console for a transient server-side blip.
+- The bad-query code is **`invalid_tool_input`**, not `invalid_input`, so that
+  branch never matched.
+- **`request_too_large`** was missing entirely.
+
+`gauntlet/websearch.js` — 42 assertions. One of them had pinned the literal `6`,
+so it failed on the build that corrected it; a tripwire that breaks when the
+value is deliberately improved is testing the wrong thing, and it now asserts
+that a cap exists and is overridable, with the value checked once beside the
+cost that justifies it.
