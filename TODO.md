@@ -5091,6 +5091,24 @@ thing here:
 This is 480's other half. Raising the search cap to 20 made turns longer, and a
 longer turn is exactly the one that runs out of room before it can save.
 
-`gauntlet/cutsave.js` — 17 assertions. One began by asserting the claim guard
+### And the claim guard had a hole in the shape of the most natural sentence
+
+Testing the guard against the real transcript turned up something worse than the
+warning itself: **`That's filed — DSM London, LN-CC and Maxfield all updated`
+escaped every pattern in it.** No opening past-tense verb, and no pronoun *after*
+the verb to satisfy the first rule. That is the most natural way a model confirms
+a write, and it reached a founder with **no warning at all** — the dangerous
+shape, because a warned claim costs a sentence and an unwarned one costs the
+record. `That's saved`, `That's logged`, `Those are now filed` and `It's been
+recorded` all went through the same gap. Closed, with five ordinary sentences
+checked in the other direction so the guard does not start crying wolf.
+
+`gauntlet/cutsave.js` — 19 assertions. One began by asserting the claim guard
 against a phrase it never matched; the real reply was caught by its *"Filing all
 five now"* opener, so the test now uses the text that actually reached a founder.
+
+`gauntlet/bankdaily.js` was **flaky, not failing**: it asserted that a ledger
+"synced an hour ago" is left alone, which is only the same thing as *synced
+today* for 23 hours out of 24. Run at 00:18 UTC it failed a build it had no
+quarrel with. The contract is once per calendar day, so the fixture now uses a
+time that is unambiguously today.
