@@ -115,6 +115,28 @@ export default async (req) => {
        { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 10,
          max_content_tokens: 20000, citations: { enabled: true } }]
     : [{ type: v, name: 'web_search', max_uses: 20 }]);
+  // THE SAVE IS A TOOL CALL. A cloud turn was the worst place to lose one: the
+  // founder closes the app, comes back to a paragraph saying the stores were
+  // filed, and nothing was written. The tool rides on every attempt including
+  // the no-search fallback, and the call is converted back into the fenced
+  // block the client has always parsed, so nothing downstream changes.
+  const VENIA_ACTION_TOOL = {
+    name: 'venia_action',
+    description: 'Write a change into the VENIA workspace. This is the ONLY thing that saves anything \u2014 '
+      + 'buyers, corrections, outreach, styles, vendors, plans, handoffs. Saying you saved, filed, added or '
+      + 'updated something WITHOUT calling this tool saves nothing at all. Pass the action object exactly as '
+      + 'shown in the example for that action type in your instructions: "type" plus every other field that '
+      + 'example carries. Call it once, alongside your one-sentence reply. Do not call it for research, '
+      + 'analysis, drafting or advice \u2014 only when a record should actually change.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', description: 'The action type, exactly as named in your instructions (add_buyers, update_buyers, log_outreach, handoff, \u2026).' },
+      },
+      required: ['type'],
+      additionalProperties: true,
+    },
+  };
   const post = (body) => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
@@ -165,8 +187,8 @@ export default async (req) => {
   };
   const attempt = async (tools) => {
     const body = { model: 'claude-opus-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
-    if (tools) body.tools = tools;
-    let text = '', sources = [], rounds = 0;
+    body.tools = (tools || []).concat([VENIA_ACTION_TOOL]);
+    let text = '', sources = [], rounds = 0, actionJson = '';
     const errs = [];
     while (rounds++ < 4) {
       const r = await post(body);
@@ -180,6 +202,8 @@ export default async (req) => {
       text += (text ? '\n' : '') + blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
       sources = sources.concat(sourcesOf(blocks));
       searchErrors(blocks).forEach((c) => { if (errs.indexOf(c) < 0) errs.push(c); });
+      const tb = blocks.filter((b) => b && b.type === 'tool_use' && b.name === 'venia_action')[0];
+      if (tb && !actionJson) { try { actionJson = JSON.stringify(tb.input == null ? {} : tb.input); } catch (_) {} }
       // A server-tool turn can run long enough that the API hands it back
       // paused rather than finished. Continuing is the whole answer arriving;
       // stopping here would truncate mid-search and read as a short reply.
@@ -187,7 +211,8 @@ export default async (req) => {
       body.messages = body.messages.concat([{ role: 'assistant', content: blocks }]);
     }
     text = text.trim();
-    if (!text) throw new Error('empty reply');
+    // A turn that is nothing but a save is a complete turn, not an empty reply.
+    if (!text && !actionJson) throw new Error('empty reply');
     // Say which wall, in the reply, so the founder is not relying on the model's
     // reading of an error block it was never given the vocabulary for.
     if (errs.length) {
@@ -199,6 +224,14 @@ export default async (req) => {
       const lines = sources.filter((s2) => !seen.has(s2.url) && seen.add(s2.url)).slice(0, 12)
         .map((s2) => '- ' + (s2.title ? s2.title + ' — ' : '') + s2.url);
       text += '\n\nSOURCES\n' + lines.join('\n');
+    }
+    // LAST: a block cut off part-way through leaves its fence open on purpose,
+    // so the client salvages what landed and warns about the tail. Anything
+    // appended after it would be swallowed into the JSON.
+    if (actionJson && !/```venia:action/.test(text)) {
+      let closed = false;
+      try { const o = JSON.parse(actionJson); closed = !!(o && typeof o === 'object' && !Array.isArray(o)); } catch (_) {}
+      text += '\n\n```venia:action\n' + actionJson + (closed ? '\n```' : '');
     }
     return text;
   };
