@@ -66,7 +66,7 @@ export default async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-5',
+        model: 'claude-opus-5',
         max_tokens: 700,
         system: `You are the CFO of VENIA Collection, a two-person luxury womenswear label in Los Angeles, writing the Monday money brief that lands on both founders' phones as a push notification.
 

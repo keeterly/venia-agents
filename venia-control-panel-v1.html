@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '484';
+  const BUILD = '485';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23082,6 +23082,10 @@ function isInternal(name) { return INTERNAL.has((name||'').toLowerCase().trim())
 // Retry wrapper: Anthropic's servers intermittently answer 529 "Overloaded"
 // (and the odd 500/503/429) — transient by nature, so absorb up to two
 // automatic retries with backoff before surfacing anything to the user.
+// One name for the model that does the thinking, so the two call paths cannot
+// drift apart -- and so changing it is one edit rather than a hunt. The cheap
+// paths name Haiku explicitly; they are errands, not reasoning.
+const VENIA_MODEL = 'claude-opus-5';
 async function callClaude(system, userMsg, history, model, opts) {
   let lastErr = null, askedCode = false;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -23134,6 +23138,10 @@ const SEARCH_WHY = {
   too_many_requests: 'Anthropic is rate limiting web search right now \u2014 try again shortly',
   unavailable: 'web search hit an internal error at Anthropic \u2014 not your account, and worth one retry',
   invalid_tool_input: 'that search query was rejected as malformed',
+  url_not_allowed: 'that page cannot be opened \u2014 it was not one the search turned up',
+  url_too_long: 'that link was too long to open',
+  url_not_accessible: 'that page could not be reached \u2014 it may be down or blocking us',
+  unsupported_content_type: 'that link is not a page we can read',
   request_too_large: 'that search request was too large to send',
   query_too_long: 'that search query was too long \u2014 ask for one store at a time',
 };
@@ -23154,8 +23162,15 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // the current tool version, once for the older one, because which version an
   // account is on is not knowable from here and a rejected tool must not cost
   // the answer. Then plain, then buffered.
+  // SEARCH FINDS THE PAGE; FETCH READS IT. Validating a stockist list or a
+  // contact page needs the page itself, not a snippet -- and a search result
+  // that says "info@ and a phone number" is exactly the thin evidence that has
+  // been filling the CRM with the wrong door. Fetch only opens URLs already in
+  // the conversation, which is what the search results put there.
   const _tools = (opts && opts.search)
-    ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) }] : null;
+    ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) },
+       { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: (opts.maxFetch || 10),
+         max_content_tokens: 20000, citations: { enabled: true } }] : null;
   try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384, tools: _tools }); }
   catch (e) {
     if (_tools) {
@@ -23171,7 +23186,7 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // (disp, img) and the API strict-rejects unknown fields with a 400.
   const _clean = (h) => (h || []).map(m => ({ role: m.role, content: m.content }));
   const msgs = userMsg ? [..._clean(history), {role:'user', content: userMsg}] : _clean(history);
-  const body = JSON.stringify({ model: model || 'claude-sonnet-5', max_tokens: 16384, system: veniaSysBlocks(system), messages: msgs });
+  const body = JSON.stringify({ model: model || VENIA_MODEL, max_tokens: 16384, system: veniaSysBlocks(system), messages: msgs });
 
   // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
   // path that can't be shadowed by the site's "/" rewrite. We try the relative
@@ -23242,7 +23257,7 @@ async function callClaudeStream(system, userMsg, opts) {
   const _cleanS = (h) => (h || []).map(m => ({ role: m.role, content: m.content }));
   const msgs = userMsg ? [..._cleanS(opts.history), { role: 'user', content: userMsg }] : _cleanS(opts.history);
   const body = JSON.stringify({
-    model: opts.model || 'claude-sonnet-5',
+    model: opts.model || VENIA_MODEL,
     max_tokens: opts.maxTokens || 16384,
     stream: true,
     system: (typeof veniaSysBlocks === 'function') ? veniaSysBlocks(system) : system,
@@ -27067,7 +27082,7 @@ function escHtml(str) {
 // be allowed to save.
 const ACTION_MODULE = {
   add_buyers: 'sales', update_buyers: 'sales', record_payment: 'sales', log_outreach: 'sales',
-  log_owed: 'sales',
+  log_owed: 'sales', merge_buyers: 'sales',
   add_vendors: 'product', update_vendors: 'product', add_material: 'product',
   add_styles: 'product', update_styles: 'product', apply_style_specs: 'product',
   generate_care_label: 'product', log_sample_round: 'product', set_forecast: 'product',
@@ -27149,6 +27164,15 @@ function agentActionSpec(key) {
       + 'nextDays defaults to 7. Never log an approach you were not told was made.\n'      + '```\n'
       + '{"type":"log_owed","owed":[{"name":"Exact store name","what":"The SS27 line sheet","since":"2026-05-04"}]}\n'
       + '```\n'
+      + '```\n'
+      + '{"type":"merge_buyers","merges":[{"keep":"The record to keep","merge":"The duplicate to fold in"}]}\n'
+      + '```\n'
+      + 'Rules for merge_buyers: use it when the SAME store is in the CRM twice under two spellings. The '
+      + 'merge only ever ADDS to the record you keep \u2014 every contact, every line of history, every '
+      + 'field the survivor is missing, the furthest-along stage and the earliest next date. Nothing is '
+      + 'lost, so prefer merging to asking the founder to delete one. Never merge two DIFFERENT stores '
+      + 'that happen to share a name: check the city and the address first, and if they differ, say so '
+      + 'and merge nothing.\n'
       + 'Rules for log_owed: use it when a BUYER ASKED US for something and has not received it \u2014 '
       + 'a lookbook, a line sheet, prices, an appointment. This is the opposite direction to '
       + 'log_outreach: that records what we sent, this records what we owe. "since" is the date THEY '
@@ -27578,6 +27602,22 @@ function agentPRRadarSpec() {
 // The live-data hints that ride WITH the specs but change as data changes.
 // Kept out of the spec functions so the specs stay byte-identical across turns
 // (the cacheable block); these travel in the volatile system block instead.
+// RECONCILING WHAT WAS CLAIMED AGAINST WHAT IS THERE. The agent can read its
+// own claims in the conversation; what it could not read was the roster to
+// check them against -- so "that's filed" had nothing to be contradicted by.
+// Names, stages and addresses only: enough to answer "did that actually save",
+// small enough to sit in every prompt.
+function agentRosterHint(){
+  const rows = (typeof slNamesOnFile === 'function') ? slNamesOnFile() : [];
+  if (!rows.length) return '';
+  const line = rows.slice(0, 200).map(function(r){
+    return r.name + (r.email ? ' <' + r.email + '>' : '') + (r.stage ? ' [' + r.stage + ']' : '');
+  }).join('; ');
+  return '\n\nEVERY ACCOUNT CURRENTLY IN THE CRM (' + rows.length + ') \u2014 check any claim you made '
+    + 'about filing something against this list before repeating it, and say plainly when one is missing:\n'
+    + line + (rows.length > 200 ? '\n(first 200 of ' + rows.length + ')' : '');
+}
+window.agentRosterHint = agentRosterHint;
 function agentContextHints() {
   return (typeof slCrmKnownAccountsHint === 'function' ? slCrmKnownAccountsHint() : '')
     + (typeof agentWatchedPullsHint === 'function' ? agentWatchedPullsHint() : '')
@@ -28020,6 +28060,7 @@ function agentRunAction(key, action, chatBody) {
   if (action.type === 'update_buyers') return agentRunUpdateBuyers(action, chatBody);
   if (action.type === 'log_outreach') return agentRunLogOutreach(action, chatBody);
   if (action.type === 'log_owed') return agentRunLogOwed(action, chatBody);
+  if (action.type === 'merge_buyers') return agentRunMergeBuyers(action, chatBody);
   if (action.type === 'add_vendors') return agentRunAddVendors(action, chatBody);
   if (action.type === 'add_material') return agentRunAddMaterial(action, chatBody);
   if (action.type === 'add_styles') return agentRunAddStyles(action, chatBody);
@@ -28747,6 +28788,8 @@ const ACTION_LIST = {
                       + ' \u2014 ' + (x.note || 'approached'); } },
   log_owed:       { field: 'owed',    verb: 'Record', label: function(x){ return (x.name || 'unnamed')
                       + ' \u2014 ' + (x.what || 'a request'); } },
+  merge_buyers:   { field: 'merges',  verb: 'Merge', always: true, label: function(x){
+                      return (x.keep || '?') + ' \u2190 ' + (x.merge || x.drop || '?'); } },
   add_vendors:    { field: 'vendors', verb: 'Add', always: true, label: function(x){ return (x.name || 'unnamed')
                       + (x.location ? ' \u2014 ' + x.location : ''); } },
   update_vendors: { field: 'updates', verb: 'Update', label: function(x){
@@ -29918,6 +29961,90 @@ function agentBuildBuyers(action) {
 // Execute update_buyers: edit existing CRM accounts in place. Matches by name
 // (exact first, then contains), applies only whitelisted non-blank fields,
 // stamps updatedAt for the cross-device merge, and offers a full Undo.
+// MERGING TWO RECORDS OF THE SAME STORE.
+//
+// 130-odd buyers arrived from spreadsheets over months, so the same shop is in
+// there twice under two spellings -- and a duplicate is worse than a missing
+// row, because outreach goes to one copy and the follow-up reads the other.
+// Nothing could collapse them. The rule is that the merge only ever ADDS to the
+// survivor: every contact, every line of history, every field the survivor is
+// missing. A merge that loses a fact is not a merge, it is a delete.
+function agentRunMergeBuyers(action, chatBody) {
+  const list = Array.isArray(action.merges) ? action.merges : [];
+  const buyers = STATE.slBuyers || [];
+  const done = [], missed = [];
+  const snap = JSON.parse(JSON.stringify(buyers));
+  list.slice(0, 20).forEach(function(m){
+    const kq = String(m && m.keep || '').trim().toLowerCase();
+    const dq = String(m && m.merge || m.drop || '').trim().toLowerCase();
+    if (!kq || !dq || kq === dq) return;
+    const find = (q) => buyers.find(function(x){ return String(x.name||'').toLowerCase() === q; })
+                     || buyers.find(function(x){ return String(x.name||'').toLowerCase().indexOf(q) >= 0; });
+    const keep = find(kq), drop = find(dq);
+    if (!keep || !drop || keep === drop) { missed.push((m.merge || m.drop || '?')); return; }
+    // Fields: the survivor wins where it has something, the other fills blanks.
+    ['location','country','type','tier','website','phone','address','fit','notes','nextAction']
+      .forEach(function(k){ if (!String(keep[k] || '').trim() && String(drop[k] || '').trim()) keep[k] = drop[k]; });
+    // Contacts: union, deduped by address.
+    const cs = slContactsOf(keep).slice();
+    slContactsOf(drop).forEach(function(c){
+      const em = String(c && c.email || '').toLowerCase();
+      if (em && cs.some(function(x){ return String(x.email||'').toLowerCase() === em; })) return;
+      if (!em && !String(c && c.name || '').trim()) return;
+      cs.push({ name: c.name || '', email: c.email || '', role: c.role || '' });
+    });
+    keep.contacts = cs;
+    keep.contactName = (cs[0] || {}).name || keep.contactName || '';
+    keep.email = (cs[0] || {}).email || keep.email || '';
+    // History: both, in time order. Losing a touch would lose the pipeline.
+    keep.log = (Array.isArray(keep.log) ? keep.log : []).concat(Array.isArray(drop.log) ? drop.log : [])
+      .sort(function(a, b){ return String(a.at||'').localeCompare(String(b.at||'')); });
+    (drop.owed || []).forEach(function(o){ (keep.owed = keep.owed || []).push(o); });
+    // The furthest-along stage and the earliest next date both survive.
+    if (SL_DESK_RANK[drop.stage] != null && (SL_DESK_RANK[keep.stage] == null
+        || SL_DESK_RANK[drop.stage] < SL_DESK_RANK[keep.stage])) keep.stage = drop.stage;
+    if (drop.lastContact && String(drop.lastContact) > String(keep.lastContact || '')) keep.lastContact = drop.lastContact;
+    if (drop.nextDate && (!keep.nextDate || String(drop.nextDate) < String(keep.nextDate))) keep.nextDate = drop.nextDate;
+    keep.updatedAt = new Date().toISOString();
+    const i = buyers.indexOf(drop);
+    if (i >= 0) buyers.splice(i, 1);
+    done.push(keep.name + ' \u2190 ' + drop.name);
+  });
+  if (!done.length) {
+    appendAgentNote(chatBody, '\u26a0 Nothing was merged'
+      + (missed.length ? ' \u2014 no match for: ' + missed.join(', ') : '') + '.');
+    return;
+  }
+  window.__agPrevAllBuyers = snap;
+  save();
+  try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch(e){}
+  agentActionCard(chatBody, 'Merged ' + done.length + ' duplicate' + (done.length === 1 ? '' : 's'),
+    done.map(function(n){ return escHtml(n); }).join('<br>')
+    + '<div style="font-size:10px;color:var(--muted);margin-top:4px">Contacts, history and dates were kept from both.</div>',
+    'agentUndoMergeBuyers()');
+}
+window.agentUndoMergeBuyers = function(){
+  const snap = window.__agPrevAllBuyers; if (!snap) return false;
+  STATE.slBuyers = snap; window.__agPrevAllBuyers = null;
+  save();
+  try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch(e){}
+  try { showToast('Merge undone', 'info'); } catch(e){}
+  return true;
+};
+
+// WHAT IT SAID IT FILED, AGAINST WHAT IS ACTUALLY THERE.
+//
+// Written the night six saves were claimed and none happened. The agent can
+// read its own claims and the CRM, so it can answer this itself -- but only if
+// there is a verb that hands it the current rows to check against.
+window.slNamesOnFile = function(){
+  return (STATE.slBuyers || []).map(function(b){
+    const c = slContactsOf(b)[0] || {};
+    return { name: b.name || '', stage: b.stage || '', email: c.email || b.email || '',
+             contact: c.name || '', country: b.country || '', updated: String(b.updatedAt || '').slice(0, 10) };
+  });
+};
+
 // THE OTHER DIRECTION. log_outreach records what we sent; this records what a
 // buyer asked us for and has not received. Reading it out of a mail thread is
 // exactly the job an agent should do, because it is the thing a person forgets:
@@ -52121,6 +52248,7 @@ async function skSend(preset, opts){
       (typeof plmContext==='function' ? plmContext() : '')
         + '\n\nWHERE THE USER IS RIGHT NOW: ' + info.label + '. ' + info.guide
         + (hasActions && typeof agentContextHints==='function' ? agentContextHints() : '')
+        + (typeof agentRosterHint==='function' ? agentRosterHint() : '')
         + (voice ? '\n\nVENIA voice/tone notes: ' + voice : ''),
     ];
     // Call history: the same turns, but if a photo rode this send, the last user

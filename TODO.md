@@ -5210,3 +5210,68 @@ straight away.
 
 `gauntlet/actionpick.js` — 17 assertions, now covering both directions of that
 distinction.
+
+## Build 485 — a better model, and the four things the agent could not do
+
+### Opus 5 for the thinking, Haiku for the errands
+
+Everything ran on **Sonnet 5**, and the relay's allow-list meant nothing else
+could be asked for even deliberately. What failed all evening was
+instruction-following under a long, rule-dense prompt: six replies in a row that
+described a save and omitted the block that performs it. That is the class of
+thing the more capable model handles better, and for a two-person brand the
+difference in spend — $5/$25 per MTok against $2/$10 — is small measured against
+one lost evening of buyer research.
+
+Checked against the published reference before anything moved, because Opus 5
+**rejects** things Sonnet accepted: `temperature`, `top_p`, `top_k` and
+`budget_tokens` all return a 400. None were in use. The one assistant-turn
+append is the documented `pause_turn` continuation, not a prefill, and already
+runs on Sonnet 5. Sonnet stays allowed so it can still be named deliberately;
+Haiku stays the retry and the fact-extractor, where capability buys nothing and
+costs on every turn.
+
+`VENIA_MODEL` names it once, so the two call paths cannot drift apart.
+
+### Web fetch — search finds the page, fetch reads it
+
+A search snippet saying "info@ and a phone number" is exactly the thin evidence
+that has been filling the CRM with the wrong door. Fetch opens the contact page
+itself. It can only open URLs already in the conversation, which is what the
+search results put there.
+
+**The relay clamp had to learn a second tool.** As written in 476 it allowed one
+tool per turn and would have dropped fetch **silently** — a stripped tool raises
+no error, it just quietly stops working. One of each now, each with its own
+ceiling, and still nothing beyond the two research tools.
+
+### merge_buyers — the same store filed twice
+
+130-odd buyers arrived from spreadsheets over months, so the same shop is in
+there twice under two spellings. A duplicate is worse than a missing row:
+outreach goes to one copy and the follow-up reads the other, so a warm account
+reads cold.
+
+**The merge only ever ADDS to the record that survives** — every contact, every
+line of history in time order, every field the survivor is missing, the
+furthest-along stage and the earliest next date. A merge that loses a fact is
+not a merge, it is a delete. Undoable, and a name matching nothing merges
+nothing. The spec warns against merging two different stores that share a name.
+
+### The roster — something for a claim to be contradicted by
+
+On the night six saves were claimed and none happened, the agent could read its
+own claims but had **nothing to check them against**. Every turn now carries the
+names, stages and addresses currently in the CRM, with the instruction to check
+any claim about filing against it and say plainly when one is missing.
+
+`gauntlet/model.js` — 16 assertions. `gauntlet/mergededupe.js` — 13.
+`gauntlet/websearch.js` — extended to 53; two of its assertions asserted the old
+one-tool limitation rather than the intent, and were rewritten.
+
+`agentperm.js` caught `merge_buyers` before it shipped, as it is built to.
+
+**Still outstanding: Gmail read.** It is the largest remaining gap — L'ABBEYE
+cc's `sales@` on every invitation, so the agent's own outreach is sitting in the
+inbox invisible to the app — but it needs a restricted scope and a change to the
+Google Cloud consent screen, which is the founders' decision, not a code change.
