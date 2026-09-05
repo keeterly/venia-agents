@@ -108,7 +108,13 @@ export default async (req) => {
   // $10 per 1,000 searches -- a cent each, errors unbilled. Six was set before
   // that price was known and is two or three stores; multi-entity research
   // routinely wants ten or more.
-  const searchTool = (v) => [{ type: v, name: 'web_search', max_uses: 20 }];
+  // Search finds the page; fetch reads it. Fetch only opens URLs already in the
+  // conversation, so the search results are what make it reachable.
+  const searchTool = (v) => (v === 'web_search_20260209'
+    ? [{ type: v, name: 'web_search', max_uses: 20 },
+       { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 10,
+         max_content_tokens: 20000, citations: { enabled: true } }]
+    : [{ type: v, name: 'web_search', max_uses: 20 }]);
   const post = (body) => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
@@ -149,7 +155,7 @@ export default async (req) => {
   const searchErrors = (blocks) => {
     const out = [];
     (blocks || []).forEach((b) => {
-      if (!b || b.type !== 'web_search_tool_result') return;
+      if (!b || (b.type !== 'web_search_tool_result' && b.type !== 'web_fetch_tool_result')) return;
       const c = b.content;
       if (!c || Array.isArray(c)) return;          // a list is a normal result set
       const code = String(c.error_code || 'unknown');
@@ -158,7 +164,7 @@ export default async (req) => {
     return out;
   };
   const attempt = async (tools) => {
-    const body = { model: 'claude-sonnet-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
+    const body = { model: 'claude-opus-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
     if (tools) body.tools = tools;
     let text = '', sources = [], rounds = 0;
     const errs = [];

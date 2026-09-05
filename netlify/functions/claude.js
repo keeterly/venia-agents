@@ -34,8 +34,21 @@ function originAllowed(req) {
 }
 // Only these models may be driven through the relay, so a stray or malicious
 // caller can't pick an expensive one. Anything else is coerced to the default.
-const ALLOWED_MODELS = new Set(['claude-sonnet-5', 'claude-haiku-4-5', 'claude-haiku-4-5-20251001']);
-const DEFAULT_MODEL = 'claude-sonnet-5';
+// OPUS 5 FOR THE THINKING, HAIKU FOR THE ERRANDS.
+//
+// Everything ran on Sonnet 5, and the relay's allow-list meant nothing else
+// could be asked for. What kept failing was instruction-following under a long,
+// rule-dense prompt -- six replies in a row that described a save and omitted
+// the block that performs it. That is the class of thing the more capable model
+// handles better, and for a two-person brand the difference in spend is small
+// against one lost evening of buyer research.
+//
+// Sonnet stays allowed so a caller can still ask for it deliberately; Haiku
+// stays the retry and the small-parse model, where capability buys nothing.
+const ALLOWED_MODELS = new Set([
+  'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-haiku-4-5-20251001',
+]);
+const DEFAULT_MODEL = 'claude-opus-5';
 
 export default async (req) => {
   const cors = corsHeaders(req);
@@ -106,14 +119,27 @@ export default async (req) => {
     // and the client asks for 20. A ceiling below what the app requests is
     // just a silent truncation of the answer.
     const MAX_USES = 24;
-    const OK_TYPES = /^web_search_\d{8}$/;
-    const tools = Array.isArray(payload.tools) ? payload.tools.filter(
-      (t) => t && typeof t.type === 'string' && OK_TYPES.test(t.type)) : [];
-    if (!tools.length) delete payload.tools;
-    else payload.tools = tools.slice(0, 1).map((t) => ({
-      type: t.type, name: 'web_search',
-      max_uses: Math.max(1, Math.min(MAX_USES, Number(t.max_uses) || 5)),
-    }));
+    // Search AND fetch: search finds the page, fetch reads it, and clamping to
+    // one tool would have silently dropped the second -- a stripped tool is not
+    // an error the caller ever sees, it just quietly stops working. Each keeps
+    // its own name and its own ceiling; nothing else gets through.
+    const OK = { web_search: /^web_search_\d{8}$/, web_fetch: /^web_fetch_\d{8}$/ };
+    const nameFor = (type) => Object.keys(OK).find((n) => OK[n].test(type)) || '';
+    const seen = {};
+    const tools = (Array.isArray(payload.tools) ? payload.tools : []).reduce((acc, t) => {
+      const n = t && typeof t.type === 'string' ? nameFor(t.type) : '';
+      if (!n || seen[n]) return acc;                       // one of each, at most
+      seen[n] = 1;
+      const keep = { type: t.type, name: n,
+        max_uses: Math.max(1, Math.min(MAX_USES, Number(t.max_uses) || 5)) };
+      if (n === 'web_fetch') {
+        keep.max_content_tokens = Math.max(1000, Math.min(40000, Number(t.max_content_tokens) || 20000));
+        if (t.citations) keep.citations = { enabled: true };
+      }
+      acc.push(keep);
+      return acc;
+    }, []);
+    if (!tools.length) delete payload.tools; else payload.tools = tools;
     if (payload.tool_choice) delete payload.tool_choice;   // never force a paid tool
   }
 

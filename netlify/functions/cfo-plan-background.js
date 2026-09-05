@@ -57,7 +57,7 @@ async function callModel(key, system, user, maxTokens) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
-      model: 'claude-sonnet-5',
+      model: 'claude-opus-5',
       max_tokens: maxTokens || 8192,
       system,
       messages: [{ role: 'user', content: user }],
