@@ -50,6 +50,30 @@ const ALLOWED_MODELS = new Set([
 ]);
 const DEFAULT_MODEL = 'claude-opus-5';
 
+// THE APP'S OWN SAVE TOOL. Unlike web search it costs nothing to offer, but it
+// is still DEFINED HERE rather than trusted from the request body: the body is
+// caller-controlled, and a caller past the gate must not be able to reshape
+// what the model is told it may write. The client ships an identical copy so
+// the direct-key fallback still works when the relay is unreachable — if the
+// two ever drift, this one wins for every call that comes through here.
+const VENIA_ACTION_TOOL = {
+  name: 'venia_action',
+  description: 'Write a change into the VENIA workspace. This is the ONLY thing that saves anything \u2014 '
+    + 'buyers, corrections, outreach, styles, vendors, plans, handoffs. Saying you saved, filed, added or '
+    + 'updated something WITHOUT calling this tool saves nothing at all. Pass the action object exactly as '
+    + 'shown in the example for that action type in your instructions: "type" plus every other field that '
+    + 'example carries. Call it once, alongside your one-sentence reply. Do not call it for research, '
+    + 'analysis, drafting or advice \u2014 only when a record should actually change.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', description: 'The action type, exactly as named in your instructions (add_buyers, update_buyers, log_outreach, handoff, \u2026).' },
+    },
+    required: ['type'],
+    additionalProperties: true,
+  },
+};
+
 export default async (req) => {
   const cors = corsHeaders(req);
   // Preflight — answer it so a cross-origin POST (e.g. when the app is opened on
@@ -127,6 +151,14 @@ export default async (req) => {
     const nameFor = (type) => Object.keys(OK).find((n) => OK[n].test(type)) || '';
     const seen = {};
     const tools = (Array.isArray(payload.tools) ? payload.tools : []).reduce((acc, t) => {
+      // The save tool has no `type` — it is ours, not one of Anthropic's server
+      // tools — so it would have fallen straight through the filter below and
+      // been dropped, silently, which is the one failure mode this whole change
+      // exists to remove. Match it by name and substitute our own definition.
+      if (t && t.name === 'venia_action') {
+        if (!seen.venia_action) { seen.venia_action = 1; acc.push(VENIA_ACTION_TOOL); }
+        return acc;
+      }
       const n = t && typeof t.type === 'string' ? nameFor(t.type) : '';
       if (!n || seen[n]) return acc;                       // one of each, at most
       seen[n] = 1;

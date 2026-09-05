@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '491';
+  const BUILD = '492';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23314,6 +23314,69 @@ const SEARCH_WHY = {
 // is that multi-entity research "can use 10 or more". Twenty costs 20c in the
 // worst case, against a list that has to be usable before a Paris showroom.
 const SEARCH_MAX = 20;
+// ── THE SAVE IS A TOOL CALL, NOT A SENTENCE ────────────────────────
+// Eight times in one evening the model described a change in prose and left out
+// the ```venia:action``` block that performs it. The founder was told the stores
+// were filed and nothing was written. Every fix until now has been recovery
+// built AROUND the gap -- salvage a block cut off mid-array (481), spot the
+// unbacked claim, offer to re-file -- because a fenced block is prose the model
+// has to remember to type, and forgetting to type prose is exactly the failure.
+//
+// A tool call is not prose. The API hands the model a named instrument, decodes
+// its input as JSON, and reports the call as its own block type: it cannot be
+// described instead of emitted, and it cannot arrive as invalid JSON.
+//
+// The call is converted straight back into the same fenced block the rest of the
+// app has always read, so agentExtractAction, the tick lists, the stored history
+// format and every gauntlet are untouched -- and a model that still hand-types a
+// fence keeps working exactly as it did.
+const VENIA_ACTION_TOOL = {
+  name: 'venia_action',
+  description: 'Write a change into the VENIA workspace. This is the ONLY thing that saves anything \u2014 '
+    + 'buyers, corrections, outreach, styles, vendors, plans, handoffs. Saying you saved, filed, added or '
+    + 'updated something WITHOUT calling this tool saves nothing at all. Pass the action object exactly as '
+    + 'shown in the example for that action type in your instructions: "type" plus every other field that '
+    + 'example carries. Call it once, alongside your one-sentence reply. Do not call it for research, '
+    + 'analysis, drafting or advice \u2014 only when a record should actually change.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', description: 'The action type, exactly as named in your instructions (add_buyers, update_buyers, log_outreach, handoff, \u2026).' },
+    },
+    required: ['type'],
+    additionalProperties: true,
+  },
+};
+// A tool call, rendered as the block the app has always parsed. If the JSON came
+// back complete we close the fence; if the turn ran out of room part-way through
+// the object we deliberately DO NOT, because an unclosed fence is precisely what
+// agentExtractAction reads as truncated -- it salvages the rows that landed and
+// warns that the tail is missing, which is the behaviour proven in 481.
+function agentFenceFromTool(json){
+  const raw = String(json == null ? '' : json).trim();
+  if (!raw) return '';
+  let ok = false;
+  try { const o = JSON.parse(raw); ok = !!(o && typeof o === 'object' && !Array.isArray(o)); } catch (e) { ok = false; }
+  return '\n\n```venia:action\n' + raw + (ok ? '\n```' : '');
+}
+window.agentFenceFromTool = agentFenceFromTool;
+// Append the tool's block to a reply -- unless the model ALSO hand-typed one.
+// Two blocks in one reply trips the "I tried to do more than one thing at once"
+// warning, so a model that belt-and-braces both would have been told half its
+// work was dropped when nothing was.
+function agentWithToolAction(text, json){
+  const t = String(text == null ? '' : text);
+  const raw = String(json || '').trim();
+  if (!raw) return t;
+  if (/```venia:action\s*[\s\S]*?```/.test(t)) return t;   // it typed a whole block
+  // An OPEN fence is a block the reply ran out of room on part-way through. The
+  // tool call carries the same save and its JSON arrived on its own budget, so
+  // drop the wreckage and use it — salvaging half a list while the whole list
+  // is in hand would be thrift for its own sake.
+  const cut = t.indexOf('```venia:action');
+  return (cut >= 0 ? t.slice(0, cut).trim() : t) + agentFenceFromTool(raw);
+}
+window.agentWithToolAction = agentWithToolAction;
 async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // Stream-first: the SSE relay isn't subject to the buffered-function time
   // window, so long generations (day plans, reshapes, adjustments) stop
@@ -23330,17 +23393,29 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // that says "info@ and a phone number" is exactly the thin evidence that has
   // been filling the CRM with the wrong door. Fetch only opens URLs already in
   // the conversation, which is what the search results put there.
+  // The save tool rides on EVERY turn unless a caller opts out. That is the
+  // point: a capability the caller has to remember to switch on is the same
+  // shape of bug as a block the model has to remember to type. Its definition
+  // sits inside the cached prefix, so carrying it costs effectively nothing,
+  // and a prompt that documents no actions simply never calls it.
+  const _act = (opts && opts.noAction) ? [] : [VENIA_ACTION_TOOL];
   const _tools = (opts && opts.search)
     ? [{ type: 'web_search_20260209', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) },
        { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: (opts.maxFetch || 10),
-         max_content_tokens: 20000, citations: { enabled: true } }] : null;
+         max_content_tokens: 20000, citations: { enabled: true } }].concat(_act)
+    : (_act.length ? _act : null);
   try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384, tools: _tools }); }
   catch (e) {
-    if (_tools) {
+    if (opts && opts.search) {
+      // The search fallbacks keep the save tool. Dropping to an older search
+      // version is about which server tool this account has, and has nothing to
+      // do with whether the turn is allowed to write — losing the save on the
+      // way down would trade one failure for the other.
       try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) }] }); }
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: (opts.maxSearch || SEARCH_MAX) }].concat(_act) }); }
       catch (e2) { /* fall through */ }
-      try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384 }); }
+      try { return await callClaudeStream(system, userMsg, { model: model, history: history, maxTokens: 16384,
+        tools: (_act.length ? _act : null) }); }
       catch (e3) { /* fall back to buffered */ }
     }
   }
@@ -23349,7 +23424,8 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   // (disp, img) and the API strict-rejects unknown fields with a 400.
   const _clean = (h) => (h || []).map(m => ({ role: m.role, content: m.content }));
   const msgs = userMsg ? [..._clean(history), {role:'user', content: userMsg}] : _clean(history);
-  const body = JSON.stringify({ model: model || VENIA_MODEL, max_tokens: 16384, system: veniaSysBlocks(system), messages: msgs });
+  const body = JSON.stringify({ model: model || VENIA_MODEL, max_tokens: 16384, system: veniaSysBlocks(system), messages: msgs,
+    ...(_act.length ? { tools: _act } : {}) });
 
   // Proxy-first (secure: the key stays server-side), on a dedicated /api/claude
   // path that can't be shadowed by the site's "/" rewrite. We try the relative
@@ -23402,11 +23478,16 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
   const text = blocks
     .filter(b => b && b.type === 'text' && typeof b.text === 'string')
     .map(b => b.text).join('');
-  if (!text.trim() && blocks.length) {
+  // The save, if the model made one. A reply that is nothing BUT a tool call is
+  // a complete, correct turn — it must not be reported as "no text".
+  let _tj = '';
+  const _tb = blocks.filter(b => b && b.type === 'tool_use' && b.name === 'venia_action')[0];
+  if (_tb) { try { _tj = JSON.stringify(_tb.input == null ? {} : _tb.input); } catch (_e) { _tj = ''; } }
+  if (!text.trim() && !_tj && blocks.length) {
     // Got a real reply but no usable text — surface why, so it's diagnosable.
     throw new Error('Enigma replied with no text — stop: ' + (data.stop_reason || '?') + ', blocks: ' + (blocks.map(b => b && b.type).join('/') || 'none'));
   }
-  return text;
+  return agentWithToolAction(text, _tj);
 }
 
 // Streaming variant — for LONG work (agent research, deep drafts). Returns the
@@ -23460,6 +23541,12 @@ async function callClaudeStream(system, userMsg, opts) {
     const dec = new TextDecoder();
     let buf = '', out = '';
     const cites = [], citeT = {}, sErrs = [];
+    // Tool calls arrive as their own content blocks, keyed by index: a start
+    // that names the tool, then input_json_delta fragments that spell out the
+    // arguments. Nothing about them is text, which is why the old parser -- it
+    // only ever read delta.text -- saw a save action as an empty reply.
+    const tuse = {};
+    let toolJson = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -23494,15 +23581,28 @@ async function callClaudeStream(system, userMsg, opts) {
             if (sErrs.indexOf(code) < 0) sErrs.push(code);
           }
         }
+        if (ev.type === 'content_block_start' && ev.content_block && ev.content_block.type === 'tool_use') {
+          tuse[ev.index] = { name: String(ev.content_block.name || ''), json: '' };
+        }
+        if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'input_json_delta' && tuse[ev.index]) {
+          tuse[ev.index].json += String(ev.delta.partial_json || '');
+        }
         if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
       }
     }
-    if (!out.trim()) throw new Error('Enigma replied with no text');
+    Object.keys(tuse).forEach(function(i){
+      if (!toolJson && tuse[i].name === 'venia_action') toolJson = tuse[i].json;
+    });
+    // A turn that is nothing but a save is a complete turn. Throwing "no text"
+    // here would have thrown away the very thing this change exists to deliver.
+    if (!out.trim() && !toolJson.trim()) throw new Error('Enigma replied with no text');
     if (cites.length) out += '\n\nSOURCES\n' + cites.slice(0, 12).map(function(u){
       return '- ' + (citeT[u] ? citeT[u] + ' \u2014 ' : '') + u; }).join('\n');
     if (sErrs.length) out += '\n\n\u26a0 WEB SEARCH DID NOT RUN (' + sErrs.join(', ') + ')'
       + sErrs.map(function(c){ return SEARCH_WHY[c] ? '\n\u2014 ' + SEARCH_WHY[c] : ''; }).join('');
-    return out;
+    // LAST, always. A block cut off mid-object leaves its fence open on purpose,
+    // and anything appended after it would be swallowed into the JSON.
+    return agentWithToolAction(out, toolJson);
   } catch (e) {
     if (timedOut) throw new Error('The connection went quiet (the app may have been asleep)');
     throw e;
@@ -27295,8 +27395,21 @@ function agentSpecChunks(chunks){
 // blocks that are then refused — which reads as the app being broken.
 const AGENT_NO_ACTIONS = '\n\nYou cannot change records for this user: they have read access, or changes by the assistant are switched off for them. '
   + 'Do the work anyway — research, analyse, compare, draft, calculate, and write out the finished thing in the conversation so they can paste or act on it. '
-  + 'Never emit a venia:action block, never say you saved, filed or updated anything, and do not apologise repeatedly for it. '
+  + 'Never call the venia_action tool, never emit a venia:action block, never say you saved, filed or updated anything, and do not apologise repeatedly for it. '
   + 'If a change genuinely needs to be made in the app, say in one line what should change and that a founder can make it or grant access.';
+
+// HOW A CHANGE IS ACTUALLY WRITTEN. Every action below is documented as a
+// fenced block because that is what the object looks like on the page, and
+// rewriting thirty examples would have been thirty chances to get one wrong.
+// This one paragraph maps all of them onto the tool instead. The fence still
+// works — a reply that hand-types one is parsed exactly as before — so nothing
+// is lost if the tool is stripped somewhere between here and the API.
+const AGENT_TOOL_NOTE = '\n\nHOW A CHANGE IS ACTUALLY WRITTEN: call the venia_action tool, passing the action object \u2014 '
+  + '"type" plus the fields shown in that action\'s example. The examples above are written as fenced '
+  + '```venia:action``` blocks because that is the shape of the object; the tool takes the SAME object. '
+  + 'Use the tool. Only if the tool is genuinely unavailable to you, emit the fenced block instead. '
+  + 'Never both and never neither, and one action per reply. '
+  + 'Describing a change in words changes nothing \u2014 the tool call IS the save.';
 
 function agentActionSpec(key) {
   // Every spec function gates ITSELF, so there is no call site that can forget.
@@ -27428,7 +27541,7 @@ function agentScopedSpec(key) {
     mk:  () => agentBrandDocSpec() + B(),
     br:  () => agentBrandDocSpec() + B(),
   };
-  if (!map[key]) return agentAllActionSpec();      // unknown key: lose nothing
+  if (!map[key]) return agentAllActionSpec() + AGENT_TOOL_NOTE;   // unknown key: lose nothing
   // The named agents pass through the SAME gate. Their own spec functions
   // already filter chunk by chunk; this drops the whole-group ones a viewer or
   // a non-member must not be offered. The handoff always survives — passing
@@ -27438,7 +27551,7 @@ function agentScopedSpec(key) {
   // block, and appending it to a notice that says "never emit a venia:action
   // block" is a prompt arguing with itself — and handing work to a colleague
   // whose agent has exactly the same permissions achieves nothing anyway.
-  return body ? body + agentHandoffSpec(key) : AGENT_NO_ACTIONS;
+  return body ? body + agentHandoffSpec(key) + AGENT_TOOL_NOTE : AGENT_NO_ACTIONS;
 }
 // Passing work along. Without this, scoping an agent would just make it say no.
 function agentHandoffSpec(key) {
@@ -52575,7 +52688,7 @@ async function skSend(preset, opts){
     const system = [
       persona + '\n\n' + SK_ANSWER_RULE
         + '\nGive help specific to the user\'s current section when relevant. You can take any of the actions below right from wherever they are — never send the user to another screen to get something done.'
-        + (hasActions ? agentAllActionSpec() : ''),
+        + (hasActions ? agentAllActionSpec() + AGENT_TOOL_NOTE : ''),
       (typeof plmContext==='function' ? plmContext() : '')
         + '\n\nWHERE THE USER IS RIGHT NOW: ' + info.label + '. ' + info.guide
         + (hasActions && typeof agentContextHints==='function' ? agentContextHints() : '')
