@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '492';
+  const BUILD = '493';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23495,19 +23495,72 @@ async function _callClaudeOnce(system, userMsg, history=[], model, opts) {
 // through so generation can run past the buffered-function time limit. opts:
 // { model, tools, maxTokens }. Throws on transport/API errors (caller may fall
 // back to callClaude).
+//
+// A PAUSED TURN IS NOT A FINISHED TURN.
+//
+// With server tools in play the API can hand a long turn back with stop_reason
+// "pause_turn": the work so far, and an expectation that you send it straight
+// back to be continued. The cloud worker has done that since it was written.
+// This path never did — it read the SSE, returned whatever text had arrived,
+// and dropped everything the model still intended to do. The dock ALWAYS runs
+// with search on, so this was every researched buyer batch: the founder gets a
+// confident summary, and the save that was going to follow it never happens.
+// That is indistinguishable, from the outside, from an agent that lies.
+const STREAM_MAX_PAUSE = 4;
 async function callClaudeStream(system, userMsg, opts) {
   opts = opts || {};
   // Same strip as callClaude: only {role, content} may reach the API.
   const _cleanS = (h) => (h || []).map(m => ({ role: m.role, content: m.content }));
   const msgs = userMsg ? [..._cleanS(opts.history), { role: 'user', content: userMsg }] : _cleanS(opts.history);
-  const body = JSON.stringify({
-    model: opts.model || VENIA_MODEL,
-    max_tokens: opts.maxTokens || 16384,
-    stream: true,
-    system: (typeof veniaSysBlocks === 'function') ? veniaSysBlocks(system) : system,
-    messages: msgs,
-    ...(opts.tools ? { tools: opts.tools } : {}),
-  });
+  const sysB = (typeof veniaSysBlocks === 'function') ? veniaSysBlocks(system) : system;
+  let out = '', toolJson = '';
+  const cites = [], citeT = {}, sErrs = [];
+  for (let round = 0; ; round++) {
+    const body = JSON.stringify({
+      model: opts.model || VENIA_MODEL,
+      max_tokens: opts.maxTokens || 16384,
+      stream: true,
+      system: sysB,
+      messages: msgs,
+      ...(opts.tools ? { tools: opts.tools } : {}),
+    });
+    let r;
+    try { r = await veniaStreamOnce(body, opts); }
+    catch (e) {
+      // A CONTINUATION THAT FAILS MUST NOT COST THE ANSWER. Round 0 is the
+      // caller's to handle — it has fallbacks. A later round already holds real
+      // work, and throwing it away to report a transport error would make this
+      // fix worse than the bug it replaces.
+      if (round === 0) throw e;
+      break;
+    }
+    if (r.text) out += (out ? '\n' : '') + r.text;
+    r.cites.forEach(function(c){ if (cites.indexOf(c.url) < 0) { cites.push(c.url); citeT[c.url] = c.title; } });
+    r.sErrs.forEach(function(c){ if (sErrs.indexOf(c) < 0) sErrs.push(c); });
+    if (!toolJson && r.toolJson) toolJson = r.toolJson;
+    if (r.stop !== 'pause_turn' || round >= STREAM_MAX_PAUSE) break;
+    const blocks = r.blocks.filter(function(b){ return b; });
+    if (!blocks.length) break;                 // nothing to hand back — stop rather than loop
+    msgs.push({ role: 'assistant', content: blocks });
+  }
+  // A turn that is nothing but a save is a complete turn. Throwing "no text"
+  // here would have thrown away the very thing this change exists to deliver.
+  if (!out.trim() && !toolJson.trim()) throw new Error('Enigma replied with no text');
+  if (cites.length) out += '\n\nSOURCES\n' + cites.slice(0, 12).map(function(u){
+    return '- ' + (citeT[u] ? citeT[u] + ' — ' : '') + u; }).join('\n');
+  if (sErrs.length) out += '\n\n⚠ WEB SEARCH DID NOT RUN (' + sErrs.join(', ') + ')'
+    + sErrs.map(function(c){ return SEARCH_WHY[c] ? '\n— ' + SEARCH_WHY[c] : ''; }).join('');
+  // LAST, always. A block cut off mid-object leaves its fence open on purpose,
+  // and anything appended after it would be swallowed into the JSON.
+  return agentWithToolAction(out, toolJson);
+}
+// ONE ROUND of the stream. Returns everything the caller needs to decide
+// whether to continue: the text, the assistant's content blocks rebuilt well
+// enough to hand straight back, the stop reason, citations, search errors and
+// the save. Rebuilding the blocks is the price of continuing a paused turn —
+// the API wants its own reply back, and the SSE is the only copy we get.
+async function veniaStreamOnce(body, opts) {
+  opts = opts || {};
   const PATHS = ['/api/claude', '/.netlify/functions/claude'];
   const CANON = 'https://creator.veniacollection.com';
   // Watchdog. iOS suspends a backgrounded PWA mid-stream; on resume the pending
@@ -23539,13 +23592,11 @@ async function callClaudeStream(system, userMsg, opts) {
     // Parse the SSE stream: collect every text delta; surface API error events.
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
-    let buf = '', out = '';
-    const cites = [], citeT = {}, sErrs = [];
-    // Tool calls arrive as their own content blocks, keyed by index: a start
-    // that names the tool, then input_json_delta fragments that spell out the
-    // arguments. Nothing about them is text, which is why the old parser -- it
-    // only ever read delta.text -- saw a save action as an empty reply.
-    const tuse = {};
+    let buf = '', out = '', stop = '';
+    const cites = [], seenCite = {}, sErrs = [];
+    // The assistant's own blocks, rebuilt by index. Tool inputs arrive as JSON
+    // fragments and are only parseable once the block closes.
+    const blocks = [], partial = {};
     let toolJson = '';
     while (true) {
       const { done, value } = await reader.read();
@@ -23559,50 +23610,53 @@ async function callClaudeStream(system, userMsg, opts) {
         const raw = line.slice(5).trim();
         if (!raw || raw === '[DONE]') continue;
         let ev; try { ev = JSON.parse(raw); } catch (e) { continue; }
-        if (ev.type === 'content_block_delta' && ev.delta && typeof ev.delta.text === 'string') out += ev.delta.text;
-        // WHERE IT CAME FROM. A searched answer arrives with citations riding
-        // alongside the text, and we were dropping them on the floor — which
-        // for a contact detail is the difference between a fact and a guess.
-        if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'citations_delta') {
-          const c = ev.delta.citation || {};
-          const u = c.url || c.source;
-          if (u && cites.indexOf(u) < 0) { cites.push(u); citeT[u] = String(c.title || '').slice(0, 90); }
-        }
-        // A FAILED SEARCH IS NOT AN ERROR EVENT. Anthropic's server tools answer
-        // HTTP 200 and put the failure INSIDE a web_search_tool_result, whose
-        // content is an error object where a success is a list. Nothing here
-        // threw, so the tool-version fallback never fired and the model was
-        // left to describe an error block in prose. Read the code instead.
-        if (ev.type === 'content_block_start' && ev.content_block
-            && ev.content_block.type === 'web_search_tool_result') {
-          const c = ev.content_block.content;
-          if (c && !Array.isArray(c)) {
-            const code = String(c.error_code || 'unknown');
-            if (sErrs.indexOf(code) < 0) sErrs.push(code);
+        if (ev.type === 'content_block_start') {
+          const cb = ev.content_block || null;
+          try { blocks[ev.index] = cb ? JSON.parse(JSON.stringify(cb)) : null; } catch (e) { blocks[ev.index] = cb; }
+          if (cb && (cb.type === 'tool_use' || cb.type === 'server_tool_use')) partial[ev.index] = '';
+          // A FAILED SEARCH IS NOT AN ERROR EVENT. Anthropic's server tools answer
+          // HTTP 200 and put the failure INSIDE a web_search_tool_result, whose
+          // content is an error object where a success is a list. Nothing here
+          // threw, so the tool-version fallback never fired and the model was
+          // left to describe an error block in prose. Read the code instead.
+          if (cb && (cb.type === 'web_search_tool_result' || cb.type === 'web_fetch_tool_result')) {
+            const c = cb.content;
+            if (c && !Array.isArray(c)) {
+              const code = String(c.error_code || 'unknown');
+              if (sErrs.indexOf(code) < 0) sErrs.push(code);
+            }
           }
         }
-        if (ev.type === 'content_block_start' && ev.content_block && ev.content_block.type === 'tool_use') {
-          tuse[ev.index] = { name: String(ev.content_block.name || ''), json: '' };
+        if (ev.type === 'content_block_delta' && ev.delta) {
+          const d = ev.delta, B = blocks[ev.index];
+          if (typeof d.text === 'string') { out += d.text; if (B) B.text = (B.text || '') + d.text; }
+          if (typeof d.thinking === 'string' && B) B.thinking = (B.thinking || '') + d.thinking;
+          if (typeof d.signature === 'string' && B) B.signature = (B.signature || '') + d.signature;
+          if (d.type === 'input_json_delta' && Object.prototype.hasOwnProperty.call(partial, ev.index)) {
+            partial[ev.index] += String(d.partial_json || '');
+          }
+          // WHERE IT CAME FROM. A searched answer arrives with citations riding
+          // alongside the text, and we were dropping them on the floor — which
+          // for a contact detail is the difference between a fact and a guess.
+          if (d.type === 'citations_delta') {
+            const c = d.citation || {};
+            const u = c.url || c.source;
+            if (u && !seenCite[u]) { seenCite[u] = 1; cites.push({ url: u, title: String(c.title || '').slice(0, 90) }); }
+            if (B && u) { B.citations = (B.citations || []).concat([c]); }
+          }
         }
-        if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'input_json_delta' && tuse[ev.index]) {
-          tuse[ev.index].json += String(ev.delta.partial_json || '');
+        if (ev.type === 'content_block_stop' && Object.prototype.hasOwnProperty.call(partial, ev.index)) {
+          const B = blocks[ev.index];
+          if (B) { try { B.input = JSON.parse(partial[ev.index] || '{}'); } catch (e) { /* left as sent */ } }
+          if (B && B.type === 'tool_use' && B.name === 'venia_action' && !toolJson) toolJson = partial[ev.index];
         }
+        // WHY THE TURN ENDED. Everything above is content; this is the one flag
+        // that says whether there is more of it coming.
+        if (ev.type === 'message_delta' && ev.delta && ev.delta.stop_reason) stop = String(ev.delta.stop_reason);
         if (ev.type === 'error') throw new Error((ev.error && ev.error.message) || 'stream error');
       }
     }
-    Object.keys(tuse).forEach(function(i){
-      if (!toolJson && tuse[i].name === 'venia_action') toolJson = tuse[i].json;
-    });
-    // A turn that is nothing but a save is a complete turn. Throwing "no text"
-    // here would have thrown away the very thing this change exists to deliver.
-    if (!out.trim() && !toolJson.trim()) throw new Error('Enigma replied with no text');
-    if (cites.length) out += '\n\nSOURCES\n' + cites.slice(0, 12).map(function(u){
-      return '- ' + (citeT[u] ? citeT[u] + ' \u2014 ' : '') + u; }).join('\n');
-    if (sErrs.length) out += '\n\n\u26a0 WEB SEARCH DID NOT RUN (' + sErrs.join(', ') + ')'
-      + sErrs.map(function(c){ return SEARCH_WHY[c] ? '\n\u2014 ' + SEARCH_WHY[c] : ''; }).join('');
-    // LAST, always. A block cut off mid-object leaves its fence open on purpose,
-    // and anything appended after it would be swallowed into the JSON.
-    return agentWithToolAction(out, toolJson);
+    return { text: out, blocks: blocks, stop: stop, cites: cites, sErrs: sErrs, toolJson: toolJson };
   } catch (e) {
     if (timedOut) throw new Error('The connection went quiet (the app may have been asleep)');
     throw e;
@@ -27409,7 +27463,21 @@ const AGENT_TOOL_NOTE = '\n\nHOW A CHANGE IS ACTUALLY WRITTEN: call the venia_ac
   + '```venia:action``` blocks because that is the shape of the object; the tool takes the SAME object. '
   + 'Use the tool. Only if the tool is genuinely unavailable to you, emit the fenced block instead. '
   + 'Never both and never neither, and one action per reply. '
-  + 'Describing a change in words changes nothing \u2014 the tool call IS the save.';
+  + 'Describing a change in words changes nothing \u2014 the tool call IS the save.'
+  // HOW A BATCH IS REPORTED BACK.
+  //
+  // A researched batch came back under two headings, "Filed:" and "Flagged, not
+  // filed:", with one store listed under the second and the words "Filing the
+  // phone and website only" inside it. Both halves were true -- it flagged the
+  // address and filed the phone -- and every write landed. It still read as the
+  // agent contradicting itself, which was enough to put the whole batch in
+  // doubt. An account is not filed or unfiled; individual FIELDS are.
+  + '\n\nREPORTING A BATCH: one line per account, and never the same account under two headings. '
+  + 'Say what you wrote and what you left empty, in that order, naming the fields: '
+  + '"Stijl \u2014 filed email, phone, address." / "Centre Commercial \u2014 filed phone, address, site; no email, it is redacted in every index I hit." '
+  + 'Never write "not filed" above a line that then describes something you filed. '
+  + 'An account you wrote NOTHING to is the only one that belongs under a heading like "nothing filed", and say in the same line what would unblock it. '
+  + 'Count honestly: if you wrote to five accounts, say five, whether or not some of them are also flagged.';
 
 function agentActionSpec(key) {
   // Every spec function gates ITSELF, so there is no call site that can forget.
@@ -29164,8 +29232,66 @@ window.agentReviewApply = function(id){
   catch(e){ try { appendAgentNote(h.body, '\u26a0 That change did NOT save \u2014 '
     + (e && e.message || 'something went wrong') + '.'); } catch(_){} }
 };
+// ── A RECEIPT IS DATA, NOT DOM ─────────────────────────────────────
+// Every action card was appended straight to the chat body, and skRenderHistory
+// wipes that body and rebuilds it from the stored turns -- which hold text and
+// nothing else. So one reload, one service-worker update, one panel redraw, and
+// "✓ Updated 5 accounts" is gone, while the model's sentence saying it did the
+// work survives word for word. The founder is left holding the claim with the
+// proof deleted, and reasonably concludes the agent is making it up.
+//
+// That is exactly what happened on 5 September: five accounts written in a
+// single action at 08:29:23Z -- every field the reply named, and every field it
+// said it was NOT filing left empty -- and no receipt anywhere on screen.
+//
+// So the receipt is now stored beside the turn that earned it. Text only, and
+// no buttons: a live card can offer Undo because it holds a snapshot in memory,
+// and a card rebuilt after a reload would be offering to undo from nothing.
+function agentReceiptText(html){
+  return String(html == null ? '' : html)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:div|p|li|tr|h\d)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#(?:39|x27);/g, "'")
+    .split('\n').map(function(x){ return x.trim(); }).filter(Boolean).slice(0, 16).join('\n');
+}
+function agentReceipt(headline, lines){
+  const rec = { title: agentReceiptText(headline), body: agentReceiptText(lines), at: new Date().toISOString() };
+  if (!rec.title) return rec;
+  try {
+    // `const SK = …` at script scope is reachable by name but is NOT a property
+    // of window, so the obvious window.SK check silently found nothing and every
+    // receipt was dropped on the floor — the same class of quiet no-op this
+    // build exists to remove.
+    const S = (typeof SK !== 'undefined' && SK) ? SK : (window.SK || null);
+    const h = (S && S.history) || [];
+    for (let i = h.length - 1; i >= 0; i--) {
+      if (h[i] && h[i].role === 'assistant') {
+        h[i].receipts = (h[i].receipts || []).concat([rec]);
+        if (typeof skSaveHistory === 'function') skSaveHistory();
+        break;
+      }
+    }
+  } catch (e) {}
+  return rec;
+}
+window.agentReceipt = agentReceipt;
+function agentReceiptHTML(rec){
+  if (!rec || !rec.title) return '';
+  const esc = (typeof escHtml === 'function') ? escHtml : function(x){ return String(x); };
+  return '<div class="ag-msg from-agent"><div class="ag-msg-meta">Action</div>'
+    + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+    + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ '
+    + esc(rec.title) + '</div>'
+    + (rec.body ? '<div style="font-size:10.5px;line-height:1.6;margin-top:4px">'
+        + rec.body.split('\n').map(esc).join('<br>') + '</div>' : '')
+    + '</div></div>';
+}
+window.agentReceiptHTML = agentReceiptHTML;
 function agentActionCard(chatBody, headline, lines, undoCall, btnLabel, mark){
   const pending = !!btnLabel;
+  if (!pending) { try { agentReceipt(headline, lines); } catch (e) {} }
   const card = document.createElement('div');
   card.className = 'ag-msg from-agent';
   card.innerHTML = '<div class="ag-msg-meta">Action</div>'
@@ -30489,6 +30615,11 @@ function agentRunUpdateBuyers(action, chatBody) {
   });
   if (!done.length && !missed.length){ appendAgentNote(chatBody, 'Tell me which accounts to update and what to change on each.'); return; }
   if (done.length){ save(); try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch (e) {} }
+  // The receipt outlives the card. Contact enrichment writes to columns that
+  // sit off-screen behind the agent panel, so this line is the only place the
+  // founder can see WHICH fields landed on WHICH account.
+  if (done.length) { try { agentReceipt('Updated ' + done.length + ' account' + (done.length !== 1 ? 's' : ''),
+    done.map(function(d){ return d.name + ' \u2014 ' + d.fields.join(', '); }).join('\n')); } catch (e) {} }
   const snapId = 'bu' + Date.now();
   window.__agBuyerUpdUndo = window.__agBuyerUpdUndo || {};
   window.__agBuyerUpdUndo[snapId] = snap;
@@ -30588,6 +30719,9 @@ function agentRunAddBuyers(action, chatBody) {
   try { logActivity('Sales: ' + built.length + ' prospect(s) added by agent' + (skipped.length ? ' (' + skipped.length + ' dupe(s) skipped)' : '')); } catch (e) {}
   if (isSalesBuyersVisible()) window.slOpenBuyers();   // refresh the list only if it's already on screen
 
+  try { agentReceipt(built.length + ' prospect' + (built.length > 1 ? 's' : '') + ' added',
+    built.map(function(b){ return b.name + (b.location ? ' \u2014 ' + b.location : ''); }).join('\n')
+    + (skipped.length ? '\n' + skipped.length + ' already in your CRM, skipped' : '')); } catch (e) {}
   const ids = built.map(b => b.id).join(',');
   const dupeNote = skipped.length
     ? '<div style="font-size:10px;color:var(--muted);margin-top:6px">' + skipped.length + ' already in your CRM — skipped: ' + escHtml(skipped.slice(0,4).join(', ')) + (skipped.length > 4 ? '…' : '') + '</div>'
@@ -52172,7 +52306,20 @@ function skGreet(){
 function skRenderHistory(){
   const body = document.getElementById('sk-body'); if (!body) return;
   body.innerHTML = '';
-  (SK.history||[]).forEach(m => skAppend(m.role==='user'?'user':'agent', m.disp || m.content, m.img));
+  (SK.history||[]).forEach(m => {
+    skAppend(m.role==='user'?'user':'agent', m.disp || m.content, m.img);
+    // What the turn actually wrote, rebuilt from the stored receipt rather than
+    // from a card that no longer exists.
+    ((m && m.receipts) || []).forEach(function(rec){
+      try {
+        const html = agentReceiptHTML(rec);
+        if (!html) return;
+        const hold = document.createElement('div');
+        hold.innerHTML = html;
+        if (hold.firstChild) body.appendChild(hold.firstChild);
+      } catch (e) {}
+    });
+  });
   // Redrawing throws away any working bubble, so put back the ones still running.
   try { skRestorePending(); } catch(e){}
   try { skRestoreFileSet(); } catch(e){}
