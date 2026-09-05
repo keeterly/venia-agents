@@ -5339,3 +5339,30 @@ evidence.
 
 `gauntlet/gmailread.js` — 18 assertions, including the exact thread that
 produced this.
+
+## Build 488 — one page is not the mailbox
+
+The first working pull returned **two rows** on a morning when the showroom sent
+about **two hundred invitations**. Both fixes below are why.
+
+**Gmail returns at most 100 message ids per call, and the scan took the first
+page and stopped.** Into an inbox with 18,000 items, that could not see the
+campaign it was built to find. It follows the pages now, up to 500, with a
+ceiling so a huge mailbox cannot run away — and fetches headers **eight at a
+time** rather than one after another, because five hundred sequential round
+trips is a minute of staring at a button. The button counts as it goes.
+
+**And the model's private correction was being printed to the founder.** When a
+reply claims a save it did not make, a bracketed `[SYSTEM CORRECTION — …]` note
+is appended to what the *model* sees, so it learns that prose does not write a
+record. A re-render prints assistant content verbatim, so that note was
+appearing on screen in the middle of a buyer research thread. Every reply now
+stores a display copy alongside the model's copy.
+
+**Opus 5 did not fix the missing block.** "Filing the five confirmed contacts
+now" still arrived with nothing behind it, on 487. It was the most likely single
+improvement and it did not land; what is carrying this is the recovery built for
+it — the salvage, the File it now button, and the roster.
+
+`gauntlet/gmailread.js` — 27 assertions, including a match sitting at the 240th
+message of 250.
