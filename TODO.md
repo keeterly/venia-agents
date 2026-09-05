@@ -5275,3 +5275,36 @@ one-tool limitation rather than the intent, and were rewritten.
 cc's `sales@` on every invitation, so the agent's own outreach is sitting in the
 inbox invisible to the app — but it needs a restricted scope and a change to the
 Google Cloud consent screen, which is the founders' decision, not a code change.
+
+## Build 486 — the pipeline was in the mailbox all along
+
+The desk audit reported **four accounts with any contact history**. On the same
+morning the showroom sent about **two hundred invitations** and cc'd `sales@` on
+every one. Both numbers were true: the outreach was real, and the app could not
+see it, because the only Gmail scope it held was `gmail.send`. So the CRM
+reported a cold list while the inbox held a live campaign, and every follow-up
+decision was being made against the wrong picture.
+
+- `gmail.readonly` added to the requested scopes. It is a **restricted** scope:
+  it works for accounts listed as test users on the Google consent screen, which
+  is what a two-founder brand has. A refusal says exactly that rather than
+  "HTTP 403".
+- **Headers only.** `format=metadata` with From, To, Cc, Subject and Date —
+  enough to answer "was this account approached, when, by whom", without the app
+  ever holding the body of the founders' mail.
+- `gmailScanOutreach()` matches recent mail against the accounts on file: by
+  contact address first, then by the store's own web **domain**, which is what
+  catches the showroom writing to `info@` at a shop we hold a named buyer for.
+- **Pull outreach from Gmail** on the desk turns the result into *proposed
+  touches* — the tick list from 478, not a report to read. A day already logged
+  for that account is never proposed twice.
+
+**A real bug, caught by its own gauntlet:** direction was read as "not from a
+veniacollection.com address", which makes the showroom writing out *on our
+behalf* look like a buyer writing in — and would have set a two-day "Reply"
+follow-up on outreach we had just sent. Direction is decided by **which side of
+the message the account is on**: in the From, they wrote to us and are owed a
+reply; in the To or Cc, we wrote to them. A message sent by the showroom is
+credited to the showroom.
+
+`gauntlet/gmailread.js` — 14 assertions.

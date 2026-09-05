@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '485';
+  const BUILD = '486';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -18481,6 +18481,13 @@ const G_SCOPES = [
   'https://www.googleapis.com/auth/drive.file',        // files this app creates
   'https://www.googleapis.com/auth/calendar.events',   // plan around the real day
   'https://www.googleapis.com/auth/gmail.send',        // send pull sheets as VENIA
+  // READING THE MAILBOX IS READING THE PIPELINE. The showroom cc's sales@ on
+  // every invitation it sends, so the agent's own outreach — two hundred
+  // approaches — sits in the inbox where the CRM cannot see it, and the app
+  // reports four accounts with any history. This is a RESTRICTED scope: it
+  // works for accounts listed as test users on the consent screen, which is
+  // what a two-founder brand has, and it never sends anything.
+  'https://www.googleapis.com/auth/gmail.readonly',   // see the outreach that already happened
   'https://www.googleapis.com/auth/userinfo.email',    // so we can NAME the account
 ];
 let _gTok = null;                 // { token, exp, scopes:[], account:'' }
@@ -22705,6 +22712,101 @@ window.setPullCc = function(v){
 // guessed at, because those two cases need different fixes.
 let _gmailWho = '';
 function gmailToken(interactive){ return googleTokenFor('gmail.send', !!interactive); }
+function gmailReadToken(interactive){ return googleTokenFor('gmail.readonly', !!interactive); }
+window.gmailCanRead = function(){ return googleGranted('gmail.readonly'); };
+// Raw reads. Deliberately thin: everything above them decides what to ask for.
+async function gmailSearch(query, max){
+  const tok = await gmailReadToken(true);
+  const u = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults='
+    + Math.max(1, Math.min(100, max || 40)) + '&q=' + encodeURIComponent(String(query || ''));
+  const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+  if (!r.ok) throw new Error(await gmailWhy(r));
+  const j = await r.json();
+  return Array.isArray(j.messages) ? j.messages : [];
+}
+// Headers only. The body is not needed to answer "who was approached, when",
+// and not asking for it keeps a mailbox read narrow.
+async function gmailHeaders(id){
+  const tok = await gmailReadToken(true);
+  const u = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + encodeURIComponent(id)
+    + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc'
+    + '&metadataHeaders=Subject&metadataHeaders=Date';
+  const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+  if (!r.ok) throw new Error(await gmailWhy(r));
+  const j = await r.json();
+  const h = {};
+  (((j.payload || {}).headers) || []).forEach(function(x){ h[String(x.name || '').toLowerCase()] = x.value || ''; });
+  return { id: j.id, threadId: j.threadId, at: Number(j.internalDate || 0),
+           from: h.from || '', to: h.to || '', cc: h.cc || '', subject: h.subject || '',
+           snippet: String(j.snippet || '').slice(0, 300) };
+}
+async function gmailWhy(r){
+  let msg = '';
+  try { const j = JSON.parse(await r.text()); msg = String((j.error || {}).message || ''); } catch(e){}
+  if (r.status === 401 || r.status === 403) {
+    return 'Gmail read was refused (HTTP ' + r.status + ') \u2014 the gmail.readonly scope has to be '
+      + 'granted on this device, and the account listed as a test user on the Google consent screen'
+      + (msg ? '. Google said: ' + msg.slice(0, 140) : '');
+  }
+  return 'Gmail read failed (HTTP ' + r.status + ')' + (msg ? ' \u2014 ' + msg.slice(0, 140) : '');
+}
+// Every address in a header line, lowercased.
+function gmailAddrs(line){
+  return String(line || '').toLowerCase().match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) || [];
+}
+// WHAT THE MAILBOX KNOWS THAT THE CRM DOES NOT.
+//
+// Matches recent mail against the accounts on file — by contact address first,
+// then by the store's own web domain, which is what catches the showroom
+// writing to info@ at a shop we hold a named buyer for. Returns proposed
+// touches; it writes nothing on its own.
+window.gmailScanOutreach = async function(days){
+  const since = new Date(Date.now() - Math.max(1, Math.min(120, days || 30)) * 864e5);
+  const q = 'newer_than:' + Math.max(1, Math.min(120, days || 30)) + 'd -in:draft';
+  const ids = await gmailSearch(q, 100);
+  const buyers = (STATE.slBuyers || []).filter(Boolean);
+  // Index the CRM by every address and domain we hold for it.
+  const byAddr = {}, byDomain = {};
+  buyers.forEach(function(b){
+    slContactsOf(b).forEach(function(c){
+      const e = String(c && c.email || '').toLowerCase().trim();
+      if (e) byAddr[e] = b;
+    });
+    const site = String(b.website || '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+    if (site && site.indexOf('.') > 0) byDomain[site] = byDomain[site] || b;
+    Object.keys(byAddr).forEach(function(e){ const d = e.split('@')[1]; if (d && !byDomain[d]) byDomain[d] = byAddr[e]; });
+  });
+  const hits = [];
+  const seen = {};
+  for (let i = 0; i < ids.length; i++) {
+    let m; try { m = await gmailHeaders(ids[i].id); } catch(e){ continue; }
+    if (!m || m.at < since.getTime()) continue;
+    const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc));
+    const fromAddrs = gmailAddrs(m.from);
+    const hit = (list) => {
+      for (let k = 0; k < list.length; k++) {
+        const b2 = byAddr[list[k]] || byDomain[(list[k].split('@')[1] || '')];
+        if (b2) return b2;
+      }
+      return null;
+    };
+    const fromBuyer = hit(fromAddrs);      // the buyer wrote: inbound, owed a reply
+    const b = fromBuyer || hit(outTo);     // else we (or the showroom) wrote to them
+    if (!b) continue;
+    const inbound = !!fromBuyer;
+    const day = new Date(m.at).toISOString().slice(0, 10);
+    const key = b.id + '|' + day;
+    if (seen[key]) continue;
+    seen[key] = 1;
+    // Who actually sent it, when it was not one of the founders — the showroom
+    // writing on VENIA's behalf is a touch on the account, credited to them.
+    const fromUs = /veniacollection\.com/i.test(m.from);
+    hits.push({ buyerId: b.id, name: b.name || '', at: day, inbound: inbound,
+                by: (inbound || fromUs) ? '' : String(m.from).replace(/.*<|>.*/g, '').trim(),
+                subject: String(m.subject || '').slice(0, 120) });
+  }
+  return hits.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
+};
 // Which Google account is actually signed in. The app must never assume the
 // answer — a pull sheet sent from the wrong account is exactly the bug this
 // whole thread is about.
@@ -33629,6 +33731,14 @@ window.slDeskRender = function(){
     +   'The queue below is today\'s work, closest to an order first. Everything else on this screen '
     +   'is what stands between the list and a first invoice.'
     + '</div>'
+    + (typeof gmailCanRead === 'function'
+        ? '<div style="margin-bottom:14px"><button id="sl-mail-pull" class="ag-btn ag-btn-sm" '
+          + 'onclick="slDeskPullMail()" title="Match recent mail against these accounts and record what was already sent">'
+          + '\u2709 Pull outreach from Gmail</button>'
+          + '<span style="font-size:10px;color:var(--muted);margin-left:8px">'
+          + (gmailCanRead() ? 'Reads headers only, records nothing until you tick it.'
+                            : 'Needs Gmail read access \u2014 you will be asked once.') + '</span></div>'
+        : '')
     + '<div style="margin-bottom:16px">' + issues + '</div>'
     + (owedHtml
         ? '<div class="ag-sec-head"><h2 class="ag-sec-title">They asked \u2014 we have not sent it</h2></div>'
@@ -33643,6 +33753,44 @@ window.slDeskRender = function(){
     +   'Logging an approach moves the buyer, stamps the date and sets the follow-up a week out. '
     +   'Nothing here sends an email — you send it, from your own address.'
     + '</div>';
+};
+// PULL THE PIPELINE OUT OF THE MAILBOX.
+//
+// The CRM said four accounts had ever been contacted while two hundred
+// invitations sat in the inbox, cc'd to sales@ by the showroom. Nothing here
+// invents a touch: every row is a real message, matched to an account already
+// on file, and the founder ticks which ones to record.
+window.slDeskPullMail = async function(){
+  const btn = document.getElementById('sl-mail-pull');
+  if (btn) { btn.disabled = true; btn.textContent = 'Reading\u2026'; }
+  let hits = [];
+  try { hits = await gmailScanOutreach(45); }
+  catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '\u2709 Pull outreach from Gmail'; }
+    try { showToast(String(e && e.message || e), 'error'); } catch(_){}
+    return;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '\u2709 Pull outreach from Gmail'; }
+  // Only what the CRM has not already recorded on that day.
+  const fresh = hits.filter(function(h){
+    const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === h.buyerId; });
+    if (!b) return false;
+    return !(b.log || []).some(function(l){ return String(l.at || '').slice(0, 10) === h.at; });
+  });
+  if (!fresh.length) {
+    try { showToast(hits.length ? 'Nothing new \u2014 all ' + hits.length + ' already logged'
+      : 'No mail matched an account on file', 'info'); } catch(_){}
+    return;
+  }
+  try { skToggle(true); } catch(e){}
+  const target = document.getElementById('sk-body') || document.getElementById('sl-desk-body');
+  if (!target) return;
+  agentRunAction('sl', { type: 'log_outreach', touches: fresh.slice(0, 20).map(function(h){
+    return { name: h.name, channel: h.inbound ? 'email' : 'agent',
+             note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
+               + (h.by ? ' (via ' + h.by + ')' : ''),
+             nextAction: h.inbound ? 'Reply' : 'Follow up', nextDays: h.inbound ? 2 : 7 };
+  }) }, target);
 };
 window.slDeskDelivered = function(id, owedId){
   if (slOwedDone(id, owedId)) {
