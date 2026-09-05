@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '486';
+  const BUILD = '487';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22750,6 +22750,25 @@ async function gmailWhy(r){
   }
   return 'Gmail read failed (HTTP ' + r.status + ')' + (msg ? ' \u2014 ' + msg.slice(0, 140) : '');
 }
+// A DOMAIN THAT EVERYONE SHARES IDENTIFIES NOBODY.
+//
+// Matching by domain is what catches the showroom writing to info@ at a shop we
+// hold a named buyer for. It is also what matched a press thread to IMMENSE
+// twice, from two people at neither IMMENSE nor VENIA -- because one contact on
+// that record sits at a free-mail domain, so every message with any address at
+// that domain looked like correspondence with the store. A shared domain is not
+// evidence.
+const GMAIL_OPEN_DOMAINS = ('gmail.com googlemail.com yahoo.com yahoo.co.uk yahoo.co.jp hotmail.com '
+  + 'hotmail.co.uk outlook.com live.com msn.com icloud.com me.com mac.com aol.com gmx.com gmx.de '
+  + 'protonmail.com proton.me pm.me mail.com yandex.ru mail.ru qq.com 163.com 126.com naver.com '
+  + 'daum.net hanmail.net web.de t-online.de orange.fr wanadoo.fr free.fr libero.it virgilio.it '
+  + 'seznam.cz o2.pl wp.pl interia.pl sbcglobal.net comcast.net verizon.net att.net bellsouth.net '
+  + 'googlegroups.com veniacollection.com').split(' ');
+function gmailSharedDomain(d){
+  d = String(d || '').toLowerCase();
+  if (!d || d.indexOf('.') < 1) return true;
+  return GMAIL_OPEN_DOMAINS.indexOf(d) >= 0;
+}
 // Every address in a header line, lowercased.
 function gmailAddrs(line){
   return String(line || '').toLowerCase().match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) || [];
@@ -22770,11 +22789,14 @@ window.gmailScanOutreach = async function(days){
   buyers.forEach(function(b){
     slContactsOf(b).forEach(function(c){
       const e = String(c && c.email || '').toLowerCase().trim();
-      if (e) byAddr[e] = b;
+      if (!e) return;
+      byAddr[e] = b;
+      // A contact's domain identifies the store only if it is the store's own.
+      const d = e.split('@')[1];
+      if (d && !gmailSharedDomain(d)) byDomain[d] = byDomain[d] || b;
     });
     const site = String(b.website || '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
-    if (site && site.indexOf('.') > 0) byDomain[site] = byDomain[site] || b;
-    Object.keys(byAddr).forEach(function(e){ const d = e.split('@')[1]; if (d && !byDomain[d]) byDomain[d] = byAddr[e]; });
+    if (site && !gmailSharedDomain(site)) byDomain[site] = byDomain[site] || b;
   });
   const hits = [];
   const seen = {};
@@ -22783,16 +22805,21 @@ window.gmailScanOutreach = async function(days){
     if (!m || m.at < since.getTime()) continue;
     const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc));
     const fromAddrs = gmailAddrs(m.from);
+    // AN EXACT ADDRESS BEATS A DOMAIN, everywhere in the message. Checking one
+    // address fully before moving on let a domain guess on the first recipient
+    // win over a real address match on the third.
     const hit = (list) => {
+      for (let k = 0; k < list.length; k++) if (byAddr[list[k]]) return { b: byAddr[list[k]], via: list[k], exact: true };
       for (let k = 0; k < list.length; k++) {
-        const b2 = byAddr[list[k]] || byDomain[(list[k].split('@')[1] || '')];
-        if (b2) return b2;
+        const d = list[k].split('@')[1] || '';
+        if (byDomain[d]) return { b: byDomain[d], via: list[k], exact: false };
       }
       return null;
     };
     const fromBuyer = hit(fromAddrs);      // the buyer wrote: inbound, owed a reply
-    const b = fromBuyer || hit(outTo);     // else we (or the showroom) wrote to them
-    if (!b) continue;
+    const got = fromBuyer || hit(outTo);   // else we (or the showroom) wrote to them
+    if (!got) continue;
+    const b = got.b;
     const inbound = !!fromBuyer;
     const day = new Date(m.at).toISOString().slice(0, 10);
     const key = b.id + '|' + day;
@@ -22803,6 +22830,12 @@ window.gmailScanOutreach = async function(days){
     const fromUs = /veniacollection\.com/i.test(m.from);
     hits.push({ buyerId: b.id, name: b.name || '', at: day, inbound: inbound,
                 by: (inbound || fromUs) ? '' : String(m.from).replace(/.*<|>.*/g, '').trim(),
+                // WHICH ADDRESS MATCHED, and whether it was the address itself
+                // or only its domain. Showing the sender instead made a wrong
+                // match impossible to spot: two people at neither the store nor
+                // VENIA were offered as correspondence with IMMENSE, and the
+                // card gave no way to tell why.
+                via: got.via, exact: got.exact,
                 subject: String(m.subject || '').slice(0, 120) });
   }
   return hits.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
@@ -33788,7 +33821,8 @@ window.slDeskPullMail = async function(){
   agentRunAction('sl', { type: 'log_outreach', touches: fresh.slice(0, 20).map(function(h){
     return { name: h.name, channel: h.inbound ? 'email' : 'agent',
              note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
-               + (h.by ? ' (via ' + h.by + ')' : ''),
+               + ' \u2014 ' + h.via + (h.exact ? '' : ' (domain match)')
+               + (h.by ? ', via ' + h.by : ''),
              nextAction: h.inbound ? 'Reply' : 'Follow up', nextDays: h.inbound ? 2 : 7 };
   }) }, target);
 };

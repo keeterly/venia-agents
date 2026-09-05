@@ -5308,3 +5308,34 @@ reply; in the To or Cc, we wrote to them. A message sent by the showroom is
 credited to the showroom.
 
 `gauntlet/gmailread.js` — 14 assertions.
+
+## Build 487 — a domain that everyone shares identifies nobody
+
+The first real Gmail pull worked, and offered this:
+
+> IMMENSE — Sent: Re: LADW 2026 October 2 (via christina.wen@anima-initiative.org)
+> IMMENSE — Sent: Re: LADW 2026 October 2 (via jonathan@thebrutalistmagazine.com)
+
+*"Correspondence to IMMENSE is not from the emails in the chat."* Correct — a
+press thread between two strangers, offered twice as contact with a store.
+
+Matching by **domain** is what catches the showroom writing to `info@` at a shop
+we hold a named buyer for, so it earns its place. But the domain map was built
+from every contact address on every record, with nothing excluded — so one
+contact sitting at a free-mail domain made **every message with any address at
+that domain** look like correspondence with that store. A shared domain is not
+evidence.
+
+- `gmailSharedDomain()` — the free-mail and group domains are named and never
+  index a store. **`veniacollection.com` is on that list too:** we are on every
+  thread, so our own domain identifies no store either.
+- **An exact address beats a domain, everywhere in the message.** Checking one
+  address fully before moving on let a domain guess on the first recipient win
+  over a real address match on the third.
+- **The row now says which address matched**, and marks a domain match as one.
+  Showing the *sender* instead is what made the wrong match impossible to spot:
+  two people at neither the store nor VENIA, with nothing on the card to explain
+  why they were there.
+
+`gauntlet/gmailread.js` — 18 assertions, including the exact thread that
+produced this.
