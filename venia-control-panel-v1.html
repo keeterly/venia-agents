@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '482';
+  const BUILD = '483';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26984,7 +26984,8 @@ async function agentSend(key, message) {
     } else if (!action && truncated) {
       shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
     } else if (!action && !parseError && unbackedClaim) {
-      shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it. Ask me again and I\'ll file it properly, or add it by hand.';
+      shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
+      window.__agOfferRefile = 'That reply described a change but carried nothing that writes it.';
     }
     if (extraBlocks) {
       shown += '\n\n⚠ I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
@@ -26995,6 +26996,7 @@ async function agentSend(key, message) {
     think.__done && think.__done();
     const t = think.querySelector('.sk-work');
     if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
+    if (window.__agOfferRefile) { const w0 = window.__agOfferRefile; window.__agOfferRefile = ''; try { agentRefileCard(body, w0); } catch(e){} }
     if (action) { try { agentRunAction(key, action, body); } catch(e){ console.warn('agent action failed', e); try { appendAgentNote(body, '⚠ That change did NOT save — ' + (e && e.message || 'something went wrong') + '. Please try again.'); } catch(_){} } }
     agentEndWork(workKey, !!action);
   } catch (err) {
@@ -27806,6 +27808,48 @@ function agentSalvageAction(raw){
   return null;
 }
 window.agentSalvageAction = agentSalvageAction;
+
+// ASK AGAIN, ON THE FOUNDER'S BEHALF.
+//
+// "Ask me again and I'll file it properly" put the recovery on the person who
+// had just been told their work vanished -- twice in one evening, on batches
+// of five and six accounts they had already paid to research. The app is the
+// one that noticed the mismatch, so the app should be the one to fix it.
+//
+// The retry is deliberately narrow: no prose, no searching, no re-deciding
+// what to file. The findings are already in the conversation and the history
+// note appended on a failed turn already tells the model what went wrong, so
+// the shortest possible turn is also the one least likely to run out of room
+// -- which is what lost the block in the first place.
+window.__agRefileSeq = 0;
+function agentRefileCard(chatBody, why){
+  if (!chatBody || typeof skSend !== 'function') return;
+  const id = 'agrf' + (++window.__agRefileSeq);
+  const card = document.createElement('div');
+  card.className = 'ag-msg from-agent';
+  card.id = id;
+  card.innerHTML = '<div class="ag-msg-bubble" style="border-color:var(--amber)">'
+    + '<div style="font-size:11px;color:var(--ink);line-height:1.5;margin-bottom:8px">'
+    +   escHtml(why || 'That did not save.') + ' I can put it through now \u2014 no searching, just the change.</div>'
+    + '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentRefileGo(\'' + id + '\')">File it now</button>'
+    + '</div>';
+  chatBody.appendChild(card);
+  chatBody.scrollTop = chatBody.scrollHeight;
+}
+window.agentRefileGo = function(id){
+  const c = document.getElementById(id);
+  if (c) c.innerHTML = '<div class="ag-msg-bubble"><div style="font-size:11px;color:var(--muted)">Filing\u2026</div></div>';
+  try {
+    skSend('Emit ONLY the venia:action block for the change you just described \u2014 the same records, '
+      + 'the same values, nothing new. No prose before or after it, no searching, no summary. '
+      + 'If it does not fit in one block, emit the block for as many as fit and say nothing else.',
+      { direct: true });
+  } catch (e) {
+    if (c) c.innerHTML = '<div class="ag-msg-bubble"><div style="font-size:11px;color:var(--red)">Could not retry \u2014 '
+      + escHtml(String(e && e.message || 'something went wrong')) + '</div></div>';
+  }
+};
+window.agentRefileCard = agentRefileCard;
 
 function agentExtractAction(text) {
   const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
@@ -52111,8 +52155,14 @@ async function skSend(preset, opts){
         ? ((parsed.clean || '') + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.').trim()
         : (parsed.clean || (action ? "Done — here's what I set up:" : reply));
       if (parsed.truncated && action) shown += '\n\n⚠ That reply ran out of room part-way through — what arrived was saved, but the last few may be missing. Ask for the rest and check the count.';
-      else if (parsed.truncated) shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
-      else if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
+      else if (parsed.truncated) {
+        shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written.';
+        window.__agOfferRefile = 'That reply ran out of room before it could write the change.';
+      }
+      else if (unbacked) {
+        shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
+        window.__agOfferRefile = 'That reply described a change but carried nothing that writes it.';
+      }
     }
     SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked)});
     skSaveHistory();
@@ -52122,6 +52172,7 @@ async function skSend(preset, opts){
     if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
     const t = think.querySelector('.sk-work'); if (t) t.outerHTML = `<div class="sk-msg-body">${skFormat(shown)}</div>`;
+    if (window.__agOfferRefile) { const w = window.__agOfferRefile; window.__agOfferRefile = ''; try { agentRefileCard(body, w); } catch(e){} }
     if (action) {
       // Hand the photo (if any) to the action so a "save as a note" can keep it.
       window.__agTurnPhoto = photo ? photo.dataUrl : '';

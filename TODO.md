@@ -5147,3 +5147,33 @@ The append-only default stands. It was never wrong — it just had no door in it
 
 `gauntlet/contactswap.js` — 13 assertions, 8 of which failed against 481 (the
 other five passed only because nothing happened at all).
+
+## Build 483 — the app noticed, so the app should fix it
+
+*"Once again nothing was actually saved."*
+
+Second time in one evening. Six new prospects researched against real criteria —
+RESTIR, I.T, Kapok, Neighbour, Table of Contents, Modes Bruxelles — described in
+full, *"Adding all six as new prospects"*, *"All six are in as New"*. No block.
+Nothing written.
+
+481 fixed the truncation case, and this was not that: the reply ends cleanly. The
+model simply did not emit the block. And the app's entire answer was **"Ask me
+again and I'll file it properly"** — handing the recovery to the person who had
+just been told their work vanished, for the second time, after paying to research
+it.
+
+The app is what noticed the mismatch. It should be what fixes it.
+
+- **A "File it now" button** on every reply that claimed a save and did not make
+  one — the unbacked claim, and a truncation with nothing salvageable.
+- One tap sends the turn itself. Nothing is retyped, and nothing is re-decided:
+  the retry asks for **the action block only, the same records, the same values,
+  no prose, no searching**. The findings are already in the conversation and the
+  history note appended on a failed turn already tells the model what went
+  wrong, so the shortest possible turn is also the one least likely to run out of
+  room — which is what lost the block in the first place.
+- It goes **direct** rather than back through the cloud queue, since the path
+  that just failed is not worth a second try.
+
+`gauntlet/refile.js` — 14 assertions.
