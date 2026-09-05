@@ -5366,3 +5366,37 @@ it — the salvage, the File it now button, and the roster.
 
 `gauntlet/gmailread.js` — 27 assertions, including a match sitting at the 240th
 message of 250.
+
+## Build 489 — who reached out, so nobody reaches out twice
+
+*"Should we have a way to track attribution and who reaches out so we don't
+double reach out?"*
+
+The first full pull returned twenty rows, **eighteen of them the showroom
+writing to accounts already on file**. The desk still had every one of those
+queued for a direct approach, because "who touched this" existed only inside the
+note text, where nothing could act on it. Two founders and an agent working the
+same list is exactly how a buyer gets written to twice in a fortnight, from two
+addresses with different wording — which reads as a brand that does not talk to
+its own showroom.
+
+- **`via` on every touch** — the address that made it, as a field. `channel`
+  already said *how*; this says *who*.
+- **An approach the agent made makes it the agent's account.** Recorded, not
+  guessed: set only by a touch that actually came from them. The desk queue
+  already skips agent-held accounts, so this is what structurally prevents the
+  second approach. A touch we made never hands an account away.
+- **The desk row says when it was last approached and by whom.**
+- **Logging a direct approach on an account the agent touched in the last three
+  weeks asks first**, and says who and when. Beyond that window it is not a
+  conflict, it is a follow-up.
+- **A newsletter is not an approach.** ORIMONO's "SS26 FINAL SALE" was matched
+  because it genuinely came from that shop — bulk senders declare themselves in
+  a `List-Unsubscribe` header, and those are now skipped.
+
+**A firm is its domain; a person is not.** Taking the domain credited every one
+of Polina's approaches to *"Gmail"* — she writes from a personal address, so the
+label that names nobody would have landed on the one agent actually working this
+list. A shared domain falls back to the local part: *Polina A Kozlova*.
+
+`gauntlet/attribution.js` — 15 assertions.
