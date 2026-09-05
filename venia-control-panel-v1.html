@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '480';
+  const BUILD = '481';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26971,7 +26971,7 @@ async function agentSend(key, message) {
       : await callClaude(sysPrompt, null, SK.history);
     // The agent may append a machine-readable action block. Split it off so the
     // chat shows only the human sentence; the block drives a real change.
-    const { clean, action, parseError, unbackedClaim, extraBlocks } = agentExtractAction(reply);
+    const { clean, action, parseError, unbackedClaim, extraBlocks, truncated } = agentExtractAction(reply);
     let shown = parseError
       ? (clean ? clean + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.'
                : '⚠ I couldn\'t complete that change — nothing was saved. Please try once more.')
@@ -26979,7 +26979,11 @@ async function agentSend(key, message) {
     // Said it filed something, filed nothing. Left alone the sentence reads as
     // a confirmation and the founder stops checking — which is how a vendor
     // goes missing for a week.
-    if (!action && !parseError && unbackedClaim) {
+    if (action && truncated) {
+      shown += '\n\n⚠ That reply ran out of room part-way through — what arrived was saved, but the last few may be missing. Ask for the rest and check the count.';
+    } else if (!action && truncated) {
+      shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
+    } else if (!action && !parseError && unbackedClaim) {
       shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it. Ask me again and I\'ll file it properly, or add it by hand.';
     }
     if (extraBlocks) {
@@ -27774,11 +27778,51 @@ function agentHistoryText(shown, action, unbacked){
 }
 window.agentHistoryText = agentHistoryText;
 
+// Close a JSON object that was cut off mid-write. Each candidate is one guess
+// at the missing tail; the first that parses into something with a type wins,
+// and nothing is invented -- a row that did not fully arrive is dropped, not
+// completed.
+function agentSalvageAction(raw){
+  const txt = String(raw || '').trim();
+  if (!txt) return null;
+  const tries = [txt];
+  const last = txt.lastIndexOf('}');
+  if (last > 0) {
+    const head = txt.slice(0, last + 1);
+    tries.push(head + ']}', head + '}', head + ']', head);
+  }
+  for (let i = 0; i < tries.length; i++) {
+    try {
+      const o = JSON.parse(tries[i]);
+      if (o && typeof o === 'object' && !Array.isArray(o) && o.type) return o;
+    } catch (e) { /* try the next tail */ }
+  }
+  return null;
+}
+window.agentSalvageAction = agentSalvageAction;
+
 function agentExtractAction(text) {
   const m = String(text || '').match(/```venia:action\s*([\s\S]*?)```/);
   if (!m) {
     const t = String(text || '');
-    return { clean: t, action: null, parseError: false, unbackedClaim: AGENT_CLAIM_RE.test(t) };
+    // A REPLY CUT OFF MID-SAVE IS NOT A REPLY THAT FORGOT TO SAVE.
+    //
+    // The block is written LAST, so a turn that runs out of room loses exactly
+    // that -- and with the closing fence gone the pattern above matches
+    // nothing, which read to the founder as "there was no save action behind
+    // it". They said "file it", were told nothing happened, said "file it"
+    // again, and were told the same. The half-written block was sitting in the
+    // text the whole time. An opening fence with no close is the fingerprint.
+    const m2 = t.match(/```venia:action\s*([\s\S]*)$/);
+    if (!m2) return { clean: t, action: null, parseError: false, unbackedClaim: AGENT_CLAIM_RE.test(t) };
+    // SALVAGE WHAT ARRIVED. Brainstorm's workParse has done this since 393:
+    // a block cut off mid-array is still mostly valid JSON, and the rows that
+    // made it are real work. Trim back to the last complete object and close
+    // the structure. Losing the tail row is a fair price; losing all ten and
+    // telling the founder nothing was saved is not.
+    const salvaged = agentSalvageAction(m2[1]);
+    return { clean: t.slice(0, m2.index).trim(), action: salvaged, parseError: !salvaged,
+             truncated: true, unbackedClaim: false };
   }
   let action = null, parseError = false;
   try { action = JSON.parse(m[1].trim()); } catch (e) { action = null; parseError = true; }
@@ -39779,12 +39823,14 @@ function cfoChatApply(status, result, job){
     if (live.workKey) agentEndWork(live.workKey, false);
     return;
   }
-  const { clean, action, parseError, unbackedClaim, extraBlocks } = agentExtractAction(result);
+  const { clean, action, parseError, unbackedClaim, extraBlocks, truncated } = agentExtractAction(result);
   let shown = parseError
     ? ((clean ? clean + '\n\n' : '') + '\u26a0 I couldn\u2019t complete that change \u2014 nothing was saved. Please try once more.')
     : (clean || (action ? 'Done \u2014 here\u2019s what I set up:' : result));
   if (!action && !parseError && unbackedClaim) {
-    shown += '\n\n\u26a0 Nothing was actually saved \u2014 that reply had no save action behind it. Ask me again and I\u2019ll file it properly, or add it by hand.';
+    shown += truncated
+      ? '\n\n\u26a0 Nothing was saved \u2014 the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.'
+      : '\n\n\u26a0 Nothing was actually saved \u2014 that reply had no save action behind it. Ask me again and I\u2019ll file it properly, or add it by hand.';
   }
   if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
   SK.history = SK.history || [];
@@ -52018,7 +52064,9 @@ async function skSend(preset, opts){
       shown = parsed.parseError
         ? ((parsed.clean || '') + '\n\n⚠ I couldn\'t complete that change — nothing was saved. Please try once more.').trim()
         : (parsed.clean || (action ? "Done — here's what I set up:" : reply));
-      if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
+      if (parsed.truncated && action) shown += '\n\n⚠ That reply ran out of room part-way through — what arrived was saved, but the last few may be missing. Ask for the rest and check the count.';
+      else if (parsed.truncated) shown += '\n\n⚠ Nothing was saved — the reply ran out of room before the change could be written. Ask for fewer at a time and it will land.';
+      else if (unbacked) shown += '\n\n⚠ Nothing was actually saved — that reply had no save action behind it.';
     }
     SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked)});
     skSaveHistory();

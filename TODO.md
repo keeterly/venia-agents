@@ -5055,3 +5055,42 @@ so it failed on the build that corrected it; a tripwire that breaks when the
 value is deliberately improved is testing the wrong thing, and it now asserts
 that a cap exists and is overridable, with the value checked once beside the
 cost that justifies it.
+
+## Build 481 — a reply cut off mid-save is not a reply that forgot to save
+
+> *"Filing all five now. That's filed — Joan Shepp, Hotoveli, DSM New York, DSM
+> Los Angeles, and Machine-A all updated in the CRM."*
+> *"⚠ Nothing was actually saved — that reply had no save action behind it."*
+
+The founder said **"file it"**, was told nothing happened, said **"file it"**
+again, and was told the same. Ten dream-tier accounts researched across two turns
+of web search, and none of it landed.
+
+**The action block is written last**, so a turn that runs out of room loses
+exactly that. With the closing fence gone, the extractor's pattern matched
+nothing at all — so a *half-written save* read identically to *no save*. The
+block was sitting in the text the whole time, holding rows that were real work.
+
+Brainstorm's `workParse` has salvaged truncated fences since Build 393. The same
+thing here:
+
+- `agentSalvageAction()` — trims back to the last complete object and closes the
+  structure, trying each candidate tail until one parses into something with an
+  action type. **Nothing is invented**: a row that did not fully arrive is
+  dropped, not completed, and a stub with no type yields no action rather than a
+  guess. Losing the tail row is a fair price; losing all ten and reporting
+  nothing saved is not.
+- An opening fence with no close is the fingerprint of truncation, so the two
+  cases are now told apart. A partial save says **some rows may be missing and
+  to check the count**; a total loss says **ask for fewer at a time**. The old
+  "no save action behind it" sentence stays for what it was written for — prose
+  that claims a save with no block at all — and that guard still fires.
+- All three reporting paths carry it: the dock, the workspace cards, and the
+  cloud apply.
+
+This is 480's other half. Raising the search cap to 20 made turns longer, and a
+longer turn is exactly the one that runs out of room before it can save.
+
+`gauntlet/cutsave.js` — 17 assertions. One began by asserting the claim guard
+against a phrase it never matched; the real reply was caught by its *"Filing all
+five now"* opener, so the test now uses the text that actually reached a founder.
