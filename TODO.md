@@ -5177,3 +5177,36 @@ The app is what noticed the mismatch. It should be what fixes it.
   that just failed is not worth a second try.
 
 `gauntlet/refile.js` — 14 assertions.
+
+## Build 484 — a suggestion should arrive with the option to take it
+
+> *"Why did it take so many steps just to add these stores even though it was
+> already suggested? When they were proposed, I should have had the option to
+> add them already."*
+
+Right, and the cause was a rule of mine that had quietly gone stale:
+
+> *"Emit the block ONLY when the user wants stores saved — if they only asked to
+> see ideas, list them and offer to add the best fits."*
+
+**That was correct before Build 478.** Emitting a block meant it applied
+immediately, so withholding one on a mere suggestion was proper caution. Since
+478, nothing applies until the founder ticks — **the review card is the "do you
+want these?" step.** The rule survived the change that made it obsolete, and
+went on causing exactly the harm it was written to prevent: six well-chosen
+stores described, wanted, and then asked for again. Six times.
+
+A proposal now carries its block. The founder ticks what they want; a suggestion
+costs one tap instead of another whole turn.
+
+**That is only safe because a proposal is now always reviewed.** 478 let a
+single-item action through unreviewed, on the grounds that a one-row checklist
+is friction rather than control — sound while the model only emitted a block for
+a change the founder had *asked for*. With proposals carrying blocks, one
+suggested store would land in the CRM with nobody agreeing to it. So the
+**creating** verbs (`add_buyers`, `add_vendors`, `add_styles`) always ask,
+however few they name, and a **correction** the founder asked for still applies
+straight away.
+
+`gauntlet/actionpick.js` — 17 assertions, now covering both directions of that
+distinction.
