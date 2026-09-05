@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '481';
+  const BUILD = '482';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -27153,7 +27153,7 @@ function agentActionSpec(key) {
       + 'ASKED, not today \u2014 read it off the email or the message and backdate it, because the age '
       + 'is the whole point and a four-month-old promise must read as four months old. Omit "since" '
       + 'only if you genuinely cannot tell. It ages on the Today list until it is marked delivered.\n'
-      + 'Rules for update_buyers: put ONLY the fields you are changing inside "set" — allowed keys: location, country, type, stage, tier, phone, address, website, notes, fit, nextDate, nextAction. Blank values are ignored (this action never clears a field). "stage" takes To Reach / Talking / Quoted / Stockist / Ordered / Dormant; "tier" is dream / strong / reach. "addContacts" appends people, never replaces. AT MOST 20 updates per block — same continue pattern as add_buyers. Use this instead of asking the user to fix records by hand.';
+      + 'Rules for update_buyers: put ONLY the fields you are changing inside "set" — allowed keys: location, country, type, stage, tier, phone, address, website, notes, fit, nextDate, nextAction. Blank values are ignored (this action never clears a field). "stage" takes To Reach / Talking / Quoted / Stockist / Ordered / Dormant; "tier" is dream / strong / reach. "addContacts" appends people, never replaces. To CORRECT a contact already on the record \u2014 the buyer left, the address is wrong \u2014 use "fixContacts":[{"match":"the email or name currently on file","name":"","email":"","role":""}]. "match" must be a contact that is really there; if nothing matches, nothing changes (it never becomes an append). Fields you leave blank keep their current value, so you can fix only the address and keep the name. AT MOST 20 updates per block — same continue pattern as add_buyers. Use this instead of asking the user to fix records by hand.';
   }
   if (key === 'plm') {
     return '\n\nVENDOR SOURCING — you are also VENIA\'s production scout.\n'
@@ -29968,6 +29968,46 @@ function agentRunUpdateBuyers(action, chatBody) {
       if (String(b[k]||'') === v) return;
       b[k] = v; applied.push(k);
     });
+    // REPLACING A CONTACT WHO NO LONGER WORKS THERE.
+    //
+    // Append-only stays the default, and for a good reason: never silently
+    // destroy a verified contact. But the ordinary case has no route through
+    // it -- the person on file is real and well-formed and simply gone -- so
+    // the agent kept parking accounts as "wrong contacts, need manual replace,
+    // I can't overwrite an existing contact". A fix must MATCH something
+    // already on the record, and when it matches nothing it does nothing: a
+    // replace that quietly becomes an append is how a contact list doubles.
+    const fixes = Array.isArray(u && u.fixContacts) ? u.fixContacts : [];
+    if (fixes.length){
+      const cs = slContactsOf(b).slice();
+      let fixed = 0;
+      fixes.forEach(c => {
+        const key = String(c && (c.match || c.was || c.old) || '').trim().toLowerCase();
+        if (!key) return;
+        let i = cs.findIndex(x => String(x.email || '').toLowerCase() === key);
+        if (i < 0) i = cs.findIndex(x => String(x.name || '').toLowerCase() === key);
+        if (i < 0) return;                       // matched nothing: change nothing
+        const cur = cs[i];
+        // CLEAN WHAT WAS GIVEN FIRST, then fall back. Falling back before
+        // cleaning meant an address buried in the supplied name was never
+        // extracted -- the name tidied up and the stale address stayed. Only
+        // after cleaning does a still-empty field inherit the current value,
+        // so a field left out is left alone and never blanked.
+        const gn = String(c.name || '').trim(), ge = String(c.email || '').trim();
+        const cl0 = (typeof slContactClean === 'function') ? slContactClean(gn, ge) : { name: gn, email: ge };
+        const cl = { name: cl0.name || cur.name || '', email: cl0.email || cur.email || '' };
+        const rl = String(c.role || '').trim() || cur.role || '';
+        if (cl.name === (cur.name || '') && cl.email === (cur.email || '') && rl === (cur.role || '')) return;
+        cs[i] = { name: cl.name, email: cl.email, role: rl };
+        fixed++;
+      });
+      if (fixed){
+        b.contacts = cs;
+        b.contactName = cs[0].name || '';
+        b.email = cs[0].email || '';
+        applied.push(fixed + ' contact' + (fixed > 1 ? 's' : '') + ' corrected');
+      }
+    }
     const adds = Array.isArray(u && u.addContacts) ? u.addContacts : [];
     if (adds.length){
       const cs = slContactsOf(b).slice();

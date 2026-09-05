@@ -5112,3 +5112,38 @@ five now"* opener, so the test now uses the text that actually reached a founder
 today* for 23 hours out of 24. Run at 00:18 UTC it failed a build it had no
 quarrel with. The contract is once per calendar day, so the fixture now uses a
 time that is unambiguously today.
+
+## Build 482 — replacing a contact who no longer works there
+
+> *"Position by Kling, Wolfensson (wrong contacts, need manual replace) …
+> needing your manual hand rather than mine."*
+
+Enigma had now said this about four dream-tier accounts in a row. 478 gave it a
+repair for **malformed** contacts — a doubled-up name it could prove was broken —
+but not the ordinary case: the person on file is real, well-formed, and simply
+gone. There was no route through append-only for that, so accounts kept getting
+parked.
+
+**And 478 left a dangling reference.** It put `fixContacts` into the review
+card's label and never implemented it, so a row could read *"fix contact"* for a
+field that did nothing at all. That is mine, from the build before.
+
+- `fixContacts: [{match, name, email, role}]` on `update_buyers`. **`match` must
+  be a contact really on the record** — by address or by name — and when it
+  matches nothing it changes nothing. A replace that quietly becomes an append
+  is how a contact list doubles.
+- A field left out keeps its current value, so you can correct only the address
+  and keep the name.
+- The replacement is cleaned like any other write, so a fix cannot reintroduce
+  the doubled-up shape 478 removed. The clean happens **before** the fallback:
+  doing it the other way round meant an address buried in the supplied name was
+  never extracted — the name tidied up and the stale address stayed.
+- The account headline follows the first contact, and the whole thing is
+  undoable like every other buyer write.
+- Documented in the action spec, because a verb the model is not told about is a
+  verb it will keep saying it does not have.
+
+The append-only default stands. It was never wrong — it just had no door in it.
+
+`gauntlet/contactswap.js` — 13 assertions, 8 of which failed against 481 (the
+other five passed only because nothing happened at all).
