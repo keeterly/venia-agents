@@ -5400,3 +5400,40 @@ label that names nobody would have landed on the one agent actually working this
 list. A shared domain falls back to the local part: *Polina A Kozlova*.
 
 `gauntlet/attribution.js` — 15 assertions.
+
+## Build 490 — "Talking" meant we had sent an email
+
+*"Talking implies that we are in communication, however at the 2nd stage we have
+just reached out and may or may not have heard a response."*
+
+Any approach moved an account straight from **To Reach** to **Talking**, so a
+one-way message nobody answered counted as a conversation. Reading the mailbox
+made that indefensible: **eighteen accounts became "in conversation" in a single
+morning** on the strength of an invitation the showroom sent, not one of which
+had been replied to.
+
+A pipeline that counts its own outbox lies to the person running it — and "in
+conversation" is the number the whole thing is read through.
+
+**Approached** now sits between them: we wrote, they have not answered. Talking
+means what it says.
+
+- An approach **we** made lands at Approached; a **reply** is what makes it
+  Talking, and promotes an already-approached account. Inbound versus outbound
+  is the one signal the mailbox can actually give us, and 487 already knew which
+  side of a message an account sat on.
+- The promotion lives in `slLogTouch`, not in its callers — it was in the two
+  that compute a stage, so a touch logged directly (which is how the mailbox
+  pull records the showroom's work) left the account at To Reach after it had
+  demonstrably been written to.
+- **A reply outranks a send on the desk**, and both outrank a cold door. An
+  approached account is still worked: it is owed a follow-up.
+- Its own column in the pipeline view: *written to · no reply yet*.
+- The agent is told the difference **in the words it will act on** — never move
+  an account to Talking on the strength of something we sent.
+
+**The accounts already mislabelled are counted, not rewritten.** Some will have
+replied long before any of this logging existed, so the audit says how many are
+marked Talking with no reply on record and leaves the judgement where it belongs.
+
+`gauntlet/approached.js` — 13 assertions.
