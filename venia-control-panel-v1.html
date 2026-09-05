@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '488';
+  const BUILD = '489';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22743,7 +22743,7 @@ async function gmailHeaders(id){
   const tok = await gmailReadToken(true);
   const u = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/' + encodeURIComponent(id)
     + '?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc'
-    + '&metadataHeaders=Subject&metadataHeaders=Date';
+    + '&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-Unsubscribe';
   const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
   if (!r.ok) throw new Error(await gmailWhy(r));
   const j = await r.json();
@@ -22751,6 +22751,9 @@ async function gmailHeaders(id){
   (((j.payload || {}).headers) || []).forEach(function(x){ h[String(x.name || '').toLowerCase()] = x.value || ''; });
   return { id: j.id, threadId: j.threadId, at: Number(j.internalDate || 0),
            from: h.from || '', to: h.to || '', cc: h.cc || '', subject: h.subject || '',
+           // A shop's SS26 FINAL SALE blast is from the shop and is not
+           // correspondence with it. Bulk senders say so in a header.
+           bulk: !!h['list-unsubscribe'],
            snippet: String(j.snippet || '').slice(0, 300) };
 }
 async function gmailWhy(r){
@@ -22827,6 +22830,7 @@ window.gmailScanOutreach = async function(days, onProgress){
   for (let i = 0; i < metas.length; i++) {
     const m = metas[i];
     if (!m || m.at < since.getTime()) continue;
+    if (m.bulk) continue;                  // a newsletter is not an approach
     const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc));
     const fromAddrs = gmailAddrs(m.from);
     // AN EXACT ADDRESS BEATS A DOMAIN, everywhere in the message. Checking one
@@ -30262,7 +30266,7 @@ function agentRunLogOutreach(action, chatBody) {
     if (!snap[b.id]) snap[b.id] = JSON.parse(JSON.stringify(b));
     const stage = (t.stage && SL_STAGES[t.stage]) ? t.stage : (b.stage === 'new' ? 'warm' : b.stage);
     if (slLogTouch(b.id, { stage: stage, note: t.note, nextAction: t.nextAction,
-                           nextDays: t.nextDays })) done.push(b.name);
+                           nextDays: t.nextDays, channel: t.channel, via: t.via })) done.push(b.name);
   });
   if (!done.length) {
     appendAgentNote(chatBody, '⚠ Nothing was logged'
@@ -33677,6 +33681,33 @@ window.slDeskQueue = function(n){
 // the CRM stays a list of names that were never spoken to. A touch moves the
 // stage, stamps when it happened, leaves a line of history the next approach
 // can read, and sets the date the follow-up is owed.
+// A readable name for whoever made the approach. The address is the truth; the
+// label is what a founder reads on a row at a glance.
+function slAgentName(addr){
+  const a = String(addr || '').toLowerCase().trim();
+  if (!a) return 'Agent';
+  const dom = a.split('@')[1] || '';
+  // A FIRM IS ITS DOMAIN; A PERSON IS NOT. Polina writes from a personal
+  // address, so taking the domain credited every one of her approaches to
+  // "Gmail" — a label that names nobody and would have made the attribution
+  // useless for the one agent actually working this list.
+  const shared = (typeof gmailSharedDomain === 'function') ? gmailSharedDomain(dom) : !dom;
+  const src = shared ? (a.split('@')[0] || a) : dom.replace(/^www\./, '').split('.')[0];
+  const label = String(src).replace(/[^a-z0-9]+/g, ' ').trim()
+    .replace(/\b\w/g, function(c){ return c.toUpperCase(); });
+  return label || 'Agent';
+}
+window.slAgentName = slAgentName;
+// The last approach on an account, whoever made it — the thing to check before
+// making another one.
+window.slLastTouch = function(b){
+  const log = (b && Array.isArray(b.log)) ? b.log : [];
+  if (!log.length) return null;
+  const l = log[log.length - 1];
+  return { at: String(l.at || '').slice(0, 10), channel: l.channel || '',
+           via: l.via || '', by: l.by || '',
+           who: l.via ? slAgentName(l.via) : (l.by || 'us') };
+};
 window.slLogTouch = function(id, opts){
   const o = opts || {};
   const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
@@ -33691,8 +33722,20 @@ window.slLogTouch = function(id, opts){
   // inbox never answers and the owner's Instagram does.
   const CH = { email:1, ig:1, whatsapp:1, phone:1, post:1, agent:1, meeting:1 };
   const chan = CH[String(o.channel || '').toLowerCase()] ? String(o.channel).toLowerCase() : '';
-  b.log.push({ at: now.toISOString(), by: who, channel: chan,
+  // WHO REACHED OUT, as a field rather than a sentence. The showroom approached
+  // eighteen of these accounts in one morning and the desk still had every one
+  // queued for a direct approach, because "who touched this" only existed
+  // inside the note text where nothing could act on it. Two founders and an
+  // agent working the same list is exactly how a buyer gets written to twice.
+  const party = String(o.via || o.party || '').trim().slice(0, 120);
+  b.log.push({ at: now.toISOString(), by: who, channel: chan, via: party,
                note: String(o.note || 'Approached').replace(/\s+/g, ' ').trim().slice(0, 400) });
+  // An approach the agent made is the agent's account from now on. Recorded,
+  // not guessed: it is set only by a touch that actually came from them.
+  if (chan === 'agent' && party) {
+    b.owner = 'agent';
+    b.agentName = slAgentName(party);
+  }
   if (o.nextAction) b.nextAction = String(o.nextAction).replace(/\s+/g, ' ').trim().slice(0, 200);
   // A touch without a next date is how a conversation quietly ends.
   const days = (o.nextDays != null) ? Math.max(1, Math.min(120, o.nextDays)) : 7;
@@ -33758,7 +33801,12 @@ window.slDeskRender = function(){
       + (b.fit ? '<div style="font-size:11px;color:var(--muted);line-height:1.55;margin-top:3px">'
           + slEsc(String(b.fit).slice(0, 180)) + '</div>' : '')
       + '<div style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted);margin-top:4px">'
-      +   slEsc(reach) + (b.lastContact ? ' · last spoken ' + slEsc(String(b.lastContact).slice(0, 10)) : ' · never approached')
+      +   slEsc(reach) + (function(){
+            const t = slLastTouch(b);
+            if (!t) return ' \u00b7 never approached';
+            return ' \u00b7 last approached ' + slEsc(t.at)
+              + (t.via ? ' by <strong>' + slEsc(t.who) + '</strong>' : ' by us');
+          })()
       + '</div>'
       + '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">'
       +   (b.email ? '<a class="ag-btn ag-btn-sm" href="mailto:' + slEsc(b.email) + '" target="_blank" rel="noopener">Email</a>' : '')
@@ -33849,7 +33897,8 @@ window.slDeskPullMail = async function(){
   const target = document.getElementById('sk-body') || document.getElementById('sl-desk-body');
   if (!target) return;
   agentRunAction('sl', { type: 'log_outreach', touches: fresh.slice(0, 20).map(function(h){
-    return { name: h.name, channel: h.inbound ? 'email' : 'agent',
+    return { name: h.name, channel: h.inbound ? 'email' : (h.by ? 'agent' : 'email'),
+             via: h.by || '',
              note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
                + ' \u2014 ' + h.via + (h.exact ? '' : ' (domain match)')
                + (h.by ? ', via ' + h.by : ''),
@@ -33884,6 +33933,20 @@ window.slDeskOwe = function(id){
 window.slDeskTouch = function(id){
   const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
   if (!b) return;
+  // ASK BEFORE WRITING TO A BUYER SOMEBODY ELSE JUST WROTE TO. The showroom
+  // approached eighteen accounts in one morning; a second approach days later,
+  // from a different address with different wording, reads to the buyer as a
+  // brand that does not talk to its own agent.
+  const lt = slLastTouch(b);
+  if (lt && lt.via) {
+    const days = Math.round((Date.now() - new Date(lt.at + 'T00:00:00')) / 864e5);
+    if (days >= 0 && days <= 21) {
+      if (!confirm(lt.who + ' approached ' + (b.name || 'them') + ' '
+        + (days === 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago')
+        + '.\n\nWriting again now means two approaches from VENIA in three weeks.'
+        + '\n\nLog an approach anyway?')) return;
+    }
+  }
   const note = prompt('What did you send ' + (b.name || 'them') + '?', 'Sent the SS27 line sheet');
   if (note === null) return;
   const stage = b.stage === 'new' ? 'warm' : b.stage;
