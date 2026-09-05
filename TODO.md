@@ -5437,3 +5437,20 @@ replied long before any of this logging existed, so the audit says how many are
 marked Talking with no reply on record and leaves the judgement where it belongs.
 
 `gauntlet/approached.js` — 13 assertions.
+
+## Build 491 — the model's notes are not the founder's transcript
+
+`[SYSTEM CORRECTION — that reply said a change had been made but carried NO
+venia:action block…]` was still appearing mid-thread, after 488 supposedly fixed
+it.
+
+488 stored a clean copy alongside the annotated one, which fixes every reply
+**from then on**. But the thread is persisted: every turn saved before that has
+only the annotated text, so re-rendering printed the note into the middle of a
+buyer research thread.
+
+Stripping now happens at the point of **display**, which fixes the turns already
+on disk and does not depend on any caller remembering. The founder-facing
+warning stays — that one is theirs.
+
+`gauntlet/refile.js` — 18 assertions, including a turn saved before the fix.
