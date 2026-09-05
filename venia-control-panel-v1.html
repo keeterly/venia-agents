@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '487';
+  const BUILD = '488';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22715,14 +22715,27 @@ function gmailToken(interactive){ return googleTokenFor('gmail.send', !!interact
 function gmailReadToken(interactive){ return googleTokenFor('gmail.readonly', !!interactive); }
 window.gmailCanRead = function(){ return googleGranted('gmail.readonly'); };
 // Raw reads. Deliberately thin: everything above them decides what to ask for.
+// ONE PAGE IS NOT THE MAILBOX. Gmail returns at most 100 ids per call, and the
+// showroom sent about two hundred invitations in a single morning -- so a
+// single page could not see the campaign this was built to find, and came back
+// with two rows out of a day's work.
 async function gmailSearch(query, max){
   const tok = await gmailReadToken(true);
-  const u = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults='
-    + Math.max(1, Math.min(100, max || 40)) + '&q=' + encodeURIComponent(String(query || ''));
-  const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
-  if (!r.ok) throw new Error(await gmailWhy(r));
-  const j = await r.json();
-  return Array.isArray(j.messages) ? j.messages : [];
+  const want = Math.max(1, Math.min(600, max || 40));
+  const out = [];
+  let page = '';
+  while (out.length < want) {
+    const u = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults='
+      + Math.min(100, want - out.length) + '&q=' + encodeURIComponent(String(query || ''))
+      + (page ? '&pageToken=' + encodeURIComponent(page) : '');
+    const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+    if (!r.ok) throw new Error(await gmailWhy(r));
+    const j = await r.json();
+    (Array.isArray(j.messages) ? j.messages : []).forEach(function(m){ out.push(m); });
+    page = j.nextPageToken || '';
+    if (!page) break;
+  }
+  return out;
 }
 // Headers only. The body is not needed to answer "who was approached, when",
 // and not asking for it keeps a mailbox read narrow.
@@ -22779,10 +22792,10 @@ function gmailAddrs(line){
 // then by the store's own web domain, which is what catches the showroom
 // writing to info@ at a shop we hold a named buyer for. Returns proposed
 // touches; it writes nothing on its own.
-window.gmailScanOutreach = async function(days){
+window.gmailScanOutreach = async function(days, onProgress){
   const since = new Date(Date.now() - Math.max(1, Math.min(120, days || 30)) * 864e5);
   const q = 'newer_than:' + Math.max(1, Math.min(120, days || 30)) + 'd -in:draft';
-  const ids = await gmailSearch(q, 100);
+  const ids = await gmailSearch(q, 500);
   const buyers = (STATE.slBuyers || []).filter(Boolean);
   // Index the CRM by every address and domain we hold for it.
   const byAddr = {}, byDomain = {};
@@ -22800,8 +22813,19 @@ window.gmailScanOutreach = async function(days){
   });
   const hits = [];
   const seen = {};
-  for (let i = 0; i < ids.length; i++) {
-    let m; try { m = await gmailHeaders(ids[i].id); } catch(e){ continue; }
+  // Headers are one call per message, so five hundred in a row is a minute of
+  // staring at a button. Eight at a time is polite to Gmail and finishes in
+  // seconds; one failure is skipped rather than fatal.
+  const metas = [];
+  for (let i = 0; i < ids.length; i += 8) {
+    const batch = await Promise.all(ids.slice(i, i + 8).map(function(x){
+      return gmailHeaders(x.id).catch(function(){ return null; });
+    }));
+    batch.forEach(function(m){ if (m) metas.push(m); });
+    if (typeof onProgress === 'function') { try { onProgress(Math.min(i + 8, ids.length), ids.length); } catch(e){} }
+  }
+  for (let i = 0; i < metas.length; i++) {
+    const m = metas[i];
     if (!m || m.at < since.getTime()) continue;
     const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc));
     const fromAddrs = gmailAddrs(m.from);
@@ -27140,7 +27164,7 @@ async function agentSend(key, message) {
     if (extraBlocks) {
       shown += '\n\n⚠ I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
     }
-    SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim) });
+    SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim), disp: shown });
     skSaveHistory();
     if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
@@ -27952,6 +27976,10 @@ function agentHistoryText(shown, action, unbacked){
       + '" with this reply and it was applied. The block itself is stripped from the transcript for '
       + 'readability — it WAS there. Keep emitting one whenever you change a record.]';
   }
+  // EVERYTHING BELOW IS FOR THE MODEL, NOT THE FOUNDER. Each caller stores the
+  // plain reply as `disp` alongside this, because a re-render prints assistant
+  // content verbatim -- which is how "[SYSTEM CORRECTION ...]" ended up on
+  // screen in the middle of a buyer research thread.
   if (unbacked) {
     return shown + '\n\n[SYSTEM CORRECTION — that reply said a change had been made but carried NO '
       + 'venia:action block, so nothing was written. Prose never changes a record in this app; '
@@ -33797,7 +33825,9 @@ window.slDeskPullMail = async function(){
   const btn = document.getElementById('sl-mail-pull');
   if (btn) { btn.disabled = true; btn.textContent = 'Reading\u2026'; }
   let hits = [];
-  try { hits = await gmailScanOutreach(45); }
+  try { hits = await gmailScanOutreach(45, function(done, total){
+    if (btn) btn.textContent = 'Reading ' + done + ' of ' + total + '\u2026';
+  }); }
   catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '\u2709 Pull outreach from Gmail'; }
     try { showToast(String(e && e.message || e), 'error'); } catch(_){}
@@ -40246,7 +40276,7 @@ function cfoChatApply(status, result, job){
   }
   if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
   SK.history = SK.history || [];
-  SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim) });
+  SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim), disp: shown });
   if (SK.history.length > 40) SK.history = SK.history.slice(-40);
   try { skSaveHistory(); } catch(e){}
   const landed = land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
@@ -52491,7 +52521,7 @@ async function skSend(preset, opts){
         window.__agOfferRefile = 'That reply described a change but carried nothing that writes it.';
       }
     }
-    SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked)});
+    SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked), disp: shown});
     skSaveHistory();
     // The bubble is already on screen, so this reply IS rendered — it just may
     // not have been looked at.
