@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '493';
+  const BUILD = '494';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22795,13 +22795,48 @@ function gmailAddrs(line){
 // then by the store's own web domain, which is what catches the showroom
 // writing to info@ at a shop we hold a named buyer for. Returns proposed
 // touches; it writes nothing on its own.
+// ── A NAME IS A BETTER KEY THAN A DOMAIN, for this list ────────────
+// Only 61 of 117 accounts hold a website and 57 an email, so address-and-domain
+// matching can reach about half the CRM however well it works — and the
+// showroom wrote to 201 stores in one morning. But the address it wrote TO
+// almost always carries the store's name: info@justoneeye.com,
+// info@antoniolishop.ch, info@machine-a.com. Strip everything that is not a
+// letter or a digit from both sides and the name falls straight out of the
+// domain. The invitation also opens "Dear JUST ONE EYE Team", which names the
+// store outright when the address does not (anthologykiev@gmail.com).
+function slNameKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+function slDomainSLD(d){
+  const parts = String(d || '').toLowerCase().split('.').filter(Boolean);
+  if (parts.length < 2) return parts[0] || '';
+  // co.uk, com.au, co.nz: the label before a two-part public suffix.
+  const a = parts[parts.length - 2], b = parts[parts.length - 1];
+  if (parts.length > 2 && a.length <= 3 && b.length <= 3) return parts[parts.length - 3] || '';
+  return a;
+}
+// Guarded on purpose. A short name matches far too much — "INK" would claim
+// inkjetworld.com and quietly mark the wrong store as approached, which is the
+// error this whole feature exists to prevent.
+function slNameMatchesDomain(name, dom){
+  const n = slNameKey(name), sld = slNameKey(slDomainSLD(dom));
+  if (n.length < 5 || sld.length < 4) return false;
+  return sld === n || sld.indexOf(n) === 0 || n.indexOf(sld) === 0;
+}
+// "Dear JUST ONE EYE Team," — the store, named by the sender.
+function slSnippetStore(snip){
+  const m = String(snip || '').match(/\bdear\s+(.{2,60}?)[\s,]+team\b/i);
+  return m ? m[1].replace(/\s+/g, ' ').trim() : '';
+}
+window.slNameKey = slNameKey;
+window.slDomainSLD = slDomainSLD;
+window.slNameMatchesDomain = slNameMatchesDomain;
+window.slSnippetStore = slSnippetStore;
 window.gmailScanOutreach = async function(days, onProgress){
   const since = new Date(Date.now() - Math.max(1, Math.min(120, days || 30)) * 864e5);
   const q = 'newer_than:' + Math.max(1, Math.min(120, days || 30)) + 'd -in:draft';
   const ids = await gmailSearch(q, 500);
   const buyers = (STATE.slBuyers || []).filter(Boolean);
   // Index the CRM by every address and domain we hold for it.
-  const byAddr = {}, byDomain = {};
+  const byAddr = {}, byDomain = {}, byName = [];
   buyers.forEach(function(b){
     slContactsOf(b).forEach(function(c){
       const e = String(c && c.email || '').toLowerCase().trim();
@@ -22813,8 +22848,10 @@ window.gmailScanOutreach = async function(days, onProgress){
     });
     const site = String(b.website || '').toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
     if (site && !gmailSharedDomain(site)) byDomain[site] = byDomain[site] || b;
+    if (slNameKey(b.name).length >= 5) byName.push(b);
   });
   const hits = [];
+  const misses = [];
   const seen = {};
   // Headers are one call per message, so five hundred in a row is a minute of
   // staring at a button. Eight at a time is polite to Gmail and finishes in
@@ -22837,18 +22874,58 @@ window.gmailScanOutreach = async function(days, onProgress){
     // address fully before moving on let a domain guess on the first recipient
     // win over a real address match on the third.
     const hit = (list) => {
-      for (let k = 0; k < list.length; k++) if (byAddr[list[k]]) return { b: byAddr[list[k]], via: list[k], exact: true };
+      for (let k = 0; k < list.length; k++) if (byAddr[list[k]]) return { b: byAddr[list[k]], via: list[k], exact: true, how: 'address' };
       for (let k = 0; k < list.length; k++) {
         const d = list[k].split('@')[1] || '';
-        if (byDomain[d]) return { b: byDomain[d], via: list[k], exact: false };
+        if (byDomain[d]) return { b: byDomain[d], via: list[k], exact: false, how: 'domain' };
+      }
+      // THE NAME INSIDE THE DOMAIN. This is the tier that reaches the half of
+      // the CRM holding no website and no email.
+      for (let k = 0; k < list.length; k++) {
+        const d = list[k].split('@')[1] || '';
+        if (!d || gmailSharedDomain(d)) continue;
+        for (let n = 0; n < byName.length; n++) {
+          if (slNameMatchesDomain(byName[n].name, d)) return { b: byName[n], via: list[k], exact: false, how: 'name' };
+        }
       }
       return null;
     };
     const fromBuyer = hit(fromAddrs);      // the buyer wrote: inbound, owed a reply
-    const got = fromBuyer || hit(outTo);   // else we (or the showroom) wrote to them
-    if (!got) continue;
+    let got = fromBuyer || hit(outTo);     // else we (or the showroom) wrote to them
+    // LAST RESORT: the sender named the store in the greeting. It is the only
+    // thing that identifies a shop written to at anthologykiev@gmail.com.
+    if (!got) {
+      const named = slSnippetStore(m.snippet);
+      const nk = named ? slNameKey(named) : '';
+      if (nk.length >= 4) {
+        for (let n = 0; n < byName.length; n++) {
+          const bk = slNameKey(byName[n].name);
+          if (bk === nk || bk.indexOf(nk) === 0 || nk.indexOf(bk) === 0) {
+            got = { b: byName[n], via: outTo[0] || '', exact: false, how: 'greeting' };
+            break;
+          }
+        }
+      }
+    }
+    if (!got) {
+      // AN INVITATION TO A STORE THE CRM HAS NEVER HEARD OF. Skipping these
+      // silently is how the picture stays wrong in the other direction: the
+      // work was done and there is no record of it anywhere.
+      const outbound = !fromAddrs.some(function(a){ return /veniacollection\.com/i.test(a); });
+      if (outTo.length && outbound) misses.push({ at: new Date(m.at).toISOString().slice(0, 10),
+        to: outTo.slice(0, 4), by: String(m.from).replace(/.*<|>.*/g, '').trim(),
+        store: slSnippetStore(m.snippet), subject: String(m.subject || '').slice(0, 120) });
+      continue;
+    }
     const b = got.b;
     const inbound = !!fromBuyer;
+    // Group the recipients by the matched store's own domain. A shared domain
+    // identifies nobody, so there we keep only the address that actually
+    // matched rather than sweeping in every other gmail address on the line.
+    const dom0 = String(got.via || '').split('@')[1] || '';
+    const toAddrs = (dom0 && !gmailSharedDomain(dom0))
+      ? outTo.filter(function(a){ return (a.split('@')[1] || '') === dom0; })
+      : (got.via ? [got.via] : []);
     const day = new Date(m.at).toISOString().slice(0, 10);
     const key = b.id + '|' + day;
     if (seen[key]) continue;
@@ -22863,10 +22940,21 @@ window.gmailScanOutreach = async function(days, onProgress){
                 // match impossible to spot: two people at neither the store nor
                 // VENIA were offered as correspondence with IMMENSE, and the
                 // card gave no way to tell why.
-                via: got.via, exact: got.exact,
+                via: got.via, exact: got.exact, how: got.how || '',
+                // EVERY DOOR THAT WAS KNOCKED ON. The showroom often wrote to
+                // two or three addresses at one store — sales@ and info@ at
+                // L'Armoire, three buyers at Moliera2 — and recording only the
+                // first leaves the others looking untried, which is precisely
+                // how the second approach gets sent.
+                to: toAddrs,
                 subject: String(m.subject || '').slice(0, 120) });
   }
-  return hits.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
+  hits.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
+  // Carried on the array rather than changing the return shape, so every
+  // existing caller is untouched: these are the invitations that matched no
+  // account on file, and they are the other half of the answer.
+  hits.misses = misses.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
+  return hits;
 };
 // Which Google account is actually signed in. The app must never assume the
 // answer — a pull sheet sent from the wrong account is exactly the bug this
@@ -27499,13 +27587,30 @@ function agentActionSpec(key) {
       + '```venia:action\n'
       + '{"type":"update_buyers","updates":[{"name":"Exact store name","set":{"location":"Chicago, IL","country":"USA"},"addContacts":[{"name":"","email":"","role":""}]}]}\n'
       + '```\n'
-      + '{"type":"log_outreach","touches":[{"name":"Exact store name","note":"What you sent them","stage":"Talking","nextAction":"Follow up on the line sheet","nextDays":7}]}\n'
+      + '{"type":"log_outreach","touches":[{"name":"Exact store name","note":"What you sent them","to":["the address it went to"],"stage":"Approached","nextAction":"Follow up on the line sheet","nextDays":7}]}\n'
       + '```\n'
       + 'Rules for log_outreach: use it AFTER an approach has actually been sent, to record what went '
       + 'out and when the follow-up is owed. It moves the buyer\'s stage, stamps the contact date, '
       + 'appends a line of history and sets nextDate. It does NOT send anything — the founder sends '
       + 'from their own address, then you record it. "note" is what was actually sent, in one line. '
-      + 'nextDays defaults to 7. Never log an approach you were not told was made.\n'      + '```\n'
+      + 'nextDays defaults to 7. Never log an approach you were not told was made. '
+  + '"to" is the address at the STORE that was written to \u2014 not who sent it. Record it whenever you know it: '
+  + 'a store with three addresses on file needs to show which one has been tried.\n'
+  // WRITING TO SOMEONE THE SHOWROOM ALREADY WROTE TO.
+  //
+  // L'ABBEYE invited 201 stores in one morning, cc'ing sales@. The CRM knew
+  // about seven touches and had 113 accounts still reading "To Reach", so every
+  // list in the app was one tap from a second approach — from a different
+  // address, in different words, which reads to a buyer as a brand that does
+  // not talk to its own agent.
+  + '\nBEFORE YOU DRAFT AN APPROACH, CHECK WHO ALREADY MADE ONE. Each account carries who reached it, when, '
+  + 'and at which address. If somebody has written in the last three weeks, say so in one line and do not draft a fresh '
+  + 'cold approach: either write a follow-up that refers to what was already sent, or suggest a different door \u2014 '
+  + 'a named buyer rather than the info@ that was used, or a call. Two approaches from VENIA in three weeks costs the account.\n'
+  + 'HOW WE KNOW THEM changes the letter. When an account carries a connection ("Met H\u00e9l\u00e8ne at Tranoi", '
+  + '"Christine knows the owner"), write to that person by name, open with the actual connection, and drop the '
+  + 'showroom-invitation register entirely \u2014 short, specific, one ask. A templated letter to somebody we have met '
+  + 'is worse than no letter. When there is no connection on file, do not invent one.\n'      + '```\n'
       + '{"type":"log_owed","owed":[{"name":"Exact store name","what":"The SS27 line sheet","since":"2026-05-04"}]}\n'
       + '```\n'
       + '```\n'
@@ -27955,10 +28060,19 @@ function agentRosterHint(){
   const rows = (typeof slNamesOnFile === 'function') ? slNamesOnFile() : [];
   if (!rows.length) return '';
   const line = rows.slice(0, 200).map(function(r){
-    return r.name + (r.email ? ' <' + r.email + '>' : '') + (r.stage ? ' [' + r.stage + ']' : '');
+    return r.name + (r.email ? ' <' + r.email + '>' : '') + (r.stage ? ' [' + r.stage + ']' : '')
+      // The two facts that decide whether to write, and how.
+      + (r.reachedBy ? ' {reached by ' + r.reachedBy + ' ' + r.reachedAt
+          + (r.reachedVia ? ' at ' + r.reachedVia : '') + '}' : ' {not reached}')
+      + (r.connection ? ' {we know them: ' + r.connection + '}' : '');
   }).join('; ');
+  const nr = rows.filter(function(r){ return !r.reachedBy; }).length;
+  const cn = rows.filter(function(r){ return r.connection; }).length;
   return '\n\nEVERY ACCOUNT CURRENTLY IN THE CRM (' + rows.length + ') \u2014 check any claim you made '
-    + 'about filing something against this list before repeating it, and say plainly when one is missing:\n'
+    + 'about filing something against this list before repeating it, and say plainly when one is missing. '
+    + '"{reached by X}" means somebody has ALREADY approached that account at that address: do not draft a cold '
+    + 'approach to it, and say who got there first. "{not reached}" (' + nr + ' of them) is the workable list. '
+    + '"{we know them}" (' + cn + ') gets a personal note naming the connection, never the template:\n'
     + line + (rows.length > 200 ? '\n(first 200 of ' + rows.length + ')' : '');
 }
 window.agentRosterHint = agentRosterHint;
@@ -30446,8 +30560,15 @@ window.agentUndoMergeBuyers = function(){
 window.slNamesOnFile = function(){
   return (STATE.slBuyers || []).map(function(b){
     const c = slContactsOf(b)[0] || {};
+    // WHO ALREADY WROTE, AND HOW WE KNOW THEM. Both ride in the roster the model
+    // reads every turn, because both change the answer to "draft an approach to
+    // these five" — and neither existed anywhere the model could see.
+    const r = (typeof slReachLast === 'function') ? slReachLast(b) : null;
     return { name: b.name || '', stage: b.stage || '', email: c.email || b.email || '',
-             contact: c.name || '', country: b.country || '', updated: String(b.updatedAt || '').slice(0, 10) };
+             contact: c.name || '', country: b.country || '', updated: String(b.updatedAt || '').slice(0, 10),
+             reachedBy: r ? r.who : '', reachedAt: r ? r.at : '',
+             reachedVia: r && r.to && r.to.length ? r.to[0] : '',
+             connection: String(b.connection || '').slice(0, 90) };
   });
 };
 
@@ -30506,6 +30627,7 @@ function agentRunLogOutreach(action, chatBody) {
     const stage = (t.stage && SL_STAGES[t.stage]) ? t.stage : (b.stage === 'new' ? 'approached' : b.stage);
     if (slLogTouch(b.id, { stage: stage, note: t.note, nextAction: t.nextAction,
                            nextDays: t.nextDays, channel: t.channel, via: t.via,
+                           to: t.to || [],
                            inbound: t.inbound })) done.push(b.name);
   });
   if (!done.length) {
@@ -30534,7 +30656,7 @@ window.agentUndoOutreach = function(){
 function agentRunUpdateBuyers(action, chatBody) {
   const list = Array.isArray(action.updates) ? action.updates : [];
   const buyers = STATE.slBuyers || [];
-  const OK = ['location','country','type','stage','tier','phone','address','website','notes','fit','nextDate','nextAction'];
+  const OK = ['location','country','type','stage','tier','phone','address','website','notes','fit','nextDate','nextAction','connection'];
   const STAGE_BY = {};
   Object.entries(SL_STAGES).forEach(([k,v]) => { STAGE_BY[k] = k; STAGE_BY[v.toLowerCase()] = k; });
   const snap = {}, done = [], missed = [];
@@ -33987,6 +34109,34 @@ window.slLastTouch = function(b){
            via: l.via || '', by: l.by || '',
            who: l.via ? slAgentName(l.via) : (l.by || 'us') };
 };
+// WHO HAS ALREADY APPROACHED THIS ACCOUNT, AND AT WHICH ADDRESS.
+// The one question to answer before writing to a buyer. It reads the log rather
+// than a denormalised field so it cannot drift out of step with the history.
+window.slReach = function(b){
+  const log = (b && Array.isArray(b.log)) ? b.log : [];
+  const out = [];
+  for (let i = log.length - 1; i >= 0; i--) {
+    const l = log[i] || {};
+    if (l.inbound) continue;                       // they wrote to us; not an approach
+    const who = l.via ? slAgentName(l.via) : (l.by || 'Direct');
+    out.push({ at: String(l.at || '').slice(0, 10), who: who, agent: !!l.via,
+               via: l.via || '', to: Array.isArray(l.to) ? l.to : (l.to ? [l.to] : []) });
+  }
+  return out;
+};
+// The single line the table shows: the most recent approach, whoever made it.
+window.slReachLast = function(b){ const r = slReach(b); return r.length ? r[0] : null; };
+// Has ANYBODY approached this account — us, the showroom, anyone. The inverse
+// is the list the founders can still work, and it is the whole point of this.
+window.slReached = function(b){ return slReach(b).length > 0; };
+// Every address at this store that has already been written to, so a second
+// approach can at least go through a different door.
+window.slReachedAddrs = function(b){
+  const seen = {}, out = [];
+  slReach(b).forEach(function(r){ (r.to || []).forEach(function(a){
+    const k = String(a).toLowerCase(); if (k && !seen[k]) { seen[k] = 1; out.push(k); } }); });
+  return out;
+};
 window.slLogTouch = function(id, opts){
   const o = opts || {};
   const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
@@ -34015,7 +34165,24 @@ window.slLogTouch = function(id, opts){
   // inside the note text where nothing could act on it. Two founders and an
   // agent working the same list is exactly how a buyer gets written to twice.
   const party = String(o.via || o.party || '').trim().slice(0, 120);
+  // WHICH DOOR AT THE STORE. `via` is who sent it; `to` is the address it went
+  // to, and they are not the same question. Without it the note text was the
+  // only record of which of a store's three addresses had been tried — and a
+  // note is a sentence, so nothing could filter, count or dedupe on it. Two
+  // founders and an agent working one list is exactly how info@ gets written
+  // to twice while the buyer's own address stays untouched.
+  const toList = (Array.isArray(o.to) ? o.to : String(o.to || '').split(/[,;\s]+/))
+    .map(function(x){ return String(x || '').trim().toLowerCase(); })
+    .filter(function(x){ return x && x.indexOf('@') > 0; })
+    .filter(function(x, i, a){ return a.indexOf(x) === i; })
+    .slice(0, 6);
+  // WHICH DIRECTION IT WENT, recorded rather than only acted on. `inbound` moved
+  // the stage and was then thrown away, so a buyer writing to US left a log
+  // entry indistinguishable from an approach — and the account dropped off the
+  // workable list as though somebody had already written to it. The one signal
+  // that means the opposite of what it was being read as.
   b.log.push({ at: now.toISOString(), by: who, channel: chan, via: party,
+               to: toList, inbound: !!o.inbound,
                note: String(o.note || 'Approached').replace(/\s+/g, ' ').trim().slice(0, 400) });
   // An approach the agent made is the agent's account from now on. Recorded,
   // not guessed: it is set only by a touch that actually came from them.
@@ -34131,6 +34298,12 @@ window.slDeskRender = function(){
         ? '<div style="margin-bottom:14px"><button id="sl-mail-pull" class="ag-btn ag-btn-sm" '
           + 'onclick="slDeskPullMail()" title="Match recent mail against these accounts and record what was already sent">'
           + '\u2709 Pull outreach from Gmail</button>'
+          // THE BULK ONE. The pull above hands twenty rows to the agent to tick;
+          // this reads sixty days and tags every match at once, because 201
+          // invitations is eleven rounds of ticking and nobody does eleven.
+          + ' <button id="sl-mail-backfill" class="ag-btn ag-btn-sm ag-btn-primary" '
+          + 'onclick="slMailBackfill(60)" title="Tag every account the showroom or you have already written to, with the address it went to">'
+          + '\u2709 Tag outreach already sent</button>'
           + '<span style="font-size:10px;color:var(--muted);margin-left:8px">'
           + (gmailCanRead() ? 'Reads headers only, records nothing until you tick it.'
                             : 'Needs Gmail read access \u2014 you will be asked once.') + '</span></div>'
@@ -34156,6 +34329,87 @@ window.slDeskRender = function(){
 // invitations sat in the inbox, cc'd to sales@ by the showroom. Nothing here
 // invents a touch: every row is a real message, matched to an account already
 // on file, and the founder ticks which ones to record.
+// ── TAGGING WORK THAT WAS ALREADY DONE ─────────────────────────────
+// The showroom wrote to 201 stores in one morning. The CRM knew about seven
+// touches and had 113 accounts still sitting at To Reach, so every founder
+// looking at that list was one click from writing to a buyer L'ABBEYE had
+// already invited — from a different address, in different words, which reads
+// to the buyer as a brand that does not talk to its own agent.
+//
+// This does NOT go through the agent. The mailbox is evidence, not a claim: a
+// model does not need to transcribe 201 rows it cannot verify, and the tick
+// list it would produce is capped at twenty. One confirmation, then written
+// directly, with the address each store was reached at recorded per account.
+window.slMailBackfill = async function(days){
+  const btn = document.getElementById('sl-mail-backfill');
+  const set = function(t, off){ if (btn) { btn.disabled = !!off; btn.textContent = t; } };
+  set('Reading…', true);
+  let hits = [];
+  try { hits = await gmailScanOutreach(days || 60, function(done, total){ set('Reading ' + done + ' of ' + total + '…', true); }); }
+  catch (e) { set('✉ Tag outreach already sent', false); try { showToast(String(e && e.message || e), 'error'); } catch(_){} return; }
+  set('✉ Tag outreach already sent', false);
+  const misses = hits.misses || [];
+  // Only what is not already on the account for that day.
+  const fresh = hits.filter(function(h){
+    const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === h.buyerId; });
+    if (!b) return false;
+    return !(b.log || []).some(function(l){ return String(l.at || '').slice(0, 10) === h.at; });
+  });
+  const byWho = {};
+  fresh.forEach(function(h){ const w = h.by ? slAgentName(h.by) : 'us'; byWho[w] = (byWho[w] || 0) + 1; });
+  const whoLine = Object.keys(byWho).sort(function(a, b2){ return byWho[b2] - byWho[a]; })
+    .map(function(w){ return byWho[w] + ' by ' + w; }).join(', ');
+  if (!fresh.length && !misses.length) {
+    try { showToast(hits.length ? 'Nothing new — all ' + hits.length + ' already tagged'
+      : 'No mail matched an account on file', 'info'); } catch(_){}
+    return;
+  }
+  const sample = fresh.slice(0, 6).map(function(h){
+    return '  · ' + h.name + ' — ' + ((h.to || [])[0] || h.via || '?')
+      + (h.how && h.how !== 'address' ? ' (' + h.how + ' match)' : ''); }).join('\n');
+  const msg = 'Tag ' + fresh.length + ' approach' + (fresh.length === 1 ? '' : 'es') + ' onto the CRM?'
+    + (whoLine ? '\n' + whoLine + '.' : '')
+    + (sample ? '\n\n' + sample + (fresh.length > 6 ? '\n  · …and ' + (fresh.length - 6) + ' more' : '') : '')
+    + (misses.length ? '\n\n' + misses.length + ' more went to stores not in the CRM — listed after this.' : '')
+    + '\n\nEach account records who reached it and at which address. Nothing is sent.';
+  if (fresh.length && !confirm(msg)) return;
+  let done = 0;
+  fresh.forEach(function(h){
+    // A touch logged here is EVIDENCE of an approach, so it must not invent a
+    // follow-up date the founder never chose. nextDays is set, as slLogTouch
+    // requires, but the note says plainly where it came from.
+    const okd = slLogTouch(h.buyerId, {
+      channel: h.inbound ? 'email' : (h.by ? 'agent' : 'email'),
+      via: h.by || '', to: h.to || [], inbound: h.inbound,
+      note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
+        + (h.how && h.how !== 'address' ? ' (matched on ' + h.how + ')' : ''),
+      nextAction: h.inbound ? 'Reply' : 'Follow up',
+      nextDays: h.inbound ? 2 : 14,
+    });
+    if (okd) done++;
+  });
+  try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch(e){}
+  try { if (typeof slOpenBuyers === 'function' && isSalesBuyersVisible()) slOpenBuyers(); } catch(e){}
+  try { showToast(done + ' account' + (done === 1 ? '' : 's') + ' tagged — filter "Not reached" for the rest', 'success'); } catch(e){}
+  // THE OTHER HALF OF THE ANSWER. An invitation that matched no account is a
+  // store worth having: the work is done, the door is already open, and the CRM
+  // has no idea it exists.
+  if (misses.length) {
+    const target = document.getElementById('sk-body');
+    if (target) {
+      try { skToggle(true); } catch(e){}
+      const rows = misses.slice(0, 40).map(function(x){
+        return (x.store ? x.store + ' — ' : '') + (x.to || []).join(', ') + ' · ' + x.at; });
+      const rec = agentReceipt(misses.length + ' invitation' + (misses.length === 1 ? '' : 's')
+        + ' went to stores not in your CRM',
+        'Already contacted, no account on file — worth adding, the door is open.\n'
+        + rows.join('\n') + (misses.length > 40 ? '\n…and ' + (misses.length - 40) + ' more' : ''));
+      const hold = document.createElement('div');
+      hold.innerHTML = agentReceiptHTML(rec);
+      if (hold.firstChild) { target.appendChild(hold.firstChild); target.scrollTop = target.scrollHeight; }
+    }
+  }
+};
 window.slDeskPullMail = async function(){
   const btn = document.getElementById('sl-mail-pull');
   if (btn) { btn.disabled = true; btn.textContent = 'Reading\u2026'; }
@@ -34185,7 +34439,7 @@ window.slDeskPullMail = async function(){
   if (!target) return;
   agentRunAction('sl', { type: 'log_outreach', touches: fresh.slice(0, 20).map(function(h){
     return { name: h.name, channel: h.inbound ? 'email' : (h.by ? 'agent' : 'email'),
-             via: h.by || '', inbound: h.inbound,
+             via: h.by || '', to: h.to || [], inbound: h.inbound,
              note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
                + ' \u2014 ' + h.via + (h.exact ? '' : ' (domain match)')
                + (h.by ? ', via ' + h.by : ''),
@@ -34243,7 +34497,10 @@ window.slDeskTouch = function(id){
   }
 };
 
-let SL_FILTER = { q: '', stage: '', tier: '', due: false, flagged: false, sort: 'pipeline' };
+let SL_FILTER = { q: '', stage: '', tier: '', due: false, flagged: false, sort: 'pipeline',
+  // '' all · 'none' nobody has approached · 'agent' the showroom did · 'us' we did
+  // · 'conn' we know someone there.
+  reach: '' };
 let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier)
 // Buyers CRM view: the phase-grouped pipeline, or a flat spreadsheet-style
 // table with click-to-sort column headers. Device preference, not synced.
@@ -34266,7 +34523,7 @@ function slSortComparator() {
 }
 function slBuyerFilterActive() {
   const f = SL_FILTER;
-  return !!(f.q || f.stage || f.tier || f.due || f.flagged);
+  return !!(f.q || f.stage || f.tier || f.due || f.flagged || f.reach);
 }
 function slBuyerMatches(b) {
   const f = SL_FILTER;
@@ -34280,9 +34537,21 @@ function slBuyerMatches(b) {
   // Only the accounts you have marked as yours to work right now. A specific
   // colour narrows it further -- "show me everything blocked".
   if (f.flagged) { if (!b.flag) return false; if (f.flagged !== true && b.flag !== f.flagged) return false; }
+  // WHO HAS ALREADY WRITTEN TO THEM. "Not reached" is the working list: the
+  // accounts a founder can approach today without crossing the showroom. The
+  // CRM had 113 accounts sitting at To Reach while 201 invitations had gone
+  // out, so stage alone could not answer this.
+  if (f.reach) {
+    const last = slReachLast(b);
+    if (f.reach === 'none' && last) return false;
+    if (f.reach === 'agent' && !(last && last.agent)) return false;
+    if (f.reach === 'us' && !(last && !last.agent)) return false;
+    if (f.reach === 'conn' && !String(b.connection || '').trim()) return false;
+  }
   if (f.q) {
     const cs = slContactsOf(b).map(c => (c.name||'') + ' ' + (c.email||'') + ' ' + (c.role||'')).join(' ');
-    const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, b.address, b.phone, cs]
+    const hay = [b.name, b.location, b.country, b.type, b.contactName, b.contact, b.email, b.notes, b.address, b.phone, cs,
+      b.connection, slReachedAddrs(b).join(' ')]
       .map(x => String(x || '').toLowerCase()).join(' ');
     if (!f.q.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t))) return false;
   }
@@ -34305,6 +34574,10 @@ function slTblVal(b, key){
     case 'email':    { const c=slContactsOf(b)[0]||{}; return String(c.email||b.email||'').toLowerCase(); }
     case 'phone':    return String(b.phone||'').toLowerCase();
     case 'flag':     { const i = (typeof FLAGS!=='undefined'?FLAGS:[]).findIndex(f=>f.id===b.flag); return i<0?99:i; }
+    // Never approached sorts LAST, ascending: the table's blank-cells-sink rule
+    // would otherwise bury the working list under everything already handled.
+    case 'reach':    { const r = slReachLast(b); return r ? (r.at + ' ' + String(r.who).toLowerCase()) : ''; }
+    case 'connection': return String(b.connection||'').toLowerCase();
     case 'owner':    return b.owner === 'agent' ? String(b.agentName||'agent').toLowerCase() : '';
     case 'next':     return String(b.nextDate||'');
     case 'last':     return String(b.lastContact||'');
@@ -34368,6 +34641,22 @@ const SL_COLS = [
       return '<td>' + (AGENT_TIER_LABEL[b.tier] ? '<span style="font-size:10px;letter-spacing:1px;'
         + 'text-transform:uppercase;color:var(--gold);border:1px solid var(--gold);padding:1px 5px">'
         + AGENT_TIER_LABEL[b.tier] + '</span>' : '') + '</td>'; } },
+  { key:'reach',   label:'Reached',  sort:'reach',    cell:function(b){
+      const r = slReachLast(b);
+      if (!r) return '<td style="white-space:nowrap;color:var(--muted)">\u2014</td>';
+      const addrs = slReachedAddrs(b);
+      // WHICH DOOR, not just whether. A second approach that goes through the
+      // same address the showroom already used is the double-up; one through a
+      // different address is a legitimate second try.
+      const at = addrs.length ? addrs[0] + (addrs.length > 1 ? ' +' + (addrs.length - 1) : '') : '';
+      return '<td style="white-space:nowrap" title="' + slEsc(addrs.join(', ')) + '">'
+        + '<span style="font-weight:600">' + slEsc(r.who) + '</span>'
+        + '<span style="color:var(--muted)"> \u00b7 ' + slEsc(r.at) + '</span>'
+        + (at ? '<br><span style="color:var(--muted);font-size:10px">' + slEsc(at) + '</span>' : '')
+        + '</td>'; } },
+  { key:'connection', label:'Connection', sort:'connection', def:false, cell:function(b){
+      return '<td style="white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis" title="'
+        + slEsc(b.connection || '') + '">' + (slEsc(b.connection) || '') + '</td>'; } },
   { key:'owner',   label:'Owner',    sort:'owner',    def:false, cell:function(b){
       return '<td style="white-space:nowrap;color:var(--muted)">'
         + (b.owner === 'agent' ? slEsc(b.agentName || 'Agent') : 'Direct') + '</td>'; } },
@@ -34546,6 +34835,9 @@ function slFilterBarHTML() {
       </select>` : ''}
       <button class="sl-chip${SL_VIEW==='pipeline'?' on':''}" onclick="slSetView('pipeline')" title="Phase-grouped pipeline view">☰ Pipeline</button>
       <button class="sl-chip${SL_VIEW==='table'?' on':''}" onclick="slSetView('table')" title="Flat spreadsheet view — click column headers to sort">▦ Table</button>
+      <button class="sl-chip${SL_FILTER.reach==='none'?' on':''}" onclick="slSetReachFilter('none')" title="Nobody has approached these — the list you can work today without crossing the showroom">Not reached${(typeof slReachCount==='function')?' '+slReachCount('none'):''}</button>
+      <button class="sl-chip${SL_FILTER.reach==='agent'?' on':''}" onclick="slSetReachFilter('agent')" title="Already approached by the showroom — do not write again without saying so">Showroom${(typeof slReachCount==='function')?' '+slReachCount('agent'):''}</button>
+      <button class="sl-chip${SL_FILTER.reach==='conn'?' on':''}" onclick="slSetReachFilter('conn')" title="Accounts where you or Christine know someone — these get a personal note, not a template">Connections${(typeof slReachCount==='function')?' '+slReachCount('conn'):''}</button>
       <button class="sl-chip sl-chip-due${SL_FILTER.due?' on':''}" onclick="slToggleDueFilter()" title="Only accounts with an overdue follow-up">⚑ Due</button>
       <button class="sl-chip${SL_FILTER.flagged?' on':''}" onclick="slToggleFlagFilter()" title="Only accounts you have flagged">⚑ Flagged${(typeof slFlaggedCount==='function'&&slFlaggedCount())?' '+slFlaggedCount():''}</button>
       </div>
@@ -34557,6 +34849,25 @@ function slFilterBarHTML() {
     </div>`;
 }
 // Search re-renders only the list + count so the input keeps focus mid-type.
+// Tapping the chip that is already on clears it, so the working list is one tap
+// away in both directions.
+window.slSetReachFilter = function(v){
+  SL_FILTER.reach = (SL_FILTER.reach === v) ? '' : v;
+  slRerenderFilterBar();
+};
+window.slReachCount = function(kind){
+  const all = (window.STATE && STATE.slBuyers) || [];
+  let n = 0;
+  for (let i = 0; i < all.length; i++) {
+    const b = all[i]; if (!b) continue;
+    if (kind === 'conn') { if (String(b.connection || '').trim()) n++; continue; }
+    const last = slReachLast(b);
+    if (kind === 'none' && !last) n++;
+    else if (kind === 'agent' && last && last.agent) n++;
+    else if (kind === 'us' && last && !last.agent) n++;
+  }
+  return n;
+};
 function slSearchBuyers(v) { SL_FILTER.q = v; slRenderBuyerList(); slUpdateFilterCount(); }
 function slSetTierFilter(v) { SL_FILTER.tier = v; slRenderBuyerList(); slUpdateFilterCount(); }
 function slSetSort(v) { SL_FILTER.sort = v; slRenderBuyerList(); }
@@ -34565,7 +34876,7 @@ function slSetStageFilter(k) { SL_FILTER.stage = (SL_FILTER.stage === k ? '' : k
 function slToggleDueFilter() { SL_FILTER.due = !SL_FILTER.due; slRerenderFilterBar(); }
 window.slFlaggedCount = function(){ return (STATE.slBuyers || []).filter(function(b){ return b && b.flag; }).length; };
 function slToggleFlagFilter() { SL_FILTER.flagged = SL_FILTER.flagged ? false : true; slRerenderFilterBar(); }
-function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false, flagged:false, sort: SL_FILTER.sort || 'pipeline' }; slRerenderFilterBar(); }
+function slClearBuyerFilter() { SL_FILTER = { q:'', stage:'', tier:'', due:false, flagged:false, reach:'', sort: SL_FILTER.sort || 'pipeline' }; slRerenderFilterBar(); }
 function slRenderBuyerList() { const el = document.getElementById('sl-buyers-list'); if (el) el.innerHTML = slBuyersListHTML(); }
 function slRerenderFilterBar() { const bar = document.getElementById('sl-filter-bar'); if (bar) bar.innerHTML = ((STATE.slBuyers||[]).length ? slFilterBarHTML() : ''); slRenderBuyerList(); }
 function slUpdateFilterCount() {
@@ -34816,6 +35127,11 @@ function slOpenBuyerModal(id) {
         </div>
       </div>
       <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">How we know them</div>
+        <input id="sl-b-connection" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.connection||'')}" placeholder="Met Hélène at Tranoï SS26 · Christine knows the owner · introduced by Polina">
+        <div style="font-size:10px;color:var(--muted);margin-top:3px">A real connection changes the letter. Fill this in and the agent writes to them personally instead of sending the template.</div>
+      </div>
+      <div>
         <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Notes / Last conversation</div>
         <textarea id="sl-b-notes" rows="3" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px;font-family:inherit;resize:vertical" placeholder="Interested in FW26, wants opening order minimum discussion…">${b?.notes||''}</textarea>
       </div>
@@ -34861,6 +35177,7 @@ function slSaveBuyer(existingId) {
     website:     (document.getElementById('sl-b-website')?.value||'').trim(),
     address:     (document.getElementById('sl-b-address')?.value||'').trim(),
     phone:       (document.getElementById('sl-b-phone')?.value||'').trim(),
+    connection:  (document.getElementById('sl-b-connection')?.value||'').trim(),
     notes:       (document.getElementById('sl-b-notes')?.value||'').trim(),
   };
   if (!data.name) { showToast('Account name is required'); return; }
