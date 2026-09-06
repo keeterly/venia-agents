@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '494';
+  const BUILD = '495';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22804,6 +22804,18 @@ function gmailAddrs(line){
 // letter or a digit from both sides and the name falls straight out of the
 // domain. The invitation also opens "Dear JUST ONE EYE Team", which names the
 // store outright when the address does not (anthologykiev@gmail.com).
+// OUR OWN ADDRESSES ARE NOT A STORE.
+// Shipped without this, and the result was a card headed "72 invitations went
+// to stores not in your CRM" listing keeter@veniacollection.com eleven times,
+// christine@, and a magazine editor. The test for "somebody wrote to a store"
+// only checked that the SENDER was not us — so every ordinary email arriving in
+// the founder's inbox qualified, because he was one of the recipients.
+const VENIA_OWN_DOMAINS = ['veniacollection.com'];
+function slOurAddress(a){
+  const d = String(a || '').toLowerCase().split('@')[1] || '';
+  return !!d && VENIA_OWN_DOMAINS.indexOf(d) >= 0;
+}
+window.slOurAddress = slOurAddress;
 function slNameKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 function slDomainSLD(d){
   const parts = String(d || '').toLowerCase().split('.').filter(Boolean);
@@ -22830,10 +22842,42 @@ window.slNameKey = slNameKey;
 window.slDomainSLD = slDomainSLD;
 window.slNameMatchesDomain = slNameMatchesDomain;
 window.slSnippetStore = slSnippetStore;
-window.gmailScanOutreach = async function(days, onProgress){
-  const since = new Date(Date.now() - Math.max(1, Math.min(120, days || 30)) * 864e5);
-  const q = 'newer_than:' + Math.max(1, Math.min(120, days || 30)) + 'd -in:draft';
-  const ids = await gmailSearch(q, 500);
+// WHO WRITES TO BUYERS ON VENIA'S BEHALF. A showroom's outreach all comes from
+// one address, and searching for that address finds every message of it in one
+// pass — where a blanket scan of the mailbox does not get near it.
+window.slAgentSenders = function(){
+  const raw = (window.STATE && STATE.slPrefs && STATE.slPrefs.agentSenders) || '';
+  return String(raw).split(/[,;\s]+/).map(function(x){ return x.trim().toLowerCase(); })
+    .filter(function(x){ return x.indexOf('@') > 0; }).slice(0, 8);
+};
+window.gmailScanOutreach = async function(days, onProgress, opts){
+  opts = opts || {};
+  const win = Math.max(1, Math.min(120, days || 30));
+  const since = new Date(Date.now() - win * 864e5);
+  // A BLANKET SCAN CANNOT REACH BACK FAR ENOUGH, and said nothing about it.
+  // 500 ids is roughly two days of this mailbox — 201 threads arrived in the
+  // last two alone — so a 60-day scan silently examined the most recent two and
+  // reported "72 invitations" about them. The showroom's 201 invitations, three
+  // days back, were never looked at.
+  //
+  // So the senders who write on VENIA's behalf are searched BY NAME first, one
+  // query each, which reaches all of them however busy the inbox is. The broad
+  // pass still runs afterwards for everything else, and now says how far back
+  // it actually got.
+  const senders = (opts.senders || slAgentSenders()).filter(Boolean);
+  // Mail SENT BY one of them is outreach on our behalf, so a recipient it did
+  // not match is a store we do not have — the same as if we had sent it.
+  const agentFrom = {};
+  senders.forEach(function(a){ agentFrom[a] = 1; });
+  const seenId = {};
+  let ids = [];
+  for (let si = 0; si < senders.length; si++) {
+    const found = await gmailSearch('from:' + senders[si] + ' newer_than:' + win + 'd -in:draft', 600);
+    found.forEach(function(x){ if (x && x.id && !seenId[x.id]) { seenId[x.id] = 1; ids.push(x); } });
+  }
+  const broad = await gmailSearch('newer_than:' + win + 'd -in:draft', 500);
+  const broadCapped = broad.length >= 500;
+  broad.forEach(function(x){ if (x && x.id && !seenId[x.id]) { seenId[x.id] = 1; ids.push(x); } });
   const buyers = (STATE.slBuyers || []).filter(Boolean);
   // Index the CRM by every address and domain we hold for it.
   const byAddr = {}, byDomain = {}, byName = [];
@@ -22868,7 +22912,7 @@ window.gmailScanOutreach = async function(days, onProgress){
     const m = metas[i];
     if (!m || m.at < since.getTime()) continue;
     if (m.bulk) continue;                  // a newsletter is not an approach
-    const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc));
+    const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc)).filter(function(a){ return !slOurAddress(a); });
     const fromAddrs = gmailAddrs(m.from);
     // AN EXACT ADDRESS BEATS A DOMAIN, everywhere in the message. Checking one
     // address fully before moving on let a domain guess on the first recipient
@@ -22911,9 +22955,12 @@ window.gmailScanOutreach = async function(days, onProgress){
       // AN INVITATION TO A STORE THE CRM HAS NEVER HEARD OF. Skipping these
       // silently is how the picture stays wrong in the other direction: the
       // work was done and there is no record of it anywhere.
-      const outbound = !fromAddrs.some(function(a){ return /veniacollection\.com/i.test(a); });
-      if (outTo.length && outbound) misses.push({ at: new Date(m.at).toISOString().slice(0, 10),
-        to: outTo.slice(0, 4), by: String(m.from).replace(/.*<|>.*/g, '').trim(),
+      // Only the recipients who are NOT us. A message with none left is mail to
+      // the founders, not an approach to a shop.
+      const outsiders = outTo.filter(function(a){ return !slOurAddress(a); });
+      const sentByUsOrAgent = fromAddrs.some(slOurAddress) || !!agentFrom[String(m.from).toLowerCase().replace(/.*<|>.*/g, '').trim()];
+      if (outsiders.length && sentByUsOrAgent) misses.push({ at: new Date(m.at).toISOString().slice(0, 10),
+        to: outsiders.slice(0, 4), by: String(m.from).replace(/.*<|>.*/g, '').trim(),
         store: slSnippetStore(m.snippet), subject: String(m.subject || '').slice(0, 120) });
       continue;
     }
@@ -22954,6 +23001,14 @@ window.gmailScanOutreach = async function(days, onProgress){
   // existing caller is untouched: these are the invitations that matched no
   // account on file, and they are the other half of the answer.
   hits.misses = misses.sort(function(a, b2){ return String(b2.at).localeCompare(String(a.at)); });
+  // HOW FAR BACK THIS ACTUALLY GOT. Silence here is what turned a scan that
+  // covered two days into a report that read as if it covered sixty.
+  let oldest = 0;
+  metas.forEach(function(x){ if (x && x.at && (!oldest || x.at < oldest)) oldest = x.at; });
+  hits.scanned = metas.length;
+  hits.oldest = oldest ? new Date(oldest).toISOString().slice(0, 10) : '';
+  hits.capped = broadCapped && !senders.length;
+  hits.senders = senders;
   return hits;
 };
 // Which Google account is actually signed in. The app must never assume the
@@ -34117,6 +34172,12 @@ window.slReach = function(b){
   const out = [];
   for (let i = log.length - 1; i >= 0; i--) {
     const l = log[i] || {};
+    // OLDER ENTRIES ARE NOT TOUCHES. The log has carried a {d, t} shape for
+    // stage changes since long before any of this — "Stage: To Reach → Talking",
+    // no date field this code understands and nobody on the other end. Reading
+    // one as an approach put "Direct ·" with no date against Lynx Store and,
+    // worse, took it off the workable list as though somebody had written.
+    if (!l.at) continue;
     if (l.inbound) continue;                       // they wrote to us; not an approach
     const who = l.via ? slAgentName(l.via) : (l.by || 'Direct');
     out.push({ at: String(l.at || '').slice(0, 10), who: who, agent: !!l.via,
@@ -34304,6 +34365,9 @@ window.slDeskRender = function(){
           + ' <button id="sl-mail-backfill" class="ag-btn ag-btn-sm ag-btn-primary" '
           + 'onclick="slMailBackfill(60)" title="Tag every account the showroom or you have already written to, with the address it went to">'
           + '\u2709 Tag outreach already sent</button>'
+          + ' <button id="sl-repair" class="ag-btn ag-btn-sm" onclick="slRepairTouches()" '
+          + 'title="Fix touches where the sender or the address ended up in the note text, and accounts marked Talking that never replied">'
+          + '\u21ba Repair attribution</button>'
           + '<span style="font-size:10px;color:var(--muted);margin-left:8px">'
           + (gmailCanRead() ? 'Reads headers only, records nothing until you tick it.'
                             : 'Needs Gmail read access \u2014 you will be asked once.') + '</span></div>'
@@ -34340,9 +34404,89 @@ window.slDeskRender = function(){
 // model does not need to transcribe 201 rows it cannot verify, and the tick
 // list it would produce is capped at twenty. One confirmation, then written
 // directly, with the address each store was reached at recorded per account.
+// ── REPAIRING WHAT THE MODEL WROTE AS PROSE ────────────────────────
+// boutiqueW and QUADRATO read "reached by keeter" and sat at Talking. Neither
+// was true. L'ABBEYE sent both invitations and neither store ever replied.
+//
+// Two failures, both visible in the stored row:
+//  · the touch carries via:"" and a note reading "…— info@boutiquew.com, via
+//    pr@labbeye.com". The model was given a `via` field and put the sender in
+//    the sentence instead, so attribution fell back to whoever was signed in.
+//  · the stage is "warm" — Talking — for a message that was only SENT. The
+//    log_outreach example in the spec literally read "stage":"Talking", so the
+//    model marked a one-way invitation as a conversation.
+//
+// The note text still holds the truth, so it can be read back out. This lists
+// every change before making it, and touches nothing it cannot evidence.
+window.slRepairTouches = function(){
+  const buyers = (window.STATE && STATE.slBuyers) || [];
+  const plan = [];
+  buyers.forEach(function(b){
+    const log = Array.isArray(b.log) ? b.log : [];
+    let changed = null;
+    log.forEach(function(l, i){
+      if (!l || !l.at) return;
+      // "…, via pr@labbeye.com" — the sender, written into the sentence.
+      const mv = !l.via && String(l.note || '').match(/,\s*via\s+([^\s,;]+@[^\s,;]+)/i);
+      // "— info@boutiquew.com" — the address it went to, likewise.
+      const mt = (!Array.isArray(l.to) || !l.to.length)
+        && String(l.note || '').match(/—\s*([^\s,;]+@[^\s,;]+)/);
+      if (!mv && !mt) return;
+      changed = changed || { b: b, fixes: [] };
+      changed.fixes.push({ i: i, via: mv ? mv[1].toLowerCase() : '', to: mt ? mt[1].toLowerCase() : '' });
+    });
+    // Talking with nothing inbound anywhere in the log is not a conversation.
+    const anyInbound = log.some(function(l){ return l && l.inbound; });
+    const outbound = log.some(function(l){ return l && l.at && !l.inbound; });
+    const wrongStage = (b.stage === 'warm') && outbound && !anyInbound;
+    if (wrongStage) { changed = changed || { b: b, fixes: [] }; changed.stage = 'approached'; }
+    if (changed) plan.push(changed);
+  });
+  if (!plan.length) { try { showToast('Nothing to repair', 'info'); } catch(e){} return; }
+  const lines = plan.map(function(p){
+    const bits = [];
+    p.fixes.forEach(function(f){
+      if (f.via) bits.push('credit to ' + slAgentName(f.via) + ' (' + f.via + ')');
+      if (f.to) bits.push('reached at ' + f.to);
+    });
+    if (p.stage) bits.push('Talking → Approached (nothing inbound on file)');
+    return '  · ' + (p.b.name || '?') + ' — ' + bits.join('; ');
+  });
+  if (!confirm('Repair ' + plan.length + ' account' + (plan.length === 1 ? '' : 's') + '?\n\n'
+    + lines.slice(0, 14).join('\n') + (plan.length > 14 ? '\n  · …and ' + (plan.length - 14) + ' more' : '')
+    + '\n\nRead back out of the note each touch already carries. Nothing is sent.')) return;
+  let n = 0;
+  plan.forEach(function(p){
+    p.fixes.forEach(function(f){
+      const l = p.b.log[f.i]; if (!l) return;
+      if (f.via) { l.via = f.via; l.channel = 'agent'; p.b.owner = 'agent'; p.b.agentName = slAgentName(f.via); }
+      if (f.to) l.to = [f.to];
+    });
+    if (p.stage) p.b.stage = p.stage;
+    p.b.updatedAt = new Date().toISOString();
+    n++;
+  });
+  save();
+  try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch(e){}
+  try { if (typeof slOpenBuyers === 'function' && isSalesBuyersVisible()) slOpenBuyers(); } catch(e){}
+  try { agentReceipt('Repaired ' + n + ' account' + (n === 1 ? '' : 's'), lines.join('\n')); } catch(e){}
+  try { showToast(n + ' repaired', 'success'); } catch(e){}
+};
 window.slMailBackfill = async function(days){
   const btn = document.getElementById('sl-mail-backfill');
   const set = function(t, off){ if (btn) { btn.disabled = !!off; btn.textContent = t; } };
+  // Asked once and remembered. Without it the scan is a blanket read of the
+  // mailbox, which on a busy inbox reaches back about two days.
+  if (!slAgentSenders().length) {
+    const who = prompt('Which addresses write to buyers on VENIA\'s behalf?\n\n'
+      + 'A showroom or agent sends from one address, and naming it here finds every message '
+      + 'of theirs however busy the inbox is. Comma-separated. Leave blank to scan recent mail only.',
+      'pr@labbeye.com');
+    if (who === null) return;
+    STATE.slPrefs = STATE.slPrefs || {};
+    STATE.slPrefs.agentSenders = String(who).trim();
+    save();
+  }
   set('Reading…', true);
   let hits = [];
   try { hits = await gmailScanOutreach(days || 60, function(done, total){ set('Reading ' + done + ' of ' + total + '…', true); }); }
@@ -34360,14 +34504,21 @@ window.slMailBackfill = async function(days){
   const whoLine = Object.keys(byWho).sort(function(a, b2){ return byWho[b2] - byWho[a]; })
     .map(function(w){ return byWho[w] + ' by ' + w; }).join(', ');
   if (!fresh.length && !misses.length) {
-    try { showToast(hits.length ? 'Nothing new — all ' + hits.length + ' already tagged'
-      : 'No mail matched an account on file', 'info'); } catch(_){}
+    try { showToast((hits.length ? 'Nothing new — all ' + hits.length + ' already tagged'
+      : 'No mail matched an account on file')
+      + ' · read ' + (hits.scanned || 0) + (hits.oldest ? ' back to ' + hits.oldest : '')
+      + (hits.capped ? ' (capped — name the sender who writes for you)' : ''), 'info'); } catch(_){}
     return;
   }
   const sample = fresh.slice(0, 6).map(function(h){
     return '  · ' + h.name + ' — ' + ((h.to || [])[0] || h.via || '?')
       + (h.how && h.how !== 'address' ? ' (' + h.how + ' match)' : ''); }).join('\n');
+  const reach = 'Read ' + (hits.scanned || 0) + ' messages'
+    + (hits.oldest ? ', back to ' + hits.oldest : '')
+    + (hits.senders && hits.senders.length ? ' (all mail from ' + hits.senders.join(', ') + ')' : '')
+    + (hits.capped ? '. THAT IS AS FAR AS IT GOT — the inbox is busier than one scan can read, so older mail was not examined. Name the sender who writes for you to reach all of it.' : '.');
   const msg = 'Tag ' + fresh.length + ' approach' + (fresh.length === 1 ? '' : 'es') + ' onto the CRM?'
+    + '\n' + reach
     + (whoLine ? '\n' + whoLine + '.' : '')
     + (sample ? '\n\n' + sample + (fresh.length > 6 ? '\n  · …and ' + (fresh.length - 6) + ' more' : '') : '')
     + (misses.length ? '\n\n' + misses.length + ' more went to stores not in the CRM — listed after this.' : '')
