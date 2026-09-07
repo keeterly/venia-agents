@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '498';
+  const BUILD = '499';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -28618,9 +28618,64 @@ function veniaToneFlags(text){
   return hits.length >= floor ? hits.slice(0, 8) : [];
 }
 window.veniaToneFlags = veniaToneFlags;
+// ── THE DOCUMENT IS THE LIVE SOURCE, WITH RAILS ────────────────────
+// Edit the tone document in the Brand Library and the next turn writes to it.
+// That is the point of keeping it in a library rather than in the source, and
+// it is also the way to break every desk at once with one bad paste — so the
+// document is validated before it is ever allowed near a prompt, the last good
+// version is kept, and a small set of rules cannot be deleted at all.
+const VENIA_TONE_DOC_TITLE = 'VENIA — Tone & Brand Language System';
+// What a usable tone document must still contain. These are the sections that
+// carry rules rather than description; losing one changes what the agents do,
+// which is exactly what a truncated paste looks like.
+const VENIA_TONE_ANCHORS = ['GRACEFUL REBELLION', 'NEVER SOUND LIKE', 'WORDS TO LIMIT',
+                            'AI WRITING RULES', 'TONE CALIBRATION', 'ONE-SENTENCE TEST'];
+const VENIA_TONE_MIN = 2000;      // below this it is a fragment, not the document
+const VENIA_TONE_MAX = 32000;     // above this it is not a tone document
+function veniaToneDocCheck(body){
+  const t = String(body == null ? '' : body);
+  if (!t.trim()) return { ok: false, reason: 'it is empty' };
+  if (t.length < VENIA_TONE_MIN) return { ok: false, reason: 'it is only ' + t.length + ' characters — the document is at least ' + VENIA_TONE_MIN + ', so this looks like a partial paste' };
+  if (t.length > VENIA_TONE_MAX) return { ok: false, reason: 'it is ' + t.length + ' characters, past the ' + VENIA_TONE_MAX + ' this can carry into every prompt' };
+  const up = t.toUpperCase();
+  const missing = VENIA_TONE_ANCHORS.filter(function(a){ return up.indexOf(a) < 0; });
+  if (missing.length) return { ok: false, reason: 'these sections are missing: ' + missing.join(', ') };
+  return { ok: true, reason: '' };
+}
+window.veniaToneDocCheck = veniaToneDocCheck;
+function veniaToneDoc(){
+  const docs = (window.STATE && STATE.brandDocs) || [];
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
+    if (d && (d.kind === 'tone' || d.title === VENIA_TONE_DOC_TITLE)) return d;
+  }
+  return null;
+}
+window.veniaToneDoc = veniaToneDoc;
+// The live body, or nothing. A document that fails its check is never used —
+// the built-in spine carries the turn instead, and the Tone screen says why.
+function veniaToneDocLive(){
+  const d = veniaToneDoc();
+  if (!d) return '';
+  return veniaToneDocCheck(d.body).ok ? String(d.body) : '';
+}
+window.veniaToneDocLive = veniaToneDocLive;
+// WHAT CANNOT BE EDITED AWAY. Everything above is the founders' to rewrite. This
+// is not: it is the difference between a brand voice and an agent inventing a
+// stockist. It is appended after the document, so it holds whatever the
+// document says — including if somebody deletes the section that said it.
+const VENIA_VOICE_CORE = '\n\nTHESE HOLD WHATEVER THE TONE DOCUMENT SAYS:\n'
+  + 'Never invent provenance, construction, materials, cultural references, press, stockists, collaborators, '
+  + 'awards or accomplishments. If a fact is not in front of you, leave it out and say plainly that it is missing. '
+  + 'Never describe work as done that you have not done. Voice is how VENIA says a true thing — never a reason to '
+  + 'say an untrue one.';
+window.VENIA_VOICE_CORE = VENIA_VOICE_CORE;
 function veniaVoiceText(key){
   const ch = VENIA_TONE_CHANNELS[VENIA_AGENT_CHANNEL[key] || ''] || '';
-  return VENIA_VOICE + (ch ? '\n\n' + ch : '') + veniaToneLibraryText();
+  // The founders' document when it is whole; the built-in spine when it is not.
+  const live = veniaToneDocLive();
+  const voice = live ? ('\n\nHOW VENIA WRITES — the house tone document.\n' + live) : VENIA_VOICE;
+  return voice + VENIA_VOICE_CORE + (ch ? '\n\n' + ch : '') + veniaToneLibraryText();
 }
 window.VENIA_VOICE = VENIA_VOICE;
 window.VENIA_AVOID = VENIA_AVOID;
@@ -29803,6 +29858,18 @@ function agentRunSaveBrandDoc(action, chatBody) {
   const docBody = String(action.body || '').trim();
   if (!title || !docBody) { appendAgentNote(chatBody, 'Give me a title and the document text and I\'ll file it in the Brand Library.'); return; }
   let kind = String(action.kind || '').toLowerCase().trim();
+  // AN AGENT DOES NOT EDIT THE DOCUMENT THAT GOVERNS IT.
+  //
+  // Now that the tone document is live, save_brand_doc is a path from anything
+  // the model reads — a buyer's email, a scraped page, a pasted brief — to the
+  // instructions every desk is given. It stays a founder's action. The model can
+  // draft a new voice and say so; a person decides whether it becomes the voice.
+  if (kind === 'tone' || title.toLowerCase() === VENIA_TONE_DOC_TITLE.toLowerCase()) {
+    appendAgentNote(chatBody, '⚠ Nothing was saved — the tone document is the one thing I cannot write. '
+      + 'It sets the instructions I follow, so it is changed by hand in Brand → Tone. '
+      + 'Paste what I drafted there and it goes live on my next message.');
+    return;
+  }
   if (BRAND_DOC_KINDS.indexOf(kind) < 0) kind = 'note';
   if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
   const doc = { id: 'BD' + Date.now(), title: title.slice(0, 120), kind, body: docBody.slice(0, 40000),
@@ -37250,6 +37317,97 @@ window.VENIA_TONE_DOC = VENIA_TONE_DOC;
 // read and revised. Neither is what makes the agents write in VENIA's voice —
 // veniaVoiceText() does that on every turn — but a founder should be able to
 // see, and change, what the house actually says.
+// EDITING THE VOICE. Validated before it is stored, never after — a document
+// that fails is refused with the reason, and the version that was working stays
+// working. The last good body is kept so a bad edit is one tap from undone.
+// The editor. Plain textarea on purpose — this is a document, and the check
+// runs on save rather than fighting the founder while they type.
+window.brEditToneDoc = function(){
+  const d = veniaToneDoc();
+  const body = d ? String(d.body || '') : VENIA_TONE_DOC;
+  const html = '<div class="modal" style="width:820px;max-width:96vw">'
+    + '<div class="modal-head"><div class="modal-title">Tone document</div>'
+    + '<button class="modal-close" aria-label="Close" onclick="closeModal(\'br-tone-edit\')">✕</button></div>'
+    + '<div class="modal-body" style="padding:18px">'
+    + '<div style="font-size:10.5px;color:var(--muted);line-height:1.6;margin-bottom:10px">'
+    + 'Every agent writes to this from the next message. It must keep its rule-bearing sections — '
+    + escHtml(VENIA_TONE_ANCHORS.join(', ')) + ' — and stay between ' + VENIA_TONE_MIN + ' and ' + VENIA_TONE_MAX
+    + ' characters. If a save is refused, the version now running keeps running.</div>'
+    + '<textarea id="br-tone-body" spellcheck="false" style="width:100%;height:52vh;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:12px;font-size:11.5px;line-height:1.6;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical">'
+    + escHtml(body) + '</textarea>'
+    + '<div id="br-tone-msg" style="font-size:10.5px;color:var(--red);margin-top:8px;min-height:14px"></div>'
+    + '<div style="display:flex;gap:8px;justify-content:space-between;margin-top:12px;border-top:1px solid var(--border);padding-top:12px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="brRestoreToneDoc()">Restore last good</button>'
+    + '<div style="display:flex;gap:8px">'
+    + '<button class="btn btn-ghost btn-sm" onclick="closeModal(\'br-tone-edit\')">Cancel</button>'
+    + '<button class="btn btn-gold btn-sm" onclick="brCommitToneDoc()">Save</button>'
+    + '</div></div></div></div>';
+  let modal = document.getElementById('br-tone-edit');
+  if (!modal) { modal = document.createElement('div'); modal.className = 'overlay'; modal.id = 'br-tone-edit'; document.body.appendChild(modal); }
+  modal.innerHTML = html;
+  openModal('br-tone-edit');
+};
+window.brCommitToneDoc = function(){
+  const el = document.getElementById('br-tone-body'); if (!el) return;
+  const msg = document.getElementById('br-tone-msg');
+  const res = brSaveToneDoc(el.value);
+  if (!res.ok) { if (msg) msg.textContent = 'Not saved — ' + res.reason + '. The version now running is untouched.'; return; }
+  closeModal('br-tone-edit');
+  try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
+};
+window.brSaveToneDoc = function(body, opts){
+  opts = opts || {};
+  const t = String(body == null ? '' : body);
+  const chk = veniaToneDocCheck(t);
+  if (!chk.ok) {
+    try { showToast('Not saved — ' + chk.reason, 'error'); } catch(e){}
+    return { ok: false, reason: chk.reason };
+  }
+  const d = veniaToneDoc();
+  const prev = d ? String(d.body || '') : '';
+  // A SUDDEN COLLAPSE IN LENGTH IS A TRUNCATED PASTE, not an edit. It passes
+  // every structural check — the anchors survive in the first half — so length
+  // is the only thing that catches it.
+  if (prev && t.length < prev.length * 0.6 && !opts.force) {
+    const lost = Math.round((1 - t.length / prev.length) * 100);
+    if (!confirm('This removes ' + lost + '% of the tone document (' + prev.length + ' → ' + t.length
+      + ' characters).\n\nThat is usually a paste that got cut short. Save anyway?')) {
+      return { ok: false, reason: 'shrink not confirmed' };
+    }
+  }
+  // KEEP THE LAST BODY THAT PASSED, not the one before it. Undo semantics read
+  // naturally and are the wrong tool here: by the time a founder reaches for
+  // this, the live document is already unusable, and handing them the version
+  // from two edits ago is not what "restore last good" means. Storing the body
+  // being saved — which has just been validated — means restore always returns
+  // the last voice that actually ran.
+  if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
+  if (d) { d.body = t; d.updatedAt = new Date().toISOString(); }
+  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: VENIA_TONE_DOC_TITLE, kind: 'tone',
+                                 body: t, createdAt: new Date().toISOString() });
+  STATE.brToneBackup = { body: t, at: new Date().toISOString() };
+  save();
+  try { logActivity('Brand: tone document updated (' + t.length + ' characters)'); } catch(e){}
+  try { showToast('Tone updated — every agent writes to it from the next message', 'success'); } catch(e){}
+  return { ok: true, reason: '' };
+};
+// One tap back to the version that was working, or to the one that shipped.
+window.brRestoreToneDoc = function(){
+  const bk = STATE.brToneBackup;
+  const body = (bk && veniaToneDocCheck(bk.body).ok) ? bk.body : VENIA_TONE_DOC;
+  const which = (bk && veniaToneDocCheck(bk.body).ok)
+    ? 'the last version that passed its checks, saved ' + new Date(bk.at).toLocaleString()
+    : 'the document VENIA OS ships with';
+  if (!confirm('Restore ' + which + '?')) return;
+  const d = veniaToneDoc();
+  if (d) { d.body = body; d.updatedAt = new Date().toISOString(); }
+  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: VENIA_TONE_DOC_TITLE, kind: 'tone',
+                                 body: body, createdAt: new Date().toISOString() });
+  save();
+  try { logActivity('Brand: tone document restored'); } catch(e){}
+  try { showToast('Restored', 'success'); } catch(e){}
+  try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
+};
 window.brInstallVeniaTone = function(){
   if (!STATE.brTone) STATE.brTone = { approved:[], avoid:[], phrases:[] };
   const t = STATE.brTone;
@@ -37280,6 +37438,7 @@ window.brInstallVeniaTone = function(){
   if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
   else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: title, kind: 'tone', body: body,
                                  createdAt: new Date().toISOString() });
+  STATE.brToneBackup = { body: body, at: new Date().toISOString() };
   save();
   try { logActivity('Brand: installed the VENIA tone system (' + a + ' words, ' + v + ' avoided, ' + p2 + ' lines)'); } catch(e){}
   try { showToast('Tone installed — ' + a + ' words, ' + v + ' avoided, ' + p2 + ' lines, and the full document in the Brand Library', 'success'); } catch(e){}
@@ -37301,7 +37460,18 @@ function agBuildToneLibrarySection() {
     ? `<div style="padding:20px;text-align:center;color:var(--muted);font-size:10px">None yet</div>`
     : t.phrases.map((p,i) => `<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);gap:8px"><span style="font-size:11px;color:var(--ink);line-height:1.4;flex:1">${p}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('phrases',${i})">&#x2715;</button></div>`).join('');
 
-  const installed = (STATE.brandDocs || []).some(function(d){ return d.title === 'VENIA — Tone & Brand Language System'; });
+  const installed = !!veniaToneDoc();
+  const liveDoc = veniaToneDocLive();
+  const why = installed && !liveDoc ? veniaToneDocCheck((veniaToneDoc() || {}).body).reason : '';
+  // WHICH VOICE IS ACTUALLY RUNNING. A document that failed its check is not
+  // used, and a founder should never have to guess which one the agents read.
+  const status = !installed
+    ? '<span style="color:var(--muted)">Running the built-in voice. Install to edit it.</span>'
+    : liveDoc
+      ? '<span style="color:var(--live,#3f7d55);font-weight:700">● Your document is live</span>'
+        + '<span style="color:var(--muted)"> — ' + liveDoc.length + ' characters, read by every agent on every message.</span>'
+      : '<span style="color:var(--red);font-weight:700">● Your document is NOT being used</span>'
+        + '<span style="color:var(--muted)"> — ' + escHtml(why) + '. The built-in voice is running instead; fix it or restore the last good version.</span>';
   return `
     <div style="border:1px solid var(--border);padding:14px 16px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
       <div style="font-size:11px;line-height:1.6;color:var(--muted);max-width:620px">
@@ -37309,8 +37479,12 @@ function agBuildToneLibrarySection() {
         every turn — poetic but precise, restrained, describing rather than declaring — and each desk uses the register
         for its channel: wholesale plain and commercial, campaign poetic, product technical, service warm.
         The lists below are yours: they override the house defaults and are checked against anything the agents write.
+        <div style="margin-top:8px">${status}</div>
       </div>
-      <button class="ag-btn ag-btn-sm ${installed ? '' : 'ag-btn-primary'}" onclick="brInstallVeniaTone()">${installed ? 'Reinstall tone system' : 'Install VENIA tone system'}</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${installed ? '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="brEditToneDoc()">Edit tone document</button>' : ''}
+        <button class="ag-btn ag-btn-sm ${installed ? '' : 'ag-btn-primary'}" onclick="brInstallVeniaTone()">${installed ? 'Reinstall' : 'Install VENIA tone system'}</button>
+      </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-bottom:24px">
       <div style="background:var(--bg);padding:16px">
