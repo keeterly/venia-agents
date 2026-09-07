@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '495';
+  const BUILD = '496';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22816,6 +22816,16 @@ function slOurAddress(a){
   return !!d && VENIA_OWN_DOMAINS.indexOf(d) >= 0;
 }
 window.slOurAddress = slOurAddress;
+// DOES A BULK HEADER DISQUALIFY THIS MESSAGE? Direction decides it.
+// A shop's SS26 FINAL SALE blast is from the shop and is not correspondence
+// with it. A showroom's mail-merge to 201 stores carries exactly the same
+// List-Unsubscribe header and is unambiguously an approach — and dropping all
+// 201 of those, before matching and before the unmatched report, is what made
+// a scan of the right days log nothing at all and say nothing about why.
+function gmailBulkSkips(bulk, fromOurs, fromAgent){
+  return !!bulk && !fromOurs && !fromAgent;
+}
+window.gmailBulkSkips = gmailBulkSkips;
 function slNameKey(s){ return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
 function slDomainSLD(d){
   const parts = String(d || '').toLowerCase().split('.').filter(Boolean);
@@ -22897,21 +22907,35 @@ window.gmailScanOutreach = async function(days, onProgress, opts){
   const hits = [];
   const misses = [];
   const seen = {};
+  // EVERY REASON A MESSAGE DID NOT COUNT, so a scan can never again read as
+  // though it examined mail it silently threw away.
+  const skipped = { bulk: 0, failed: 0, old: 0 };
   // Headers are one call per message, so five hundred in a row is a minute of
   // staring at a button. Eight at a time is polite to Gmail and finishes in
   // seconds; one failure is skipped rather than fatal.
   const metas = [];
   for (let i = 0; i < ids.length; i += 8) {
     const batch = await Promise.all(ids.slice(i, i + 8).map(function(x){
-      return gmailHeaders(x.id).catch(function(){ return null; });
+      // Swallowed whole before: a message whose headers failed to load simply
+      // ceased to exist, with no count and no warning anywhere.
+      return gmailHeaders(x.id).catch(function(){ skipped.failed++; return null; });
     }));
     batch.forEach(function(m){ if (m) metas.push(m); });
     if (typeof onProgress === 'function') { try { onProgress(Math.min(i + 8, ids.length), ids.length); } catch(e){} }
   }
   for (let i = 0; i < metas.length; i++) {
     const m = metas[i];
-    if (!m || m.at < since.getTime()) continue;
-    if (m.bulk) continue;                  // a newsletter is not an approach
+    if (!m) continue;
+    if (m.at < since.getTime()) { skipped.old++; continue; }
+    // A NEWSLETTER FROM A SHOP IS NOT CORRESPONDENCE WITH IT — but a showroom's
+    // mail-merge to 201 stores IS an approach, and it carries the same
+    // List-Unsubscribe header. This test dropped all 201 invitations before
+    // matching AND before they could be reported as unmatched, so the scan
+    // logged nothing at all from the day they went out and said nothing about
+    // why. Bulk only disqualifies mail coming IN.
+    const _fromOurs = gmailAddrs(m.from).some(slOurAddress);
+    const _fromAgent = !!agentFrom[String(m.from).toLowerCase().replace(/.*<|>.*/g, '').trim()];
+    if (gmailBulkSkips(m.bulk, _fromOurs, _fromAgent)) { skipped.bulk++; continue; }
     const outTo = gmailAddrs(m.to).concat(gmailAddrs(m.cc)).filter(function(a){ return !slOurAddress(a); });
     const fromAddrs = gmailAddrs(m.from);
     // AN EXACT ADDRESS BEATS A DOMAIN, everywhere in the message. Checking one
@@ -22957,9 +22981,19 @@ window.gmailScanOutreach = async function(days, onProgress, opts){
       // work was done and there is no record of it anywhere.
       // Only the recipients who are NOT us. A message with none left is mail to
       // the founders, not an approach to a shop.
-      const outsiders = outTo.filter(function(a){ return !slOurAddress(a); });
-      const sentByUsOrAgent = fromAddrs.some(slOurAddress) || !!agentFrom[String(m.from).toLowerCase().replace(/.*<|>.*/g, '').trim()];
-      if (outsiders.length && sentByUsOrAgent) misses.push({ at: new Date(m.at).toISOString().slice(0, 10),
+      // ONLY WHAT AN AGENT WROTE ON OUR BEHALF. Counting all of our own outbound
+      // mail produced a card headed "invitations went to stores not in your
+      // CRM" listing a magazine editor, a PR contact and Polina herself. VENIA
+      // emails plenty of people who are not shops; a showroom's send is store
+      // outreach by definition, and that is the only thing this can honestly
+      // claim. Free-mail recipients are dropped too — an address at gmail is
+      // a person, and there is no store to add from it.
+      const outsiders = outTo.filter(function(a){
+        const d = a.split('@')[1] || '';
+        return !slOurAddress(a) && d && !gmailSharedDomain(d);
+      });
+      const sentByAgent = !!agentFrom[String(m.from).toLowerCase().replace(/.*<|>.*/g, '').trim()];
+      if (outsiders.length && sentByAgent) misses.push({ at: new Date(m.at).toISOString().slice(0, 10),
         to: outsiders.slice(0, 4), by: String(m.from).replace(/.*<|>.*/g, '').trim(),
         store: slSnippetStore(m.snippet), subject: String(m.subject || '').slice(0, 120) });
       continue;
@@ -22979,9 +23013,18 @@ window.gmailScanOutreach = async function(days, onProgress, opts){
     seen[key] = 1;
     // Who actually sent it, when it was not one of the founders — the showroom
     // writing on VENIA's behalf is a touch on the account, credited to them.
-    const fromUs = /veniacollection\.com/i.test(m.from);
+    const fromUs = gmailAddrs(m.from).some(slOurAddress);
+    // WHO ACTUALLY SENT IT. "From us" was collapsed to a single entity and the
+    // sender then discarded, so every approach — Christine's included — was
+    // credited to whoever happened to be signed in. Hélène Uccello was written
+    // to by Christine and the CRM said Keeter. Two founders share a domain, and
+    // the domain is not the person.
+    const sender = String(m.from).replace(/.*<|>.*/g, '').trim().toLowerCase();
     hits.push({ buyerId: b.id, name: b.name || '', at: day, inbound: inbound,
-                by: (inbound || fromUs) ? '' : String(m.from).replace(/.*<|>.*/g, '').trim(),
+                by: (inbound || fromUs) ? '' : sender,
+                // Set on OUR OWN outbound mail, where `by` stays blank because
+                // the approach belongs to a founder rather than to an agent.
+                sender: (!inbound && fromUs) ? sender : '',
                 // WHICH ADDRESS MATCHED, and whether it was the address itself
                 // or only its domain. Showing the sender instead made a wrong
                 // match impossible to spot: two people at neither the store nor
@@ -23008,6 +23051,7 @@ window.gmailScanOutreach = async function(days, onProgress, opts){
   hits.scanned = metas.length;
   hits.oldest = oldest ? new Date(oldest).toISOString().slice(0, 10) : '';
   hits.capped = broadCapped && !senders.length;
+  hits.skipped = skipped;
   hits.senders = senders;
   return hits;
 };
@@ -30682,7 +30726,7 @@ function agentRunLogOutreach(action, chatBody) {
     const stage = (t.stage && SL_STAGES[t.stage]) ? t.stage : (b.stage === 'new' ? 'approached' : b.stage);
     if (slLogTouch(b.id, { stage: stage, note: t.note, nextAction: t.nextAction,
                            nextDays: t.nextDays, channel: t.channel, via: t.via,
-                           to: t.to || [],
+                           to: t.to || [], by: t.by || '',
                            inbound: t.inbound })) done.push(b.name);
   });
   if (!done.length) {
@@ -34147,7 +34191,11 @@ function slAgentName(addr){
   // address, so taking the domain credited every one of her approaches to
   // "Gmail" — a label that names nobody and would have made the attribution
   // useless for the one agent actually working this list.
-  const shared = (typeof gmailSharedDomain === 'function') ? gmailSharedDomain(dom) : !dom;
+  // Our own domain is shared in exactly the way a free-mail one is: it
+  // identifies VENIA, and VENIA is two people. Taking the domain would credit
+  // every founder's outreach to "Veniacollection".
+  const shared = (typeof slOurAddress === 'function' && slOurAddress(a))
+    || ((typeof gmailSharedDomain === 'function') ? gmailSharedDomain(dom) : !dom);
   const src = shared ? (a.split('@')[0] || a) : dom.replace(/^www\./, '').split('.')[0];
   const label = String(src).replace(/[^a-z0-9]+/g, ' ').trim()
     .replace(/\b\w/g, function(c){ return c.toUpperCase(); });
@@ -34207,7 +34255,11 @@ window.slLogTouch = function(id, opts){
   if (o.stage && SL_STAGES[o.stage]) b.stage = o.stage;
   b.lastContact = now.toISOString();
   if (!Array.isArray(b.log)) b.log = [];
+  // WHO MADE THIS APPROACH, when it is known to be somebody other than whoever
+  // is holding the phone. The signed-in user was assumed unconditionally, which
+  // is right for a touch logged by hand and wrong for one read out of a mailbox.
   let who = ''; try { who = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
+  if (o.by) who = slAgentName(String(o.by));
   // WHICH DOOR was used. Without it there is no way to learn that the shop
   // inbox never answers and the owner's Instagram does.
   const CH = { email:1, ig:1, whatsapp:1, phone:1, post:1, agent:1, meeting:1 };
@@ -34516,6 +34568,11 @@ window.slMailBackfill = async function(days){
   const reach = 'Read ' + (hits.scanned || 0) + ' messages'
     + (hits.oldest ? ', back to ' + hits.oldest : '')
     + (hits.senders && hits.senders.length ? ' (all mail from ' + hits.senders.join(', ') + ')' : '')
+    + ((hits.skipped && (hits.skipped.bulk || hits.skipped.failed))
+        ? '. Skipped ' + (hits.skipped.bulk ? hits.skipped.bulk + ' bulk mail received' : '')
+          + (hits.skipped.bulk && hits.skipped.failed ? ' and ' : '')
+          + (hits.skipped.failed ? hits.skipped.failed + ' that would not load' : '')
+        : '')
     + (hits.capped ? '. THAT IS AS FAR AS IT GOT — the inbox is busier than one scan can read, so older mail was not examined. Name the sender who writes for you to reach all of it.' : '.');
   const msg = 'Tag ' + fresh.length + ' approach' + (fresh.length === 1 ? '' : 'es') + ' onto the CRM?'
     + '\n' + reach
@@ -34532,6 +34589,8 @@ window.slMailBackfill = async function(days){
     const okd = slLogTouch(h.buyerId, {
       channel: h.inbound ? 'email' : (h.by ? 'agent' : 'email'),
       via: h.by || '', to: h.to || [], inbound: h.inbound,
+      // Which founder actually sent it, rather than whoever is signed in now.
+      by: h.sender || '',
       note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
         + (h.how && h.how !== 'address' ? ' (matched on ' + h.how + ')' : ''),
       nextAction: h.inbound ? 'Reply' : 'Follow up',
@@ -34551,8 +34610,8 @@ window.slMailBackfill = async function(days){
       try { skToggle(true); } catch(e){}
       const rows = misses.slice(0, 40).map(function(x){
         return (x.store ? x.store + ' — ' : '') + (x.to || []).join(', ') + ' · ' + x.at; });
-      const rec = agentReceipt(misses.length + ' invitation' + (misses.length === 1 ? '' : 's')
-        + ' went to stores not in your CRM',
+      const rec = agentReceipt(misses.length + ' store' + (misses.length === 1 ? '' : 's')
+        + ' your showroom wrote to are not in the CRM',
         'Already contacted, no account on file — worth adding, the door is open.\n'
         + rows.join('\n') + (misses.length > 40 ? '\n…and ' + (misses.length - 40) + ' more' : ''));
       const hold = document.createElement('div');
@@ -34590,7 +34649,7 @@ window.slDeskPullMail = async function(){
   if (!target) return;
   agentRunAction('sl', { type: 'log_outreach', touches: fresh.slice(0, 20).map(function(h){
     return { name: h.name, channel: h.inbound ? 'email' : (h.by ? 'agent' : 'email'),
-             via: h.by || '', to: h.to || [], inbound: h.inbound,
+             via: h.by || '', to: h.to || [], inbound: h.inbound, by: h.sender || '',
              note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
                + ' \u2014 ' + h.via + (h.exact ? '' : ' (domain match)')
                + (h.by ? ', via ' + h.by : ''),
