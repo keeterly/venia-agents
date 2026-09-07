@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '499';
+  const BUILD = '500';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -23735,8 +23735,21 @@ async function callClaudeStream(system, userMsg, opts) {
   if (!out.trim() && !toolJson.trim()) throw new Error('Enigma replied with no text');
   if (cites.length) out += '\n\nSOURCES\n' + cites.slice(0, 12).map(function(u){
     return '- ' + (citeT[u] ? citeT[u] + ' — ' : '') + u; }).join('\n');
-  if (sErrs.length) out += '\n\n⚠ WEB SEARCH DID NOT RUN (' + sErrs.join(', ') + ')'
-    + sErrs.map(function(c){ return SEARCH_WHY[c] ? '\n— ' + SEARCH_WHY[c] : ''; }).join('');
+  if (sErrs.length) {
+    // Name the tool that failed, and say something useful about a code this app
+    // does not know rather than printing "(unknown)" and stopping there.
+    const kinds = {};
+    sErrs.forEach(function(t){ kinds[String(t).split(':')[0]] = 1; });
+    const what = Object.keys(kinds)
+      .map(function(k){ return k === 'fetch' ? 'A PAGE COULD NOT BE OPENED' : 'WEB SEARCH DID NOT RUN'; })
+      .filter(function(v, i, a){ return a.indexOf(v) === i; }).join(' AND ');
+    out += '\n\n⚠ ' + what + ' (' + sErrs.join(', ') + ')'
+      + sErrs.map(function(t){
+          const c = String(t).split(':')[1] || String(t);
+          return '\n— ' + (SEARCH_WHY[c] || 'an error code this app does not recognise (' + c
+            + ') — the answer above may rest on less than it looks. Ask again, and say so if it repeats.');
+        }).join('');
+  }
   // LAST, always. A block cut off mid-object leaves its fence open on purpose,
   // and anything appended after it would be swallowed into the JSON.
   return agentWithToolAction(out, toolJson);
@@ -23806,11 +23819,24 @@ async function veniaStreamOnce(body, opts) {
           // content is an error object where a success is a list. Nothing here
           // threw, so the tool-version fallback never fired and the model was
           // left to describe an error block in prose. Read the code instead.
+          //
+          // BUT NOT BY SHAPE. This tested "content is not a list", which is a
+          // sound reading of web_search — a successful search IS a list — and a
+          // wrong one for web_fetch, where a SUCCESSFUL fetch is an object. It
+          // carries no error_code, so every page the agent actually opened was
+          // reported as a failed search with the code "unknown". The founder
+          // was told the search did not run while looking at a correctly
+          // sourced record it had just written from it. Slandering the one
+          // capability that produces evidence is worse than staying quiet.
+          //
+          // An error announces itself: it carries error_code, or a type ending
+          // in _error. Read the signal, never the shape.
           if (cb && (cb.type === 'web_search_tool_result' || cb.type === 'web_fetch_tool_result')) {
             const c = cb.content;
-            if (c && !Array.isArray(c)) {
-              const code = String(c.error_code || 'unknown');
-              if (sErrs.indexOf(code) < 0) sErrs.push(code);
+            if (c && !Array.isArray(c) && (c.error_code || /_error$/.test(String(c.type || '')))) {
+              const kind = cb.type === 'web_fetch_tool_result' ? 'fetch' : 'search';
+              const tag = kind + ':' + String(c.error_code || 'unknown');
+              if (sErrs.indexOf(tag) < 0) sErrs.push(tag);
             }
           }
         }
