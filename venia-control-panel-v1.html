@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '496';
+  const BUILD = '497';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -30726,7 +30726,7 @@ function agentRunLogOutreach(action, chatBody) {
     const stage = (t.stage && SL_STAGES[t.stage]) ? t.stage : (b.stage === 'new' ? 'approached' : b.stage);
     if (slLogTouch(b.id, { stage: stage, note: t.note, nextAction: t.nextAction,
                            nextDays: t.nextDays, channel: t.channel, via: t.via,
-                           to: t.to || [], by: t.by || '',
+                           to: t.to || [], by: t.by || '', at: t.at || '',
                            inbound: t.inbound })) done.push(b.name);
   });
   if (!done.length) {
@@ -34251,7 +34251,14 @@ window.slLogTouch = function(id, opts){
   const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
   if (!b) { try { showToast('No buyer with that id', 'error'); } catch(e){} return false; }
   window.__slPrevBuyer = JSON.parse(JSON.stringify(b));
-  const now = new Date();
+  // WHEN IT ACTUALLY HAPPENED. The clock was read unconditionally, so 187
+  // invitations sent on 4 September were all recorded as having been sent the
+  // moment the import button was pressed. Every date in the CRM read today, the
+  // "last approached N days ago" line was wrong for all of them, and the guard
+  // that stops a second approach inside three weeks was measuring from the
+  // wrong end. A touch read out of a mailbox carries its own date.
+  const now = o.at ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(o.at)) ? String(o.at) + 'T12:00:00Z' : o.at) : new Date();
+  if (isNaN(now.getTime())) return slLogTouch(id, Object.assign({}, o, { at: '' }));
   if (o.stage && SL_STAGES[o.stage]) b.stage = o.stage;
   b.lastContact = now.toISOString();
   if (!Array.isArray(b.log)) b.log = [];
@@ -34307,10 +34314,22 @@ window.slLogTouch = function(id, opts){
   // A touch without a next date is how a conversation quietly ends.
   const days = (o.nextDays != null) ? Math.max(1, Math.min(120, o.nextDays)) : 7;
   b.nextDate = new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10);
-  b.updatedAt = now.toISOString();
-  save();
-  try { if (typeof agNavSl === 'function' && STATE.currentPage === 'sl') agNavSl('buyers'); } catch(e){}
-  try { logActivity('Wholesale: ' + (b.name || 'buyer') + ' — ' + (o.note || 'approached')); } catch(e){}
+  b.updatedAt = new Date().toISOString();
+  // A BULK IMPORT MUST NOT SAVE ONCE PER ROW. Writing 187 touches called save()
+  // 187 times and re-navigated the Sales screen 187 times, and only 45 of those
+  // rows survived: an async sync landing mid-loop replaced STATE with an
+  // earlier snapshot and took the rest of the work with it. The caller batches
+  // and saves once at the end.
+  if (!o.defer) {
+    save();
+    try { if (typeof agNavSl === 'function' && STATE.currentPage === 'sl') agNavSl('buyers'); } catch(e){}
+  }
+  // logActivity() SAVES TOO, so deferring the save above and then calling it
+  // was deferring nothing — and 187 imported touches would have written 187
+  // entries into an activity log capped at 200, flushing the founder's entire
+  // history to record one button press. A bulk import writes one line, from the
+  // caller, once it knows what actually landed.
+  if (!o.defer) { try { logActivity('Wholesale: ' + (b.name || 'buyer') + ' — ' + (o.note || 'approached')); } catch(e){} }
   return true;
 };
 window.slUndoTouch = function(){
@@ -34582,6 +34601,7 @@ window.slMailBackfill = async function(days){
     + '\n\nEach account records who reached it and at which address. Nothing is sent.';
   if (fresh.length && !confirm(msg)) return;
   let done = 0;
+  const wroteIds = {};
   fresh.forEach(function(h){
     // A touch logged here is EVIDENCE of an approach, so it must not invent a
     // follow-up date the founder never chose. nextDays is set, as slLogTouch
@@ -34595,12 +34615,35 @@ window.slMailBackfill = async function(days){
         + (h.how && h.how !== 'address' ? ' (matched on ' + h.how + ')' : ''),
       nextAction: h.inbound ? 'Reply' : 'Follow up',
       nextDays: h.inbound ? 2 : 14,
+      // The day the message was sent, not the day it was imported.
+      at: h.at,
+      // Batched: one save after the loop, not one per row.
+      defer: true,
     });
-    if (okd) done++;
+    if (okd) { done++; wroteIds[h.buyerId] = 1; }
+  });
+  save();
+  // COUNT WHAT LANDED, NOT WHAT WAS ATTEMPTED. The last run reported 187 and
+  // stored 45, and the number it reported was the number of times it had TRIED.
+  // Read the rows back out of the workspace instead.
+  let rows = 0, accounts = 0;
+  (STATE.slBuyers || []).forEach(function(b){
+    if (!b || !wroteIds[b.id]) return;
+    const n = (b.log || []).filter(function(l){ return l && l.at; }).length;
+    if (n) { accounts++; rows += n; }
   });
   try { if (typeof slRefreshBuyers === 'function') slRefreshBuyers(); } catch(e){}
   try { if (typeof slOpenBuyers === 'function' && isSalesBuyersVisible()) slOpenBuyers(); } catch(e){}
-  try { showToast(done + ' account' + (done === 1 ? '' : 's') + ' tagged — filter "Not reached" for the rest', 'success'); } catch(e){}
+  const shortfall = (done > accounts) ? ' (' + (done - accounts) + ' did not stick — tell Claude)' : '';
+  // One line for the whole import, written from what landed.
+  try { logActivity('Wholesale: tagged ' + accounts + ' account' + (accounts === 1 ? '' : 's')
+    + ' from ' + done + ' message' + (done === 1 ? '' : 's') + ' already sent'); } catch(e){}
+  try { showToast(accounts + ' account' + (accounts === 1 ? '' : 's') + ' tagged from ' + done
+    + ' message' + (done === 1 ? '' : 's') + shortfall + ' — filter "Not reached" for the rest', 'success'); } catch(e){}
+  try { agentReceipt(accounts + ' account' + (accounts === 1 ? '' : 's') + ' tagged',
+    done + ' message' + (done === 1 ? '' : 's') + ' matched an account on file'
+    + (misses.length ? '\n' + misses.length + ' more went to stores not in the CRM' : '')
+    + shortfall); } catch(e){}
   // THE OTHER HALF OF THE ANSWER. An invitation that matched no account is a
   // store worth having: the work is done, the door is already open, and the CRM
   // has no idea it exists.
@@ -34653,6 +34696,7 @@ window.slDeskPullMail = async function(){
              note: (h.inbound ? 'They wrote: ' : 'Sent: ') + h.subject
                + ' \u2014 ' + h.via + (h.exact ? '' : ' (domain match)')
                + (h.by ? ', via ' + h.by : ''),
+             at: h.at,
              nextAction: h.inbound ? 'Reply' : 'Follow up', nextDays: h.inbound ? 2 : 7 };
   }) }, target);
 };
