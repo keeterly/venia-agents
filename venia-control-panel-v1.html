@@ -2764,8 +2764,8 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '500';
-  const BUILD_DATE = '2026.09.03';
+  const BUILD = '501';
+  const BUILD_DATE = '2026.09.07';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -46527,7 +46527,29 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           if (differs) rerender();
         }
       } else {
-        pushNow();                    // our local is newer → push it (pushNow sets base)
+        // OUR LOCAL IS NEWER — BUT NEWER IS NOT THE SAME AS COMPLETE.
+        //
+        // This branch used to call pushNow() straight out, publishing the local
+        // snapshot wholesale. That is right about the conflict it was written for
+        // (a device with real work must not be flattened by a stale cloud) and
+        // wrong about everything the cloud holds that this device has never seen:
+        // those records are not in conflict, they are simply absent locally, and
+        // a wholesale push DELETES them.
+        //
+        // It is not hypothetical. A measurement backfill written straight to the
+        // database was erased three times by this line — each time on a refresh,
+        // each time silently, because a push is a success from the pusher's side.
+        // Whoever booted last won, and nothing on screen said anything had gone.
+        //
+        // mergeSnapshots is already the right tool and is already used by every
+        // other pull: it merges styles record-by-record and pom/bom row-by-row,
+        // so local edits still win their own fields while cloud-only records
+        // survive. Absorb first, then push the union. With no base recorded the
+        // merge unions both sides, which is the safe reading when we cannot tell
+        // an addition from a deletion — the worst case is a stale record a person
+        // can delete, rather than real work nobody knows is gone.
+        if (row && row.data) { absorbRemote(row, 'boot (local newer — merged, not overwritten)'); rerender(); }
+        pushNow();                    // publish the union (pushNow sets base)
       }
     } else {
       _logDecision('cloudOk=false (no usable cloud content) → pushing local');
