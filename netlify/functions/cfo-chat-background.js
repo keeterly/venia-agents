@@ -179,8 +179,15 @@ export default async (req) => {
     (blocks || []).forEach((b) => {
       if (!b || (b.type !== 'web_search_tool_result' && b.type !== 'web_fetch_tool_result')) return;
       const c = b.content;
-      if (!c || Array.isArray(c)) return;          // a list is a normal result set
-      const code = String(c.error_code || 'unknown');
+      // NOT BY SHAPE. "Content is not a list" is a sound reading of web_search,
+      // where a successful search IS a list, and a wrong one for web_fetch,
+      // where a SUCCESSFUL fetch is an object — so every page actually opened
+      // was reported as a failed search, with code "unknown" because a success
+      // carries no error_code. An error announces itself: read the signal.
+      if (!c || Array.isArray(c)) return;
+      if (!c.error_code && !/_error$/.test(String(c.type || ''))) return;
+      const kind = b.type === 'web_fetch_tool_result' ? 'fetch' : 'search';
+      const code = kind + ':' + String(c.error_code || 'unknown');
       if (out.indexOf(code) < 0) out.push(code);
     });
     return out;
@@ -216,8 +223,14 @@ export default async (req) => {
     // Say which wall, in the reply, so the founder is not relying on the model's
     // reading of an error block it was never given the vocabulary for.
     if (errs.length) {
-      text += '\n\n\u26a0 WEB SEARCH DID NOT RUN (' + errs.join(', ') + ')'
-        + errs.map((c) => SEARCH_WHY[c] ? '\n\u2014 ' + SEARCH_WHY[c] : '').join('');
+      const kinds = [...new Set(errs.map((t) => String(t).split(':')[0]))]
+        .map((k) => (k === 'fetch' ? 'A PAGE COULD NOT BE OPENED' : 'WEB SEARCH DID NOT RUN'));
+      text += '\n\n\u26a0 ' + [...new Set(kinds)].join(' AND ') + ' (' + errs.join(', ') + ')'
+        + errs.map((t) => {
+            const c = String(t).split(':')[1] || String(t);
+            return '\n\u2014 ' + (SEARCH_WHY[c] || 'an error code this app does not recognise (' + c
+              + ') \u2014 the answer above may rest on less than it looks.');
+          }).join('');
     }
     if (sources.length) {
       const seen = new Set();
