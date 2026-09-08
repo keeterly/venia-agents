@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '500';
+  const BUILD = '501';
   const BUILD_DATE = '2026.09.03';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36171,7 +36171,7 @@ function slLinesheetPrintDoc(subtitle, footNote, rows){
 // GARMENT, so this one is landscape, a few styles to a page, photo first and
 // the numbers under it. It is the same data and the same freeze/price rules —
 // only the shape is different.
-window.SL_VLS = { perPage: 3, genders: [], currency: 'USD', photosOnly: false, copy: true,
+window.SL_VLS = { perPage: 3, cols: 0, genders: [], currency: 'USD', photosOnly: false, copy: true,
   // Where a style is made and who makes it. A sheet built for one factory's
   // capacity should not carry another's styles, and an account that only takes
   // Japanese production should not have to read past everything else.
@@ -36228,9 +36228,29 @@ function slVlsCopy(txt, max){
 // Layout per page: one style per column, always a single row. Stacking two
 // rows halved the card and forced the spec off it; a landscape sheet has width
 // to spare and height it cannot borrow, so the styles go across.
-function slVlsGrid(n){
-  return { cols: n, rows: 1 };
+// HOW THE CARDS STACK. This returned { cols: n, rows: 1 } for every count, so
+// eight per page meant eight across a 283mm sheet — 32mm a column, which this
+// file's own sizing notes call too narrow to carry a spec legibly. Eight styles
+// want four across and two down.
+//
+// Auto keeps the shapes that were already right (three across stays three
+// across) and stacks only where a single row stops working.
+const SL_VLS_AUTO = { 1:1, 2:2, 3:3, 4:4, 6:3, 8:4 };   // columns, by styles per page
+function slVlsGrid(n, cols){
+  const per = Math.max(1, Number(n) || 1);
+  const c = Math.max(1, Math.min(per, Number(cols) || SL_VLS_AUTO[per] || Math.min(per, 4)));
+  return { cols: c, rows: Math.ceil(per / c) };
 }
+// Every arrangement that divides evenly, so a page is never part-empty by
+// construction. Wider than four is offered only where it is the whole page —
+// a fifth column is legible at 8-up across one row and nowhere else.
+function slVlsArrangements(per){
+  const out = [];
+  for (let c = 1; c <= per; c++) if (per % c === 0) out.push({ cols: c, rows: per / c });
+  return out.filter(function(a){ return a.cols <= 4 || a.rows === 1; });
+}
+window.slVlsGrid = slVlsGrid;
+window.slVlsArrangements = slVlsArrangements;
 // The values actually present in the line, with counts, so the dialog offers
 // what exists rather than a list someone has to keep in step. Blanks are left
 // out: "not set" is not a country, and a filter that offers it invites a sheet
@@ -36279,10 +36299,15 @@ window.slVlsOpen = function(){
   const ex = document.getElementById('sl-vls-modal'); if (ex) ex.remove();
   const ov = document.createElement('div');
   ov.className = 'overlay'; ov.id = 'sl-vls-modal';
-  ov.innerHTML = `<div class="modal" style="width:460px;max-width:94vw">
+  // Wide enough for the page beside the controls; a narrow screen stacks them,
+  // because a preview squeezed into 200px is not a preview.
+  const wide = (window.innerWidth || 1200) >= 820;
+  ov.innerHTML = `<div class="modal" style="width:${wide ? 940 : 460}px;max-width:94vw">
     <div class="modal-head"><div class="modal-title">Visual line sheet</div>
       <button class="modal-close" aria-label="Close" onclick="closeModal('sl-vls-modal')">&#x2715;</button></div>
-    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px">
+    <div class="modal-body" style="padding:18px 20px;display:grid;gap:20px;align-items:start;${
+      wide ? 'grid-template-columns:300px minmax(0,1fr)' : 'grid-template-columns:minmax(0,1fr)'}">
+      <div style="display:flex;flex-direction:column;gap:16px;${wide ? 'max-height:66vh;overflow-y:auto;padding-right:6px' : ''}">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">Landscape, photo first. The table export is unchanged — this is the other way to send the same line.</div>
       <div>
         <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Styles per page</div>
@@ -36290,6 +36315,10 @@ window.slVlsOpen = function(){
           ${[1,2,3,4,6,8].map(n => `<button class="btn btn-ghost btn-sm" data-n="${n}" onclick="slVlsPer(${n})"
             style="min-width:38px${SL_VLS.perPage===n?';border-color:var(--ink);color:var(--ink);font-weight:700':''}">${n}</button>`).join('')}
         </div>
+      </div>
+      <div id="sl-vls-arr-wrap">
+        <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Stacking</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap" id="sl-vls-arr">${slVlsArrHTML()}</div>
       </div>
       <div>
         <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted);margin-bottom:7px">Genders — none ticked means all</div>
@@ -36338,18 +36367,80 @@ window.slVlsOpen = function(){
           Show retail price
         </label>
       </div>
-      <div id="sl-vls-count" style="font-size:11px;color:var(--ink)"></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
-        <button class="btn btn-ghost" onclick="closeModal('sl-vls-modal')">Cancel</button>
-        <button class="btn btn-gold" onclick="slVlsPrint()">Export</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+        <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted)">Preview — page one</div>
+        <div id="sl-vls-prev" style="border:1px solid var(--border);background:#f4f4f4;min-height:120px;overflow:hidden"></div>
+        <div id="sl-vls-count" style="font-size:11px;color:var(--ink)"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
+          <button class="btn btn-ghost" onclick="closeModal('sl-vls-modal')">Cancel</button>
+          <button class="btn btn-gold" onclick="slVlsPrint()">Export</button>
+        </div>
       </div>
     </div></div>`;
   document.body.appendChild(ov);
   slVlsCount();
+  slVlsPreview();
   openModal('sl-vls-modal');
+};
+// EVERY ARRANGEMENT THAT DIVIDES EVENLY, as buttons. "4 x 2" reads as the page
+// looks: four across, two down.
+window.slVlsArrHTML = function(){
+  const per = SL_VLS.perPage;
+  const opts = slVlsArrangements(per);
+  const cur = slVlsGrid(per, SL_VLS.cols);
+  if (opts.length < 2) return '<span style="font-size:10.5px;color:var(--muted)">'
+    + (per === 1 ? 'One to a page.' : cur.cols + ' across, one row — the only way this divides.') + '</span>';
+  return opts.map(function(o){
+    const on = o.cols === cur.cols;
+    return '<button class="btn btn-ghost btn-sm" data-c="' + o.cols + '" onclick="slVlsCols(' + o.cols + ')"'
+      + ' style="min-width:58px' + (on ? ';border-color:var(--ink);color:var(--ink);font-weight:700' : '') + '">'
+      + o.cols + ' \u00d7 ' + o.rows + '</button>';
+  }).join('');
+};
+window.slVlsCols = function(c){
+  SL_VLS.cols = c;
+  const wrap = document.getElementById('sl-vls-arr');
+  if (wrap) wrap.innerHTML = slVlsArrHTML();
+  slVlsCount(); slVlsPreview();
+};
+// THE PREVIEW IS THE EXPORT. It renders the real document in an iframe and
+// scales it down, rather than approximating the page with a second renderer
+// that could quietly disagree with the one that prints. What you are looking at
+// is the file.
+let SL_VLS_PREV_T = null;
+window.slVlsPreview = function(){
+  const box = document.getElementById('sl-vls-prev'); if (!box) return;
+  // Coalesced: a tick of typing or a burst of checkbox changes should rebuild
+  // the document once, not once per event.
+  clearTimeout(SL_VLS_PREV_T);
+  SL_VLS_PREV_T = setTimeout(function(){
+    let html = '';
+    try { html = slVlsDoc(); } catch (e) { html = ''; }
+    if (!html) {
+      box.innerHTML = '<div style="padding:24px;text-align:center;font-size:10.5px;color:var(--muted)">'
+        + 'Nothing to preview — every style is filtered out.</div>';
+      return;
+    }
+    // A4 landscape at 96dpi. Scaled to the pane, top-left anchored, so the
+    // first page sits square in the box.
+    const PAGE_W = 1122, PAGE_H = 794;
+    const w = Math.max(200, box.clientWidth || 420);
+    const k = w / PAGE_W;
+    box.innerHTML = '<div style="height:' + Math.round(PAGE_H * k) + 'px;overflow:hidden;position:relative">'
+      + '<iframe id="sl-vls-prev-f" title="Line sheet preview" style="position:absolute;top:0;left:0;border:0;'
+      + 'width:' + PAGE_W + 'px;height:' + PAGE_H + 'px;transform:scale(' + k + ');transform-origin:top left"></iframe></div>';
+    const f = document.getElementById('sl-vls-prev-f');
+    if (f) { f.srcdoc = html; }
+  }, 90);
 };
 window.slVlsPer = function(n){
   SL_VLS.perPage = n;
+  // A stacking chosen for six does not carry to eight, so the new count starts
+  // on its own default rather than on a shape that no longer divides.
+  SL_VLS.cols = 0;
+  const arr = document.getElementById('sl-vls-arr');
+  if (arr) arr.innerHTML = slVlsArrHTML();
   document.querySelectorAll('#sl-vls-per button').forEach(b => {
     const on = Number(b.dataset.n) === n;
     b.style.borderColor = on ? 'var(--ink)' : '';
@@ -36372,23 +36463,37 @@ window.slVlsGenders = function(){
   slVlsCount();
 };
 function slVlsCount(){
+  // EVERY option change already lands here, so the preview hangs off this one
+  // call rather than off eight call sites one of which would eventually be
+  // added without it. It is debounced, so this is cheap.
+  try { slVlsPreview(); } catch (e) {}
   const el = document.getElementById('sl-vls-count'); if (!el) return;
   const n = slVlsStyles().length;
   const pages = Math.max(1, Math.ceil(n / SL_VLS.perPage));
   const hidden = SL_VLS.photosOnly
     ? slLsStyles().filter(s => (!SL_VLS.genders.length || SL_VLS.genders.indexOf(slVlsGenderOf(s))>=0) && !s.photoUrl).length : 0;
   const cur = SL_VLS.currency, rate = cur !== 'USD' ? fxRate(cur) : 1;
+  // WHAT THIS LAYOUT LEAVES OFF. A dense card prints the essentials only, which
+  // is the right trade for the room it has — but a founder who ticked "Show
+  // retail price" and gets a sheet without one has been quietly overruled. Say
+  // it here, next to the choice that caused it.
+  const gr = slVlsGrid(SL_VLS.perPage, SL_VLS.cols);
+  const isDense = gr.cols > 4 || gr.rows > 1;
+  const dropped = isDense
+    ? ['composition', 'origin', (SL_VLS.retail !== false ? 'retail price' : ''), 'MOQ', 'delivery'].filter(Boolean)
+    : [];
   el.innerHTML = n
-    ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${SL_VLS.perPage} per page, landscape`
+    ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${gr.cols} × ${gr.rows} per page, landscape`
       + (cur !== 'USD' ? (rate ? `, priced in <b>${cur}</b> at ${rate}` : `, <span style="color:var(--red)">no ${cur} rate — prices will print in USD</span>`) : '')
       + '.'
       + (hidden ? `<br><span style="color:var(--muted)">${hidden} style${hidden===1?'':'s'} left out for having no photo.</span>` : '')
+      + (dropped.length ? `<br><span style="color:var(--muted)">This density prints the essentials only — ${dropped.join(', ')} are left off. Four or fewer across in one row keeps them.</span>` : '')
     : `<span style="color:var(--red)">Nothing matches — every style is filtered out.</span>`;
 }
 window.slVlsDoc = function(){
   const rows = slVlsStyles().map(slLsRowFrom);
   if (!rows.length) return '';
-  const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per);
+  const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per, SL_VLS.cols);
   const esc = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
   const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
@@ -36453,8 +36558,18 @@ window.slVlsDoc = function(){
   // The alignment the fixed height was protecting is kept a better way: every
   // card on a page gets the same spec band (min-height), so every photo gets
   // the same remainder and the names still sit on one line across the sheet.
-  const IMG_MIN = { 1: 76, 2: 68, 3: 64, 4: 66, 6: 60, 8: 52 };   // mm floor, by columns
-  const imgH = IMG_MIN[cols] || 60;
+  // THE ROW BUDGET. Every measurement below was taken with ONE row, where the
+  // whole page belongs to a single band of cards. Stack two rows and each gets
+  // roughly half — and this file already knows what happens when a card does
+  // not fit: it is not clipped, it reflows onto a page of its own, and "8 per
+  // page" quietly becomes 4 and 4. So the budget is computed rather than
+  // assumed, and every height below is capped by it.
+  // 196mm page, less the header band (~10mm), the footer (~10mm) and the grid's
+  // own 4mm padding top and bottom, leaves ~168mm of track; the rows split it
+  // with a 6mm gap between them.
+  const TRACK_H = 168;
+  const rowH = Math.round(((TRACK_H - (gridRows - 1) * 6) / gridRows) * 10) / 10;
+  const IMG_MIN = { 1: 76, 2: 68, 3: 64, 4: 66, 6: 60, 8: 52 };   // mm floor, by columns, one row
   // A4 landscape less 7mm margins is 283mm wide; the gap is 6mm.
   const colW = Math.round(((283 - (cols - 1) * 6) / cols) * 10) / 10;
   // Portrait, and capped so a narrow column does not get a band three times its
@@ -36462,17 +36577,26 @@ window.slVlsDoc = function(){
   // Capped against the PAGE as well as the column: at 2-up the column is 138mm
   // wide, and 1.34 of that is taller than the sheet. 112mm leaves the spec band
   // and the footer their room at every density.
-  const imgMax = Math.min(112, Math.round(colW * 1.34 * 10) / 10);
+  // Capped by the ROW as well now: at 4 x 2 the row is 81mm and the spec takes
+  // 32 of it, so a 66mm photo floor would push the card off the page.
+  // The spec band, decided BEFORE the photo, because the photo now takes what
+  // the spec leaves rather than the other way round.
+  const INFO_H = { 1: 46, 2: 44, 3: 42, 4: 42, 6: 34, 8: 30 };
+  // A stacked row has half the height and the same spec to print, so the card
+  // prints less of it — the optional compliance fields go, exactly as they do
+  // in a narrow column. The garment is still the point of the card.
+  const short = gridRows > 1;
+  const infoH = Math.min(INFO_H[cols] || 38, short ? 32 : 999);
+  const imgMax = Math.max(24, Math.min(112, Math.round(colW * 1.34 * 10) / 10, rowH - infoH - 2));
+  const imgH = Math.min(IMG_MIN[cols] || 60, imgMax);
   // The spec band. Tall enough for the fields this density prints, so all the
   // photos on a page match; a card that overruns it borrows from its own photo
   // and nobody else's.
-  const INFO_H = { 1: 46, 2: 44, 3: 42, 4: 42, 6: 34, 8: 30 };
-  const infoH = INFO_H[cols] || 38;
   // Width, not height, is what runs out now. Past four across a column is too
   // narrow to carry compliance detail legibly — composition and origin belong
   // on the roomy layouts and in the list export, not wrapped to four lines in a
   // 32mm column.
-  const dense = cols > 4;
+  const dense = cols > 4 || gridRows > 1;
   const roomy = cols <= 3;
   // One type scale, picked by column width: roomy (1–3 across), the 4-up, and
   // the narrow ones. Written once so a size can never be tuned in one rule and
@@ -36553,6 +36677,15 @@ window.slVlsDoc = function(){
        card ended up 287mm tall on a 182mm page. */
     .pg{page-break-after:always;display:flex;flex-direction:column;height:196mm}
     .pg:last-child{page-break-after:auto}
+    /* ON SCREEN, THE SAME PAGE. Without a width the body flows to whatever the
+       window is, so the export popup and the preview showed columns at the
+       wrong proportions and the layout could only really be judged on paper.
+       283mm is A4 landscape less the 7mm margins — the same figure the column
+       arithmetic above uses. */
+    @media screen{
+      body{width:283mm;margin:0 auto;padding:7mm 0;background:#f4f4f4}
+      .pg{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.12);margin-bottom:8mm;padding:0 0}
+    }
     header{display:flex;justify-content:space-between;align-items:baseline;font-size:8pt;
       letter-spacing:1.4px;text-transform:uppercase;color:#666;border-bottom:1.5px solid #111;padding-bottom:4mm}
     header .b{font-weight:700;letter-spacing:3px;color:#111}
@@ -36566,7 +36699,7 @@ window.slVlsDoc = function(){
     /* One row, filling the page. It was an auto track centred in the leftover
        space, which is what left a band of white above and below the cards. */
     .grid{flex:1;display:grid;grid-template-columns:repeat(${cols},1fr);
-      grid-template-rows:1fr;align-content:stretch;gap:6mm;padding:4mm 0;
+      grid-template-rows:repeat(${gridRows},1fr);align-content:stretch;gap:6mm;padding:4mm 0;
       --colw:${colW}mm;--imgmax:${imgMax}mm}
     /* Content hugs the bottom: the spec sits on the baseline of the card and
        any slack the photo cannot use falls above it, not between them. */
