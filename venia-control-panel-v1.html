@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '502';
+  const BUILD = '503';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36179,7 +36179,14 @@ window.SL_VLS = { perPage: 3, cols: 0, genders: [], currency: 'USD', photosOnly:
   // Retail is the domestic recommendation. A sheet crossing a border, or going
   // to an account that sets its own price, should be able to quote the
   // wholesale without it — and empty === every one, as with genders.
-  retail: true };
+  retail: true,
+  // AND THE WHOLESALE, WHICH IS THE ONE THAT MATTERS. A sheet going to press,
+  // to a stylist, or to a buyer before terms are agreed should carry the line
+  // without carrying what it costs. Like retail, the number must be ABSENT from
+  // the page rather than unlabelled — a PDF is searched as often as it is read.
+  wholesale: true,
+  // One section per factory rather than one continuous run of styles.
+  byVendor: false };
 // The sheet quotes ONE currency, chosen per export, at the season rate the app
 // already holds (fxEnsureRate asks once and keeps it). It is never today's
 // spot: a line sheet has to hold its prices all season.
@@ -36371,6 +36378,16 @@ window.slVlsOpen = function(){
           <input type="checkbox" id="sl-vls-retail" ${SL_VLS.retail!==false?'checked':''} onchange="SL_VLS.retail=this.checked;slVlsCount()" style="accent-color:var(--ink)">
           Show retail price
         </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px"
+               title="For a sheet going to press, to a stylist, or to a buyer before terms are agreed. The number is left off the page entirely, not just unlabelled — a PDF is searched as often as it is read.">
+          <input type="checkbox" id="sl-vls-wholesale" ${SL_VLS.wholesale!==false?'checked':''} onchange="SL_VLS.wholesale=this.checked;slVlsCount()" style="accent-color:var(--ink)">
+          Show wholesale price
+        </label>
+        ${slVlsVendors().length > 1 ? `<label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px"
+               title="Each factory's styles start on their own page, headed with their name and numbered within their own section — so one export covers every maker and each of them can be sent only their part.">
+          <input type="checkbox" id="sl-vls-byvendor" ${SL_VLS.byVendor?'checked':''} onchange="SL_VLS.byVendor=this.checked;slVlsCount()" style="accent-color:var(--ink)">
+          One section per factory
+        </label>` : ''}
       </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
@@ -36421,7 +36438,7 @@ window.slVlsPreview = function(){
   clearTimeout(SL_VLS_PREV_T);
   SL_VLS_PREV_T = setTimeout(function(){
     let html = '';
-    try { html = slVlsDoc(); } catch (e) { html = ''; }
+    try { html = slVlsDoc({ groupBy: SL_VLS.byVendor ? 'vendor' : '' }); } catch (e) { html = ''; }
     if (!html) {
       box.innerHTML = '<div style="padding:24px;text-align:center;font-size:10.5px;color:var(--muted)">'
         + 'Nothing to preview — every style is filtered out.</div>';
@@ -36485,17 +36502,35 @@ function slVlsCount(){
   const gr = slVlsGrid(SL_VLS.perPage, SL_VLS.cols);
   const isDense = gr.cols > 4 || gr.rows > 1;
   const dropped = isDense
-    ? ['composition', 'origin', (SL_VLS.retail !== false ? 'retail price' : ''), 'MOQ', 'delivery'].filter(Boolean)
+    ? ['composition', 'origin',
+       (SL_VLS.retail !== false && SL_VLS.wholesale !== false ? 'retail price' : ''),
+       'MOQ', 'delivery'].filter(Boolean)
     : [];
+  // A SHEET WITH NO PRICES ON IT IS NOT A LINE SHEET. That is a real thing to
+  // send — to press, to a stylist, before terms — but it is worth knowing
+  // before it goes to a buyer expecting to order from it.
+  const noPrice = SL_VLS.wholesale === false && SL_VLS.retail === false;
+  const wsOff = SL_VLS.wholesale === false && !noPrice;
   el.innerHTML = n
     ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${gr.cols} × ${gr.rows} per page, landscape`
       + (cur !== 'USD' ? (rate ? `, priced in <b>${cur}</b> at ${rate}` : `, <span style="color:var(--red)">no ${cur} rate — prices will print in USD</span>`) : '')
       + '.'
       + (hidden ? `<br><span style="color:var(--muted)">${hidden} style${hidden===1?'':'s'} left out for having no photo.</span>` : '')
       + (dropped.length ? `<br><span style="color:var(--muted)">This density prints the essentials only — ${dropped.join(', ')} are left off. Four or fewer across in one row keeps them.</span>` : '')
+      + (noPrice ? `<br><span style="color:var(--red)">No prices on this sheet at all — it reads as a lookbook. The pages say "Prices on request".</span>` : '')
+      + (wsOff ? `<br><span style="color:var(--muted)">Wholesale is off — the page carries the recommended retail and says wholesale is on request.</span>` : '')
+      + (SL_VLS.byVendor ? (function(){
+          const g = {};
+          slVlsStyles().forEach(function(x){ g[String(x.vendor||'').trim() || 'Factory not set'] = 1; });
+          const names = Object.keys(g).sort();
+          const unset = names.indexOf('Factory not set') >= 0;
+          return `<br><span style="color:var(--muted)">${names.length} section${names.length===1?'':'s'}, one per factory, each starting a new page and numbered within itself: ${escHtml(names.join(', '))}.`
+            + (unset ? ' Styles with no factory on file are grouped last.' : '') + `</span>`;
+        })() : '')
     : `<span style="color:var(--red)">Nothing matches — every style is filtered out.</span>`;
 }
-window.slVlsDoc = function(){
+window.slVlsDoc = function(opts){
+  opts = opts || {};
   const rows = slVlsStyles().map(slLsRowFrom);
   if (!rows.length) return '';
   const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per, SL_VLS.cols);
@@ -36509,11 +36544,31 @@ window.slVlsDoc = function(){
   const money = v => slVlsMoney(v, rate ? cur : 'USD');
   // What the prices are quoted IN, said on the sheet itself. A converted price
   // with no rate beside it is a number a buyer cannot check.
-  const curLine = (cur === 'USD' || !rate)
-    ? 'Wholesale prices in USD, FOB. Prices confidential.'
-    : 'Wholesale prices in ' + cur + ', FOB — converted at ' + rate + ' ' + cur
-      + ' to 1 USD, the season rate. Prices confidential.'
-      + (cur !== 'USD' ? '' : '');
+  // WHICH PRICES THIS SHEET CARRIES. Declared here rather than beside the card
+  // builder because the running head and the footer are written first and both
+  // have to know — a footer that promises a wholesale the page does not print
+  // is worse than no footer.
+  //
+  // Retail is a recommendation, not a term of sale: a sheet crossing a border,
+  // or going to an account that prices its own way, quotes the wholesale and
+  // nothing else. The wholesale comes off for the other direction — press, a
+  // stylist, a buyer before terms. Either way the number must be ABSENT from
+  // the page, not merely unlabelled, because a PDF is searched as often as it
+  // is read.
+  const showRetail = SL_VLS.retail !== false;
+  const showWholesale = SL_VLS.wholesale !== false;
+  const anyPrice = showRetail || showWholesale;
+  const curName = (cur === 'USD' || !rate) ? 'USD' : cur;
+  const curNote = (cur === 'USD' || !rate) ? ''
+    : ' — converted at ' + rate + ' ' + cur + ' to 1 USD, the season rate';
+  const curLine = !anyPrice
+    ? 'Prices on request.'
+    : (showWholesale
+        ? 'Wholesale prices in ' + curName + ', FOB' + curNote + '. Prices confidential.'
+        // Retail alone is a recommendation, not a term of sale, so it is not
+        // "FOB" and it is not confidential — and the wholesale a buyer still
+        // needs has to be asked for rather than silently missing.
+        : 'Recommended retail in ' + curName + curNote + '. Wholesale on request.');
   const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
   const termsLine = (STATE.slPrefs && STATE.slPrefs.terms) ? 'Terms: ' + STATE.slPrefs.terms + '.' : '';
   // How to order. A line sheet without a way back to the brand is a catalogue.
@@ -36531,7 +36586,30 @@ window.slVlsDoc = function(){
   // tall a photo happens to render is how you get four styles on one page and
   // one orphan on the next.
   const pages = [];
-  for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  if (opts.groupBy === 'vendor') {
+    // ONE SECTION PER FACTORY, each starting on its own page. A maker should
+    // receive the styles they make and nothing else, and a page that mixes two
+    // factories cannot be sent to either. Grouping here rather than exporting
+    // once per factory keeps it a single action and a single file — browsers
+    // block the second popup anyway.
+    const groups = {};
+    rows.forEach(function(r){
+      const k = String(r.vendor || '').trim() || 'Factory not set';
+      (groups[k] = groups[k] || []).push(r);
+    });
+    Object.keys(groups).sort(function(a, b){
+      // Whatever has no factory on file sorts last: it is the work to do, not
+      // a maker to send to.
+      if (a === 'Factory not set') return 1;
+      if (b === 'Factory not set') return -1;
+      return a.localeCompare(b);
+    }).forEach(function(k){
+      const g = groups[k];
+      for (let i = 0; i < g.length; i += per) { const pg = g.slice(i, i + per); pg.group = k; pages.push(pg); }
+    });
+  } else {
+    for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
+  }
   // THE PAGE HAS 190mm AND THE CARD HAS TO FIT IN IT.
   // A4 landscape is 210mm tall, less 10mm of margin each side. Adding
   // composition, origin and delivery pushed a full card past that, and content
@@ -36616,7 +36694,6 @@ window.slVlsDoc = function(){
   // or going to an account that prices its own way, quotes the wholesale and
   // nothing else — and the number must be absent from the page, not merely
   // unlabelled, because a PDF is searched as often as it is read.
-  const showRetail = SL_VLS.retail !== false;
   const copyCap = roomy ? 200 : (dense ? 70 : 90);
   const card = r => {
     const copy = withCopy && copyCap ? slVlsCopy(r.desc, copyCap) : '';
@@ -36633,8 +36710,8 @@ window.slVlsDoc = function(){
         ${r.colors ? `<tr><td>Colours</td><td>${chips ? `<div class="cws">${chips}</div>` : esc(r.colors)}</td></tr>` : ''}
         ${r.sizes  ? `<tr><td>Sizes</td><td>${esc(r.sizes)}</td></tr>` : ''}
         ${!dense && r.coo ? `<tr><td>Made in</td><td>${esc(r.coo)}</td></tr>` : ''}
-        <tr><td>Wholesale</td><td class="ws">${r.wholesale ? esc(money(r.wholesale)) : '—'}</td></tr>
-        ${(!dense && showRetail) ? `<tr><td>Retail</td><td>${r.retail ? esc(money(r.retail)) : '—'}</td></tr>` : ''}
+        ${showWholesale ? `<tr><td>Wholesale</td><td class="ws">${r.wholesale ? esc(money(r.wholesale)) : '—'}</td></tr>` : ''}
+        ${(showRetail && (!dense || !showWholesale)) ? `<tr><td>Retail</td><td class="${showWholesale ? '' : 'ws'}">${r.retail ? esc(money(r.retail)) : '—'}</td></tr>` : ''}
         ${!dense && r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
         ${!dense && r.drop ? `<tr><td>Delivery</td><td>${esc(slVlsDate(r.drop))}</td></tr>` : ''}
       </table>
@@ -36642,19 +36719,33 @@ window.slVlsDoc = function(){
     </div>`;
   };
   const body = pages.map((pg, i) => `<section class="pg">
-      <header><span class="b">VENIA COLLECTION</span><span>${esc(seasonLabel)} · Wholesale ${esc(rate ? cur : 'USD')} · ${esc(gLabel)}${
+      <header><span class="b">VENIA COLLECTION</span><span>${esc(seasonLabel)}${
+        // The running head named the wholesale on every page. A sheet without
+        // one should not, and a sheet with no prices at all should say so where
+        // a reader is already looking.
+        esc(!anyPrice ? ' · Prices on request'
+            : (showWholesale ? ' · Wholesale ' + curName : ' · Retail ' + curName))
+      } · ${esc(gLabel)}${
         // A filtered sheet has to say so on every page. A buyer holding "the
         // SS27 sheet" that is really the Japan-made half of it, with no way to
         // tell, is how a style gets ordered that was never offered.
         ((SL_VLS.coos || []).length ? ' · Made in ' + esc(SL_VLS.coos.join(' / ')) : '')
       }${
-        ((SL_VLS.vendors || []).length ? ' · ' + esc(SL_VLS.vendors.join(' / ')) : '')
+        (pg.group ? ' · ' + esc(pg.group)
+                  : ((SL_VLS.vendors || []).length ? ' · ' + esc(SL_VLS.vendors.join(' / ')) : ''))
       }${
         // Which categories this page carries — the sheet is grouped now, so the
         // header can say where in the line you are.
         (function(){ const c=[...new Set(pg.map(x=>String(x.category||'').trim()).filter(Boolean))];
           return c.length ? ' · ' + esc(c.join(' / ')) : ''; })()
-      }</span><span>${i+1} / ${pages.length}</span></header>
+      }</span><span>${(function(){
+        if (!pg.group) return (i+1) + ' / ' + pages.length;
+        // Within the factory: "2 / 3" of THEIR pages, because that is the
+        // document they receive. A maker holding page 7 of 19 cannot tell
+        // whether they have all of theirs.
+        const mine = pages.filter(function(x){ return x.group === pg.group; });
+        return (mine.indexOf(pg) + 1) + ' / ' + mine.length;
+      })()}</span></header>
       <div class="grid">${pg.map(card).join('')}${
         // Empty cells on the last page so three styles stay three columns wide
         // instead of stretching to fill the sheet.
@@ -36788,7 +36879,7 @@ window.slVlsPrint = function(){
   const gLabel = SL_VLS.genders.length ? SL_VLS.genders.join(' · ') : 'all genders';
   const cur = SL_VLS.currency || 'USD';
   const rate = cur !== 'USD' ? fxRate(cur) : 1;
-  const html = slVlsDoc();
+  const html = slVlsDoc({ groupBy: SL_VLS.byVendor ? 'vendor' : '' });
   const w = window.open('', '_blank', 'width=1100,height=800');
   if (!w) { showToast('Allow pop-ups to export the line sheet', 'warning'); return; }
   w.document.write(html); w.document.close();
@@ -36808,7 +36899,9 @@ window.slVlsPrint = function(){
     + ', ' + (rate ? cur : 'USD')
     + ((SL_VLS.coos || []).length ? ', made in ' + SL_VLS.coos.join('/') : '')
     + ((SL_VLS.vendors || []).length ? ', by ' + SL_VLS.vendors.join('/') : '')
-    + (SL_VLS.retail === false ? ', wholesale only' : '')); } catch(e){}
+    + (SL_VLS.retail === false ? ', no retail' : '')
+    + (SL_VLS.wholesale === false ? ', no wholesale' : '')
+    + (SL_VLS.byVendor ? ', grouped by factory' : '')); } catch(e){}
   closeModal('sl-vls-modal');
 };
 
@@ -36828,6 +36921,10 @@ function slLsRowFrom(s){
     // already (the tech pack's care-label check reads the same two fields) and
     // were simply never carried onto the sheet.
     coo: s.coo || '', composition: s.fiberContent || '',
+    // Who makes it. The sheet could already be FILTERED to one factory; it
+    // could not be grouped, so sending each maker their own styles meant one
+    // export per factory and remembering which you had done.
+    vendor: s.vendor || '',
     // When this style ships, per style — the footer only carries the season's
     // window, and a Delivery 2 piece is the exception that needs saying.
     drop: s.drop || '',
