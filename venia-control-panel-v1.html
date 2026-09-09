@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '504';
+  const BUILD = '505';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6746,7 +6746,30 @@ function mergeSnapshots(base, local, cloud) {
     // side's work. Styles conflict-merge field-by-field; nested fit arrays
     // (sampleLog/fitNotes/fitPhotos) keep both sides' additions.
     if (k === 'styles' && (_mRecArray(l) || _mRecArray(c))) {
-      out[k] = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : [], _mRec3);
+      const mergedStyles = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : [], _mRec3);
+      // AN ASSIGNMENT IS NEVER UNDONE BY A SYNC — the same guard finTxns keeps
+      // for a filed category, for the same reason and against the same branch.
+      //
+      // _mRec3 gives the cloud a field it changed when this device did not, and
+      // that is right while the baseline is accurate. When the baseline has run
+      // ahead of the cloud for any reason, it hands back the older value — and
+      // for a factory tag the older value is usually nothing at all, so the tag
+      // silently disappears a style at a time.
+      //
+      // The race that caused it is fixed above; this is the second lock. The
+      // merge may CHANGE which factory a style is assigned to and may never
+      // blank one this device is holding. Clearing still works on the device
+      // doing the clearing, which is where a person watching it happen is.
+      const lStyles = Object.create(null);
+      (Array.isArray(l) ? l : []).forEach(function (x) { if (x && x.id != null) lStyles[x.id] = x; });
+      mergedStyles.forEach(function (x) {
+        const was = x && x.id != null ? lStyles[x.id] : null;
+        if (!was) return;
+        ['vendor', 'coo'].forEach(function (f) {
+          if (!String(x[f] || '').trim() && String(was[f] || '').trim()) x[f] = was[f];
+        });
+      });
+      out[k] = mergedStyles;
       return;
     }
     // pom/bom are {styleId: [rows]}: a same-style conflict merged whole-array
@@ -46461,6 +46484,34 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       showToast('⇅ Sync ' + kind + ' failed — ' + String(msg || '').slice(0, 80) + (/(jwt|auth|policy|denied|401|403)/i.test(String(msg)) ? ' · try signing in again' : ''), 'error');
     }
   }
+  // WHAT WAS EDITED WHILE THE PUSH WAS IN THE AIR.
+  //
+  // pushNow snapshots the workspace, then awaits a pull and an upsert — two
+  // network round trips — and then adopts the merged result with
+  // applySnapshot(). Anything the founder changed during those awaits is in
+  // neither the snapshot nor the merge, so adopting overwrote it, and the
+  // setBase() that followed recorded the overwritten state as the baseline.
+  // The edit was then gone from the device, the baseline AND the cloud at once,
+  // with a green sync and nothing on screen to say so.
+  //
+  // Tagging a factory is one click. Whether it survived depended entirely on
+  // whether that click landed inside an in-flight push's await window, which is
+  // exactly "sometimes it saves, sometimes it undoes itself".
+  //
+  // So the state on the device NOW is reconciled against what was published:
+  // the pre-push snapshot is the base, the device is local, the published blob
+  // is the remote. Fields touched during the window changed against that base
+  // and win; records the cloud contributed did not change locally and win. It
+  // is the same three-way merge the rest of sync uses, applied to the gap the
+  // awaits opened.
+  function syncReconcileAfterPush(before, fresh, published){
+    try {
+      if (!fresh || !published) return published;
+      if (_mStr(fresh) === _mStr(before)) return published;   // nothing happened meanwhile
+      return mergeSnapshots(before, fresh, published);
+    } catch (e) { return published; }
+  }
+  window.syncReconcileAfterPush = syncReconcileAfterPush;
   async function pushNow(){
     if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;   // share/agent/signing views are strictly read-only — never write the workspace
     // Never push before the first pull decision: a fresh browser seeds demo
@@ -46568,7 +46619,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // Adopt what we just published.
         var adopted = false;
         try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
-        if (adopted) { applySnapshot(toPush); setBase(snapshot()); }
+        if (adopted) {
+          // Never applySnapshot(toPush) straight out — see syncReconcileAfterPush.
+          applySnapshot(syncReconcileAfterPush(localSnap, snapshot(), toPush));
+          setBase(snapshot());
+        }
         else { setBase(localSnap); }
         pushLanded();
         window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
