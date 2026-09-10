@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '506';
+  const BUILD = '507';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36157,7 +36157,7 @@ function agBuildLineSheetsSection() {
     <div class="ag-sec-head"><h2 class="ag-sec-title">${slEsc(seasonLabel)} Line Sheet Preview</h2>
       <div class="ag-sec-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <select onchange="SL_LS_SEASON=this.value;agNavSl('linesheets')" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${seasonOpts}</select>
-        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLineSheet()">&#x21D3; Export list</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slLsOpen()" title="One row per style, every number in one table — choose which prices it carries">&#x21D3; Export list</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slVlsOpen()" title="Landscape, photo first, a few styles per page">&#x25A6; Export visual</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slFreezeLinesheet()" title="Snapshot this sheet — versioned, immutable, order forms come from it">❄ Freeze</button>
         <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentSend('sl','Generate a full wholesale line sheet for ${slEsc(seasonLabel)}. For each style include: style number, name, description, wholesale price, retail price, available colors, sizes, and estimated delivery date. Format it clearly for a wholesale buyer. VENIA voice.')">&#x25C8; Generate with Agent</button>
@@ -36177,15 +36177,91 @@ function agBuildLineSheetsSection() {
     </div>`;
 }
 
+// WHICH PRICES THE LIST EXPORT CARRIES. The visual sheet has had these three
+// switches since 503/506; this export had no dialog at all and printed both
+// selling prices on every sheet, always.
+//
+// The rules are the visual sheet's rules, because they are the same document in
+// another shape: a hidden price is ABSENT rather than unlabelled, and the cost
+// defaults to off and clears itself after one export.
+window.SL_LS_OPT = { wholesale: true, retail: true, cogs: false };
+// ONE cost formula for every sheet that carries one. landedCost() is the
+// authority — a cost sheet with duties and freight on it is what the style
+// actually costs, and a raw COGS beside a wholesale on a page headed "cost"
+// would put a margin on paper that is not the margin.
+function slRowCost(s){
+  const own = Number(s.cogs || 0);
+  const landed = (typeof landedCost === 'function') ? Number(landedCost(s) || 0) : own;
+  return { cost: landed > 0 ? landed : own,
+    // Which of the two it is. The difference is the part someone would query,
+    // so the sheet says it rather than leaving it to be assumed.
+    costLanded: landed > 0 && Math.abs(landed - own) > 0.01 };
+}
+// The list export's own row — the cost is attached here, on the way to one
+// document, and only when the switch is on. slLsRowFrom feeds the FROZEN
+// snapshot, which is stored in STATE and synced across devices; a cost that got
+// in there would outlive the export that asked for it.
+function slLsRowForList(s){
+  const r = slLsRowFrom(s);
+  if (SL_LS_OPT.cogs === true) { const c = slRowCost(s); r.cost = c.cost; r.costLanded = c.costLanded; }
+  return r;
+}
 // One print engine for live previews and frozen snapshots alike.
-function slLinesheetPrintDoc(subtitle, footNote, rows){
+// opts is the live export's switches; a frozen reprint passes none, so it
+// prints exactly as it was sent.
+function slLinesheetPrintDoc(subtitle, footNote, rows, opts){
+  const o = opts || {};
+  const showWs = o.wholesale !== false, showRt = o.retail !== false, showCg = o.cogs === true;
   const esc = (v) => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;');
   const hasPhotos = rows.some(r => r.photo);
-  const tr = rows.map(r => `<tr>${hasPhotos?`<td>${r.photo?`<img src="${esc(r.photo)}" style="width:56px;height:66px;object-fit:cover;border:1px solid #ddd">`:''}</td>`:''}<td>${esc(r.code)}</td><td>${esc(r.name)}</td><td>${esc(r.category)}</td><td>$${esc(r.wholesale||'—')}</td><td>$${esc(r.retail||'—')}</td><td>${esc(r.colors||'—')}</td><td>${esc(r.sizes||'—')}</td><td>${esc(r.moq||'—')}</td><td>${esc(r.season)}</td></tr>`).join('');
-  const html = '<!DOCTYPE html><html><head><title>VENIA Line Sheet</title><style>body{font-family:monospace;font-size:11px;padding:40px;color:#111}h1{font-size:14px;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:24px}th{font-size:10px;letter-spacing:2px;text-transform:uppercase;border-bottom:2px solid #111;padding:8px 4px;text-align:left}td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:10px;vertical-align:middle}.foot{margin-top:28px;border-top:1px solid #111;padding-top:10px;font-size:10px;letter-spacing:1px;color:#555;line-height:1.7}@media print{button{display:none}}</style></head><body><h1>VENIA Collection</h1><p style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#666">' + esc(subtitle) + '</p><table><thead><tr>' + (hasPhotos?'<th></th>':'') + '<th>Style#</th><th>Name</th><th>Category</th><th>Wholesale</th><th>Retail</th><th>Colors</th><th>Sizes</th><th>MOQ</th><th>Season</th></tr></thead><tbody>' + tr + '</tbody></table><div class="foot">' + footNote + '</div><' + '/body></html>';
+  // A price that is not there prints as a dash, not as "$—". The dollar sign
+  // was outside the fallback, so an unpriced style claimed a currency.
+  const dollars = (v) => v ? '$' + esc(v) : '—';
+  // COLUMNS AS A LIST, head and body from the same entry. Built as two parallel
+  // strings, a column dropped from the body but not the head shifts every row
+  // one cell left — which is how a retail price ends up printed under Colours.
+  const cols = [];
+  if (hasPhotos) cols.push({ h:'', v: r => r.photo ? `<img src="${esc(r.photo)}" style="width:56px;height:66px;object-fit:cover;border:1px solid #ddd">` : '' });
+  cols.push({ h:'Style#', v: r => esc(r.code) });
+  cols.push({ h:'Name', v: r => esc(r.name) });
+  cols.push({ h:'Category', v: r => esc(r.category) });
+  // Cost leads the prices — on a costed sheet it is the column being read, and
+  // it is marked so nobody mistakes it for one of the two selling prices.
+  if (showCg) cols.push({ h:'Cost', cls:'cg',
+    v: r => dollars(r.cost ? Math.round(r.cost) : 0) + (r.costLanded ? '<sup>†</sup>' : '') });
+  if (showWs) cols.push({ h:'Wholesale', v: r => dollars(r.wholesale) });
+  if (showRt) cols.push({ h:'Retail', v: r => dollars(r.retail) });
+  cols.push({ h:'Colors', v: r => esc(r.colors||'—') });
+  cols.push({ h:'Sizes', v: r => esc(r.sizes||'—') });
+  cols.push({ h:'MOQ', v: r => esc(r.moq||'—') });
+  cols.push({ h:'Season', v: r => esc(r.season) });
+  const th = cols.map(c => '<th>' + c.h + '</th>').join('');
+  const tr = rows.map(r => '<tr>' + cols.map(c =>
+    '<td' + (c.cls ? ' class="' + c.cls + '"' : '') + '>' + c.v(r) + '</td>').join('') + '</tr>').join('');
+  // Any landed cost on the sheet is explained once, under the table — the
+  // dagger is only honest if the reader can find out what it means.
+  const daggerNote = showCg && rows.some(r => r.costLanded)
+    ? '<br>† landed cost — material, labour, overhead, duties and freight from the style’s cost sheet. Unmarked figures are the COGS.'
+    : '';
+  // THE FILE IS NAMED FOR WHAT IT CARRIES. Every list export was called "VENIA
+  // Line Sheet", so the internal one and the buyer’s one were the same file on
+  // disk — and the filename is the last thing anyone reads before attaching it.
+  // o.name is the season on its own; the subtitle spells out what the sheet
+  // carries and would say it twice over. A frozen reprint passes no name and
+  // keeps its own — better than the constant "VENIA Line Sheet" every export
+  // used to share.
+  const docTitle = 'VENIA Line Sheet — ' + (showCg ? 'INTERNAL — COST · ' : '') + (o.name || subtitle)
+    + (!showWs && !showRt ? ' · no prices' : (!showWs ? ' · retail only' : ''));
+  const html = '<!DOCTYPE html><html><head><title>' + esc(docTitle) + '</title><style>body{font-family:monospace;font-size:11px;padding:40px;color:#111}h1{font-size:14px;letter-spacing:3px;text-transform:uppercase;margin-bottom:4px}table{width:100%;border-collapse:collapse;margin-top:24px}th{font-size:10px;letter-spacing:2px;text-transform:uppercase;border-bottom:2px solid #111;padding:8px 4px;text-align:left}td{padding:8px 4px;border-bottom:1px solid #ddd;font-size:10px;vertical-align:middle}td.cg{font-weight:700;color:#a11}.int{color:#a11;font-weight:700;letter-spacing:2px;text-transform:uppercase;font-size:10px;border:1.5px solid #a11;padding:5px 8px;display:inline-block;margin-top:8px}.foot{margin-top:28px;border-top:1px solid #111;padding-top:10px;font-size:10px;letter-spacing:1px;color:#555;line-height:1.7}@media print{button{display:none}}</style></head><body><h1>VENIA Collection</h1><p style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:#666">'
+    + esc(subtitle) + '</p>'
+    // Said where a reader is already looking, not only in the footer.
+    + (showCg ? '<div class="int">Internal — carries cost of goods. Not for a buyer, a factory or press.</div>' : '')
+    + '<table><thead><tr>' + th + '</tr></thead><tbody>' + tr + '</tbody></table><div class="foot">'
+    + footNote + daggerNote + '</div><' + '/body></html>';
   const w = window.open('','_blank','width=900,height=700');
   // Photos need a beat to load before the print dialog snapshots the page.
   if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), hasPhotos ? 1500 : 400); }
+  return !!w;
 }
 // ══════════════════════════════════════════════════════════
 //  THE VISUAL LINE SHEET
@@ -37010,9 +37086,24 @@ window.slVlsPrint = function(){
   closeModal('sl-vls-modal');
 };
 
-function slLinesheetFoot(currency, delivery, frozenLine){
+function slLinesheetFoot(currency, delivery, frozenLine, opts){
+  const o = opts || {};
+  const showWs = o.wholesale !== false, showRt = o.retail !== false, showCg = o.cogs === true;
+  const cur = currency || 'USD';
   const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
-  return 'VENIA Collection — Trade Only. Wholesale prices in ' + (currency||'USD') + ', FOB. Prices confidential.'
+  // A footer that promises a wholesale the page does not print is worse than no
+  // footer. Retail alone is a recommendation, not a term of sale — so it is not
+  // FOB, it is not confidential, and the wholesale a buyer still needs has to
+  // be asked for rather than silently missing.
+  const priceLine = !showWs && !showRt
+    ? 'Prices on request.'
+    : (showWs ? 'Wholesale prices in ' + cur + ', FOB. Prices confidential.'
+              : 'Recommended retail in ' + cur + '. Wholesale on request.');
+  // AND A COSTED SHEET IS NOT A TRADE DOCUMENT. It says so instead of saying
+  // "Trade Only", because "Trade Only" is what makes it look sendable.
+  return (showCg
+      ? 'VENIA Collection — INTERNAL. Carries cost of goods: not for a buyer, a factory or press. '
+      : 'VENIA Collection — Trade Only. ') + priceLine
     + (moqDefault ? ' Minimum order ' + String(moqDefault).replace(/</g,'&lt;') + ' unless noted per style.' : '')
     + (delivery ? '<br>Delivery window: ' + String(delivery).replace(/</g,'&lt;') + '.' : '')
     + (frozenLine ? '<br>' + frozenLine : '');
@@ -37045,25 +37136,94 @@ function slLsRowFrom(s){
 // on: a row object with no cost field cannot leak one.
 function slVlsRowFrom(s){
   const r = slLsRowFrom(s);
-  if (SL_VLS.cogs === true) {
-    // ONE cost formula, the same one the margin screens use: landedCost() is
-    // the authority because a cost sheet with duties and freight on it is what
-    // the style actually costs. Printing the raw COGS beside a wholesale, on a
-    // page headed "cost", would put a margin on paper that is not the margin.
-    const own = Number(s.cogs || 0);
-    const landed = (typeof landedCost === 'function') ? Number(landedCost(s) || 0) : own;
-    r.cost = landed > 0 ? landed : own;
-    // Which of the two it is, said on the row — the two numbers are different
-    // and the difference is the part someone would query.
-    r.costLanded = landed > 0 && Math.abs(landed - own) > 0.01;
-  }
+  // slRowCost is the one cost formula, shared with the list export — two
+  // sheets of the same line disagreeing about what a style costs is worse than
+  // neither of them carrying it.
+  if (SL_VLS.cogs === true) { const c = slRowCost(s); r.cost = c.cost; r.costLanded = c.costLanded; }
   return r;
 }
+// The list export's dialog. Small on purpose — this sheet has no layout to
+// choose, only what it carries. It is the same three switches as the visual
+// sheet, worded the same way, because they are the same decision.
+window.slLsOpen = function(){
+  const ex = document.getElementById('sl-ls-modal'); if (ex) ex.remove();
+  const ov = document.createElement('div');
+  ov.className = 'overlay'; ov.id = 'sl-ls-modal';
+  const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
+  ov.innerHTML = `<div class="modal" style="width:460px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Line sheet — list</div>
+      <button class="modal-close" aria-label="Close" onclick="closeModal('sl-ls-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px">
+      <div style="font-size:11px;color:var(--muted);line-height:1.6">${slEsc(seasonLabel)} — one row per style, every number in one table. The visual sheet is the other way to send the same line.</div>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding:4px 0"
+               title="For a sheet going to press, to a stylist, or to a buyer before terms are agreed. The column comes off entirely, heading and all — a PDF is searched as often as it is read.">
+          <input type="checkbox" id="sl-ls-wholesale" ${SL_LS_OPT.wholesale!==false?'checked':''} onchange="SL_LS_OPT.wholesale=this.checked;slLsCount()" style="accent-color:var(--ink)">
+          Show wholesale price
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding:4px 0"
+               title="Retail is a recommendation, not a term of sale. Untick it for a sheet crossing a border, or for an account that prices its own way.">
+          <input type="checkbox" id="sl-ls-retail" ${SL_LS_OPT.retail!==false?'checked':''} onchange="SL_LS_OPT.retail=this.checked;slLsCount()" style="accent-color:var(--ink)">
+          Show retail price
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding:4px 0;border-top:1px solid var(--border);margin-top:6px;padding-top:10px"
+               title="For an internal costing or margin review. Off by default and it clears itself after the export — the sheet is marked INTERNAL on the page and named for it in the file, and it must never reach a buyer, a factory or press.">
+          <input type="checkbox" id="sl-ls-cogs" ${SL_LS_OPT.cogs===true?'checked':''} onchange="SL_LS_OPT.cogs=this.checked;slLsCount()" style="accent-color:var(--red)">
+          Show cost of goods <span style="color:var(--red)">— internal</span>
+        </label>
+      </div>
+      <div id="sl-ls-count" style="font-size:11px;color:var(--ink);line-height:1.6"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-ghost" onclick="closeModal('sl-ls-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="slPrintLineSheet()">Export</button>
+      </div>
+    </div></div>`;
+  document.body.appendChild(ov);
+  slLsCount();
+  openModal('sl-ls-modal');
+};
+// WHAT IS ABOUT TO BE ON THE PAGE, said before the export rather than after.
+window.slLsCount = function(){
+  const el = document.getElementById('sl-ls-count'); if (!el) return;
+  const n = slLsStyles().length;
+  const noPrice = SL_LS_OPT.wholesale === false && SL_LS_OPT.retail === false;
+  const wsOff = SL_LS_OPT.wholesale === false && !noPrice;
+  const cost = SL_LS_OPT.cogs === true;
+  // How many styles would print a dash rather than a number. A costed sheet
+  // that is mostly dashes is not a costing — better to know before printing it
+  // than to read it off the page.
+  const noCost = cost ? slLsStyles().filter(function(s){ return !(slRowCost(s).cost > 0); }).length : 0;
+  el.innerHTML = n
+    ? `<b>${n}</b> style${n===1?'':'s'} in one table.`
+      + (noPrice ? `<br><span style="color:var(--red)">No prices on this sheet at all — it reads as a lookbook. The footer says "Prices on request".</span>` : '')
+      + (wsOff ? `<br><span style="color:var(--muted)">Wholesale is off — the sheet carries the recommended retail and says wholesale is on request.</span>` : '')
+      + (cost ? `<br><span style="color:var(--red)"><b>Cost of goods will be on this sheet.</b> It is marked INTERNAL on the page and in the file name. Do not send it to a buyer, a factory or press. The switch clears itself after this export.</span>` : '')
+      + (noCost ? `<br><span style="color:var(--muted)">${noCost} of ${n} styles have no cost on file — those rows print a dash.</span>` : '')
+    : `<span style="color:var(--red)">No styles${(SL_LS_SEASON && SL_LS_SEASON !== 'all') ? ' in ' + slEsc(SL_LS_SEASON) : ''} — nothing to export.</span>`;
+};
 function slPrintLineSheet() {
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
   const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
   const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
-  slLinesheetPrintDoc(seasonLabel + ' Line Sheet — Wholesale', slLinesheetFoot('USD', delivery, ''), slLsStyles().map(slLsRowFrom));
+  const o = { wholesale: SL_LS_OPT.wholesale !== false, retail: SL_LS_OPT.retail !== false,
+              cogs: SL_LS_OPT.cogs === true };
+  // The subtitle named the wholesale on every sheet. One that does not carry a
+  // wholesale should not, and one carrying the cost is not a wholesale sheet at
+  // all — it is the internal read of the same line.
+  const what = o.cogs ? 'Internal, with cost'
+    : (!o.wholesale && !o.retail ? 'Prices on request' : (o.wholesale ? 'Wholesale' : 'Retail'));
+  o.name = seasonLabel;
+  const wrote = slLinesheetPrintDoc(seasonLabel + ' Line Sheet — ' + what,
+    slLinesheetFoot('USD', delivery, '', o), slLsStyles().map(slLsRowForList), o);
+  // ONE TICK, ONE EXPORT. The cost switch clears itself the moment the document
+  // is written, so the next sheet built is the buyer's, clean. A blocked pop-up
+  // leaves it on — nothing left the building, so nothing has been spent.
+  if (wrote && o.cogs) { SL_LS_OPT.cogs = false; try { slLsCount(); } catch(e){} }
+  if (wrote) { try { logActivity('Line sheet list exported — ' + seasonLabel
+    + (o.cogs ? ', WITH COST OF GOODS (internal)' : '')
+    + (!o.wholesale ? ', no wholesale' : '') + (!o.retail ? ', no retail' : '')); } catch(e){} }
+  try { closeModal('sl-ls-modal'); } catch(e){}
+  return wrote;
 }
 // Freeze the current preview into an immutable, versioned snapshot. Orders and
 // reprints come from the snapshot, so a later price edit in PLM can never
