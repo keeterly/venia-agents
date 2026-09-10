@@ -2764,7 +2764,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '505';
+  const BUILD = '506';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -36208,6 +36208,13 @@ window.SL_VLS = { perPage: 3, cols: 0, genders: [], currency: 'USD', photosOnly:
   // without carrying what it costs. Like retail, the number must be ABSENT from
   // the page rather than unlabelled — a PDF is searched as often as it is read.
   wholesale: true,
+  // COST OF GOODS. A switch in shape and nothing like the other two in default.
+  // Wholesale and retail are prices somebody is meant to read; this is the one
+  // that tells a buyer what their margin costs us and tells a factory what
+  // their competitor charges. So: off unless it was just turned on, off again
+  // after the export that used it (slVlsPrint clears it), and a sheet that
+  // carries it is marked INTERNAL on every page and named for it.
+  cogs: false,
   // One section per factory rather than one continuous run of styles.
   byVendor: false };
 // The sheet quotes ONE currency, chosen per export, at the season rate the app
@@ -36406,6 +36413,11 @@ window.slVlsOpen = function(){
           <input type="checkbox" id="sl-vls-wholesale" ${SL_VLS.wholesale!==false?'checked':''} onchange="SL_VLS.wholesale=this.checked;slVlsCount()" style="accent-color:var(--ink)">
           Show wholesale price
         </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px"
+               title="Cost of goods — the landed cost where a cost sheet exists, the COGS where it does not. For a costing or margin review, never for a buyer, a factory or press. A sheet with this on is marked INTERNAL on every page and named for it, and the switch turns itself off again after the export.">
+          <input type="checkbox" id="sl-vls-cogs" ${SL_VLS.cogs===true?'checked':''} onchange="SL_VLS.cogs=this.checked;slVlsCount()" style="accent-color:var(--red)">
+          Show cost of goods <span style="color:var(--red)">— internal</span>
+        </label>
         ${slVlsVendors().length > 1 ? `<label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px"
                title="Each factory's styles start on their own page, headed with their name and numbered within their own section — so one export covers every maker and each of them can be sent only their part.">
           <input type="checkbox" id="sl-vls-byvendor" ${SL_VLS.byVendor?'checked':''} onchange="SL_VLS.byVendor=this.checked;slVlsCount()" style="accent-color:var(--ink)">
@@ -36532,7 +36544,10 @@ function slVlsCount(){
   // A SHEET WITH NO PRICES ON IT IS NOT A LINE SHEET. That is a real thing to
   // send — to press, to a stylist, before terms — but it is worth knowing
   // before it goes to a buyer expecting to order from it.
-  const noPrice = SL_VLS.wholesale === false && SL_VLS.retail === false;
+  // A sheet with no SELLING price is a lookbook — unless it carries the cost,
+  // in which case it is a costing sheet and the warning below it is the right
+  // one to read instead.
+  const noPrice = SL_VLS.wholesale === false && SL_VLS.retail === false && SL_VLS.cogs !== true;
   const wsOff = SL_VLS.wholesale === false && !noPrice;
   el.innerHTML = n
     ? `<b>${n}</b> style${n===1?'':'s'} over <b>${pages}</b> page${pages===1?'':'s'} — ${gr.cols} × ${gr.rows} per page, landscape`
@@ -36542,6 +36557,12 @@ function slVlsCount(){
       + (dropped.length ? `<br><span style="color:var(--muted)">This density prints the essentials only — ${dropped.join(', ')} are left off. Four or fewer across in one row keeps them.</span>` : '')
       + (noPrice ? `<br><span style="color:var(--red)">No prices on this sheet at all — it reads as a lookbook. The pages say "Prices on request".</span>` : '')
       + (wsOff ? `<br><span style="color:var(--muted)">Wholesale is off — the page carries the recommended retail and says wholesale is on request.</span>` : '')
+      // Loudest thing in the box, because it is the only setting here that can
+      // do damage no reprint undoes.
+      + (SL_VLS.cogs === true ? `<br><span style="color:var(--red)"><b>Cost of goods is on this sheet.</b> Every page is marked INTERNAL and the file is named for it. Do not send it to a buyer, a factory or press. The switch turns itself off after the export.</span>`
+          // The cost row has to come out of something at a dense density, and
+          // what it comes out of is said here rather than discovered on the PDF.
+          + (isDense ? `<br><span style="color:var(--muted)">At this density the style copy is cut to one line to make room for it.</span>` : '') : '')
       + (function(){
           // Only when a factory is actually in play — otherwise it is a fact
           // about the line, not about this export.
@@ -36565,7 +36586,7 @@ function slVlsCount(){
 }
 window.slVlsDoc = function(opts){
   opts = opts || {};
-  const rows = slVlsStyles().map(slLsRowFrom);
+  const rows = slVlsStyles().map(slVlsRowFrom);
   if (!rows.length) return '';
   const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per, SL_VLS.cols);
   const esc = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
@@ -36592,11 +36613,18 @@ window.slVlsDoc = function(opts){
   const showRetail = SL_VLS.retail !== false;
   const showWholesale = SL_VLS.wholesale !== false;
   const anyPrice = showRetail || showWholesale;
+  // Cost is not one of the buyer prices and is not counted among them — a sheet
+  // with the cost on it and both buyer prices off is a COSTING sheet, not a
+  // lookbook, and must not say "prices on request" over a printed number.
+  // Strictly === true, so a stored preference that predates this switch, or any
+  // value that is merely truthy, reads as off.
+  const showCogs = SL_VLS.cogs === true;
   const curName = (cur === 'USD' || !rate) ? 'USD' : cur;
   const curNote = (cur === 'USD' || !rate) ? ''
     : ' — converted at ' + rate + ' ' + cur + ' to 1 USD, the season rate';
   const curLine = !anyPrice
-    ? 'Prices on request.'
+    ? (showCogs ? 'Cost of goods in ' + curName + curNote + '. No selling prices on this sheet.'
+                : 'Prices on request.')
     : (showWholesale
         ? 'Wholesale prices in ' + curName + ', FOB' + curNote + '. Prices confidential.'
         // Retail alone is a recommendation, not a term of sale, so it is not
@@ -36611,7 +36639,12 @@ window.slVlsDoc = function(opts){
   // must not change depending on who did.
   const contact = VENIA_TRADE_EMAIL;
   const footLines = [
-    'VENIA Collection — Trade Only. ' + curLine,
+    // A costed sheet is not a trade document and must not read like one. The
+    // footer is where a reader checks what they are holding, so it says what it
+    // is and who it is not for before it says anything else.
+    showCogs
+      ? 'VENIA Collection — INTERNAL. Carries cost of goods: not for a buyer, a factory or press. ' + curLine
+      : 'VENIA Collection — Trade Only. ' + curLine,
     (moqDefault ? 'Minimum order ' + String(moqDefault) + ' unless noted per style. ' : '') + termsLine,
     (delivery ? 'Delivery window: ' + delivery + '.' : ''),
     'To order: ' + contact + ' · ' + VENIA_PUBLIC_SITE,
@@ -36728,7 +36761,14 @@ window.slVlsDoc = function(opts){
   // or going to an account that prices its own way, quotes the wholesale and
   // nothing else — and the number must be absent from the page, not merely
   // unlabelled, because a PDF is searched as often as it is read.
-  const copyCap = roomy ? 200 : (dense ? 70 : 90);
+  // AND HOW MANY LINES IT GETS. At a dense density the card has no spare
+  // millimetre for a cost row — the photo has already collapsed to nothing and
+  // the spec is what is left. So the copy gives up its second line rather than
+  // the page giving up a row of styles, which is what an overflowing grid
+  // actually costs you: "5 across, two rows" quietly becomes five and five and
+  // a stray. The count line says so beside the switch that caused it.
+  const copyLines = roomy ? 3 : (dense && showCogs ? 1 : 2);
+  const copyCap = roomy ? 200 : (dense ? (showCogs ? 40 : 70) : 90);
   const card = r => {
     const copy = withCopy && copyCap ? slVlsCopy(r.desc, copyCap) : '';
     const chips = slVlsChips(r.colors);
@@ -36744,6 +36784,7 @@ window.slVlsDoc = function(opts){
         ${r.colors ? `<tr><td>Colours</td><td>${chips ? `<div class="cws">${chips}</div>` : esc(r.colors)}</td></tr>` : ''}
         ${r.sizes  ? `<tr><td>Sizes</td><td>${esc(r.sizes)}</td></tr>` : ''}
         ${!dense && r.coo ? `<tr><td>Made in</td><td>${esc(r.coo)}</td></tr>` : ''}
+        ${showCogs ? `<tr><td>${r.costLanded ? 'Landed cost' : 'Cost'}</td><td class="cg">${r.cost ? esc(money(r.cost)) : '—'}</td></tr>` : ''}
         ${showWholesale ? `<tr><td>Wholesale</td><td class="ws">${r.wholesale ? esc(money(r.wholesale)) : '—'}</td></tr>` : ''}
         ${(showRetail && (!dense || !showWholesale)) ? `<tr><td>Retail</td><td class="${showWholesale ? '' : 'ws'}">${r.retail ? esc(money(r.retail)) : '—'}</td></tr>` : ''}
         ${!dense && r.moq ? `<tr><td>MOQ</td><td>${esc(r.moq)}</td></tr>` : ''}
@@ -36757,8 +36798,13 @@ window.slVlsDoc = function(opts){
         // The running head named the wholesale on every page. A sheet without
         // one should not, and a sheet with no prices at all should say so where
         // a reader is already looking.
-        esc(!anyPrice ? ' · Prices on request'
+        esc(!anyPrice ? (showCogs ? '' : ' · Prices on request')
             : (showWholesale ? ' · Wholesale ' + curName : ' · Retail ' + curName))
+      }${
+        // ON EVERY PAGE, not only the first. A costed sheet gets split and
+        // forwarded a page at a time, and the page that arrives on its own has
+        // to say what it is without the rest of the file around it.
+        showCogs ? '<span class="int"> · INTERNAL — COST</span>' : ''
       } · ${esc(gLabel)}${
         // A filtered sheet has to say so on every page. A buyer holding "the
         // SS27 sheet" that is really the Japan-made half of it, with no way to
@@ -36784,7 +36830,12 @@ window.slVlsDoc = function(opts){
         // Empty cells on the last page so three styles stay three columns wide
         // instead of stretching to fill the sheet.
         Array.from({length: per - pg.length}, () => '<div class="c e"></div>').join('')}</div>
-      <footer>${footLines.map(esc).join('<br>')}</footer>
+      <footer>${footLines.map((l, n) =>
+        // The footer is the other place a reader checks what they are holding,
+        // so the internal line is marked there the way it is in the head — the
+        // same red, not a sentence in the same grey as the delivery window.
+        (showCogs && n === 0) ? '<span class="int">' + esc(l) + '</span>' : esc(l)
+      ).join('<br>')}</footer>
     </section>`).join('');
   const css = `
     /* 7mm, not 10 — a line sheet is a showpiece and the garment should own the
@@ -36870,6 +36921,10 @@ window.slVlsDoc = function(opts){
     table.f td:first-child{color:#888;letter-spacing:.8px;text-transform:uppercase;
       font-size:${sz(6.5,6,5.5)}pt;width:${dense?34:38}%;padding-right:2mm}
     table.f td.ws{font-weight:700}
+    /* The cost reads differently from the prices around it, on screen and on
+       paper — nobody should have to read the label to notice it is there. */
+    table.f td.cg{font-weight:700;color:#a11}
+    header .int,footer .int{color:#a11;font-weight:700}
     /* Past four across there is no room for a label column beside a value: a
        34% label plus "Heavy Washed Cotton Jacquard" wraps to four lines and no
        two cards line up any more. So the label goes ABOVE the value and the
@@ -36889,10 +36944,10 @@ window.slVlsDoc = function(opts){
        down to the page's bottom rule, so the copy lines up across every card
        whatever the spec above it happens to be — and the dead space that used
        to sit under a short card is gone. */
-    .dsc{margin:1.6mm 0 2.2mm;height:calc(${roomy?3:2} * 1.45em);
+    .dsc{margin:1.6mm 0 2.2mm;height:calc(${copyLines} * 1.45em);
       font-size:${sz(7.5,6.5,6)}pt;line-height:1.45;font-style:italic;color:#666;
       display:-webkit-box;-webkit-box-orient:vertical;
-      -webkit-line-clamp:${roomy?3:2};overflow:hidden}
+      -webkit-line-clamp:${copyLines};overflow:hidden}
     /* The spec is what the copy is separated FROM now, so the rule moves with
        it — otherwise the description ran straight into the fabric line. */
     .dsc + .f{border-top:1px solid #eee;padding-top:1.8mm}
@@ -36906,7 +36961,7 @@ window.slVlsDoc = function(opts){
   // The saved file is named from this. Exporting a sheet per maker means saving
   // several PDFs, and every one of them was called "VENIA Line Sheet — All
   // Seasons" — which is how the wrong one gets sent to the wrong factory.
-  const titleBits = [seasonLabel]
+  const titleBits = (showCogs ? ['INTERNAL — COST'] : []).concat([seasonLabel])
     .concat((SL_VLS.vendors || []).length ? [SL_VLS.vendors.join(' + ')] : [])
     .concat((SL_VLS.coos || []).length ? [SL_VLS.coos.join(' + ')] : [])
     .concat(opts.groupBy === 'vendor' ? ['by factory'] : [])
@@ -36921,10 +36976,17 @@ window.slVlsPrint = function(){
   const gLabel = SL_VLS.genders.length ? SL_VLS.genders.join(' · ') : 'all genders';
   const cur = SL_VLS.currency || 'USD';
   const rate = cur !== 'USD' ? fxRate(cur) : 1;
+  const withCost = SL_VLS.cogs === true;
   const html = slVlsDoc({ groupBy: SL_VLS.byVendor ? 'vendor' : '' });
   const w = window.open('', '_blank', 'width=1100,height=800');
+  // Left on when the export did not happen, so a blocked pop-up does not
+  // silently cost someone the setting they meant to use.
   if (!w) { showToast('Allow pop-ups to export the line sheet', 'warning'); return; }
   w.document.write(html); w.document.close();
+  // ONE TICK, ONE EXPORT. A switch this dangerous left standing is how the next
+  // sheet — the one for the buyer — goes out costed. The document already
+  // written keeps its cost; what turns off is the setting behind it.
+  if (withCost) { SL_VLS.cogs = false; try { slVlsCount(); } catch(e){} }
   // Photos have to be decoded before the print dialog snapshots the page —
   // wait for them rather than guessing at a delay, with a ceiling so a slow
   // image cannot hang the export.
@@ -36943,6 +37005,7 @@ window.slVlsPrint = function(){
     + ((SL_VLS.vendors || []).length ? ', by ' + SL_VLS.vendors.join('/') : '')
     + (SL_VLS.retail === false ? ', no retail' : '')
     + (SL_VLS.wholesale === false ? ', no wholesale' : '')
+    + (withCost ? ', WITH COST OF GOODS — internal, not for circulation' : '')
     + (SL_VLS.byVendor ? ', grouped by factory' : '')); } catch(e){}
   closeModal('sl-vls-modal');
 };
@@ -36974,6 +37037,27 @@ function slLsRowFrom(s){
     // whatever is on the style. Edit it in PLM and the next export says the new
     // thing; there is no second place for it to drift.
     desc: s.desc || '' };
+}
+// The visual sheet's own row. slLsRowFrom feeds the buyer-facing table export
+// AND the frozen snapshot, which is stored in STATE and synced across devices —
+// a cost that got in there would outlive the export that asked for it. So the
+// cost is added HERE, on the way to one document, and only when the switch is
+// on: a row object with no cost field cannot leak one.
+function slVlsRowFrom(s){
+  const r = slLsRowFrom(s);
+  if (SL_VLS.cogs === true) {
+    // ONE cost formula, the same one the margin screens use: landedCost() is
+    // the authority because a cost sheet with duties and freight on it is what
+    // the style actually costs. Printing the raw COGS beside a wholesale, on a
+    // page headed "cost", would put a margin on paper that is not the margin.
+    const own = Number(s.cogs || 0);
+    const landed = (typeof landedCost === 'function') ? Number(landedCost(s) || 0) : own;
+    r.cost = landed > 0 ? landed : own;
+    // Which of the two it is, said on the row — the two numbers are different
+    // and the difference is the part someone would query.
+    r.costLanded = landed > 0 && Math.abs(landed - own) > 0.01;
+  }
+  return r;
 }
 function slPrintLineSheet() {
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
