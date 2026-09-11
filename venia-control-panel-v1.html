@@ -2886,7 +2886,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '509';
+  const BUILD = '510';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20380,7 +20380,7 @@ function openPrCart(pullId=null) {
     }
     // Auto invoice number
     const invEl = document.getElementById('pr-invoice-no');
-    if (invEl) invEl.value = `PR-${new Date().getFullYear()}-${String((STATE.prPulls||[]).length+1).padStart(3,'0')}`;
+    if (invEl) invEl.value = prNextInvoiceNo();
   }
 
   // New pull starts on ① Client Info (you must name the client anyway).
@@ -21874,9 +21874,12 @@ function prBuildPullObj(status='active') {
   const feeType = document.querySelector('input[name="pr-fee-type"]:checked')?.value || 'none';
   const feeAmt = prCalcFee() || 0;
   const total = PR_CART.reduce((s,i) => s + (i.retail||0), 0);
+  // Hoisted: prSafeInvoiceNo has to know which pull is asking, so that editing
+  // an existing one does not read its own number as a collision with itself.
+  const id = PR_CURRENT_ID || ('PR'+Date.now());
 
   return {
-    id: PR_CURRENT_ID || ('PR'+Date.now()),
+    id,
     status,
     client: document.getElementById('pr-client-name')?.value.trim() || '',
     contact: document.getElementById('pr-contact-name')?.value.trim() || '',
@@ -21890,7 +21893,7 @@ function prBuildPullObj(status='active') {
     photographer: document.getElementById('pr-photographer')?.value.trim() || '',
     address: document.getElementById('pr-address')?.value.trim() || '',
     notes: document.getElementById('pr-notes')?.value.trim() || '',
-    invoiceNo: document.getElementById('pr-invoice-no')?.value || `PR-${new Date().getFullYear()}-${String((STATE.prPulls||[]).length+1).padStart(3,'0')}`,
+    invoiceNo: prSafeInvoiceNo(document.getElementById('pr-invoice-no')?.value || '', id),
     termsNotes: document.getElementById('pr-terms-notes')?.value.trim() || '',
     feeType, feeAmount: feeAmt, totalRetail: total,
     // The RATE, not just the dollars it produced — re-opening a percentage pull
@@ -22480,6 +22483,41 @@ function prNFCReturnLookup(tagId) {
 // ── SIGNATURE CAPTURE ────────────────────────────────────────────────────
 // The terms, as text, in one place — so the modal, the sheet, the email and the
 // stored signature can never describe a different agreement from each other.
+// A PULL NUMBER IS ISSUED ONCE.
+//
+// invoiceNo came from `prPulls.length + 1`. A list length is not a counter: the
+// moment a pull leaves the list its number is free again and the next pull
+// takes it. PR-2026-001 ("Demo Pull") was deleted on 30 August, and PR-2026-002
+// then went out to TWO different borrowers — both holding a sheet with that
+// number on it. A pull lost to a sync does the same thing without anyone
+// pressing delete, which is how PR-2026-004's number freed itself.
+//
+// It is worse than a duplicate in a list. The number is the reference on the
+// emailed sheet, in the Stripe description and on the charge, so two pulls
+// sharing one means a payment can be reconciled against the wrong loan.
+function prNextInvoiceNo(){
+  const yr = String(new Date().getFullYear());
+  let max = 0;
+  (STATE.prPulls || []).forEach(function (p) {
+    const m = String((p && p.invoiceNo) || '').match(/^PR-(\d{4})-0*(\d+)$/);
+    // parseInt with a radix: "099" is ninety-nine, not an octal surprise.
+    if (m && m[1] === yr) { const n = parseInt(m[2], 10); if (n > max) max = n; }
+  });
+  return 'PR-' + yr + '-' + String(max + 1).padStart(3, '0');
+}
+window.prNextInvoiceNo = prNextInvoiceNo;
+// The prefill is computed when the form OPENS. A pull created on another device
+// — or in another tab — before this one is saved would otherwise be handed the
+// same number. So the number is checked again at the moment it is committed.
+function prSafeInvoiceNo(want, ownId){
+  const w = String(want || '').trim();
+  if (!w) return prNextInvoiceNo();
+  const taken = (STATE.prPulls || []).some(function (p) {
+    return p && p.id !== ownId && String(p.invoiceNo || '').trim() === w;
+  });
+  return taken ? prNextInvoiceNo() : w;
+}
+window.prSafeInvoiceNo = prSafeInvoiceNo;
 function prTermsLines(pull){
   const t = (pull && pull.terms) || {};
   const out = [];
