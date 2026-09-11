@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '512';
+  const BUILD = '513';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -2909,6 +2909,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // a stockist or the press reads. Those carry the brand's own two facts:
   window.VENIA_PUBLIC_SITE  = 'veniacollection.com';
   window.VENIA_TRADE_EMAIL  = 'sales@veniacollection.com';
+  window.VENIA_PRESS_EMAIL  = 'press@veniacollection.com';
   // Factory share link (?share=TOKEN): a read-only live tech-pack view for a
   // manufacturer. No access code — the token IS the credential. The main app
   // never boots interactive features in this mode (see share-mode module).
@@ -26783,7 +26784,8 @@ function agBuildPullsSection() {
   const listHtml = agRenderPrPullsList(AG_PR_PULLS_FILTER, true);
 
   return statsHtml + nfcBar + `<div id="ag-pr-owed">${prOwedBar()}</div>`
-    + `<div id="ag-pr-moments">${prMomentsBoard()}</div>` + filters
+    + `<div id="ag-pr-moments">${prMomentsBoard()}</div>`
+    + `<div id="ag-pr-kit">${prPressKitBar()}</div>` + filters
     + `<div id="ag-pr-pulls-list" style="margin-top:4px">${listHtml}</div>`;
 }
 
@@ -26791,6 +26793,32 @@ function agBuildPullsSection() {
 // A detector nobody can see is not a detector. Each moment shows the claim, the
 // reasoning, and the row it came from — so the first thing a founder can do is
 // check whether it is true before acting on it.
+// THE KIT, AND WHAT IS MISSING FROM IT. The gaps are the point: a press kit
+// that only shows what exists lets you believe it is finished.
+function prPressKitBar(){
+  let kit, gaps;
+  try { kit = prPressKit(); gaps = prPressKitGaps(); } catch (e) { return ''; }
+  const esc = (typeof slEsc === 'function') ? slEsc : (x => String(x == null ? '' : x));
+  const site = (typeof VENIA_PUBLIC_SITE !== 'undefined' && VENIA_PUBLIC_SITE) || 'veniacollection.com';
+  const gapHtml = gaps.length ? gaps.map(g =>
+    `<div style="font-size:11px;line-height:1.5;margin-top:6px"><span style="color:var(--ink)">${esc(g.what)}</span>
+       <span style="color:var(--muted)"> — ${esc(g.fix)}</span></div>`).join('') : '';
+  return `<div style="border:1px solid var(--border);padding:14px 16px;margin:0 0 14px">
+    <div style="display:flex;gap:12px;align-items:baseline;flex-wrap:wrap">
+      <span style="font-size:10px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted)">Press kit</span>
+      <span style="font-size:12.5px;color:var(--ink);flex:1;min-width:200px">
+        <b>${kit.assets.length}</b> styles with usable imagery${
+          kit.coverage.length ? ` · <b>${kit.coverage.length}</b> in the coverage archive` : ''}</span>
+      <button class="btn btn-ghost btn-sm" onclick="prPressKitExport()">&#x21D3; Export the page</button>
+    </div>
+    <div style="font-size:10.5px;color:var(--muted);margin-top:7px">A standalone page to host at ${esc(site)}/press — the thing an editor opens on deadline.</div>
+    ${gapHtml ? `<div style="border-top:1px solid var(--border);margin-top:11px;padding-top:9px">
+      <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted)">What an editor will ask for that you don’t have</div>
+      ${gapHtml}</div>` : ''}
+  </div>`;
+}
+window.prPressKitBar = prPressKitBar;
+
 function prMomentsBoard(){
   let all = [];
   try { all = prMoments(); } catch (e) { return ''; }
@@ -27135,6 +27163,177 @@ function agPrManualReturnItem(pullId, itemIdx, btn) {
 // ══════════════════════════════════════════════════════════
 let PR_PITCH_CURRENT_ID = null;
 let PR_PITCH_FILTER = 'all';
+
+// ══════════════════════════════════════════════════════════════════
+//  THE PRESS KIT — the thing an editor opens at 4pm on a deadline
+// ══════════════════════════════════════════════════════════════════
+// A story dies more often over a missing image than a weak pitch. An editor who
+// cannot find hi-res in ten seconds moves to a brand whose assets are one click
+// away. What was here was two textareas and a copy button, inside a tool no
+// journalist will ever be given access to.
+//
+// So this EXPORTS: a whole page, standing on its own, to be hosted at
+// veniacollection.com/press. Which is also why the one hard rule below exists —
+// a document written for the open web is exactly where the internal tool's
+// address would escape.
+
+// Only a style an editor can actually place. A missing photo is not an asset,
+// and a data: URI is a megabyte of base64 that breaks the moment the page is
+// copied anywhere.
+function prKitAssets(){
+  return (STATE.styles || []).filter(function (st) {
+    return st && /^https?:\/\//i.test(String(st.photoUrl || ''));
+  }).map(function (st) {
+    return { id: st.id, name: st.name || st.styleId || 'Style', code: st.styleId || '',
+             season: st.season || '', category: st.category || '',
+             retail: Number(st.retail) || 0, photo: st.photoUrl,
+             desc: String(st.desc || '').trim() };
+  });
+}
+// FACTS ARE DERIVED OR ABSENT. Never a plausible-sounding guess: a press kit is
+// the document a journalist quotes, and a wrong number in it is a correction
+// with the brand's name on it.
+function prKitFacts(){
+  const live = (STATE.styles || []).filter(x => x && x.name);
+  const f = [];
+  const uniq = (k) => [...new Set(live.map(x => String(x[k] || '').trim()).filter(Boolean))];
+  const seasons = uniq('season'), cats = uniq('category'), coos = uniq('coo');
+  const priced = live.map(x => Number(x.retail) || 0).filter(n => n > 0);
+  if (cats.length) f.push({ k: 'Categories', v: cats.slice(0, 8).join(', ') });
+  if (seasons.length) f.push({ k: 'Seasons', v: seasons.sort().join(', ') });
+  if (priced.length) f.push({ k: 'Retail range',
+    v: '$' + Math.min.apply(null, priced).toLocaleString() + '–$' + Math.max.apply(null, priced).toLocaleString() });
+  if (coos.length) f.push({ k: 'Made in', v: coos.join(', ') });
+  // Stockists only once there are some. "Available at 0 retailers" is worse
+  // than silence, and announcing prospects is how you lose them.
+  let stk = 0;
+  try { stk = (STATE.slBuyers || []).filter(x => slBuyerStage(x) === 'stockist').length; } catch (e) {}
+  if (stk) f.push({ k: 'Stockists', v: String(stk) });
+  return f;
+}
+function prPressKit(){
+  let blocks = [];
+  try { blocks = (typeof bpGet === 'function' ? bpGet() : []) || []; } catch (e) {}
+  // The two blocks a journalist actually lifts.
+  const want = blocks.filter(b => b && /brand description/i.test(b.title || ''));
+  return {
+    blocks: (want.length ? want : blocks.slice(0, 2)),
+    facts: prKitFacts(),
+    assets: prKitAssets(),
+    coverage: (STATE.prCoverage || []).filter(c => c && (c.outlet || c.headline)),
+  };
+}
+window.prPressKit = prPressKit;
+
+// WHAT AN EDITOR WILL ASK FOR THAT YOU DO NOT HAVE. The useful half: a kit that
+// only shows what exists lets you believe it is finished.
+function prPressKitGaps(){
+  const gaps = [];
+  const live = (STATE.styles || []).filter(x => x && x.name);
+  const withPhoto = prKitAssets().length;
+  if (live.length && withPhoto < live.length) {
+    gaps.push({ what: withPhoto + ' of ' + live.length + ' styles have a usable photo',
+                fix: 'The rest cannot be sent to an editor. Hosted images only — a data: URI will not travel.' });
+  }
+  if (!withPhoto) gaps.push({ what: 'No usable imagery at all',
+    fix: 'This is the single most common reason a story is dropped.' });
+  const noCopy = live.filter(x => !String(x.desc || '').trim()).length;
+  if (noCopy) gaps.push({ what: noCopy + ' styles have no description',
+    fix: 'A caption an editor can lift is one less reason to write about someone else.' });
+  if (!(STATE.prCoverage || []).length) gaps.push({ what: 'No coverage archive yet',
+    fix: 'The first hit is the hardest; after that this section does the pitching for you.' });
+  let blocks = [];
+  try { blocks = (typeof bpGet === 'function' ? bpGet() : []) || []; } catch (e) {}
+  if (!blocks.some(b => b && /brand description/i.test(b.title || ''))) {
+    gaps.push({ what: 'No brand description written',
+      fix: 'This is the paragraph outlets paste verbatim. Write it once, in Brand → Boilerplate.' });
+  }
+  return gaps;
+}
+window.prPressKitGaps = prPressKitGaps;
+
+// THE PAGE ITSELF. Self-contained — no script, no app state, nothing that
+// assumes it is being served from here, because it is not.
+function prPressKitDoc(){
+  const kit = prPressKit();
+  const e = (x) => String(x == null ? '' : x)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const site  = (typeof VENIA_PUBLIC_SITE !== 'undefined' && VENIA_PUBLIC_SITE) || 'veniacollection.com';
+  // The BRAND's press address, never the signed-in user's. A press kit outlives
+  // whoever exported it, and an editor writes to the desk, not to a person who
+  // may have left.
+  const press = (typeof VENIA_PRESS_EMAIL !== 'undefined' && VENIA_PRESS_EMAIL) || ('press@' + site);
+  const facts = kit.facts.map(f =>
+    `<div class="f"><dt>${e(f.k)}</dt><dd>${e(f.v)}</dd></div>`).join('');
+  const assets = kit.assets.map(a => `<figure>
+      <img src="${e(a.photo)}" alt="${e(a.name)}" loading="lazy">
+      <figcaption><b>${e(a.name)}</b>${a.code ? ' <span class="c">' + e(a.code) + '</span>' : ''}
+        ${a.desc ? '<span class="d">' + e(a.desc) + '</span>' : ''}
+        <a href="${e(a.photo)}" download>Download</a></figcaption></figure>`).join('');
+  const cov = kit.coverage.length
+    ? '<ul class="cov">' + kit.coverage.map(c => `<li>${
+        c.url ? '<a href="' + e(c.url) + '">' + e(c.outlet || c.headline) + '</a>' : e(c.outlet || c.headline)
+      }${c.headline && c.outlet ? ' — ' + e(c.headline) : ''}${
+        c.publishDate ? ' <span class="c">' + e(c.publishDate) + '</span>' : ''}</li>`).join('') + '</ul>'
+    // Said, not silently dropped. An empty section is a fact about the brand.
+    : '<p class="none">No coverage archive yet.</p>';
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+    + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+    + '<title>VENIA Collection — Press</title>'
+    + '<style>'
+    + ':root{--ink:#111;--mut:#777;--rule:#e6e6e6}'
+    + '*{box-sizing:border-box}body{margin:0;background:#fff;color:var(--ink);'
+    + "font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;line-height:1.6}"
+    + '.w{max-width:900px;margin:0 auto;padding:56px 20px 80px}'
+    + 'h1{font-size:13px;letter-spacing:6px;text-transform:uppercase;font-weight:700;margin:0}'
+    + '.sub{font-size:11px;letter-spacing:2.4px;text-transform:uppercase;color:var(--mut);margin:8px 0 0}'
+    + 'h2{font-size:11px;letter-spacing:2.4px;text-transform:uppercase;color:var(--mut);'
+    + 'font-weight:700;margin:52px 0 14px;border-top:1px solid var(--rule);padding-top:18px}'
+    + 'p{margin:0 0 14px;max-width:68ch}'
+    + '.f{display:grid;grid-template-columns:150px 1fr;gap:14px;padding:9px 0;border-bottom:1px solid var(--rule)}'
+    + 'dt{font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:var(--mut)}'
+    + 'dd{margin:0;font-size:14px}'
+    + '.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:22px}'
+    + 'figure{margin:0}figure img{width:100%;aspect-ratio:3/4;object-fit:cover;background:#f5f5f5;display:block;'
+    + 'border:1px solid var(--rule)}'
+    + 'figcaption{font-size:12px;margin-top:8px;display:flex;flex-direction:column;gap:3px}'
+    + 'figcaption .c{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--mut)}'
+    + 'figcaption .d{color:var(--mut);font-size:11.5px}'
+    + 'figcaption a{font-size:11px;color:var(--ink);margin-top:3px}'
+    + '.cov{padding-left:18px;margin:0}.cov li{margin-bottom:7px;font-size:14px}'
+    + '.none{color:var(--mut);font-size:14px}'
+    + 'a{color:inherit}'
+    + '@media(max-width:560px){.f{grid-template-columns:1fr;gap:2px}}'
+    + '</style></head><body><div class="w">'
+    + '<h1>VENIA Collection</h1><p class="sub">Press</p>'
+    + (kit.blocks.length ? '<h2>About</h2>' + kit.blocks.map(bl =>
+        '<p>' + e(bl.text).replace(/\n+/g, '</p><p>') + '</p>').join('') : '')
+    + (facts ? '<h2>Fast facts</h2><dl>' + facts + '</dl>' : '')
+    + (assets ? '<h2>Imagery — ' + kit.assets.length + ' styles</h2><div class="grid">' + assets + '</div>' : '')
+    + '<h2>Coverage</h2>' + cov
+    + '<h2>Press contact</h2><p><a href="mailto:' + e(press) + '">' + e(press) + '</a><br>'
+    + '<a href="https://' + e(site) + '">' + e(site) + '</a></p>'
+    + '</div></body></html>';
+}
+window.prPressKitDoc = prPressKitDoc;
+// Save it as a file. It is meant to be hosted at veniacollection.com/press —
+// that is the whole point of it being a page rather than a screen in here.
+window.prPressKitExport = function(){
+  try {
+    const doc = prPressKitDoc();
+    const blob = new Blob([doc], { type: 'text/html' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'venia-press.html';
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    const n = prPressKit().assets.length;
+    try { logActivity('Press kit exported — ' + n + ' styles with imagery'); } catch (e) {}
+    try { showToast('Press kit saved — host it at ' + VENIA_PUBLIC_SITE + '/press', 'success'); } catch (e) {}
+  } catch (e) {
+    try { showToast('Could not build the press kit — ' + (e && e.message || 'unknown'), 'error'); } catch (e2) {}
+  }
+};
 
 // ══════════════════════════════════════════════════════════════════
 //  THE PRESS DESK — what is a story, and who has already been told
