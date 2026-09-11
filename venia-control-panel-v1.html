@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '511';
+  const BUILD = '512';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26782,9 +26782,89 @@ function agBuildPullsSection() {
 
   const listHtml = agRenderPrPullsList(AG_PR_PULLS_FILTER, true);
 
-  return statsHtml + nfcBar + `<div id="ag-pr-owed">${prOwedBar()}</div>` + filters
+  return statsHtml + nfcBar + `<div id="ag-pr-owed">${prOwedBar()}</div>`
+    + `<div id="ag-pr-moments">${prMomentsBoard()}</div>` + filters
     + `<div id="ag-pr-pulls-list" style="margin-top:4px">${listHtml}</div>`;
 }
+
+// WHAT IS A STORY RIGHT NOW, above the list of what there is.
+// A detector nobody can see is not a detector. Each moment shows the claim, the
+// reasoning, and the row it came from — so the first thing a founder can do is
+// check whether it is true before acting on it.
+function prMomentsBoard(){
+  let all = [];
+  try { all = prMoments(); } catch (e) { return ''; }
+  // Nothing to say is a legitimate answer and it is said quietly, not with an
+  // empty card pretending to be a feature.
+  const live = all.filter(m => m.kind !== 'pull-out');
+  if (!live.length) return '';
+  const esc = (typeof slEsc === 'function') ? slEsc : (x => String(x == null ? '' : x));
+  const DESK = { trade: 'Trade · WWD, BoF', culture: 'Culture · Hypebeast, Highsnobiety, Complex',
+                 newsroom: 'Newsroom' };
+  const rows = live.slice(0, 6).map(function (m) {
+    // A desk already pitched this fortnight is the one thing that changes what
+    // you should do next, so it is on the card rather than one click away.
+    const outlets = (PR_DESKS[m.desk] || {}).outlets || [];
+    const hot = outlets.filter(function (o) { try { return prPitchedRecently(o); } catch (e) { return false; } });
+    const warn = hot.length ? hot.map(function (o) {
+      const l = prLastPitch(o);
+      return esc(o) + ' pitched ' + (prDaysSince(l && l.sentAt) || 0) + 'd ago'
+           + (l && l.by ? ' by ' + esc(String(l.by).split('@')[0]) : '');
+    }).join(' · ') : '';
+    return `<div style="padding:13px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap">
+        <span style="font-family:'DM Mono',monospace;font-size:9.5px;letter-spacing:1.2px;
+          text-transform:uppercase;color:var(--muted);border:1px solid var(--border);padding:2px 6px;flex:none">${
+          esc(DESK[m.desk] || m.desk)}</span>
+        <span style="font-size:13px;font-weight:600;color:var(--ink);flex:1;min-width:180px">${esc(m.headline)}</span>
+      </div>
+      <div style="font-size:11.5px;line-height:1.55;color:var(--muted);margin-top:6px">${esc(m.why)}</div>
+      <div style="font-size:10.5px;color:var(--muted);margin-top:7px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        ${m.evidence.map(e => `<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--ink);
+          border-bottom:1px dotted var(--border)" title="From record ${esc(e.ref)}">${esc(e.what)}</span>`).join('')}
+      </div>
+      ${warn ? `<div style="font-size:10.5px;color:var(--amber,#8a6d1f);margin-top:7px">⚠ ${warn} — do not pitch the same desk twice</div>` : ''}
+      <div style="margin-top:10px;display:flex;gap:7px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="prMomentDraft('${esc(m.id)}')">✎ Draft the pitch</button>
+        <span style="font-size:10.5px;color:var(--muted);align-self:center">${esc(m.suggest || '')}</span>
+      </div>
+    </div>`;
+  }).join('');
+  return `<div style="border:1px solid var(--border);padding:14px 16px 4px;margin:4px 0 14px">
+    <div style="font-size:10px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted);
+      display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span>Worth a story</span>
+      <span style="color:var(--ink);font-family:'DM Mono',monospace;letter-spacing:0">${live.length}</span>
+      <span style="flex:1"></span>
+      <span style="letter-spacing:0;text-transform:none;font-size:10.5px">Read from your own records — every line below cites one.</span>
+    </div>
+    ${rows}</div>`;
+}
+window.prMomentsBoard = prMomentsBoard;
+// Hand the moment to Enigma with its evidence attached, and let it draft.
+// NOTHING SENDS: this opens a draft, which is the whole guarantee — a misfired
+// pitch cannot be recalled, and it costs the relationship rather than the mail.
+window.prMomentDraft = function(id){
+  let m = null;
+  try { m = prMoments().find(x => x.id === id); } catch (e) {}
+  if (!m) { try { showToast('That moment is no longer current', 'info'); } catch (e) {} return; }
+  const outlets = (PR_DESKS[m.desk] || {}).outlets || [];
+  const skip = outlets.filter(function (o) { try { return prPitchedRecently(o); } catch (e) { return false; } });
+  const ask = 'Draft a press pitch for this moment, in VENIA voice.\n\n'
+    + 'MOMENT: ' + m.headline + '\n'
+    + 'WHY IT IS A STORY: ' + m.why + '\n'
+    + 'DESK: ' + (m.desk === 'trade' ? 'Trade — WWD, Business of Fashion. They cover the BUSINESS: doors, markets, sourcing, numbers. Not the clothes.'
+        : m.desk === 'culture' ? 'Culture — Hypebeast, Highsnobiety, Complex. They need a hook and an image, and they move in hours.'
+        : 'Newsroom — record it; it is not an editor’s story.') + '\n'
+    + 'EVIDENCE (this is all we can claim — do not add to it):\n'
+    + m.evidence.map(e => '  · ' + e.what).join('\n') + '\n\n'
+    + (skip.length ? 'DO NOT pitch these, they were approached in the last fortnight: ' + skip.join(', ') + '.\n\n' : '')
+    + 'Give me a subject line and a short pitch body. Invent nothing — no stockists, '
+    + 'no numbers, no quotes that are not above. If the evidence is too thin for a '
+    + 'pitch, say so and tell me what is missing instead of padding it.';
+  try { skToggle(true); } catch (e) {}
+  setTimeout(function(){ try { skSend(ask); } catch (e) {} }, 80);
+};
 
 function agBuildPullIntelSection() {
   prInit();
@@ -27055,6 +27135,180 @@ function agPrManualReturnItem(pullId, itemIdx, btn) {
 // ══════════════════════════════════════════════════════════
 let PR_PITCH_CURRENT_ID = null;
 let PR_PITCH_FILTER = 'all';
+
+// ══════════════════════════════════════════════════════════════════
+//  THE PRESS DESK — what is a story, and who has already been told
+// ══════════════════════════════════════════════════════════════════
+// The app has sat on top of every press moment VENIA has had and never once
+// said so. Seven samples went to Numero Berlin on 7 September, the shoot ran on
+// the 9th, they came back on the 11th, and nothing ever suggested chasing the
+// tearsheet or pitching the story. The moment passed because nothing was
+// watching for it.
+//
+// TWO RULES. A moment must CITE the row it came from — a desk that invents a
+// stockist or a placement is worse than no desk, because the one thing a pitch
+// has to be is true. And an editor is pitched ONCE: two founders and an agent
+// working one list is how a desk gets the same story twice in a week, which is
+// the lesson the buyer pipeline already learned the hard way.
+
+// WHICH DESK. They are not one audience, and sending a drop to WWD or a
+// funding line to Highsnobiety is the fastest way to be read as unserious.
+//   trade    — WWD, Business of Fashion. The company: doors, markets, sourcing.
+//   culture  — Hypebeast, Highsnobiety, Complex. The scene: who wore it, what
+//              dropped, what it looked like.
+//   newsroom — true and worth recording, not worth an editor's time.
+const PR_DESKS = {
+  trade:   { label: 'Trade', outlets: ['WWD', 'Business of Fashion'] },
+  culture: { label: 'Culture', outlets: ['Hypebeast', 'Highsnobiety', 'Complex'] },
+  newsroom:{ label: 'Newsroom', outlets: [] },
+};
+// Higher ranks lead the list. A shoot that just wrapped has a window measured
+// in days; a stockist signed last month does not.
+const PR_RANK = { 'pull-returned': 90, 'coverage-landed': 80, 'pull-overdue': 70,
+                  'stockist-new': 60, 'pull-out': 50, 'season-delivery': 40 };
+function prDaysSince(v){
+  const t = Date.parse(v || ''); if (isNaN(t)) return null;
+  return Math.floor((Date.now() - t) / 86400000);
+}
+// One evidence entry = one real row. `ref` is the record's own id, so anything
+// a moment claims can be opened and checked.
+function prEv(what, ref){ return { what: String(what || ''), ref: String(ref || '') }; }
+
+// WHAT IS A STORY RIGHT NOW. Derived, never stored: it is a reading of the
+// workspace as it stands, so a moment cannot go stale in a list somewhere.
+function prMoments(){
+  const out = [];
+  const push = (m) => {
+    // THE RULE, ENFORCED HERE RATHER THAN TRUSTED: a moment with nothing behind
+    // it does not get to exist.
+    if (!m || !m.evidence || !m.evidence.length || !m.evidence.every(e => e && e.ref)) return;
+    m.rank = PR_RANK[m.kind] || 10;
+    out.push(m);
+  };
+
+  // ── SAMPLES BACK FROM A SHOOT ────────────────────────────────────
+  // The shoot has happened and the story has not run yet. This is the window:
+  // the tearsheet to chase, and the piece to pitch while it is still warm.
+  (STATE.prPulls || []).forEach(function (pull) {
+    if (!pull || !pull.id) return;
+    const pub = String(pull.publication || pull.client || '').trim();
+    if (!pub) return;
+    const covered = (STATE.prCoverage || []).some(c => c && c.pullId === pull.id);
+    const items = (pull.items || []);
+    const back = items.length && items.every(i => i && i.returned);
+    if (pull.status === 'returned' || back) {
+      if (covered) return;                       // already ran; nothing to chase
+      const d = prDaysSince(pull.returnDate || pull.updatedAt);
+      push({ id: 'M-back-' + pull.id, kind: 'pull-returned', desk: 'culture',
+        at: pull.returnDate || pull.updatedAt || '',
+        headline: pub + ' shot ' + items.length + ' VENIA sample' + (items.length === 1 ? '' : 's'),
+        // Careful with the tense. The samples came back. That is the whole
+        // claim — whether anything ran is a separate fact nobody has yet.
+        why: 'Samples went out'
+          + (pull.pullDate ? ' ' + prVerbalDate(pull.pullDate) : '')
+          + ' and came back' + (d === 0 ? ' today' : d ? ' ' + d + ' days ago' : '')
+          + '. No coverage recorded against this pull yet — chase the tearsheet, '
+          + 'and the shoot itself is worth a note to the culture desks.',
+        evidence: [prEv(items.length + ' samples to ' + pub + ' (' + (pull.invoiceNo || pull.id) + ')', pull.id)],
+        suggest: 'Chase ' + (pull.contact || pub) + ' for the tearsheet' });
+    } else if (pull.status === 'active') {
+      const due = prDaysSince(pull.returnDate);
+      if (due !== null && due > 0) {
+        push({ id: 'M-late-' + pull.id, kind: 'pull-overdue', desk: 'newsroom',
+          at: pull.returnDate,
+          headline: pub + ' is ' + due + ' day' + (due === 1 ? '' : 's') + ' past return',
+          why: items.length + ' samples still out, ' + (pull.totalRetail ? '$' + Number(pull.totalRetail).toLocaleString() + ' ' : '')
+             + 'on loan. Chasing them is also the natural moment to ask where the story is.',
+          evidence: [prEv((pull.invoiceNo || pull.id) + ' — return by ' + pull.returnDate, pull.id)],
+          suggest: 'Chase the return and the tearsheet together' });
+      } else {
+        push({ id: 'M-out-' + pull.id, kind: 'pull-out', desk: 'newsroom',
+          at: pull.pullDate || '',
+          headline: pub + ' has ' + items.length + ' sample' + (items.length === 1 ? '' : 's') + ' out',
+          why: 'Coverage pending' + (pull.shootDate ? '; shoot dated ' + prVerbalDate(pull.shootDate) : '') + '.',
+          evidence: [prEv((pull.invoiceNo || pull.id) + ' out to ' + pub, pull.id)],
+          suggest: 'Nothing yet — wait for the shoot' });
+      }
+    }
+  });
+
+  // ── A DOOR OPENED ────────────────────────────────────────────────
+  // Trade, not culture: WWD and BoF cover the business, and a stockist in a new
+  // market IS the business. Only once they are actually a stockist — announcing
+  // a prospect is how you lose one.
+  const marketsBefore = {};
+  (STATE.slBuyers || []).forEach(function (bz) {
+    if (!bz || slBuyerStage(bz) !== 'stockist') return;
+    const c = String(bz.country || '').trim();
+    marketsBefore[c] = (marketsBefore[c] || 0) + 1;
+  });
+  (STATE.slBuyers || []).forEach(function (bz) {
+    if (!bz || !bz.id || slBuyerStage(bz) !== 'stockist') return;
+    const d = prDaysSince(bz.updatedAt);
+    if (d !== null && d > 60) return;            // not news two months later
+    const c = String(bz.country || '').trim();
+    const first = c && marketsBefore[c] === 1;
+    push({ id: 'M-stk-' + bz.id, kind: 'stockist-new', desk: 'trade',
+      at: bz.updatedAt || '',
+      headline: bz.name + ' is stocking VENIA' + (c ? ' — ' + c : ''),
+      why: (first && c ? 'First door in ' + c + '. ' : '')
+         + 'A door opening is the shape of story the trade desks actually run: '
+         + 'the market, the retailer, and what it says about where the brand is going.',
+      evidence: [prEv(bz.name + (bz.location ? ' — ' + bz.location : ''), bz.id)],
+      suggest: 'Trade note to WWD / Business of Fashion' });
+  });
+
+  // ── SOMETHING RAN ────────────────────────────────────────────────
+  // Proof. Worth a follow-on pitch while it is fresh, and worth sending to the
+  // buyers who are deciding — which slGrowthSuggestions already does.
+  (STATE.prCoverage || []).forEach(function (cov) {
+    if (!cov || !cov.id) return;
+    const d = prDaysSince(cov.publishDate || cov.createdAt);
+    if (d === null || d > 45) return;
+    push({ id: 'M-cov-' + cov.id, kind: 'coverage-landed', desk: 'culture',
+      at: cov.publishDate || cov.createdAt || '',
+      headline: (cov.outlet || 'Coverage') + ' ran VENIA'
+        + (cov.headline ? ' — “' + String(cov.headline).slice(0, 60) + '”' : ''),
+      why: 'Fresh proof. It is the strongest thing to put in front of the next editor, '
+         + 'and in front of a buyer who has not answered.',
+      evidence: [prEv((cov.outlet || 'coverage') + (cov.publishDate ? ' · ' + cov.publishDate : ''), cov.id)],
+      suggest: 'Use it in the next pitch, and with warm buyers' });
+  });
+
+  return out.sort(function (a, b) {
+    return (b.rank - a.rank) || String(b.at || '').localeCompare(String(a.at || ''));
+  });
+}
+window.prMoments = prMoments;
+function prVerbalDate(v){
+  const t = Date.parse(v || ''); if (isNaN(t)) return String(v || '');
+  return new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
+}
+
+// ── AN EDITOR IS PITCHED ONCE ────────────────────────────────────
+// Same rule, same reason, as the buyer desk: the list is worked by more than
+// one person. A publication is matched on its name alone, normalised, because
+// "Hypebeast", "hypebeast " and "HYPEBEAST" are one desk.
+const PR_PITCH_COOLDOWN = 14;
+function prPubKey(v){ return String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); }
+function prLastPitch(publication){
+  const k = prPubKey(publication); if (!k) return null;
+  let best = null;
+  (STATE.prPitches || []).forEach(function (p) {
+    if (!p || prPubKey(p.publication) !== k) return;
+    if (!p.sentAt) return;                        // a draft is not a pitch
+    if (!best || String(p.sentAt) > String(best.sentAt)) best = p;
+  });
+  return best;
+}
+window.prLastPitch = prLastPitch;
+function prPitchedRecently(publication){
+  const last = prLastPitch(publication);
+  if (!last) return false;
+  const d = prDaysSince(last.sentAt);
+  return d !== null && d < PR_PITCH_COOLDOWN;
+}
+window.prPitchedRecently = prPitchedRecently;
 
 function prInitPitches() { if (!STATE.prPitches) STATE.prPitches = []; }
 
