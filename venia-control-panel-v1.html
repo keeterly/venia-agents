@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '515';
+  const BUILD = '516';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8091,7 +8091,11 @@ const STYLE_COLS = [
   // in already, and it is the column a buyer, a customs broker and a care label
   // all need. A column you have to go and switch on is a fact nobody checks.
   { key: 'origin',   label: 'Origin',                        w: 92,  def: true,  title: 'Country of origin — follows the factory unless this style overrides it' },
-  { key: 'desc',     label: 'Description',                   w: 220, def: false, title: 'Design intent and direction for the factory — the same note the tech pack carries' },
+  { key: 'desc',     label: 'Description',                   w: 220, def: false, title: 'Design intent and direction for the factory — the same brief the tech pack carries. One statement of what the garment is; it is replaced when you edit it.' },
+  // The running thread, in the table. It was only ever visible one style at a
+  // time, by opening each in turn — so notes went into the Description column
+  // instead, which overwrites the brief rather than adding to a log.
+  { key: 'notes',    label: 'Notes',                         w: 200, def: false, title: 'The running thread on this style — notes, comments and rev stamps, newest first. Click to open it.' },
   // The chain reads left to right: COGS → your margin → wholesale → boutique
   // margin → retail.
   { key: 'cogs',     label: 'COGS',      sort: 'cogs',     w: 74, title: 'Cost of goods — the number the whole price chain is built from' },
@@ -8257,7 +8261,17 @@ const ST_CELL = {
     const o = styleOrigin(s), own = !!(s.origin && String(s.origin).trim());
     return `<td class="cell-edit" style="font-size:10px" title="${o ? (own ? 'Set on this style' : 'From the assigned factory') + ' — click to change' : 'Assign a factory, or set it here'}" onclick="stEnumOpen('origin','${s.id}',this,event)"><span style="color:${own ? 'var(--ink)' : 'var(--muted)'}">${o ? esc(o) : '＋'}</span></td>`;
   },
-  desc:     (s) => `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${s.desc ? esc(s.desc) + ' — click to edit' : 'Add design notes / direction for the factory'}" onclick="stTextEdit('desc','${s.id}',this,event)"><div class="col-clip">${s.desc ? esc(s.desc) : '<span style="color:var(--muted)">＋ notes</span>'}</div></td>`,
+  // NOT "notes". This cell said "＋ notes" and its tooltip said "design notes",
+  // so the most inviting place to jot something down was the one field that
+  // OVERWRITES — the design brief that prints on the tech pack and feeds the
+  // line sheet. Notes have their own column now and this one says what it is.
+  desc:     (s) => `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${s.desc ? esc(s.desc) + ' — click to edit' : 'Add the design brief — direction for the factory. Replaces what is there; for a running log use Notes.'}" onclick="stTextEdit('desc','${s.id}',this,event)"><div class="col-clip">${s.desc ? esc(s.desc) : '<span style="color:var(--muted)">＋ description</span>'}</div></td>`,
+  // Count and the latest line, so the table answers "is there anything on this
+  // style" without opening it. Clicking opens the style, where the thread is.
+  notes:    (s) => { const th = styleThread(s); const top = th[0];
+    return `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${th.length ? esc(String(th.length) + (th.length === 1 ? ' entry' : ' entries') + ' — latest: ' + top.text) : 'No notes yet — click to add the first'}" onclick="event.stopPropagation();openDp('${s.id}')"><div class="col-clip">${th.length
+      ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--ink);border:1px solid var(--border-mid);padding:1px 4px;margin-right:6px">${th.length}</span>${top.kind === 'rev' ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:4px">STAMP</span>` : ''}${esc(top.text)}`
+      : '<span style="color:var(--muted)">＋ note</span>'}</div></td>`; },
   season:   (s) => `<td class="cell-edit" style="font-size:10px" title="${s.season ? esc(s.season) + ' — click to move this style to another season' : 'Set the season'}" onclick="stEnumOpen('season','${s.id}',this,event)">${s.season ? esc(s.season) : '<span style="color:var(--muted)">＋</span>'}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
@@ -8892,6 +8906,11 @@ window.stTextEdit = function(field, styleId, anchor, ev){
   st.updatedAt = new Date().toISOString();
   save();
   renderStyles();
+  // The detail panel can be the thing you edited FROM. Repaint it, or the value
+  // you just typed is the one thing on screen still showing the old one.
+  if (STATE.currentStyleId === styleId && document.getElementById('dp-body')) {
+    try { openDp(styleId); } catch(e){}
+  }
   toast(val ? spec.label + ' updated' : spec.label + ' cleared');
 };
 function stEnumClose(){
@@ -12563,7 +12582,14 @@ function openDp(styleId) {
           : 'Only fabrication';
         return dpRow('Fabrications', `<button onclick="dpGroupFabrication()" title="Group this style with another silhouette's fabrications, or split it out" style="background:none;border:none;padding:0;cursor:pointer;color:var(--ink);font-size:11px;text-align:right;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--border-mid)">${label}</button>`);
       })()}
-      ${s.desc ? `<div style="margin-top:12px;font-size:11px;color:var(--soft);line-height:1.7;font-style:italic;border-top:1px solid var(--border);padding-top:10px">"${s.desc}"</div>` : ''}
+      ${(() => {
+        // The same field as the Description column, edited through the same
+        // editor. It used to be a read-only italic quote here, so the brief
+        // could be READ from the style and only CHANGED from the table — and
+        // when it was empty there was nothing to click at all.
+        const has = !!String(s.desc || '').trim();
+        return `<div onclick="stTextEdit('desc','${s.id}',this,event)" title="${has ? 'Click to edit the design brief' : 'Add the design brief — direction for the factory'}" style="margin-top:12px;font-size:11px;color:var(--${has ? 'soft' : 'muted'});line-height:1.7;${has ? 'font-style:italic;' : ''}border-top:1px solid var(--border);padding-top:10px;cursor:pointer">${has ? '"' + esc(s.desc) + '"' : '＋ description'}</div>`;
+      })()}
     </div>
 
     <div class="dp-section">
@@ -12640,8 +12666,8 @@ function openDp(styleId) {
 
     <div class="dp-section dp-full">
       <div class="dp-sec-title" style="display:flex;justify-content:space-between;align-items:center">
-        <span>Comments & Notes</span>
-        <span style="font-size:10px;color:var(--muted)">${(s.comments||[]).length + (s.notes||[]).length} entries</span>
+        <span>Notes</span>
+        <span style="font-size:10px;color:var(--muted)">${styleThread(s).length || 'no'} ${styleThread(s).length === 1 ? 'entry' : 'entries'}</span>
       </div>
       ${dpCommentsHtml(s)}
     </div>
@@ -12863,21 +12889,6 @@ function dpDelete() {
   BULK_SELECTED.delete(s.id);
   renderPage(STATE.currentPage);
   try { updateBulkBar(); } catch(e){}
-}
-
-function addNote() {
-  const inp = document.getElementById('new-note');
-  const text = inp.value.trim();
-  if (!text || !STATE.currentStyleId) return;
-  const s = STATE.styles.find(x=>x.id===STATE.currentStyleId);
-  if (!s) return;
-  if (!s.notes) s.notes = [];
-  const d = new Date().toISOString().split('T')[0];
-  s.notes.unshift({d,t:text});
-  save();
-  document.getElementById('dp-notes').innerHTML = s.notes.map(n=>`<div class="note-item"><div class="note-meta">${n.d}</div><div class="note-text">${n.t}</div></div>`).join('');
-  inp.value = '';
-  toast('Note added');
 }
 
 // ═══════════════════════════════════════════════
@@ -17023,7 +17034,7 @@ function renderTechPackWork(s) {
           <div style="padding:0 7px 5px;font-size:7.5px;color:var(--muted)">${p.round}</div>
         </div>`).join('')}
       </div>`:'<div style="font-size:10px;color:#c8c8c8;font-style:italic;margin-bottom:12px">No fit photos yet — upload sample shots to track fit rounds.</div>'}
-      ${ta('Design Notes / Direction for Manufacturer','desc','Design intent, silhouette notes, fit references, important details for the factory…',3)}
+      ${ta('Design Brief / Direction for Manufacturer','desc','Design intent, silhouette notes, fit references, important details for the factory…',3)}
     </div>
   </div>
 
@@ -17568,11 +17579,11 @@ function renderTechPackWork(s) {
       })()}
       <div class="tpl" style="margin-bottom:8px">Development Log</div>
       <div style="display:flex;flex-direction:column;gap:1px;background:#e0e0e0;margin-bottom:10px;border:1px solid #e0e0e0">
-        ${(s.notes||[]).slice(0,8).map(n=>`<div style="background:#fff;padding:10px 12px;display:flex;justify-content:space-between;gap:12px">
-          <div style="font-size:11px;color:#000;flex:1">${n.t}</div>
-          <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);white-space:nowrap">${n.d}</div>
+        ${styleThread(s).slice(0,8).map(n=>`<div style="background:#fff;padding:10px 12px;display:flex;justify-content:space-between;gap:12px">
+          <div style="font-size:11px;color:#000;flex:1">${n.kind==='rev'?'<span style="font-family:\'DM Mono\',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:6px">STAMP</span>':''}${esc(n.text)}</div>
+          <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);white-space:nowrap">${String(n.ts).slice(0,10)}</div>
         </div>`).join('')}
-        ${!(s.notes||[]).length?'<div style="background:#fff;padding:10px 12px;font-size:10px;color:var(--muted);font-style:italic">No notes yet.</div>':''}
+        ${!styleThread(s).length?'<div style="background:#fff;padding:10px 12px;font-size:10px;color:var(--muted);font-style:italic">No notes yet.</div>':''}
       </div>
       <div style="display:flex;gap:8px">
         <input id="tp-note-input" class="tpi" style="flex:1;border:1px solid #e0e0e0;padding:8px 10px" placeholder="Add a development note…" onkeypress="if(event.key==='Enter')tpAddNote('${s.id}')">
@@ -17639,8 +17650,9 @@ function tpBumpRev(styleId) {
   if (note === null) return;                      // cancelled
   s.rev = (s.rev||1) + 1;
   s.revDate = new Date().toISOString().split('T')[0];
-  if (!s.notes) s.notes = [];
-  s.notes.unshift({ d:s.revDate, t:`Rev ${s.rev}${note?': '+note:''}` });
+  // Into the one thread, marked as a stamp the app wrote rather than something
+  // you typed — so the development history reads in one list with the notes.
+  styleThreadAdd(styleId, `Rev ${s.rev}${note?': '+note:''}`, { kind:'rev' });
   save();
   renderTechPack(styleId);
   logActivity(`Tech pack Rev ${s.rev} — ${s.name}`);
@@ -17661,12 +17673,12 @@ function tpAddNote(styleId) {
   if (!text) return;
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s) return;
-  if (!s.notes) s.notes = [];
-  s.notes.unshift({d:new Date().toISOString().split('T')[0],t:text});
-  save(); inp.value = '';
+  // ONE write. This used to push to s.notes AND call addComment, and the detail
+  // panel merges both arrays on read — so every note typed here appeared twice
+  // in the style, once with an author and once without.
+  styleThreadAdd(styleId, text);
+  inp.value = '';
   renderTechPack(styleId);
-  const author = (typeof CURRENT_USER !== 'undefined' && CURRENT_USER?.name) || getGConfig().authorName || 'Team';
-  addComment(styleId, text, author);
   logActivity(`TP Note — ${s.name}: ${text}`);
   toast('Note added');
 }
@@ -18526,7 +18538,80 @@ function toggleCheck(styleId, itemIdx) {
 // ═══════════════════════════════════════════════
 //  COMMENT THREADS ON STYLES
 // ═══════════════════════════════════════════════
-function addComment(styleId, text, author) {
+// ── ONE THREAD ──────────────────────────────────────────────────────────
+// A style's running notes lived in TWO arrays. s.comments carried the rich
+// shape (author, timestamp, resolvable); s.notes carried a thin {d,t} pair.
+// Three functions wrote them and none agreed: the panel's box wrote comments,
+// the tech pack's box wrote BOTH — so every tech-pack note showed twice in the
+// panel, which merged the arrays on read — and addNote() wrote notes alone
+// while reading a #new-note input that is not in the DOM, so it could only ever
+// throw. Nothing showed the thread in the styles table at all.
+//
+// From 516 there is one reader and one writer. s.notes is still READ, because
+// styles written before now have entries in it and a migration that rewrites
+// every style to fix a display bug is a worse trade than reading two shapes.
+// Nothing writes it any more.
+function styleThread(s) {
+  if (!s) return [];
+  const comments = Array.isArray(s.comments) ? s.comments : [];
+  const notes = Array.isArray(s.notes) ? s.notes : [];
+  const day = (ts) => String(ts || '').slice(0, 10);
+  const norm = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const out = [];
+  // The old double-write put the SAME sentence in BOTH arrays on the same day.
+  // That is one note and is shown once — but the collapse is strictly
+  // cross-array. Two entries in the same array are two notes even when they
+  // read alike: "New name" typed twice on one style in one afternoon is two
+  // things that happened, and a thread that quietly eats the second is worse
+  // than a thread that repeats itself.
+  const claimed = {};
+  const key = (text, ts) => norm(text) + '|' + day(ts);
+  const push = (e) => { if (e.text) out.push(e); };
+  comments.forEach(c => { if (String(c.text || '').trim()) claimed[key(c.text, c.ts)] = 1; });
+  comments.forEach(c => push({
+    id: c.id || ('C' + day(c.ts) + norm(c.text).slice(0, 8)),
+    text: String(c.text || '').trim(),
+    author: c.author || 'Team',
+    ts: c.ts || '',
+    resolved: !!c.resolved,
+    kind: c.kind || 'note',
+    editable: true }));
+  notes.forEach(n => {
+    if (claimed[key(n.t, n.d ? String(n.d) + 'T12:00:00Z' : '')]) return;
+    push({
+    id: 'N' + String(n.d || '') + norm(n.t).slice(0, 8),
+    text: String(n.t || '').trim(),
+    author: 'Team',
+    // A legacy note carries a date, not a time. Midday keeps it from sorting
+    // behind everything else written on the same day just because "00:00".
+    ts: n.d ? String(n.d) + 'T12:00:00Z' : '',
+    resolved: false,
+    kind: 'note',
+    editable: false });
+  });
+  return out.sort((a, b) => {
+    const ta = new Date(a.ts).getTime(), tb = new Date(b.ts).getTime();
+    return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+  });
+}
+
+// The only way to add to a style's thread. Every box that takes a note — the
+// detail panel's, the tech pack's, a rev stamp — comes through here, so a note
+// is written once and lands in one place.
+function styleThreadAdd(styleId, text, opts) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const o = opts || {};
+  const author = o.author
+    || (typeof CURRENT_USER !== 'undefined' && CURRENT_USER && CURRENT_USER.name)
+    || (typeof getGConfig === 'function' && getGConfig().authorName)
+    || 'Team';
+  return addComment(styleId, t, author, { kind: o.kind || 'note' });
+}
+window.styleThread = styleThread;
+window.styleThreadAdd = styleThreadAdd;
+
+function addComment(styleId, text, author, opts) {
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s || !text.trim()) return;
   if (!s.comments) s.comments = [];
@@ -18536,6 +18621,8 @@ function addComment(styleId, text, author) {
     author: author || 'Team',
     ts: new Date().toISOString(),
     resolved: false,
+    // 'rev' marks a stamp the app wrote for you; 'note' is something you typed.
+    kind: (opts && opts.kind) || 'note',
   };
   s.comments.unshift(comment);
   save();
@@ -19474,21 +19561,19 @@ function getGConfig() {
 
 // ── Update dpPanel notes section with full comment thread ─────────────────
 function dpCommentsHtml(s) {
-  const comments = Array.isArray(s.comments) ? s.comments : [];
-  const notes = Array.isArray(s.notes) ? s.notes : [];
-  const cfg = getGConfig();
-  const authorName = cfg.authorName || 'Team';
+  // One reader. This used to merge s.comments and s.notes here, which is why a
+  // note typed in the tech pack — written to both — showed up twice.
+  const thread = styleThread(s);
 
   return `
     <div style="display:flex;gap:8px;margin-bottom:12px">
-      <input id="dp-comment-input-${s.id}" class="fi" style="flex:1;font-size:12px" placeholder="Add comment or note…">
+      <input id="dp-comment-input-${s.id}" class="fi" style="flex:1;font-size:12px" placeholder="Add a note…" onkeypress="if(event.key==='Enter')dpPostComment('${s.id}')">
       <button class="btn btn-ghost btn-sm" onclick="dpPostComment('${s.id}')">Post</button>
     </div>
-    ${[...comments.map(c=>({...c,_type:'comment'})),...notes.map(n=>({id:'N'+n.d+n.t.slice(0,4),text:n.t,author:'Team',ts:n.d,_type:'note',resolved:false}))]
-      .sort((a,b)=>new Date(b.ts)-new Date(a.ts))
+    ${thread
       .slice(0,10)
       .map(c=>`
-        <div style="padding:10px 12px;background:${c._type==='comment'?'var(--bg)':'var(--bg-off)'};border:1px solid var(--border);margin-bottom:6px;${c.resolved?'opacity:.5':''}">
+        <div style="padding:10px 12px;background:${c.editable?'var(--bg)':'var(--bg-off)'};border:1px solid var(--border);margin-bottom:6px;${c.resolved?'opacity:.5':''}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
             <div style="display:flex;align-items:center;gap:8px">
               <div style="width:22px;height:22px;background:var(--ink);color:var(--white);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${(c.author||'T').charAt(0).toUpperCase()}</div>
@@ -19497,16 +19582,16 @@ function dpCommentsHtml(s) {
                 <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${new Date(c.ts).toLocaleDateString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}</div>
               </div>
             </div>
-            ${c._type==='comment' ? `
+            ${c.editable ? `
             <div style="display:flex;gap:4px">
               <button onclick="resolveComment('${s.id}','${c.id}')" style="background:none;border:none;color:${c.resolved?'var(--green)':'var(--muted)'};cursor:pointer;font-size:11px;padding:2px" title="${c.resolved?'Unresolve':'Mark resolved'}">✓</button>
               <button onclick="deleteComment('${s.id}','${c.id}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px" title="Delete">✕</button>
             </div>` : ''}
           </div>
-          <div style="font-size:11px;color:var(--ink);line-height:1.6;padding-left:30px">${c.text}</div>
+          <div style="font-size:11px;color:var(--ink);line-height:1.6;padding-left:30px">${c.kind==='rev'?`<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:6px">STAMP</span>`:''}${esc(c.text)}</div>
           ${c.resolved ? `<div style="font-size:10px;color:var(--green);padding-left:30px;margin-top:4px">✓ Resolved</div>` : ''}
         </div>`).join('')}
-    ${comments.length === 0 && notes.length === 0 ? `<div style="font-size:11px;color:var(--muted);font-style:italic">No comments yet. Add a note above.</div>` : ''}`;
+    ${thread.length === 0 ? `<div style="font-size:11px;color:var(--muted);font-style:italic">No notes yet. Add one above — it shows in the Notes column too.</div>` : ''}`;
 }
 
 function dpPostComment(styleId) {
@@ -19514,8 +19599,7 @@ function dpPostComment(styleId) {
   if (!inp) return;
   const text = inp.value.trim();
   if (!text) return;
-  const author = (typeof CURRENT_USER !== 'undefined' && CURRENT_USER?.name) || getGConfig().authorName || 'Team';
-  addComment(styleId, text, author);
+  styleThreadAdd(styleId, text);
   inp.value = '';
   openDp(styleId);
 }
@@ -20093,11 +20177,11 @@ function renderTechPackPrint(s) {
             <td style="padding:7px 8px;font-size:10px;color:#666">Generated from VENIA PLM</td>
             <td style="padding:7px 8px;font-size:10px;color:#666">VENIA PLM</td>
           </tr>
-          ${(s.notes||[]).slice(0,4).map(n=>`<tr style="border-bottom:1px solid #f0f0f0">
+          ${styleThread(s).slice(0,4).map(n=>`<tr style="border-bottom:1px solid #f0f0f0">
             <td style="padding:7px 8px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">—</td>
-            <td style="padding:7px 8px;font-family:'DM Mono',monospace;font-size:10px">${n.d}</td>
-            <td style="padding:7px 8px;font-size:10px;color:#666">${n.t}</td>
-            <td style="padding:7px 8px;font-size:10px;color:var(--muted)">Team</td>
+            <td style="padding:7px 8px;font-family:'DM Mono',monospace;font-size:10px">${String(n.ts).slice(0,10)}</td>
+            <td style="padding:7px 8px;font-size:10px;color:#666">${esc(n.text)}</td>
+            <td style="padding:7px 8px;font-size:10px;color:var(--muted)">${esc(n.author||'Team')}</td>
           </tr>`).join('')}
           ${[0,1,2].map(()=>`<tr><td colspan="4" style="padding:10px 8px;border-bottom:1px solid #f0f0f0"><div style="border-bottom:1px solid #e0e0e0"></div></td></tr>`).join('')}
         </tbody>
