@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '514';
+  const BUILD = '515';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8087,7 +8087,10 @@ const STYLE_COLS = [
   { key: 'drop',     label: 'Drop',                        w: 84, def: false },
   { key: 'delivery', label: 'Delivery', sort: 'delivery',    w: 142, def: false, title: 'When this style ships to the buyer. Falls back to the season calendar\u2019s delivery window until you set it per style — a Delivery 2 piece is the exception, not the rule.' },
   { key: 'vendor',   label: 'Manufacturer', sort: 'vendor',  w: 116, def: false, title: 'The factory making this style — from your Vendors library' },
-  { key: 'origin',   label: 'Origin',                        w: 92,  def: false, title: 'Country of origin — follows the factory unless this style overrides it' },
+  // ON by default: it follows the factory, so for most of the line it is filled
+  // in already, and it is the column a buyer, a customs broker and a care label
+  // all need. A column you have to go and switch on is a fact nobody checks.
+  { key: 'origin',   label: 'Origin',                        w: 92,  def: true,  title: 'Country of origin — follows the factory unless this style overrides it' },
   { key: 'desc',     label: 'Description',                   w: 220, def: false, title: 'Design intent and direction for the factory — the same note the tech pack carries' },
   // The chain reads left to right: COGS → your margin → wholesale → boutique
   // margin → retail.
@@ -36903,6 +36906,10 @@ function slLinesheetPrintDoc(subtitle, footNote, rows, opts){
     v: r => dollars(r.cost ? Math.round(r.cost) : 0) + (r.costLanded ? '<sup>†</sup>' : '') });
   if (showWs) cols.push({ h:'Wholesale', v: r => dollars(r.wholesale) });
   if (showRt) cols.push({ h:'Retail', v: r => dollars(r.retail) });
+  // Where it is made, on the document that has to answer for it. Sits beside
+  // the season rather than among the prices: it is a fact about the garment,
+  // not a term of sale.
+  cols.push({ h:'Made in', v: r => esc(r.coo||'—') });
   cols.push({ h:'Colors', v: r => esc(r.colors||'—') });
   cols.push({ h:'Sizes', v: r => esc(r.sizes||'—') });
   cols.push({ h:'MOQ', v: r => esc(r.moq||'—') });
@@ -37054,7 +37061,8 @@ function slVlsFacet(get){
   return Object.keys(n).sort(function(a, b){ return a.localeCompare(b); })
     .map(function(k){ return { key: k, count: n[k] }; });
 }
-window.slVlsCoos = function(){ return slVlsFacet(function(s){ return s.coo; }); };
+window.slVlsCoos = function(){ return slVlsFacet(function(s){
+  return (typeof styleOrigin === 'function' ? styleOrigin(s) : '') || s.coo; }); };
 window.slVlsVendors = function(){ return slVlsFacet(function(s){ return s.vendor; }); };
 window.slVlsFacetPick = function(id){
   const vals = [...document.querySelectorAll('.sl-vls-' + id)].filter(b => b.checked).map(b => b.value);
@@ -37079,7 +37087,8 @@ window.slVlsStyles = function(){
   // makes in Japan, not the union — the union is what you get by ticking
   // nothing, and a filter that widens is a filter nobody can reason about.
   return slLsStyles().filter(s => (!want.length || want.indexOf(slVlsGenderOf(s)) >= 0)
-    && has(coos, s.coo) && has(vendors, s.vendor)
+    && has(coos, (typeof styleOrigin === 'function' ? styleOrigin(s) : '') || s.coo)
+    && has(vendors, s.vendor)
     && (!SL_VLS.photosOnly || !!s.photoUrl));
 };
 window.slVlsOpen = function(){
@@ -37788,7 +37797,15 @@ function slLsRowFrom(s){
     // decides duty; composition decides the tariff code. Both live on the style
     // already (the tech pack's care-label check reads the same two fields) and
     // were simply never carried onto the sheet.
-    coo: s.coo || '', composition: s.fiberContent || '',
+    // ORIGIN COMES FROM THE FACTORY. styleOrigin() has resolved this for a
+    // while — the vendor library knows where Edovance and Topmoda cut, and a
+    // style inherits unless it says otherwise — and the line sheet was reading
+    // the RAW field instead, which is empty on every style. So "Made in" was
+    // blank on every sheet and the filter had nothing in it, while fifty-two
+    // styles had a factory with a country on file. A line sheet is a customs
+    // document; origin is what decides duty.
+    coo: (typeof styleOrigin === 'function' ? styleOrigin(s) : '') || s.coo || '',
+    composition: s.fiberContent || '',
     // Who makes it. The sheet could already be FILTERED to one factory; it
     // could not be grouped, so sending each maker their own styles meant one
     // export per factory and remembering which you had done.
