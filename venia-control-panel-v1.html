@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '516';
+  const BUILD = '517';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8268,10 +8268,22 @@ const ST_CELL = {
   desc:     (s) => `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${s.desc ? esc(s.desc) + ' — click to edit' : 'Add the design brief — direction for the factory. Replaces what is there; for a running log use Notes.'}" onclick="stTextEdit('desc','${s.id}',this,event)"><div class="col-clip">${s.desc ? esc(s.desc) : '<span style="color:var(--muted)">＋ description</span>'}</div></td>`,
   // Count and the latest line, so the table answers "is there anything on this
   // style" without opening it. Clicking opens the style, where the thread is.
-  notes:    (s) => { const th = styleThread(s); const top = th[0];
-    return `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${th.length ? esc(String(th.length) + (th.length === 1 ? ' entry' : ' entries') + ' — latest: ' + top.text) : 'No notes yet — click to add the first'}" onclick="event.stopPropagation();openDp('${s.id}')"><div class="col-clip">${th.length
-      ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--ink);border:1px solid var(--border-mid);padding:1px 4px;margin-right:6px">${th.length}</span>${top.kind === 'rev' ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:4px">STAMP</span>` : ''}${esc(top.text)}`
-      : '<span style="color:var(--muted)">＋ note</span>'}</div></td>`; },
+  // OPEN work is what a column should shout about. A style whose notes are all
+  // handled reads as clear — not as one more unread thing — and the count is of
+  // what is still outstanding, so ✓ actually buys you a quieter table.
+  notes:    (s) => { const th = styleThread(s);
+    const open = th.filter(e => !e.resolved);
+    const top = open[0];
+    const done = th.length - open.length;
+    const title = !th.length ? 'No notes yet — click to add the first'
+      : open.length ? esc(String(open.length) + (open.length === 1 ? ' open note' : ' open notes')
+          + (done ? ' · ' + done + ' done' : '') + ' — latest: ' + top.text)
+      : esc('All ' + done + ' note' + (done === 1 ? '' : 's') + ' done — click to reopen or add one');
+    return `<td class="cell-edit" style="font-size:10px;color:var(--soft)" title="${title}" onclick="event.stopPropagation();openDp('${s.id}')"><div class="col-clip">${
+      !th.length ? '<span style="color:var(--muted)">＋ note</span>'
+      : open.length
+        ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--ink);border:1px solid var(--border-mid);padding:1px 4px;margin-right:6px">${open.length}</span>${top.kind === 'rev' ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:4px">STAMP</span>` : ''}${esc(top.text)}`
+        : `<span style="color:var(--green)">✓ all done</span>`}</div></td>`; },
   season:   (s) => `<td class="cell-edit" style="font-size:10px" title="${s.season ? esc(s.season) + ' — click to move this style to another season' : 'Set the season'}" onclick="stEnumOpen('season','${s.id}',this,event)">${s.season ? esc(s.season) : '<span style="color:var(--muted)">＋</span>'}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
@@ -12488,7 +12500,30 @@ function openDp(styleId) {
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s) return;
   STATE.currentStyleId = styleId;
-  document.getElementById('dp-name').textContent = s.name;
+  // WHICH style this is. The header used to be the name and nothing else, and
+  // a name is not unique: CORA PANT is three styles (UB06, UB07, UB08) — three
+  // fabrications of one silhouette, each a separate record. All three opened a
+  // panel identical in every visible respect, so a note added to one looked, on
+  // the next, like it had never saved. The same note went onto all three in
+  // twenty-five seconds. The code is what tells them apart, so the code is in
+  // the header; when the name really is shared, the panel says so outright.
+  (() => {
+    const el = document.getElementById('dp-name');
+    if (!el) return;
+    const code = String(s.styleId || '').trim();
+    const sibs = (STATE.styles || []).filter(x => x.status !== 'archived'
+      && styleNameKey(x.name) === styleNameKey(s.name));
+    const i = sibs.sort((a, b) => String(a.styleId||'').localeCompare(String(b.styleId||'')))
+      .findIndex(x => x.id === s.id);
+    const shared = sibs.length > 1;
+    el.innerHTML = esc(s.name || '—')
+      + (code ? `<span class="dp-name-code" style="display:block;font-family:'DM Mono',monospace;font-size:10px;letter-spacing:1px;color:var(--muted);font-weight:400;margin-top:2px">${esc(code)}${
+          shared ? ` · ${i < 0 ? 1 : i + 1} of ${sibs.length}${s.fabric ? ' · ' + esc(s.fabric) : ''}` : ''}</span>` : '');
+    el.title = shared
+      ? s.name + ' — ' + code + ', ' + ((i < 0 ? 1 : i + 1)) + ' of ' + sibs.length
+        + ' styles sharing this name. Notes and edits belong to THIS one.'
+      : (s.name || '') + (code ? ' — ' + code : '');
+  })();
   const dpMargin = s.retail && s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : null;
   // Margin judged against THIS season's target when one is set (range plan),
   // not a generic 60/40 rule.
@@ -12505,7 +12540,7 @@ function openDp(styleId) {
       : `<button class="dp-hero-add" onclick="dpUploadHero('${s.id}')" style="margin-top:8px;width:100%;padding:14px;background:var(--bg-off);border:1px dashed var(--border-mid);color:var(--muted);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer">📷 Add style photo</button>`}
     <div class="dp-tags" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px">
       ${stageBadge(s.status)}
-      <span class="b-tag">${s.category}</span>
+      ${s.category ? `<span class="b-tag">${esc(s.category)}</span>` : ''}
       <span class="b-tag" onclick="dpToggleCarryover('${s.id}')" title="Tap to toggle — carryover styles repeat from a previous season" style="cursor:pointer;${s.carryover?'border-color:var(--ink);color:var(--ink);font-weight:700':''}">${s.carryover?'↺ Carryover':'New'}</span>
       <span style="font-size:10px;color:var(--muted)">${s.season}</span>
       ${s.drop?`<span style="font-size:10px;color:var(--muted)">Drop ${new Date(s.drop).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>`:''}
@@ -12667,7 +12702,11 @@ function openDp(styleId) {
     <div class="dp-section dp-full">
       <div class="dp-sec-title" style="display:flex;justify-content:space-between;align-items:center">
         <span>Notes</span>
-        <span style="font-size:10px;color:var(--muted)">${styleThread(s).length || 'no'} ${styleThread(s).length === 1 ? 'entry' : 'entries'}</span>
+        ${(() => { const th = styleThread(s); const open = th.filter(e => !e.resolved).length;
+          const done = th.length - open;
+          return `<span style="font-size:10px;color:var(--muted)">${
+            !th.length ? 'none yet'
+            : (open ? open + ' open' : 'all done') + (done ? ' · ' + done + ' done' : '')}</span>`; })()}
       </div>
       ${dpCommentsHtml(s)}
     </div>
@@ -18640,7 +18679,13 @@ function resolveComment(styleId, commentId) {
 function deleteComment(styleId, commentId) {
   const s = STATE.styles.find(x=>x.id===styleId);
   if (!s || !s.comments) return;
-  s.comments = s.comments.filter(c=>c.id!==commentId);
+  const c = s.comments.find(x=>x.id===commentId);
+  if (!c) return;
+  // It sits one click from the ✓, and unlike the ✓ it cannot be undone. That is
+  // the whole reason the two read as the same button.
+  const preview = String(c.text || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (!confirm('Delete this note permanently?\n\n"' + preview + '"\n\nThis cannot be undone. To clear it from your open list instead, use ✓ — that keeps the note and can be reopened.')) return;
+  s.comments = s.comments.filter(x=>x.id!==commentId);
   save();
   openDp(styleId);
 }
@@ -19563,7 +19608,15 @@ function getGConfig() {
 function dpCommentsHtml(s) {
   // One reader. This used to merge s.comments and s.notes here, which is why a
   // note typed in the tech pack — written to both — showed up twice.
-  const thread = styleThread(s);
+  //
+  // OPEN WORK FIRST. A note marked done used to stay exactly where it was at
+  // opacity .5 — close enough to deleted that ✓ and ✕ read as the same button,
+  // except one of them is permanent. Done notes now sink, struck through, and
+  // the heading counts what is still open.
+  const all = styleThread(s);
+  const thread = all.filter(e => !e.resolved).concat(all.filter(e => e.resolved));
+  const nOpen = all.filter(e => !e.resolved).length;
+  const nDone = all.length - nOpen;
 
   return `
     <div style="display:flex;gap:8px;margin-bottom:12px">
@@ -19573,7 +19626,7 @@ function dpCommentsHtml(s) {
     ${thread
       .slice(0,10)
       .map(c=>`
-        <div style="padding:10px 12px;background:${c.editable?'var(--bg)':'var(--bg-off)'};border:1px solid var(--border);margin-bottom:6px;${c.resolved?'opacity:.5':''}">
+        <div style="padding:10px 12px;background:${c.editable?'var(--bg)':'var(--bg-off)'};border:1px solid var(--border);margin-bottom:6px;${c.resolved?'opacity:.62':''}">
           <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
             <div style="display:flex;align-items:center;gap:8px">
               <div style="width:22px;height:22px;background:var(--ink);color:var(--white);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0">${(c.author||'T').charAt(0).toUpperCase()}</div>
@@ -19584,14 +19637,15 @@ function dpCommentsHtml(s) {
             </div>
             ${c.editable ? `
             <div style="display:flex;gap:4px">
-              <button onclick="resolveComment('${s.id}','${c.id}')" style="background:none;border:none;color:${c.resolved?'var(--green)':'var(--muted)'};cursor:pointer;font-size:11px;padding:2px" title="${c.resolved?'Unresolve':'Mark resolved'}">✓</button>
-              <button onclick="deleteComment('${s.id}','${c.id}')" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px;padding:2px" title="Delete">✕</button>
+              <button onclick="resolveComment('${s.id}','${c.id}')" style="background:${c.resolved?'var(--green)':'none'};border:1px solid ${c.resolved?'var(--green)':'var(--border-mid)'};color:${c.resolved?'var(--white)':'var(--muted)'};cursor:pointer;font-size:11px;padding:1px 5px;line-height:1.4" title="${c.resolved?'Reopen this note':'Mark done — keeps the note, you can reopen it'}">✓</button>
+              <button onclick="deleteComment('${s.id}','${c.id}')" style="background:none;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:11px;padding:1px 5px;line-height:1.4" title="Delete this note for good — it asks first">✕</button>
             </div>` : ''}
           </div>
-          <div style="font-size:11px;color:var(--ink);line-height:1.6;padding-left:30px">${c.kind==='rev'?`<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:6px">STAMP</span>`:''}${esc(c.text)}</div>
-          ${c.resolved ? `<div style="font-size:10px;color:var(--green);padding-left:30px;margin-top:4px">✓ Resolved</div>` : ''}
+          <div style="font-size:11px;color:var(--${c.resolved?'muted':'ink'});line-height:1.6;padding-left:30px;${c.resolved?'text-decoration:line-through':''}">${c.kind==='rev'?`<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:6px">STAMP</span>`:''}${esc(c.text)}</div>
+          ${c.resolved ? `<div style="font-size:10px;color:var(--green);padding-left:30px;margin-top:4px">✓ Done — click the ✓ again to reopen</div>` : ''}
         </div>`).join('')}
-    ${thread.length === 0 ? `<div style="font-size:11px;color:var(--muted);font-style:italic">No notes yet. Add one above — it shows in the Notes column too.</div>` : ''}`;
+    ${thread.length === 0 ? `<div style="font-size:11px;color:var(--muted);font-style:italic">No notes yet. Add one above — it shows in the Notes column too.</div>` : ''}
+    ${nDone && nOpen === 0 ? `<div style="font-size:10px;color:var(--green);margin-top:4px">All ${nDone} note${nDone===1?'':'s'} on this style are done.</div>` : ''}`;
 }
 
 function dpPostComment(styleId) {
