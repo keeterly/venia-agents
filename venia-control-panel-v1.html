@@ -2890,7 +2890,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '517';
+  const BUILD = '518';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -24210,6 +24210,20 @@ async function veniaStreamOnce(body, opts) {
   }
 }
 
+// A photograph the MODEL can fetch. A blob: url exists only inside the browser
+// tab that made it, and a data: url is a megabyte of base64 that would blow the
+// request — sending either is a broken picture dressed up as a real one.
+//
+// It lives HERE, beside the context that asks the question, and not in the dock
+// where the rest of Enigma's eyes are. plmContext is in an earlier <script>
+// block: a function declaration hoists within its own block and no further, so
+// a dock-side definition worked only for as long as nothing called plmContext
+// before that block parsed. That is a boot-order accident, not a guarantee.
+function stylePhotoUsable(st){
+  return /^https:\/\//i.test(String((st && st.photoUrl) || '').trim());
+}
+window.stylePhotoUsable = stylePhotoUsable;
+
 function plmContext() {
   const s = window.STATE;
   if (!s) return 'No PLM data loaded.';
@@ -24241,7 +24255,22 @@ function plmContext() {
     if (!st.sample) return '';
     return logged ? ', sample round ' + st.sample : ', no sample logged';
   };
-  const stLine = (st) => `${st.styleId} — ${st.name} (${st.season||'no season'}, stage ${st.status}${sampleTxt(st)}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'})`;
+  // WHETHER THERE IS A PHOTOGRAPH, AND WHETHER THERE ARE WORDS.
+  //
+  // Asked to write descriptions for SS27 and "reference the image", Enigma
+  // answered that it could not see the image library. It was right, and this
+  // line is why: it carried code, name, season, stage, sample and two prices,
+  // and nothing about whether the style had ever been shot. So the agent could
+  // not see a photograph AND could not know one existed to ask for — while 62
+  // of 76 SS27 styles were photographed and only 18 had copy.
+  //
+  // The URL is deliberately NOT here. It is noise the model cannot fetch out of
+  // a text prompt, and it would burn the line budget the prices live in. The
+  // picture itself rides as an image block when the turn needs eyes; this says
+  // only whether there is one.
+  const stLine = (st) => `${st.styleId} — ${st.name} (${st.season||'no season'}, stage ${st.status}${sampleTxt(st)}, retail $${st.retail||'?'}, wholesale $${st.wholesale||'?'}${
+    stylePhotoUsable(st) ? ', photo' : ', no photo'}${
+    String(st.desc||'').trim() ? '' : ', no copy'})`;
   // Styles with no season at all are always listed — there are few, and an
   // unassigned style is the one most likely to need a decision.
   const noSeason = bySeason[''] || [];
@@ -55518,6 +55547,112 @@ function skMakeWorking(whoLabel, steps){
 // in a row, opening and ending on the user. Mirrors what cfo-chat-background
 // does server-side — the dock had no equivalent, so one malformed turn was
 // terminal.
+// ── ENIGMA'S EYES ───────────────────────────────────────────────────────────
+// The app has known how to hand a picture to the model since the brainstorm
+// flat-renderer (a url image block) and the dock's paste path (a base64 one).
+// Neither was ever pointed at the line, so asked to write copy for SS27 and
+// "reference the image", Enigma could only say it had no images — while 62 of
+// the 76 SS27 styles were photographed and 49 of those had no words at all.
+
+// Does this turn need EYES? Pictures are slow and expensive, so a maths
+// question must never drag twelve of them into the call. Looking has to be the
+// point of the question, not incidental to it.
+const SK_EYE_WORDS = /\b(image|images|photo|photos|photograph|picture|pictures|shot|shots|look|looks|looking|see|seen|visual|describe|description|descriptions|copy|caption|captions|colour|color|colours|colors|fabric|silhouette|styling|styled|fit|drape|in frame|pictured)\b/i;
+// Asking ABOUT copy is not always asking to SEE. But "write the description"
+// with photographs on file is exactly when eyes earn their cost, and the cost
+// of guessing wrong the other way — copy invented for a garment nobody looked
+// at — is a product page that lies.
+function skWantsEyes(msg){
+  const t = String(msg || '');
+  if (!t.trim()) return false;
+  if (!SK_EYE_WORDS.test(t)) return false;
+  // Something has to be photographed for eyes to mean anything.
+  return (window.STATE && (STATE.styles || []).some(stylePhotoUsable)) || false;
+}
+window.skWantsEyes = skWantsEyes;
+
+// Twelve is the batch. Sending sixty photographs in one call is slow, costly,
+// and pushes the text it is supposed to be reasoning about out of the window.
+const SK_EYES_CAP = 12;
+
+// Which styles this turn should SEE, as labelled content blocks.
+//
+// Named styles win: "what colour is the ada corset" is about ONE garment, and
+// answering it with a dozen pictures is worse than answering it with one. Only
+// when nothing is named does it fall back to the season being worked on.
+function skEyesFor(msg, cap){
+  const limit = cap || SK_EYES_CAP;
+  const t = String(msg || '').toLowerCase();
+  const live = ((window.STATE && STATE.styles) || []).filter(st => st && st.status !== 'archived');
+  // Named by style code or by name — the founder writes both.
+  const named = live.filter(st => {
+    const code = String(st.styleId || '').toLowerCase();
+    const name = String(st.name || '').toLowerCase();
+    return (code && t.indexOf(code) >= 0) || (name.length > 3 && t.indexOf(name) >= 0);
+  });
+  const pinned = String((window.STATE && STATE.seasonFilter) || '').trim();
+  // A season written into the question beats the filter the app happens to be on.
+  const seasons = [...new Set(live.map(st => String(st.season || '').trim()).filter(Boolean))];
+  const spoken = seasons.filter(sn => t.indexOf(sn.toLowerCase()) >= 0);
+  let pool = named.length ? named
+    : spoken.length ? live.filter(st => spoken.indexOf(String(st.season || '').trim()) >= 0)
+    : pinned ? live.filter(st => String(st.season || '').trim() === pinned)
+    : live;
+  const shot = pool.filter(stylePhotoUsable);
+  // The ones with no words first: that is the work, and if only twelve go in
+  // the call they should be the twelve worth spending the call on.
+  const ranked = shot.slice().sort((a, b) =>
+    (String(a.desc||'').trim() ? 1 : 0) - (String(b.desc||'').trim() ? 1 : 0));
+  const pick = ranked.slice(0, limit);
+  const unshot = pool.filter(st => !stylePhotoUsable(st));
+
+  const blocks = [];
+  pick.forEach(st => {
+    blocks.push({ type:'text', text: 'PHOTO — ' + (st.styleId || '?') + ' ' + (st.name || '')
+      + (st.fabric ? ' · ' + st.fabric : '') + (st.colors ? ' · ' + st.colors : '') });
+    blocks.push({ type:'image', source:{ type:'url', url: String(st.photoUrl).trim() } });
+  });
+
+  // WHAT IT WAS NOT SHOWN. Without this the model has a dozen pictures and a
+  // list of seventy styles, and nothing stopping it writing "as pictured" about
+  // a garment whose photograph it never received.
+  const note = !pick.length ? '' : [
+    'ATTACHED: ' + pick.length + ' style photograph' + (pick.length === 1 ? '' : 's')
+      + ' of ' + shot.length + ' photographed'
+      + (shot.length > pick.length
+          ? ' — this is ONE BATCH. Write only about the ' + pick.length + ' shown; '
+            + (shot.length - pick.length) + ' more can be sent in the next message if you ask for them.'
+          : '.'),
+    'Each photograph is preceded by the style code it belongs to. Describe a garment ONLY from its own photograph.',
+    unshot.length
+      ? 'NOT SHOWN — no photograph on file: ' + unshot.slice(0, 14).map(st =>
+          (st.styleId || '?') + ' ' + (st.name || '')).join('; ')
+        + (unshot.length > 14 ? ' …and ' + (unshot.length - 14) + ' more' : '')
+        + '. Never describe these as pictured and never invent what they look like — say a photograph is needed.'
+      : '',
+  ].filter(Boolean).join('\n');
+
+  return { blocks, note, shown: pick.length, total: shot.length,
+           missing: unshot.length, styles: pick };
+}
+window.skEyesFor = skEyesFor;
+
+// Put the photographs on the last user turn, where a pasted image already goes.
+// Returns the history UNTOUCHED when the turn does not want eyes — a plain
+// string stays a plain string.
+function skAttachEyes(hist, msg){
+  const h = Array.isArray(hist) ? hist : [];
+  if (!skWantsEyes(msg)) return h;
+  const last = h[h.length - 1];
+  if (!last || last.role !== 'user' || Array.isArray(last.content)) return h;
+  const pick = skEyesFor(msg);
+  if (!pick.blocks.length) return h;
+  last.content = [{ type:'text', text: String(last.content || msg || '') + '\n\n' + pick.note }]
+    .concat(pick.blocks);
+  return h;
+}
+window.skAttachEyes = skAttachEyes;
+
 function skCleanHistory(hist){
   const out = [];
   (Array.isArray(hist) ? hist : []).forEach((m) => {
@@ -55630,6 +55765,21 @@ async function skSend(preset, opts){
       if (last && last.role === 'user') {
         last.content = [ { type:'text', text: msg || 'Photo attached — read it and act on what it shows.' }, photo.block ];
       }
+    } else {
+      // NO PASTED IMAGE, BUT THE QUESTION NEEDS EYES. A turn about how a
+      // garment looks gets the line's own photographs, labelled with the style
+      // each belongs to. Never silently: the working bubble says how many it is
+      // looking at, because an agent that quietly reads twelve pictures and one
+      // that quietly reads none give the same-looking answer.
+      try {
+        const eyes = skEyesFor(msg);
+        if (skWantsEyes(msg) && eyes.blocks.length) {
+          callHist = skAttachEyes(callHist, msg);
+          try { think.__note && think.__note('Looking at ' + eyes.shown + ' photo'
+            + (eyes.shown === 1 ? '' : 's')
+            + (eyes.total > eyes.shown ? ' of ' + eyes.total : '')); } catch(e){}
+        }
+      } catch(e){}
     }
     // CLOUD FIRST. The phone's whole job is one small POST, so a long run —
     // rewriting margin targets across 57 styles, reading a screenshot, working
