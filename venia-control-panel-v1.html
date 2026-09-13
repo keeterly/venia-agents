@@ -2943,7 +2943,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '520';
+  const BUILD = '521';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6397,7 +6397,12 @@ const MODULES = {
            // screen is derived, which is why there was no way to add a task —
            // and these have to sync, or one founder's list is not the other's.
            'todayTasks'],
-    ls: [],
+    // THE CONVERSATION IS THE FOUNDER'S, NOT THE LAPTOP'S. It lived in
+    // localStorage — one browser, one machine — so a question asked on the
+    // desktop, answered by a cloud job, and announced by a push to the phone
+    // landed in the DESKTOP'S storage and nowhere else. Home already owns the
+    // assistant's memory; the transcript belongs beside it.
+    ls: ['venia_sk_history'],
   },
   product: {
     label: 'Product', space: 'plm', nav: true,
@@ -6901,6 +6906,41 @@ function _mScalar(base, local, cloud) {
   return lChanged ? local : cloud;                               // both or neither → local
 }
 // Merge two full snapshots against a common ancestor.
+// ── TWO DEVICES, ONE CONVERSATION ───────────────────────────────────────────
+// A union by turn id, ordered by when each turn was actually said.
+//
+// Turns written before build 521 carry NEITHER. They cannot be placed against
+// stamped ones without inventing an order nobody spoke in, so they are kept as
+// a BLOCK at the front — they are the older part of the conversation by
+// definition — taken from whichever side holds more of them, and never
+// interleaved. That is the same rule the two-thread migration settled on, for
+// the same reason: a transcript that never happened is worse than a short one.
+const SK_HISTORY_CAP = 40;
+function skMergeHistory(a, b) {
+  const A = Array.isArray(a) ? a : [], B = Array.isArray(b) ? b : [];
+  const stamped = (t) => !!(t && t.id && t.at);
+  const lead = (arr) => { let i = 0; while (i < arr.length && !stamped(arr[i])) i++; return arr.slice(0, i); };
+  const leadA = lead(A), leadB = lead(B);
+  const legacy = leadA.length >= leadB.length ? leadA : leadB;
+
+  const seen = Object.create(null), out = [];
+  [A, B].forEach(function (arr) {
+    for (let i = 0; i < arr.length; i++) {
+      const t = arr[i];
+      if (!stamped(t) || seen[t.id]) continue;
+      seen[t.id] = 1; out.push(t);
+    }
+  });
+  out.sort(function (x, y) {
+    const tx = Date.parse(x.at) || 0, ty = Date.parse(y.at) || 0;
+    return tx - ty || String(x.id).localeCompare(String(y.id));
+  });
+  // Cap from the END: the newest turns are the ones the founder is still in.
+  const all = legacy.concat(out);
+  return all.length > SK_HISTORY_CAP ? all.slice(all.length - SK_HISTORY_CAP) : all;
+}
+window.skMergeHistory = skMergeHistory;
+
 function mergeSnapshots(base, local, cloud) {
   base = base || {}; local = local || {}; cloud = cloud || {};
   const out = { _who: local._who || cloud._who };
@@ -7014,6 +7054,14 @@ function mergeSnapshots(base, local, cloud) {
   (window.EXTRA_LS_KEYS || []).forEach(function (k) {
     const inL = k in lls, inC = k in cls, inB = k in bls;
     if (inL && inC) {
+      // THE CONVERSATION IS MERGED TURN BY TURN, never whole-blob. Changed-side
+      // -wins on a transcript means the device that chatted most recently
+      // overwrites everything the other one said — the cost-sheets bug, with a
+      // conversation instead of a costing.
+      if (k === 'venia_sk_history') {
+        try { outls[k] = JSON.stringify(skMergeHistory(JSON.parse(lls[k]), JSON.parse(cls[k]))); return; }
+        catch (e) { /* unparseable side — fall through to scalar */ }
+      }
       if (k === 'venia-cost-sheets') {
         try {
           const bo = inB ? (JSON.parse(bls[k]) || {}) : {};
@@ -28392,7 +28440,7 @@ async function agentSend(key, message) {
   if (!body) return;
   SK.greeted = true;
   skAppend('user', message);
-  SK.history.push({ role: 'user', content: message });
+  SK.history.push(skTurn('user', message));
   if (SK.history.length > 40) SK.history = SK.history.slice(-40);
   const think = skMakeWorking('Enigma', skWorkSteps(message, key));
   body.appendChild(think); body.scrollTop = body.scrollHeight;
@@ -28446,7 +28494,7 @@ async function agentSend(key, message) {
       const tf = (typeof veniaToneFlags === 'function') ? veniaToneFlags(clean) : [];
       if (tf.length) shown += '\n\n⚠ Off-voice: ' + tf.join(', ') + '. VENIA shows the quality rather than labelling it — ask me to rewrite without them.';
     } catch (e) {}
-    SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim), disp: shown });
+    SK.history.push(skTurn('assistant', agentHistoryText(shown, action, !action && !parseError && unbackedClaim), { disp: shown }));
     skSaveHistory();
     if (action && think.__note) think.__note('Applying changes…');
     think.__done && think.__done();
@@ -43231,7 +43279,7 @@ function cfoChatApply(status, result, job){
   }
   if (extraBlocks) shown += '\n\n\u26a0 I tried to do more than one thing at once; only the first was applied. Ask for the rest separately.';
   SK.history = SK.history || [];
-  SK.history.push({ role: 'assistant', content: agentHistoryText(shown, action, !action && !parseError && unbackedClaim), disp: shown });
+  SK.history.push(skTurn('assistant', agentHistoryText(shown, action, !action && !parseError && unbackedClaim), { disp: shown }));
   if (SK.history.length > 40) SK.history = SK.history.slice(-40);
   try { skSaveHistory(); } catch(e){}
   const landed = land('<div class="sk-msg-body">' + skFormat(shown) + '</div>');
@@ -47636,11 +47684,23 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Restore standalone-module localStorage keys from the snapshot.
       if (data._ls) {
         var extra = window.EXTRA_LS_KEYS || [];
+        var chatChanged = false;
         for (var j = 0; j < extra.length; j++) {
           var ek = extra[j];
           if (Object.prototype.hasOwnProperty.call(data._ls, ek)) {
-            try { localStorage.setItem(ek, data._ls[ek]); } catch (e) {}
+            try {
+              if (ek === 'venia_sk_history' && localStorage.getItem(ek) !== data._ls[ek]) chatChanged = true;
+              localStorage.setItem(ek, data._ls[ek]);
+            } catch (e) {}
           }
+        }
+        // WRITING IT TO DISK IS NOT SHOWING IT. SK.history is read once at boot
+        // and lives in memory from then on, so a conversation merged in from
+        // the other device would sit in localStorage while the open panel kept
+        // showing the old one — which is the same complaint that started this,
+        // fixed halfway.
+        if (chatChanged && typeof window.skAdoptStoredHistory === 'function') {
+          try { window.skAdoptStoredHistory(); } catch (e) {}
         }
       }
       if (typeof window.save === 'function') window.save();   // persist locally (push skipped by guard)
@@ -54844,11 +54904,55 @@ document.addEventListener('visibilitychange', function(){
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => skPaintUnread());
 else setTimeout(() => { try { skPaintUnread(); } catch(e){} }, 0);
 
-// Conversations survive reloads (device-local; capped like the live history).
+// ── A TURN HAS AN IDENTITY ──────────────────────────────────────────────────
+// Stored turns used to be {role, content} and nothing else, and the migration
+// note above says why that mattered: "stored turns carry no timestamps, so
+// splicing them would produce a transcript that never happened". That was the
+// reason two conversations could not be merged — and once the transcript syncs
+// between a desktop and a phone, merging is exactly what has to happen.
+//
+// So every turn is stamped where it is made. An id to recognise it on the other
+// device, a time to place it. Nothing else changes about the turn.
+let _skTurnSeq = 0;
+function skTurn(role, content, extra){
+  const t = Object.assign({ role: role, content: content }, extra || {});
+  if (!t.id) t.id = 'k' + Date.now().toString(36) + (_skTurnSeq++).toString(36)
+    + Math.random().toString(36).slice(2, 6);
+  if (!t.at) t.at = new Date().toISOString();
+  return t;
+}
+window.skTurn = skTurn;
+
+// Take up the conversation as it now stands on disk — after a sync has merged
+// in what was said on the other device — and put it on screen if anyone is
+// looking. Called by applySnapshot; safe to call when nothing has changed.
+function skAdoptStoredHistory(){
+  let next;
+  try { next = JSON.parse(localStorage.getItem('venia_sk_history') || 'null'); } catch(e){ return; }
+  if (!Array.isArray(next)) return;
+  const before = (SK.history || []).length;
+  SK.history = next;
+  SK.greeted = SK.history.length > 0;
+  if (SK.open) { try { skRenderHistory(); } catch(e){} }
+  else if (next.length !== before) SK.needsRender = true;   // rebuild on next open
+  try { skUpdateContext(); } catch(e){}
+  try { skBarPaint(); } catch(e){}
+}
+window.skAdoptStoredHistory = skAdoptStoredHistory;
+
+// The conversation survives reloads AND devices now (capped like the live
+// history). It rides the workspace snapshot as an EXTRA_LS_KEY owned by Home.
 function skSaveHistory(){
-  // Never persist image blobs — keep localStorage lean and text-only. The chat
-  // shows the thumbnail this session; on reload the text remains, the photo drops.
-  const strip = arr => (arr||[]).slice(-40).map(m => { const { img, __imgBlock, ...rest } = m; return rest; });
+  // Never persist image blobs — keep storage lean and text-only. The chat shows
+  // the thumbnail this session; on reload the text remains, the photo drops.
+  // This matters more than it did: the blob would now go to Postgres, not just
+  // to this browser.
+  const strip = arr => (arr||[]).slice(-40).map(m => {
+    const { img, __imgBlock, ...rest } = m;
+    // Anything written before 521 has no stamp. Give it one on the way out so
+    // it can be merged from here on, rather than rewriting the whole history.
+    return (rest.id && rest.at) ? rest : skTurn(rest.role, rest.content, rest);
+  });
   try { localStorage.setItem('venia_sk_history', JSON.stringify(strip(SK.history))); } catch(e){}
 }
 try {
@@ -55903,7 +56007,7 @@ async function skSend(preset, opts){
   skAppend('user', dispText, photo ? photo.dataUrl : undefined);
   // Stored turn keeps content as a plain string (+ preview img for this session);
   // the image block rides only in the call history built below.
-  SK.history.push({role:'user', content:fullText, disp: fileAtt ? dispText : undefined, img: photo ? photo.dataUrl : undefined});
+  SK.history.push(skTurn('user', fullText, { disp: fileAtt ? dispText : undefined, img: photo ? photo.dataUrl : undefined }));
   // PERSIST THE QUESTION NOW, not when the answer lands. The turn runs in the
   // cloud and the founder is invited to close the app — so if this waited for
   // the reply, closing the app would drop the question from storage and the
@@ -56014,7 +56118,7 @@ async function skSend(preset, opts){
         window.__agOfferRefile = 'That reply described a change but carried nothing that writes it.';
       }
     }
-    SK.history.push({role:'assistant', content: agentHistoryText(shown, action, unbacked), disp: shown});
+    SK.history.push(skTurn('assistant', agentHistoryText(shown, action, unbacked), { disp: shown }));
     skSaveHistory();
     // The bubble is already on screen, so this reply IS rendered — it just may
     // not have been looked at.
