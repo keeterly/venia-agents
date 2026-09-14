@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '522';
+  const BUILD = '523';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6599,7 +6599,26 @@ function moduleSplit(snap){
       && out.product) delete out.product.styles;
   return out;
 }
+// A ROW THE REGISTRY DOES NOT KNOW IS NOT THE WORKSPACE.
+//
+// venia_module_data is keyed by workspace and module, and nothing stopped
+// anything else being filed in it. Two rows were: product__backup_20260907_pom
+// — a FULL product-shaped row, 102 styles, 46 descriptions, dated the 7th, with
+// the identical top-level keys as the live product row — and
+// product__spec_payload, a stash of {ids, newStyles, payload}.
+//
+// The pull selected every row for the workspace and this function merged each
+// one with snap[k] = d[k], last row winning. The only ordering imposed was
+// projections-before-owners, and an unregistered module sorts with the owners;
+// Postgres returns rows in no particular order. So on a pull where the backup
+// came back after `product`, `styles` became the week-old copy — and the push
+// that followed applied it to the screen a second later. Descriptions the
+// founder had just written disappeared, intermittently, depending on row order.
+//
+// The assembler trusted the TABLE. It has to trust the REGISTRY.
+function moduleKnown(r){ return !!(r && r.module && MODULES[r.module]); }
 function moduleAssemble(rows){
+  rows = (rows || []).filter(moduleKnown);
   // Meta belongs to the snapshot, not to any one module: take it from whichever
   // row was written last so "who changed this" survives the round trip.
   let snap = { _schemaVersion: 2 }, newest = 0, ls = null;
@@ -47953,7 +47972,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function pullModules(){
     var c = sb(); if (!c) return null;
     try {
-      var res = await c.from('venia_module_data').select('*').eq('workspace_id', WS_ID);
+      // Only the modules the registry knows. moduleAssemble refuses the rest
+      // anyway; asking for them would still drag a second copy of the line
+      // across the wire on every pull.
+      var res = await c.from('venia_module_data').select('*')
+        .eq('workspace_id', WS_ID).in('module', MODULE_IDS);
       if (res.error){ window.__syncStat.modulePull = { ok:false, err: res.error.message }; return null; }
       var rows = res.data || [];
       if (!rows.length) return null;
