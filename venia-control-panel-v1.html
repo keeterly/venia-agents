@@ -40749,10 +40749,29 @@ function finLiabilityLines(asAt){
       moved[t.acct] = (moved[t.acct] || 0) + (t.amount || 0);
     });
   }
+  // A CREDIT BALANCE IS NOT A DEBT.
+  //
+  // finBankData normalises every credit account with Math.abs(), which is right
+  // for a feed that might report "owed" either way round and wrong the moment an
+  // account is genuinely in credit. This feed reports owed as NEGATIVE — every
+  // card that owes money is negative — and the Rivian lease account reported
+  // +1,226.63, money paid ahead. abs() turned that into $1,226.63 of debt on a
+  // statement going to a lender.
+  //
+  // Here, sign is read rather than erased: a positive `current` is a credit
+  // balance and contributes NOTHING to liabilities, and the row says so instead
+  // of quietly reporting zero.
   const feedAmount = function(a){
     const b = (a && a.balance) || {};
-    const raw = b.used != null ? Math.abs(b.used) : Math.abs(b.current || 0);
-    return raw + (asAt ? (moved[a.id] || 0) : 0);
+    let raw, inCredit = false;
+    if (b.used != null) raw = Math.abs(b.used);              // "used" is unambiguous
+    else {
+      const cur = Number(b.current || 0);
+      inCredit = cur > 0;                                     // owed is negative in this feed
+      raw = inCredit ? 0 : Math.abs(cur);
+    }
+    return { amount: raw + (asAt ? (moved[a.id] || 0) : 0), inCredit: inCredit,
+             creditAmount: inCredit ? Number(b.current || 0) : 0 };
   };
 
   const rows = [], excluded = [], unclassified = [], sameDebt = [];
@@ -40767,9 +40786,17 @@ function finLiabilityLines(asAt){
     // never on the statement of position by itself.
     const stated = m && m.statedLiability != null && m.statedLiability !== ''
       ? Number(m.statedLiability) : null;
-    const amount = (stated != null && isFinite(stated)) ? stated : feedAmount(a);
+    const feed = feedAmount(a);
+    const hasStated = stated != null && isFinite(stated);
+    const amount = hasStated ? stated : feed.amount;
+    // A LEASE CARRIED AT ITS PAYMENT-ACCOUNT BALANCE IS NOT A LEASE LIABILITY.
+    // What a lessor's servicing account reports is this month's position, not
+    // what remains owed under the lease. Saying so on the row is the difference
+    // between a number a reader can rely on and one that merely looks precise.
+    const needsStated = !hasStated && (kind === 'lease' || kind === 'loan');
     const row = { id: a.id, label: label, amount: amount, kind: kind,
-                  stated: stated != null && isFinite(stated),
+                  stated: hasStated, needsStated: needsStated,
+                  inCredit: !hasStated && feed.inCredit, creditAmount: feed.creditAmount,
                   ownership: own || '', note: (m && m.note) || '' };
     // A CARDHOLDER CARD IS NOT A SECOND DEBT. Chase reports an Ink Business
     // Cash account and each card issued on it — K. LY (…4213), C. KO (…4234),
@@ -40879,6 +40906,29 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
       + 'confirmation: ' + L.unclassified.map(function(r){ return r.label
           + ' ($' + Math.round(r.amount || 0).toLocaleString('en-US') + ')'; }).join('; ')
       + '. Business liabilities may therefore be overstated by any of these that prove personal.');
+  }
+  // A LEASE WITHOUT A STATED LIABILITY IS NOT A MEASURED LEASE.
+  //
+  // The servicing account for a lease reports this month's position — the
+  // Rivian account reported +$1,226.63, money paid ahead — and that is not what
+  // remains owed under the lease. Carrying it silently would put a precise,
+  // wrong number on a lender's desk. It is named until someone enters the real
+  // obligation, which comes from a payoff statement, not from a buyout quote.
+  const needing = (L.rows || []).filter(function(r){ return r.needsStated; });
+  if (needing.length) {
+    n.push(needing.map(function(r){ return r.label; }).join('; ')
+      + (needing.length === 1 ? ' is a lease or loan carried' : ' are leases or loans carried')
+      + ' at the balance reported by the servicing account, which is a current position and NOT '
+      + 'the remaining obligation. The obligation has not been measured and this statement does '
+      + 'not present one. A payoff statement from the lender is required; a purchase or buyout '
+      + 'quote is a price for acquiring the asset and is not the liability.');
+  }
+  const inCredit = (L.rows || []).filter(function(r){ return r.inCredit; });
+  if (inCredit.length) {
+    n.push(inCredit.map(function(r){ return r.label; }).join('; ')
+      + (inCredit.length === 1 ? ' is' : ' are') + ' in CREDIT at the reporting date — paid ahead '
+      + 'rather than owing — and so ' + (inCredit.length === 1 ? 'contributes' : 'contribute')
+      + ' nothing to liabilities. The credit is not carried as an asset either.');
   }
   // ONE CREDIT LINE, SEVERAL CARDS. Named so a reader who sees three Chase
   // cards in a statement pack and one Chase row here knows why.
