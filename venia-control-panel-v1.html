@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '523';
+  const BUILD = '524';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6453,7 +6453,16 @@ const MODULES = {
            // cost, and when. A statement note that turns a caveat into a
            // confirmation has to be attributable, and it has to reach the other
            // founder's device — otherwise two people print two different pages.
-           'finMfgConfirmed'],
+           'finMfgConfirmed',
+           // WHOSE DEBT IS THIS, AND WHAT KIND. Every liability question the SBA
+           // package came back with was this one: is 2874 business or personal,
+           // is PayPal business or personal, is 4213 business or personal, and
+           // what is inside "Cards and credit lines". A connected account knows
+           // its balance and nothing about whose it is.
+           'finAcctMeta',
+           // A creditor with no bank feed is still a creditor. PayPal is not a
+           // connected account and was therefore on no statement at all.
+           'finManualLiabs'],
     ls: ['VENIA_REV_GOALS', 'venia_budget'],
   },
   brainstorm: {
@@ -40422,14 +40431,19 @@ function finBalanceSheet(opts){
   if (prepaid > 0) assets.push({ label: 'Paid to factories, goods not yet received',
     amount: prepaid, note: 'deposits against open production', current: !!asAt });
 
-  // Card and loan balances the bank reports, as a positive debt figure.
-  const cardDebt = bank && bank.connected ? at.debt : 0;
-  const liabilities = [
-    { label: 'Cards and credit lines', amount: cardDebt,
-      note: bank && bank.connected ? '' : 'no bank connected' },
-    { label: 'Committed to factories, unpaid', amount: d.poCommitted || 0,
-      note: 'open purchase orders', current: !!asAt },
-  ];
+  // ONE ROW PER CREDITOR. This was a single "Cards and credit lines" line that
+  // summed every connected credit account — a business card, a car lease and
+  // three personal cards arriving as one figure nobody could confirm or
+  // itemise. That is what the SBA package came back for.
+  const liab = finLiabilityLines(asAt);
+  const liabilities = liab.rows.map(function(r){
+    return { label: r.label, amount: r.amount, kind: r.kind,
+             note: r.note || (r.kind === 'lease' ? 'lease obligation'
+                   : r.manual ? 'stated balance' + (r.asOf ? ' at ' + r.asOf : '') : ''),
+             current: !!asAt && !r.stated };
+  });
+  liabilities.push({ label: 'Committed to factories, unpaid', amount: d.poCommitted || 0,
+    note: 'open purchase orders', current: !!asAt });
 
   const assetsTotal = assets.reduce(function(t, r){ return t + r.amount; }, 0);
   const liabTotal = liabilities.reduce(function(t, r){ return t + r.amount; }, 0);
@@ -40457,7 +40471,10 @@ function finBalanceSheet(opts){
     // Working capital is the number a lender computes first, so it is computed
     // here rather than left to them.
     workingCapital: (cash + ar + stock) - liabTotal,
-    notes: finBalanceSheetNotes(d, bank, inv, cash, ar, stock),
+    // What was left out, and why — the statement carries its own exclusions.
+    excludedPersonal: liab.excluded,
+    unclassifiedDebt: liab.unclassified,
+    notes: finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab),
     inventoryNote: inv && inv.units
       ? 'Inventory comprises ' + inv.units.toLocaleString() + ' units across ' + inv.styles
         + ' styles, carried at landed production cost.'
@@ -40572,13 +40589,274 @@ window.finReconcileFlags = function(){
 };
 
 // Every limitation the figures above carry, on the same page as the figures.
-function finBalanceSheetNotes(d, bank, inv, cash, ar, stock){
+// ══════════════════════════════════════════════════════════════════════════
+//  WHO IS OWED, AND BY WHOM
+// ══════════════════════════════════════════════════════════════════════════
+// The SBA package came back for amendment, and every liability question on it
+// was the same question asked four times:
+//
+//   "confirm whether Auto Lease 2874 is business debt"
+//   "confirm whether PayPal Credit is business debt"
+//   "confirm whether Chase Card ...4213 is business debt"
+//   "itemize the 'Cards and credit lines' liability line ($18,255) so each
+//    specific creditor and line balance is clearly identified"
+//
+// The balance sheet carried ONE row — "Cards and credit lines" — built by
+// summing every connected credit account. Five went into it: the Chase Ink
+// business card, a Rivian lease, and three personal cards. A lender cannot tell
+// those apart when they arrive as a single figure, and nobody can confirm
+// whether a number is business debt when the number is five numbers.
+//
+// A connected account knows its balance and nothing about whose it is. That is
+// what finAcctMeta records, and it is the only thing that can answer the
+// question: ownership (business or personal), kind (card, line, lease, loan),
+// and the creditor's real name rather than a bank feed's label.
+//
+// THREE STATES, NOT TWO. business, personal, and NOT YET SAID. An unclassified
+// account is not quietly counted and not quietly dropped — either would be a
+// guess about someone's debt on a federal loan application. It is named on the
+// statement as unclassified, and it is left out of the total until a person
+// says which it is.
+const FIN_LIAB_KINDS = { card:'card', line:'credit line', lease:'lease', loan:'loan', bank:'bank' };
+function finAcctMeta(id){
+  const m = (STATE.finAcctMeta || {})[id];
+  return (m && typeof m === 'object') ? m : null;
+}
+// What to call a creditor on a document a bank reads. "K. LY-4213" is a feed
+// label; "Chase Ink Business Cash (...4213)" is a creditor.
+function finCreditorLabel(acct, meta){
+  const m = meta || {};
+  const name = String(m.creditor || '').trim() || String((acct && acct.name) || '').trim() || 'Unnamed account';
+  const last4 = String(m.last4 || '').trim();
+  return last4 && name.indexOf(last4) < 0 ? name + ' (\u2026' + last4 + ')' : name;
+}
+// The three controls that answer Lendio's questions. Each writes one fact a
+// bank feed cannot know, and each one re-renders so the balance sheet under it
+// changes as you classify.
+function finAcctSetOwnership(id, val){
+  if (!id) return;
+  STATE.finAcctMeta = STATE.finAcctMeta || {};
+  const m = STATE.finAcctMeta[id] = STATE.finAcctMeta[id] || {};
+  if (val === 'business' || val === 'personal' || val === 'part') m.ownership = val;
+  else delete m.ownership;
+  if (val === 'part' && !m.partOf) {
+    const on = prompt('Which line is this card issued on?\n\ne.g. "Chase Ink Business Cash (\u20264213)"\n\n'
+      + 'It will be shown as part of that account and never added to the total.', '');
+    if (on !== null) m.partOf = String(on).trim();
+  }
+  save();
+  try { renderPage(STATE.currentPage); } catch(e){}
+  try { showToast(val === 'business' ? 'Counted as business debt'
+    : val === 'personal' ? 'Personal — kept off the business sheet'
+    : val === 'part' ? 'Shown as part of another line — not added twice'
+    : 'Unconfirmed — still counted, and named on the statement as unconfirmed'); } catch(e){}
+}
+window.finAcctSetOwnership = finAcctSetOwnership;
+
+function finAcctNameIt(id){
+  if (!id) return;
+  const accts = ((STATE.finBank && STATE.finBank.accounts) || []);
+  const a = accts.find(function(x){ return x && x.id === id; }) || { name: '' };
+  STATE.finAcctMeta = STATE.finAcctMeta || {};
+  const m = STATE.finAcctMeta[id] = STATE.finAcctMeta[id] || {};
+  const name = prompt('Creditor name, as a lender should read it\n\ne.g. "Chase Ink Business Cash", '
+    + '"Rivian Financial Services"\n(the feed calls it "' + (a.name || '') + '")',
+    m.creditor || a.name || '');
+  if (name === null) return;
+  m.creditor = String(name).trim();
+  const last4 = prompt('Last four digits (optional)', m.last4 || '');
+  if (last4 !== null) m.last4 = String(last4).replace(/\D/g, '').slice(-4);
+  const kind = prompt('What kind of debt?\n\ncard · line · lease · loan', m.kind || 'card');
+  if (kind !== null) {
+    const k = String(kind).trim().toLowerCase();
+    m.kind = FIN_LIAB_KINDS[k] ? k : 'card';
+  }
+  // A LEASE IS THE REASON THIS EXISTS. What a card feed reports on a lease
+  // account is a payment balance, not the lease liability, and a buyout quote
+  // is a price rather than a debt. Both are asked for separately so neither is
+  // mistaken for the other on a statement of position.
+  if (m.kind === 'lease' || m.kind === 'loan') {
+    const li = prompt('Liability to carry on the balance sheet, if the feed balance is not it.\n\n'
+      + 'Leave empty to use the feed balance. This is the accounting liability — NOT a buyout quote.',
+      m.statedLiability != null ? String(m.statedLiability) : '');
+    if (li !== null) {
+      const v = String(li).replace(/[^0-9.\-]/g, '');
+      if (v === '') delete m.statedLiability; else m.statedLiability = Number(v);
+    }
+    const q = prompt('Payoff / buyout quote, if you have one.\n\nThis is recorded for the debt '
+      + 'schedule and is NEVER put on the balance sheet.',
+      m.buyoutQuote != null ? String(m.buyoutQuote) : '');
+    if (q !== null) {
+      const v = String(q).replace(/[^0-9.\-]/g, '');
+      if (v === '') delete m.buyoutQuote; else m.buyoutQuote = Number(v);
+    }
+  }
+  save();
+  try { renderPage(STATE.currentPage); } catch(e){}
+  try { showToast('Creditor recorded'); } catch(e){}
+}
+window.finAcctNameIt = finAcctNameIt;
+
+// A creditor with no bank feed. PayPal is not a connected account and was
+// therefore on no statement at all — not understated, absent.
+function finAddManualLiability(){
+  const creditor = prompt('Creditor name\n\ne.g. "PayPal / Synchrony revolving credit"', '');
+  if (creditor === null || !String(creditor).trim()) return;
+  const amt = prompt('Balance owed', '');
+  if (amt === null) return;
+  const v = Number(String(amt).replace(/[^0-9.\-]/g, ''));
+  if (!isFinite(v)) { try { showToast('That is not a number', 'error'); } catch(e){} return; }
+  const kind = prompt('What kind of debt?\n\ncard · line · lease · loan', 'line');
+  const own = prompt('Business or personal?\n\nType business or personal. Anything else leaves it '
+    + 'unclassified, which keeps it off the total and names it on the statement.', 'business');
+  const k = String(kind || '').trim().toLowerCase();
+  const o = String(own || '').trim().toLowerCase();
+  STATE.finManualLiabs = STATE.finManualLiabs || [];
+  STATE.finManualLiabs.push({ id: 'ml' + Date.now(), creditor: String(creditor).trim(),
+    amount: v, kind: FIN_LIAB_KINDS[k] ? k : 'line',
+    ownership: (o === 'business' || o === 'personal') ? o : '',
+    asOf: new Date().toISOString().slice(0, 10) });
+  save();
+  try { renderPage(STATE.currentPage); } catch(e){}
+  try { showToast('Creditor added'); } catch(e){}
+}
+window.finAddManualLiability = finAddManualLiability;
+
+function finRemoveManualLiability(id){
+  if (!id) return;
+  const list = STATE.finManualLiabs || [];
+  const row = list.find(function(x){ return x && x.id === id; });
+  if (!row) return;
+  if (!confirm('Remove "' + (row.creditor || 'this creditor') + '" from the balance sheet?')) return;
+  STATE.finManualLiabs = list.filter(function(x){ return x && x.id !== id; });
+  save();
+  try { renderPage(STATE.currentPage); } catch(e){}
+}
+window.finRemoveManualLiability = finRemoveManualLiability;
+
+function finLiabilityLines(asAt){
+  const bank = (typeof finBankData === 'function') ? finBankData() : null;
+  const accts = (bank && bank.debtAccts) ? bank.debtAccts
+    : ((STATE.finBank && STATE.finBank.accounts) || []).filter(function(a){
+        return a && (a.category || '') === 'credit'; });
+  // The balance on a date that is not today, per account: today's balance less
+  // whatever moved since. Same arithmetic finCashAt does for the total.
+  const moved = {};
+  if (asAt) {
+    (STATE.finTxns || []).forEach(function(t){
+      if (!t || t.status === 'void' || t.status === 'pending') return;
+      if (!t.date || t.date <= asAt) return;
+      moved[t.acct] = (moved[t.acct] || 0) + (t.amount || 0);
+    });
+  }
+  // A CREDIT BALANCE IS NOT A DEBT.
+  //
+  // finBankData normalises every credit account with Math.abs(), which is right
+  // for a feed that might report "owed" either way round and wrong the moment an
+  // account is genuinely in credit. This feed reports owed as NEGATIVE — every
+  // card that owes money is negative — and the Rivian lease account reported
+  // +1,226.63, money paid ahead. abs() turned that into $1,226.63 of debt on a
+  // statement going to a lender.
+  //
+  // Here, sign is read rather than erased: a positive `current` is a credit
+  // balance and contributes NOTHING to liabilities, and the row says so instead
+  // of quietly reporting zero.
+  const feedAmount = function(a){
+    const b = (a && a.balance) || {};
+    let raw, inCredit = false;
+    if (b.used != null) raw = Math.abs(b.used);              // "used" is unambiguous
+    else {
+      const cur = Number(b.current || 0);
+      inCredit = cur > 0;                                     // owed is negative in this feed
+      raw = inCredit ? 0 : Math.abs(cur);
+    }
+    return { amount: raw + (asAt ? (moved[a.id] || 0) : 0), inCredit: inCredit,
+             creditAmount: inCredit ? Number(b.current || 0) : 0 };
+  };
+
+  const rows = [], excluded = [], unclassified = [], sameDebt = [];
+  accts.forEach(function(a){
+    const m = finAcctMeta(a.id);
+    const own = m && m.ownership;
+    const kind = (m && m.kind) || 'card';
+    const label = finCreditorLabel(a, m);
+    // A LEASE IS NOT A CARD BALANCE, AND A BUYOUT QUOTE IS NOT A LIABILITY.
+    // What the lessor will sell the vehicle for is a price, not what is owed;
+    // it belongs on a debt schedule when a lender asks for a payoff figure, and
+    // never on the statement of position by itself.
+    const stated = m && m.statedLiability != null && m.statedLiability !== ''
+      ? Number(m.statedLiability) : null;
+    const feed = feedAmount(a);
+    const hasStated = stated != null && isFinite(stated);
+    const amount = hasStated ? stated : feed.amount;
+    // A LEASE CARRIED AT ITS PAYMENT-ACCOUNT BALANCE IS NOT A LEASE LIABILITY.
+    // What a lessor's servicing account reports is this month's position, not
+    // what remains owed under the lease. Saying so on the row is the difference
+    // between a number a reader can rely on and one that merely looks precise.
+    const needsStated = !hasStated && (kind === 'lease' || kind === 'loan');
+    const row = { id: a.id, label: label, amount: amount, kind: kind,
+                  stated: hasStated, needsStated: needsStated,
+                  inCredit: !hasStated && feed.inCredit, creditAmount: feed.creditAmount,
+                  ownership: own || '', note: (m && m.note) || '' };
+    // A CARDHOLDER CARD IS NOT A SECOND DEBT. Chase reports an Ink Business
+    // Cash account and each card issued on it — K. LY (…4213), C. KO (…4234),
+    // C. KO (…6111) — as separate accounts. They are one credit line with one
+    // balance. Calling them personal would be false (they are business cards)
+    // and calling them business would count the same money twice, which is how
+    // an $18,255 line gets to be a number nobody can explain. They are shown,
+    // attributed to the account they belong to, and never added.
+    if (own === 'part') { row.partOf = (m && m.partOf) || ''; sameDebt.push(row); }
+    else if (own === 'business') rows.push(row);
+    else if (own === 'personal') excluded.push(row);
+    else unclassified.push(row);
+  });
+
+  // A creditor with no bank feed is still a creditor.
+  (STATE.finManualLiabs || []).forEach(function(x){
+    if (!x) return;
+    const amount = Number(x.amount || 0);
+    const row = { id: x.id, label: String(x.creditor || 'Unnamed creditor').trim(),
+                  amount: isFinite(amount) ? amount : 0, kind: x.kind || 'line',
+                  stated: true, ownership: x.ownership || '', manual: true,
+                  asOf: x.asOf || '', note: x.note || '' };
+    if (row.ownership === 'business') rows.push(row);
+    else if (row.ownership === 'personal') excluded.push(row);
+    else unclassified.push(row);
+  });
+
+  // COUNTED, AND SAID. An unclassified account used to be left out of the
+  // total. That is the wrong direction to be wrong in: understating liabilities
+  // is exactly what the SBA package came back for, and an app that silently
+  // dropped every card the day it shipped would restage the same fault as an
+  // upgrade. So it is carried, and the note says it is unconfirmed and may
+  // include personal debt. Overstating is the safe error against a lender;
+  // understating is not.
+  const counted = rows.concat(unclassified);
+  counted.sort(function(x, y){
+    const order = { card:0, line:1, loan:2, lease:3 };
+    return (order[x.kind] || 0) - (order[y.kind] || 0) || y.amount - x.amount; });
+  return { rows: counted, confirmed: rows, excluded: excluded,
+           unclassified: unclassified, sameDebt: sameDebt,
+           total: counted.reduce(function(t, r){ return t + r.amount; }, 0) };
+}
+window.finLiabilityLines = finLiabilityLines;
+window.finCreditorLabel = finCreditorLabel;
+
+function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   const n = [];
-  n.push('Unaudited, prepared by VENIA Collection from its own records, and NOT produced by '
-    + 'double-entry bookkeeping. There is no general ledger behind these figures, so equity is '
-    + 'stated as assets less liabilities rather than carried forward from prior periods and '
-    + 'reconciled. A reader should treat this as a statement of position assembled from source '
-    + 'systems — the bank, the order book, the cost sheets — not as a trial balance.');
+  const L = liab || { rows: [], excluded: [], unclassified: [] };
+  // BASIS OF PREPARATION, not a warning memo.
+  //
+  // The old wording led with "NOT produced by double-entry bookkeeping" and
+  // "there is no general ledger behind these figures", which is true and which
+  // made a lender-facing statement read as a caution about itself. What a
+  // reader actually needs is the basis and the one consequence of it — that
+  // equity is a subtraction rather than a balance carried forward. That is
+  // said plainly here and nothing is dropped: an unaudited management-prepared
+  // statement compiled from source records is exactly what this is.
+  n.push('Unaudited management-prepared interim statement, compiled from the company\u2019s source '
+    + 'records \u2014 the bank feed, the order book and the cost sheets. Equity is stated as assets '
+    + 'less liabilities rather than carried forward from prior periods.');
   if (!bank || !bank.connected) {
     n.push('NO BANK IS CONNECTED, so cash is shown as zero and any card or loan balance is missing. '
       + 'Both sides of this statement are understated and the equity figure is not meaningful.');
@@ -40600,10 +40878,66 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock){
   n.push('Inventory is carried at landed cost — material, labour, overhead, duties and freight — '
     + 'and never at what it might sell for. No write-down has been taken for stock that is old, '
     + 'damaged or out of season, so a reader should ask how much of it is current.');
-  n.push('Liabilities include what the bank reports on cards and credit lines and what is committed '
-    + 'on open purchase orders. They do NOT include amounts owed to suppliers outside the purchase '
-    + 'order system, accrued taxes, or any lease obligation, because this application does not '
-    + 'record those. Liabilities are therefore understated by whatever those come to.');
+  // WHAT IS LEFT OUT IS NAMED, NOT SUMMARISED.
+  //
+  // This note used to say liabilities excluded "any lease obligation, because
+  // this application does not record those" and were "therefore understated".
+  // That was true, and it is the reason the package came back. It is gone
+  // because the lease is CARRIED now — not because the sentence was
+  // inconvenient. Everything still outside these records is still said.
+  n.push('Liabilities are listed creditor by creditor above, at the balance reported by each '
+    + 'institution or as stated where no feed exists. Amounts owed to suppliers outside the '
+    + 'purchase-order system and accrued taxes are not held in these records and are not included.');
+  if (L.excluded && L.excluded.length) {
+    n.push('The following are personal obligations of the founders and are NOT liabilities of the '
+      + 'business: ' + L.excluded.map(function(r){ return r.label; }).join('; ') + '. They are '
+      + 'named here so their absence from this statement is deliberate and visible rather than '
+      + 'an omission.');
+  }
+  // AN UNANSWERED QUESTION IS CARRIED, AND SAID. Dropping it would understate
+  // liabilities, which is the fault this whole section exists to fix; carrying
+  // it silently would assert it is the business's debt. So it is carried and
+  // named, and the reader is told the total may include personal balances.
+  if (L.unclassified && L.unclassified.length) {
+    n.push(L.unclassified.length + ' account' + (L.unclassified.length === 1 ? '' : 's')
+      + ' above ' + (L.unclassified.length === 1 ? 'has' : 'have')
+      + ' not yet been confirmed as business or personal and '
+      + (L.unclassified.length === 1 ? 'is' : 'are') + ' INCLUDED in the total pending '
+      + 'confirmation: ' + L.unclassified.map(function(r){ return r.label
+          + ' ($' + Math.round(r.amount || 0).toLocaleString('en-US') + ')'; }).join('; ')
+      + '. Business liabilities may therefore be overstated by any of these that prove personal.');
+  }
+  // A LEASE WITHOUT A STATED LIABILITY IS NOT A MEASURED LEASE.
+  //
+  // The servicing account for a lease reports this month's position — the
+  // Rivian account reported +$1,226.63, money paid ahead — and that is not what
+  // remains owed under the lease. Carrying it silently would put a precise,
+  // wrong number on a lender's desk. It is named until someone enters the real
+  // obligation, which comes from a payoff statement, not from a buyout quote.
+  const needing = (L.rows || []).filter(function(r){ return r.needsStated; });
+  if (needing.length) {
+    n.push(needing.map(function(r){ return r.label; }).join('; ')
+      + (needing.length === 1 ? ' is a lease or loan carried' : ' are leases or loans carried')
+      + ' at the balance reported by the servicing account, which is a current position and NOT '
+      + 'the remaining obligation. The obligation has not been measured and this statement does '
+      + 'not present one. A payoff statement from the lender is required; a purchase or buyout '
+      + 'quote is a price for acquiring the asset and is not the liability.');
+  }
+  const inCredit = (L.rows || []).filter(function(r){ return r.inCredit; });
+  if (inCredit.length) {
+    n.push(inCredit.map(function(r){ return r.label; }).join('; ')
+      + (inCredit.length === 1 ? ' is' : ' are') + ' in CREDIT at the reporting date — paid ahead '
+      + 'rather than owing — and so ' + (inCredit.length === 1 ? 'contributes' : 'contribute')
+      + ' nothing to liabilities. The credit is not carried as an asset either.');
+  }
+  // ONE CREDIT LINE, SEVERAL CARDS. Named so a reader who sees three Chase
+  // cards in a statement pack and one Chase row here knows why.
+  if (L.sameDebt && L.sameDebt.length) {
+    n.push('The following are additional cards issued on a credit line already listed above, not '
+      + 'separate obligations, and are therefore not added: '
+      + L.sameDebt.map(function(r){ return r.label
+          + (r.partOf ? ' on ' + r.partOf : ''); }).join('; ') + '.');
+  }
   return n;
 }
 window.finBalanceSheetNotes = finBalanceSheetNotes;
@@ -45033,15 +45367,68 @@ window.cmdRenderBank = function(){
         <button class="ag-btn ag-btn-ghost ag-btn-sm" title="${off ? 'Include in totals' : 'Exclude from totals'}" onclick="bankToggleIgnore('${slEsc(a.id)}')">${off ? '+' : '−'}</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" title="Disconnect" onclick="bankDisconnect('${slEsc(a.id)}')">✕</button>
       </span>
-    </div>`;
+    </div>
+    ${!isCash ? (function(){
+      // WHOSE DEBT IS THIS. A feed knows the balance and nothing about who owes
+      // it, and a lender cannot confirm "is ...4213 business debt" from a line
+      // that says K. LY-4213. Unset is a real third state, shown as such: an
+      // unclassified account is left out of the balance sheet total and named
+      // on the statement, because counting it would assert it is the business's
+      // and dropping it would assert it is not.
+      var m = (typeof finAcctMeta === 'function' ? finAcctMeta(a.id) : null) || {};
+      var own = m.ownership || '';
+      var nm = (typeof finCreditorLabel === 'function') ? finCreditorLabel(a, m) : (a.name || '');
+      return '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 0 9px 0;'
+        + 'border-bottom:1px solid var(--border);font-size:10.5px;margin-top:-1px">'
+        + '<select class="fs" style="min-height:auto;padding:4px 7px;font-size:10.5px"'
+        + ' title="Business debt appears on the balance sheet. Personal debt never does."'
+        + ' onchange="finAcctSetOwnership(\'' + slEsc(a.id) + '\', this.value)">'
+        + ['', 'business', 'personal', 'part'].map(function(v){
+            var lbl = v === '' ? '— not yet confirmed (counted) —'
+              : v === 'business' ? 'Business debt'
+              : v === 'personal' ? 'Personal — off the business sheet'
+              : 'Another card on a line already listed — not added';
+            return '<option value="' + v + '"' + (own === v ? ' selected' : '') + '>' + lbl + '</option>';
+          }).join('')
+        + '</select>'
+        + '<span style="color:var(--muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+        + (m.creditor ? slEsc(nm) : '<i>no creditor name set</i>')
+        + (m.kind && m.kind !== 'card' ? ' · ' + slEsc(m.kind) : '')
+        + (m.statedLiability != null && m.statedLiability !== '' ? ' · stated $'
+            + Math.round(Number(m.statedLiability)).toLocaleString('en-US') : '')
+        + '</span>'
+        + '<button class="ag-btn ag-btn-ghost ag-btn-sm" title="Name the creditor as a lender should read it, and set what kind of debt it is"'
+        + ' onclick="finAcctNameIt(\'' + slEsc(a.id) + '\')">Name</button>'
+        + '</div>';
+    })() : ''}`;
   };
   const group = (title, list, note) => list.length
     ? `<div class="micro-label" style="margin:14px 0 2px">${title}</div>${note ? `<div style="font-size:10px;color:var(--muted);margin-bottom:4px">${note}</div>` : ''}${list.map(row).join('')}`
     : '';
   const mirrorList = bk.accounts.filter(a => a._mirror);
   const ignoredList = bk.accounts.filter(a => bk.ignored.indexOf(a.id) >= 0 && !a._mirror);
+  // Creditors with no feed, shown beside the connected ones so the debt a
+  // lender sees on the balance sheet is all in one place.
+  const manualRows = (STATE.finManualLiabs || []).map(function(x){
+    const own = x.ownership || '';
+    return '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;'
+      + 'padding:9px 0;border-bottom:1px solid var(--border);font-size:11.5px">'
+      + '<span style="min-width:0">' + slEsc(x.creditor || 'Unnamed creditor')
+      + ' <span style="color:var(--muted)">no feed · ' + slEsc(x.kind || 'line')
+      + (x.asOf ? ' · stated ' + slEsc(x.asOf) : '')
+      + ' · ' + (own === 'business' ? 'business' : own === 'personal' ? 'personal — off the business sheet'
+          : 'not yet classified') + '</span></span>'
+      + '<span style="display:flex;align-items:center;gap:8px;white-space:nowrap">'
+      + '<span style="font-family:\'DM Mono\',monospace">−' + money(Number(x.amount) || 0) + '</span>'
+      + '<button class="ag-btn ag-btn-ghost ag-btn-sm" title="Remove" onclick="finRemoveManualLiability(\''
+      + slEsc(x.id) + '\')">✕</button></span></div>';
+  }).join('');
   const acctRows = group('Cash', bk.cashAccts)
-    + group('Credit &amp; loans', bk.debtAccts, 'Balances owed — never counted as cash.')
+    + group('Credit &amp; loans', bk.debtAccts, 'Balances owed — never counted as cash. Business debt reaches the balance sheet; personal debt never does.')
+    + '<div class="micro-label" style="margin:14px 0 2px">Stated creditors</div>'
+    + '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">A creditor with no bank feed — PayPal, a private note — is still a liability.</div>'
+    + manualRows
+    + '<div style="padding:8px 0"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finAddManualLiability()">+ Add a creditor with no feed</button></div>'
     + group('Other', bk.otherAccts)
     + group('Not counted', mirrorList.concat(ignoredList), mirrorList.length ? 'Extra cards reporting the same credit line’s balance — counted once above.' : '');
   const catOpts = (sel) => {
