@@ -40637,11 +40637,19 @@ function finAcctSetOwnership(id, val){
   if (!id) return;
   STATE.finAcctMeta = STATE.finAcctMeta || {};
   const m = STATE.finAcctMeta[id] = STATE.finAcctMeta[id] || {};
-  if (val === 'business' || val === 'personal') m.ownership = val; else delete m.ownership;
+  if (val === 'business' || val === 'personal' || val === 'part') m.ownership = val;
+  else delete m.ownership;
+  if (val === 'part' && !m.partOf) {
+    const on = prompt('Which line is this card issued on?\n\ne.g. "Chase Ink Business Cash (\u20264213)"\n\n'
+      + 'It will be shown as part of that account and never added to the total.', '');
+    if (on !== null) m.partOf = String(on).trim();
+  }
   save();
   try { renderPage(STATE.currentPage); } catch(e){}
-  try { showToast(val ? (val === 'business' ? 'Counted as business debt' : 'Personal — kept off the business sheet')
-    : 'Left unclassified — it stays off the total and is named on the statement'); } catch(e){}
+  try { showToast(val === 'business' ? 'Counted as business debt'
+    : val === 'personal' ? 'Personal — kept off the business sheet'
+    : val === 'part' ? 'Shown as part of another line — not added twice'
+    : 'Unconfirmed — still counted, and named on the statement as unconfirmed'); } catch(e){}
 }
 window.finAcctSetOwnership = finAcctSetOwnership;
 
@@ -40747,7 +40755,7 @@ function finLiabilityLines(asAt){
     return raw + (asAt ? (moved[a.id] || 0) : 0);
   };
 
-  const rows = [], excluded = [], unclassified = [];
+  const rows = [], excluded = [], unclassified = [], sameDebt = [];
   accts.forEach(function(a){
     const m = finAcctMeta(a.id);
     const own = m && m.ownership;
@@ -40763,7 +40771,15 @@ function finLiabilityLines(asAt){
     const row = { id: a.id, label: label, amount: amount, kind: kind,
                   stated: stated != null && isFinite(stated),
                   ownership: own || '', note: (m && m.note) || '' };
-    if (own === 'business') rows.push(row);
+    // A CARDHOLDER CARD IS NOT A SECOND DEBT. Chase reports an Ink Business
+    // Cash account and each card issued on it — K. LY (…4213), C. KO (…4234),
+    // C. KO (…6111) — as separate accounts. They are one credit line with one
+    // balance. Calling them personal would be false (they are business cards)
+    // and calling them business would count the same money twice, which is how
+    // an $18,255 line gets to be a number nobody can explain. They are shown,
+    // attributed to the account they belong to, and never added.
+    if (own === 'part') { row.partOf = (m && m.partOf) || ''; sameDebt.push(row); }
+    else if (own === 'business') rows.push(row);
     else if (own === 'personal') excluded.push(row);
     else unclassified.push(row);
   });
@@ -40781,14 +40797,20 @@ function finLiabilityLines(asAt){
     else unclassified.push(row);
   });
 
-  // Leases last: a lender reads revolving debt first, and it keeps the ordering
-  // stable however the feed happens to return accounts.
-  const order = { card:0, line:1, loan:2, lease:3 };
-  rows.sort(function(x, y){
+  // COUNTED, AND SAID. An unclassified account used to be left out of the
+  // total. That is the wrong direction to be wrong in: understating liabilities
+  // is exactly what the SBA package came back for, and an app that silently
+  // dropped every card the day it shipped would restage the same fault as an
+  // upgrade. So it is carried, and the note says it is unconfirmed and may
+  // include personal debt. Overstating is the safe error against a lender;
+  // understating is not.
+  const counted = rows.concat(unclassified);
+  counted.sort(function(x, y){
+    const order = { card:0, line:1, loan:2, lease:3 };
     return (order[x.kind] || 0) - (order[y.kind] || 0) || y.amount - x.amount; });
-
-  return { rows: rows, excluded: excluded, unclassified: unclassified,
-           total: rows.reduce(function(t, r){ return t + r.amount; }, 0) };
+  return { rows: counted, confirmed: rows, excluded: excluded,
+           unclassified: unclassified, sameDebt: sameDebt,
+           total: counted.reduce(function(t, r){ return t + r.amount; }, 0) };
 }
 window.finLiabilityLines = finLiabilityLines;
 window.finCreditorLabel = finCreditorLabel;
@@ -40845,16 +40867,26 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
       + 'named here so their absence from this statement is deliberate and visible rather than '
       + 'an omission.');
   }
-  // AN UNANSWERED QUESTION IS NOT A ZERO. Counting an unclassified account
-  // would assert it is business debt; dropping it silently would assert it is
-  // not. Neither is ours to assert, so it is named and excluded from the total.
+  // AN UNANSWERED QUESTION IS CARRIED, AND SAID. Dropping it would understate
+  // liabilities, which is the fault this whole section exists to fix; carrying
+  // it silently would assert it is the business's debt. So it is carried and
+  // named, and the reader is told the total may include personal balances.
   if (L.unclassified && L.unclassified.length) {
-    n.push(L.unclassified.length + ' account' + (L.unclassified.length === 1 ? ' has' : 's have')
-      + ' NOT been classified as business or personal and '
-      + (L.unclassified.length === 1 ? 'is' : 'are') + ' therefore excluded from the total: '
-      + L.unclassified.map(function(r){ return r.label
+    n.push(L.unclassified.length + ' account' + (L.unclassified.length === 1 ? '' : 's')
+      + ' above ' + (L.unclassified.length === 1 ? 'has' : 'have')
+      + ' not yet been confirmed as business or personal and '
+      + (L.unclassified.length === 1 ? 'is' : 'are') + ' INCLUDED in the total pending '
+      + 'confirmation: ' + L.unclassified.map(function(r){ return r.label
           + ' ($' + Math.round(r.amount || 0).toLocaleString('en-US') + ')'; }).join('; ')
-      + '. Until each is confirmed, total liabilities are understated by that amount.');
+      + '. Business liabilities may therefore be overstated by any of these that prove personal.');
+  }
+  // ONE CREDIT LINE, SEVERAL CARDS. Named so a reader who sees three Chase
+  // cards in a statement pack and one Chase row here knows why.
+  if (L.sameDebt && L.sameDebt.length) {
+    n.push('The following are additional cards issued on a credit line already listed above, not '
+      + 'separate obligations, and are therefore not added: '
+      + L.sameDebt.map(function(r){ return r.label
+          + (r.partOf ? ' on ' + r.partOf : ''); }).join('; ') + '.');
   }
   return n;
 }
@@ -45301,8 +45333,11 @@ window.cmdRenderBank = function(){
         + '<select class="fs" style="min-height:auto;padding:4px 7px;font-size:10.5px"'
         + ' title="Business debt appears on the balance sheet. Personal debt never does."'
         + ' onchange="finAcctSetOwnership(\'' + slEsc(a.id) + '\', this.value)">'
-        + ['', 'business', 'personal'].map(function(v){
-            var lbl = v === '' ? '— not yet classified —' : v === 'business' ? 'Business debt' : 'Personal — off the business sheet';
+        + ['', 'business', 'personal', 'part'].map(function(v){
+            var lbl = v === '' ? '— not yet confirmed (counted) —'
+              : v === 'business' ? 'Business debt'
+              : v === 'personal' ? 'Personal — off the business sheet'
+              : 'Another card on a line already listed — not added';
             return '<option value="' + v + '"' + (own === v ? ' selected' : '') + '>' + lbl + '</option>';
           }).join('')
         + '</select>'
