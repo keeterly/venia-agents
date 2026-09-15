@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '525';
+  const BUILD = '526';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40701,6 +40701,15 @@ function finAcctNameIt(id){
     m.leaseTerms.monthsRemaining = num('Months remaining on the lease', m.leaseTerms.monthsRemaining);
     m.leaseTerms.annualRate = num('Discount rate — the rate implicit in the lease, or your '
       + 'incremental borrowing rate (annual %, e.g. 7.5)', m.leaseTerms.annualRate);
+    // WHEN, not just how much. Every US retail auto lease bills in advance.
+    const tm = prompt('Are the payments due at the START of each month or the END?\n\n'
+      + 'Type advance or arrears. Vehicle leases are almost always ADVANCE \u2014 the first '
+      + 'payment is due at signing.\n\nIt changes the liability by one month of discounting.',
+      m.leaseTerms.paymentTiming || 'advance');
+    if (tm !== null) {
+      m.leaseTerms.paymentTiming =
+        String(tm).trim().toLowerCase().slice(0, 3) === 'adv' ? 'advance' : 'arrears';
+    }
     const q = prompt('Purchase / buyout quote, if you have one.\n\nRecorded for the DEBT SCHEDULE '
       + 'and disclosed as a quote. It is a price for acquiring the vehicle, is NOT a liability, and '
       + 'never reaches the balance sheet totals.',
@@ -40799,17 +40808,30 @@ function finLeaseASC842(meta){
   const ok = isFinite(pmt) && pmt > 0 && isFinite(n) && n > 0 && isFinite(annual) && annual >= 0;
   if (!ok) return { computable: false, liability: 0, rouAsset: 0 };
   // Present value of the remaining payments, discounted at the rate implicit in
-  // the lease or the incremental borrowing rate. An annuity-due is not assumed:
-  // payments in arrears is the conservative reading and the app does not know
-  // which it is, so it says which it used.
+  // the lease or the incremental borrowing rate.
+  //
+  // WHEN the payment lands is part of the measurement, not a detail. Every US
+  // retail auto lease bills IN ADVANCE — the first payment is due at signing —
+  // and a payment made at the start of the month is discounted one month less
+  // than the same payment made at the end of it. On the Rivian that is $98.63
+  // on $23,581.92: small, and understating, which is the direction the SBA
+  // package came back for.
+  //
+  // Build 525 assumed arrears and disclosed the assumption, which was honest
+  // while nobody had been asked. Now it is asked. A lease that has NOT been
+  // asked keeps arrears, because silently re-measuring a lease upward on
+  // upgrade would move a number a lender has already been shown.
+  const timing = String(t.paymentTiming || '').trim().toLowerCase() === 'advance'
+    ? 'advance' : 'arrears';
   const r = annual / 100 / 12;
-  const pv = r === 0 ? pmt * n : pmt * (1 - Math.pow(1 + r, -n)) / r;
+  let pv = r === 0 ? pmt * n : pmt * (1 - Math.pow(1 + r, -n)) / r;
+  if (timing === 'advance') pv = pv * (1 + r);      // at r === 0 this is a no-op
   const liability = Math.round(pv * 100) / 100;
   // On initial recognition the right-of-use asset equals the liability, adjusted
   // for prepayments and initial direct costs. Neither is known here, so the
   // asset is stated equal to the liability and the note says that is what it is.
   return { computable: true, liability: liability, rouAsset: liability,
-           payment: pmt, months: n, rate: annual };
+           payment: pmt, months: n, rate: annual, timing: timing };
 }
 window.finLeaseASC842 = finLeaseASC842;
 
@@ -41059,9 +41081,19 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   }
   const measured = (L.rows || []).filter(function(r){ return r.leaseTerms; });
   if (measured.length) {
+    // WHICH TIMING, PER LEASE. One blanket sentence asserting arrears cannot
+    // describe a lease measured in advance, and a reader checking the number
+    // needs to know which convention produced it before the arithmetic agrees.
     n.push('Operating lease liabilities are measured under ASC 842 as the present value of the '
-      + 'remaining lease payments, discounted at the rate stated for each lease, with payments '
-      + 'treated as made in arrears. The right-of-use asset is stated equal to the liability on '
+      + 'remaining lease payments, discounted at the rate stated for each lease: '
+      + measured.map(function(r){
+          return r.label + ' \u2014 ' + r.leaseTerms.months + ' payments of $'
+            + Number(r.leaseTerms.payment).toLocaleString('en-US',
+                { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            + ' at ' + r.leaseTerms.rate + '% a year, payable '
+            + (r.leaseTerms.timing === 'advance' ? 'in advance' : 'in arrears');
+        }).join('; ')
+      + '. The right-of-use asset is stated equal to the liability on '
       + 'recognition; no adjustment has been made for prepayments or initial direct costs.');
   }
   const needing = (L.rows || []).filter(function(r){ return r.needsStated; });
