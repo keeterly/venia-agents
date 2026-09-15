@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '524';
+  const BUILD = '525';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40430,6 +40430,10 @@ function finBalanceSheet(opts){
   ];
   if (prepaid > 0) assets.push({ label: 'Paid to factories, goods not yet received',
     amount: prepaid, note: 'deposits against open production', current: !!asAt });
+  // The other half of an operating lease. Only leases whose terms actually
+  // compute get one: a right-of-use asset invented to offset a liability is
+  // just a balanced fiction.
+  finLeaseAssets().forEach(function(r){ assets.push(r); });
 
   // ONE ROW PER CREDITOR. This was a single "Cards and credit lines" line that
   // summed every connected credit account — a business card, a car lease and
@@ -40471,6 +40475,9 @@ function finBalanceSheet(opts){
     // Working capital is the number a lender computes first, so it is computed
     // here rather than left to them.
     workingCapital: (cash + ar + stock) - liabTotal,
+    // Disclosed, never totalled. A purchase quote is a price for acquiring the
+    // asset; it is not a liability and does not belong in one.
+    leaseDisclosures: finLeaseDisclosures(),
     // What was left out, and why — the statement carries its own exclusions.
     excludedPersonal: liab.excluded,
     unclassifiedDebt: liab.unclassified,
@@ -40675,20 +40682,46 @@ function finAcctNameIt(id){
   // account is a payment balance, not the lease liability, and a buyout quote
   // is a price rather than a debt. Both are asked for separately so neither is
   // mistaken for the other on a statement of position.
-  if (m.kind === 'lease' || m.kind === 'loan') {
-    const li = prompt('Liability to carry on the balance sheet, if the feed balance is not it.\n\n'
-      + 'Leave empty to use the feed balance. This is the accounting liability — NOT a buyout quote.',
-      m.statedLiability != null ? String(m.statedLiability) : '');
-    if (li !== null) {
-      const v = String(li).replace(/[^0-9.\-]/g, '');
-      if (v === '') delete m.statedLiability; else m.statedLiability = Number(v);
-    }
-    const q = prompt('Payoff / buyout quote, if you have one.\n\nThis is recorded for the debt '
-      + 'schedule and is NEVER put on the balance sheet.',
+  if (m.kind === 'lease') {
+    // ASC 842 OR PENDING. All three or none: a liability computed from two of
+    // them is a guess wearing a formula.
+    m.leaseTerms = m.leaseTerms || {};
+    const num = (label, cur) => {
+      const v = prompt(label, cur != null && cur !== '' ? String(cur) : '');
+      if (v === null) return cur;
+      const c = String(v).replace(/[^0-9.\-]/g, '');
+      return c === '' ? '' : Number(c);
+    };
+    alert('Operating lease — ASC 842\n\nThe balance sheet needs the monthly payment, the months '
+      + 'remaining and the discount rate. With all three it carries an operating lease liability '
+      + 'and a matching right-of-use asset.\n\nLeave any of them empty and the statement says the '
+      + 'obligation is PENDING and carries nothing — which is the honest answer until the lease '
+      + 'documents are to hand. A purchase quote is not a substitute.');
+    m.leaseTerms.monthlyPayment = num('Monthly lease payment', m.leaseTerms.monthlyPayment);
+    m.leaseTerms.monthsRemaining = num('Months remaining on the lease', m.leaseTerms.monthsRemaining);
+    m.leaseTerms.annualRate = num('Discount rate — the rate implicit in the lease, or your '
+      + 'incremental borrowing rate (annual %, e.g. 7.5)', m.leaseTerms.annualRate);
+    const q = prompt('Purchase / buyout quote, if you have one.\n\nRecorded for the DEBT SCHEDULE '
+      + 'and disclosed as a quote. It is a price for acquiring the vehicle, is NOT a liability, and '
+      + 'never reaches the balance sheet totals.',
       m.buyoutQuote != null ? String(m.buyoutQuote) : '');
     if (q !== null) {
       const v = String(q).replace(/[^0-9.\-]/g, '');
       if (v === '') delete m.buyoutQuote; else m.buyoutQuote = Number(v);
+    }
+    if (m.buyoutQuote != null) {
+      const th = prompt('That quote is valid through (as printed on it)',
+        m.buyoutQuoteThrough || '10/15/2026');
+      if (th !== null && String(th).trim()) m.buyoutQuoteThrough = String(th).trim();
+    }
+    delete m.statedLiability;      // a lease is measured, never stated
+  } else if (m.kind === 'loan') {
+    const li = prompt('Balance to carry on the balance sheet, if the feed balance is not it.\n\n'
+      + 'Leave empty to use the feed balance.',
+      m.statedLiability != null ? String(m.statedLiability) : '');
+    if (li !== null) {
+      const v = String(li).replace(/[^0-9.\-]/g, '');
+      if (v === '') delete m.statedLiability; else m.statedLiability = Number(v);
     }
   }
   save();
@@ -40733,6 +40766,91 @@ function finRemoveManualLiability(id){
   try { renderPage(STATE.currentPage); } catch(e){}
 }
 window.finRemoveManualLiability = finRemoveManualLiability;
+
+// ══════════════════════════════════════════════════════════════════════════
+//  A LEASE UNDER ASC 842, OR NOTHING
+// ══════════════════════════════════════════════════════════════════════════
+// The Rivian came with a Chase purchase quote: $75,292.41, good through
+// 10/15/2026. It is tempting to put that on the balance sheet because it is the
+// only large, documented, official-looking number available. It is the wrong
+// number twice over.
+//
+// It is a PRICE FOR ACQUIRING THE VEHICLE, not the obligation under the current
+// lease. Chase says so on the quote itself: the final payment amount may differ
+// and excludes fees, tolls and taxes not yet posted.
+//
+// And put on the liability side alone it would take this business from roughly
+// −$1,400 of net position to −$76,700 — a $75,000 hole where a vehicle should
+// be, which misrepresents the borrower to the lender in the opposite direction
+// from the fault that started this.
+//
+// Nor may it be posted on BOTH sides to keep net position whole. Two wrong
+// numbers that cancel are still two wrong numbers, and a right-of-use asset is
+// not "whatever makes the liability disappear".
+//
+// So: an operating lease liability and its matching right-of-use asset are
+// computed from the LEASE TERMS — payment, months remaining, discount rate —
+// and from nothing else. Absent those, the balance sheet says PENDING and
+// carries zero. The quote is disclosed separately, as what it is.
+function finLeaseASC842(meta){
+  const t = (meta && meta.leaseTerms) || {};
+  const pmt = Number(t.monthlyPayment), n = Math.round(Number(t.monthsRemaining));
+  const annual = Number(t.annualRate);
+  const ok = isFinite(pmt) && pmt > 0 && isFinite(n) && n > 0 && isFinite(annual) && annual >= 0;
+  if (!ok) return { computable: false, liability: 0, rouAsset: 0 };
+  // Present value of the remaining payments, discounted at the rate implicit in
+  // the lease or the incremental borrowing rate. An annuity-due is not assumed:
+  // payments in arrears is the conservative reading and the app does not know
+  // which it is, so it says which it used.
+  const r = annual / 100 / 12;
+  const pv = r === 0 ? pmt * n : pmt * (1 - Math.pow(1 + r, -n)) / r;
+  const liability = Math.round(pv * 100) / 100;
+  // On initial recognition the right-of-use asset equals the liability, adjusted
+  // for prepayments and initial direct costs. Neither is known here, so the
+  // asset is stated equal to the liability and the note says that is what it is.
+  return { computable: true, liability: liability, rouAsset: liability,
+           payment: pmt, months: n, rate: annual };
+}
+window.finLeaseASC842 = finLeaseASC842;
+
+// The right-of-use assets that belong beside the lease liabilities. Only leases
+// whose terms actually compute appear — a pending lease has no asset either,
+// because inventing one is how the balance sheet gets balanced by fiction.
+function finLeaseAssets(){
+  const accts = ((STATE.finBank && STATE.finBank.accounts) || [])
+    .filter(function(a){ return a && (a.category || '') === 'credit'; });
+  const out = [];
+  accts.forEach(function(a){
+    const m = finAcctMeta(a.id);
+    if (!m || m.ownership !== 'business' || m.kind !== 'lease') return;
+    const calc = finLeaseASC842(m);
+    if (!calc.computable) return;
+    out.push({ id: a.id, label: 'Right-of-use asset — ' + finCreditorLabel(a, m),
+               amount: calc.rouAsset,
+               note: 'operating lease, ASC 842' });
+  });
+  return out;
+}
+window.finLeaseAssets = finLeaseAssets;
+
+// What the quote IS, said once, where a lender can read it and nowhere near the
+// totals. The founder's wording, kept verbatim.
+function finLeaseDisclosures(){
+  const accts = ((STATE.finBank && STATE.finBank.accounts) || [])
+    .filter(function(a){ return a && (a.category || '') === 'credit'; });
+  const out = [];
+  accts.forEach(function(a){
+    const m = finAcctMeta(a.id);
+    if (!m || m.buyoutQuote == null || m.buyoutQuote === '') return;
+    const amt = Number(m.buyoutQuote);
+    if (!isFinite(amt)) return;
+    out.push({ label: finCreditorLabel(a, m), amount: amt,
+               text: 'Current Chase/Rivian purchase quote, valid through '
+                 + (m.buyoutQuoteThrough || '10/15/2026') + '.' });
+  });
+  return out;
+}
+window.finLeaseDisclosures = finLeaseDisclosures;
 
 function finLiabilityLines(asAt){
   const bank = (typeof finBankData === 'function') ? finBankData() : null;
@@ -40787,16 +40905,30 @@ function finLiabilityLines(asAt){
     const stated = m && m.statedLiability != null && m.statedLiability !== ''
       ? Number(m.statedLiability) : null;
     const feed = feedAmount(a);
-    const hasStated = stated != null && isFinite(stated);
-    const amount = hasStated ? stated : feed.amount;
+    let hasStated = stated != null && isFinite(stated);
+    let amount = hasStated ? stated : feed.amount;
+    // A LEASE IS MEASURED UNDER ASC 842 OR IT IS PENDING. Neither a servicing
+    // balance nor a purchase quote is the obligation, so a lease does not fall
+    // back to the feed the way a card does: without terms it carries ZERO and
+    // says pending, and the reader is not handed a precise wrong number.
+    let leaseCalc = null, pending = false;
+    if (kind === 'lease') {
+      leaseCalc = finLeaseASC842(m);
+      if (leaseCalc.computable) { amount = leaseCalc.liability; hasStated = true; }
+      else { amount = 0; hasStated = false; pending = true; }
+    }
     // A LEASE CARRIED AT ITS PAYMENT-ACCOUNT BALANCE IS NOT A LEASE LIABILITY.
     // What a lessor's servicing account reports is this month's position, not
     // what remains owed under the lease. Saying so on the row is the difference
     // between a number a reader can rely on and one that merely looks precise.
-    const needsStated = !hasStated && (kind === 'lease' || kind === 'loan');
-    const row = { id: a.id, label: label, amount: amount, kind: kind,
-                  stated: hasStated, needsStated: needsStated,
-                  inCredit: !hasStated && feed.inCredit, creditAmount: feed.creditAmount,
+    const needsStated = !hasStated && kind === 'loan';
+    const row = { id: a.id, label: kind === 'lease' && !pending
+                    ? 'Operating lease liability — ' + label : label,
+                  amount: amount, kind: kind,
+                  stated: hasStated, needsStated: needsStated, pending: pending,
+                  leaseTerms: leaseCalc && leaseCalc.computable ? leaseCalc : null,
+                  inCredit: !hasStated && !pending && feed.inCredit,
+                  creditAmount: feed.creditAmount,
                   ownership: own || '', note: (m && m.note) || '' };
     // A CARDHOLDER CARD IS NOT A SECOND DEBT. Chase reports an Ink Business
     // Cash account and each card issued on it — K. LY (…4213), C. KO (…4234),
@@ -40914,14 +41046,39 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   // remains owed under the lease. Carrying it silently would put a precise,
   // wrong number on a lender's desk. It is named until someone enters the real
   // obligation, which comes from a payoff statement, not from a buyout quote.
+  const pending = (L.rows || []).filter(function(r){ return r.pending; });
+  if (pending.length) {
+    n.push('LEASE OBLIGATION PENDING MEASUREMENT. '
+      + pending.map(function(r){ return r.label; }).join('; ')
+      + (pending.length === 1 ? ' is a confirmed business lease' : ' are confirmed business leases')
+      + ' of the company. The operating lease liability and matching right-of-use asset have NOT '
+      + 'been recognised, because they have not been calculated from the lease terms under '
+      + 'ASC 842 — the monthly payment, the months remaining and the discount rate. No amount is '
+      + 'carried on either side of this statement rather than an estimated one. Neither the '
+      + 'servicing-account balance nor a purchase quote is that measurement.');
+  }
+  const measured = (L.rows || []).filter(function(r){ return r.leaseTerms; });
+  if (measured.length) {
+    n.push('Operating lease liabilities are measured under ASC 842 as the present value of the '
+      + 'remaining lease payments, discounted at the rate stated for each lease, with payments '
+      + 'treated as made in arrears. The right-of-use asset is stated equal to the liability on '
+      + 'recognition; no adjustment has been made for prepayments or initial direct costs.');
+  }
   const needing = (L.rows || []).filter(function(r){ return r.needsStated; });
   if (needing.length) {
     n.push(needing.map(function(r){ return r.label; }).join('; ')
-      + (needing.length === 1 ? ' is a lease or loan carried' : ' are leases or loans carried')
+      + (needing.length === 1 ? ' is a loan carried' : ' are loans carried')
       + ' at the balance reported by the servicing account, which is a current position and NOT '
-      + 'the remaining obligation. The obligation has not been measured and this statement does '
-      + 'not present one. A payoff statement from the lender is required; a purchase or buyout '
-      + 'quote is a price for acquiring the asset and is not the liability.');
+      + 'the remaining obligation. A payoff statement from the lender is required.');
+  }
+  // THE QUOTE, DISCLOSED AND NOWHERE NEAR A TOTAL.
+  const disc = (typeof finLeaseDisclosures === 'function') ? finLeaseDisclosures() : [];
+  if (disc.length) {
+    n.push(disc.map(function(x){
+      return x.label + ' \u2014 $' + Number(x.amount).toLocaleString('en-US',
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ': ' + x.text;
+    }).join(' ') + ' This is a price for acquiring the vehicle and is NOT a liability of the '
+      + 'company. It is disclosed for the debt schedule and is excluded from the totals above.');
   }
   const inCredit = (L.rows || []).filter(function(r){ return r.inCredit; });
   if (inCredit.length) {
@@ -45496,7 +45653,16 @@ window.cmdRenderBank = function(){
       ${STATE.finTrim && STATE.finTrim.total > 0 ? `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:9px 12px;margin:-8px 0 16px;font-size:10px;color:var(--ink);line-height:1.7">
         <strong>${STATE.finTrim.total.toLocaleString()} older transaction${STATE.finTrim.total===1?'':'s'} dropped</strong> to keep the workspace within the size a browser will hold — oldest dated ${slEsc(STATE.finTrim.from||'')}. The current year is never dropped. Export the ledger to keep a copy of what is left.</div>` : ''}
       <div class="ag-sec-head"><h2 class="ag-sec-title">Accounts</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankToggleAccts()">${acctsOpen ? 'Hide' : 'Show ' + bk.accounts.length}</button></div></div>
-      ${acctsOpen
+      ${acctsOpen || (function(){
+        // OPEN WHEN THERE IS SOMETHING TO ANSWER. The list defaulted to
+        // collapsed behind "Show 6", so the founder went looking for the
+        // classification controls, could not find them, and tried to connect
+        // PayPal through Link instead — which is not what any of this is.
+        // An unclassified credit account is a question on a lender document;
+        // it should not be one click further away than the answer.
+        try { return (bk.debtAccts || []).some(function(a){
+          const m = finAcctMeta(a.id); return !m || !m.ownership; }); } catch(e){ return false; }
+      })()
         ? `<div style="max-width:560px;margin-bottom:20px">${acctRows}</div>`
         : `<div style="font-size:11px;color:var(--muted);margin-bottom:20px">${money(bk.bal)} cash${bk.debt ? ' · ' + money(bk.debt) + ' owed' : ''} across ${bk.accounts.length} connected account${bk.accounts.length===1?'':'s'}.</div>`}
       ${finSpendBlock()}
