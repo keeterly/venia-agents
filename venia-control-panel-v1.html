@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '530';
+  const BUILD = '531';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6462,7 +6462,11 @@ const MODULES = {
            'finAcctMeta',
            // A creditor with no bank feed is still a creditor. PayPal is not a
            // connected account and was therefore on no statement at all.
-           'finManualLiabs'],
+           'finManualLiabs',
+           // Whether the founder has confirmed there is nothing owed outside
+           // these records. Only a human can answer it, so it travels with the
+           // other facts a feed cannot know.
+           'finLiabAttest'],
     ls: ['VENIA_REV_GOALS', 'venia_budget'],
   },
   brainstorm: {
@@ -40758,6 +40762,57 @@ function finAcctNameIt(id){
 }
 window.finAcctNameIt = finAcctNameIt;
 
+// "THERE ARE NONE" IS A STRONGER SENTENCE THAN SILENCE, AND IT EXPIRES.
+//
+// The statement said amounts owed to suppliers outside the purchase-order
+// system and accrued taxes "are not held in these records and are not
+// included". An underwriter reads that as "there may be liabilities we have
+// not shown you". Deleting it would be worse: a statement that quietly stops
+// mentioning the limits of its own scope is the fault this package came back
+// for, wearing a tidier coat.
+//
+// The third option is the true one, and only the founder can supply it. Said
+// affirmatively and dated, it is worth more to a lender than the caveat or the
+// silence.
+//
+// And it has a shelf life. An undated "there are none", printed six months on
+// after a franchise-tax bill has accrued, is a false statement nobody decided
+// to make. Past ATTEST_DAYS the caveat comes back on its own.
+const ATTEST_DAYS = 45;
+function finLiabAttestOK(asAt){
+  const a = STATE.finLiabAttest;
+  if (!a || a.none !== true || !a.at) return null;
+  const on = new Date(String(a.at) + 'T12:00:00');
+  if (isNaN(on.getTime())) return null;
+  const ref = asAt ? new Date(String(asAt) + 'T12:00:00') : new Date();
+  const days = (ref.getTime() - on.getTime()) / 864e5;
+  if (days > ATTEST_DAYS) return null;          // stale: it no longer speaks for today
+  return { at: a.at, days: days };
+}
+window.finLiabAttestOK = finLiabAttestOK;
+
+function finAttestNoOtherLiabs(){
+  const cur = STATE.finLiabAttest;
+  if (cur && cur.none === true) {
+    if (!confirm('Withdraw the confirmation recorded on ' + cur.at + '?\n\nThe statement will go '
+        + 'back to saying these records do not hold those amounts.')) return;
+    delete STATE.finLiabAttest;
+  } else {
+    if (!confirm('Confirm, as at today, BOTH of the following:\n\n'
+        + '\u2022 nothing is owed to suppliers outside the purchase-order system\n'
+        + '\u2022 there are no accrued taxes \u2014 payroll, sales or franchise\n\n'
+        + 'This prints on the balance sheet as a positive statement, dated today, in place of '
+        + 'a note saying these records do not hold those amounts. It lapses after '
+        + ATTEST_DAYS + ' days.')) return;
+    STATE.finLiabAttest = { none: true, at: new Date().toISOString().slice(0, 10) };
+  }
+  save();
+  try { renderPage(STATE.currentPage); } catch(e){}
+  try { showToast(STATE.finLiabAttest ? 'Confirmed \u2014 stated on the balance sheet'
+    : 'Withdrawn'); } catch(e){}
+}
+window.finAttestNoOtherLiabs = finAttestNoOtherLiabs;
+
 // A creditor with no bank feed. PayPal is not a connected account and was
 // therefore on no statement at all — not understated, absent.
 function finAddManualLiability(){
@@ -41148,9 +41203,14 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   // That was true, and it is the reason the package came back. It is gone
   // because the lease is CARRIED now — not because the sentence was
   // inconvenient. Everything still outside these records is still said.
+  const attested = (typeof finLiabAttestOK === 'function') ? finLiabAttestOK(d && d.asAtDate) : null;
   n.push('Liabilities are listed creditor by creditor above, at the balance reported by each '
-    + 'institution or as stated where no feed exists. Amounts owed to suppliers outside the '
-    + 'purchase-order system and accrued taxes are not held in these records and are not included.');
+    + 'institution or as stated where no feed exists. '
+    + (attested
+        ? 'There are no amounts owed to suppliers outside the purchase-order system and no '
+          + 'accrued taxes at this date, confirmed by management on ' + attested.at + '.'
+        : 'Amounts owed to suppliers outside the purchase-order system and accrued taxes are not '
+          + 'held in these records and are not included.'));
   if (L.excluded && L.excluded.length) {
     n.push('The following are personal obligations of the founders and are NOT liabilities of the '
       + 'business: ' + L.excluded.map(function(r){ return r.label; }).join('; ') + '. They are '
@@ -45801,6 +45861,25 @@ window.cmdRenderBank = function(){
     + '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">A creditor with no bank feed — PayPal, a private note — is still a liability.</div>'
     + manualRows
     + '<div style="padding:8px 0"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finAddManualLiability()">+ Add a creditor with no feed</button></div>'
+    + (function(){
+        const okAtt = (typeof finLiabAttestOK === 'function') ? finLiabAttestOK(null) : null;
+        const raw = STATE.finLiabAttest;
+        const lapsed = !okAtt && raw && raw.none === true;
+        return '<div style="padding:2px 0 8px;font-size:10px;line-height:1.6;color:var(--muted)">'
+          + (okAtt
+              ? '\u2713 Confirmed ' + slEsc(okAtt.at) + ' \u2014 nothing owed outside these records. '
+                + 'The balance sheet states it.'
+              : lapsed
+                ? 'The confirmation of ' + slEsc(raw.at) + ' has lapsed, so the balance sheet is '
+                  + 'back to saying these records do not hold supplier balances outside the '
+                  + 'purchase-order system, or accrued taxes.'
+                : 'The balance sheet says these records do not hold supplier balances outside the '
+                  + 'purchase-order system, or accrued taxes. If there are none, say so and it '
+                  + 'states that instead.')
+          + ' <button class="ag-btn ag-btn-ghost ag-btn-sm" style="margin-left:4px" '
+          + 'onclick="finAttestNoOtherLiabs()">'
+          + (okAtt ? 'Withdraw' : 'Confirm there are none') + '</button></div>';
+      })()
     + group('Other', bk.otherAccts)
     + group('Not counted', mirrorList.concat(ignoredList), mirrorList.length ? 'Extra cards reporting the same credit line’s balance — counted once above.' : '');
   const catOpts = (sel) => {
