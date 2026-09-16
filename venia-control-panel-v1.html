@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '526';
+  const BUILD = '527';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40444,6 +40444,7 @@ function finBalanceSheet(opts){
     return { label: r.label, amount: r.amount, kind: r.kind,
              note: r.note || (r.kind === 'lease' ? 'lease obligation'
                    : r.manual ? 'stated balance' + (r.asOf ? ' at ' + r.asOf : '') : ''),
+             leaseSplit: r.leaseSplit || null,
              current: !!asAt && !r.stated };
   });
   liabilities.push({ label: 'Committed to factories, unpaid', amount: d.poCommitted || 0,
@@ -40452,6 +40453,12 @@ function finBalanceSheet(opts){
   const assetsTotal = assets.reduce(function(t, r){ return t + r.amount; }, 0);
   const liabTotal = liabilities.reduce(function(t, r){ return t + r.amount; }, 0);
   const equity = assetsTotal - liabTotal;
+  // Everything here is current except the part of a lease that falls outside
+  // twelve months. Cards revolve, stated creditors are demand balances, and
+  // purchase-order commitments are this season's.
+  const nonCurrentTotal = Math.round(liabilities.reduce(function(t, r){
+    return t + ((r.leaseSplit && r.leaseSplit.nonCurrent) || 0); }, 0) * 100) / 100;
+  const currentLiabilitiesTotal = Math.round((liabTotal - nonCurrentTotal) * 100) / 100;
 
   return {
     entity: 'VENIA Collection',
@@ -40474,7 +40481,9 @@ function finBalanceSheet(opts){
     ].filter(function(x){ return x.amount > 0; }),
     // Working capital is the number a lender computes first, so it is computed
     // here rather than left to them.
-    workingCapital: (cash + ar + stock) - liabTotal,
+    workingCapital: (cash + ar + stock) - currentLiabilitiesTotal,
+    currentLiabilitiesTotal: currentLiabilitiesTotal,
+    nonCurrentTotal: nonCurrentTotal,
     // Disclosed, never totalled. A purchase quote is a price for acquiring the
     // asset; it is not a liability and does not belong in one.
     leaseDisclosures: finLeaseDisclosures(),
@@ -40744,6 +40753,16 @@ window.finAcctNameIt = finAcctNameIt;
 function finAddManualLiability(){
   const creditor = prompt('Creditor name\n\ne.g. "PayPal / Synchrony revolving credit"', '');
   if (creditor === null || !String(creditor).trim()) return;
+  // NOT TWICE. Nothing objected the first time and $925.59 of debt that does not
+  // exist went onto a statement bound for the SBA.
+  const nrm = function(v){ return String(v || '').trim().toLowerCase().replace(/\s+/g, ' '); };
+  const already = (STATE.finManualLiabs || []).find(function(x){
+    return x && nrm(x.creditor) === nrm(creditor); });
+  if (already && !confirm('"' + String(already.creditor).trim() + '" is already stated at $'
+      + Number(already.amount || 0).toLocaleString('en-US',
+          { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      + '.\n\nAdding it again counts the same debt twice and overstates liabilities. '
+      + 'Add a second entry anyway?')) return;
   const amt = prompt('Balance owed', '');
   if (amt === null) return;
   const v = Number(String(amt).replace(/[^0-9.\-]/g, ''));
@@ -40834,6 +40853,32 @@ function finLeaseASC842(meta){
            payment: pmt, months: n, rate: annual, timing: timing };
 }
 window.finLeaseASC842 = finLeaseASC842;
+
+// WHAT IS DUE WITHIN A YEAR, AND WHAT IS NOT.
+//
+// Working capital was current assets less TOTAL liabilities. That was harmless
+// while every liability was a revolving card, and became wrong the moment a
+// 20-month lease landed on the sheet: eight of those payments fall outside
+// twelve months, and deducting all twenty made working capital $9,671 worse
+// than the truth on the one number an underwriter computes first.
+//
+// The current portion is not a twelfth of anything. It is the principal that
+// actually comes off in twelve months — today's liability less what the
+// liability will be once twelve more payments have been made.
+function finLeaseSplit(meta){
+  const calc = finLeaseASC842(meta);
+  if (!calc.computable) return { current: 0, nonCurrent: 0, total: 0 };
+  if (calc.months <= 12) {
+    return { current: calc.liability, nonCurrent: 0, total: calc.liability };
+  }
+  const t = (meta && meta.leaseTerms) || {};
+  const later = finLeaseASC842({ leaseTerms: Object.assign({}, t,
+    { monthsRemaining: calc.months - 12 }) });
+  const nonCurrent = later.computable ? later.liability : 0;
+  return { current: Math.round((calc.liability - nonCurrent) * 100) / 100,
+           nonCurrent: nonCurrent, total: calc.liability };
+}
+window.finLeaseSplit = finLeaseSplit;
 
 // The right-of-use assets that belong beside the lease liabilities. Only leases
 // whose terms actually compute appear — a pending lease has no asset either,
@@ -40949,6 +40994,7 @@ function finLiabilityLines(asAt){
                   amount: amount, kind: kind,
                   stated: hasStated, needsStated: needsStated, pending: pending,
                   leaseTerms: leaseCalc && leaseCalc.computable ? leaseCalc : null,
+                  leaseSplit: leaseCalc && leaseCalc.computable ? finLeaseSplit(m) : null,
                   inCredit: !hasStated && !pending && feed.inCredit,
                   creditAmount: feed.creditAmount,
                   ownership: own || '', note: (m && m.note) || '' };
@@ -40963,6 +41009,34 @@ function finLiabilityLines(asAt){
     else if (own === 'business') rows.push(row);
     else if (own === 'personal') excluded.push(row);
     else unclassified.push(row);
+  });
+
+  // EXTRA CARDS DROPPED UPSTREAM ARE STILL SAID.
+  //
+  // finBankData removes accounts that report an already-counted line's balance
+  // — same institution, same subcategory, identical balance — before this function
+  // ever sees them. That is right: counting them would double the line. But it
+  // happens silently, so the note built to explain them never fired, and a
+  // lender holding three Chase statements saw one Chase row here with nothing
+  // saying why. Dropped from the total, named on the statement.
+  const allAccts = (bank && bank.accounts) ? bank.accounts : [];
+  const dupKey = function(a){
+    const bal = (a && a.balance) || {};
+    const amt = bal.current != null ? bal.current : (bal.used != null ? bal.used : null);
+    return amt == null ? null
+      : (a.institution || '') + '|' + (a.subcategory || '') + '|' + amt;
+  };
+  allAccts.forEach(function(a){
+    if (!a || !a._mirror) return;
+    const m = finAcctMeta(a.id) || {};
+    const k = dupKey(a);
+    const carrier = k == null ? null : allAccts.find(function(x){
+      return x && !x._mirror && dupKey(x) === k; });
+    const onLine = (m && m.partOf) || (carrier
+      ? finCreditorLabel(carrier, finAcctMeta(carrier.id) || {}) : '');
+    sameDebt.push({ id: a.id, label: finCreditorLabel(a, m),
+                    amount: feedAmount(a).amount, kind: (m && m.kind) || 'card',
+                    mirror: true, partOf: onLine, ownership: (m && m.ownership) || '' });
   });
 
   // A creditor with no bank feed is still a creditor.
@@ -40998,6 +41072,7 @@ window.finCreditorLabel = finCreditorLabel;
 
 function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   const n = [];
+  const EMD = '\u2014';
   const L = liab || { rows: [], excluded: [], unclassified: [] };
   // BASIS OF PREPARATION, not a warning memo.
   //
@@ -41118,6 +41193,49 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
       + (inCredit.length === 1 ? ' is' : ' are') + ' in CREDIT at the reporting date — paid ahead '
       + 'rather than owing — and so ' + (inCredit.length === 1 ? 'contributes' : 'contribute')
       + ' nothing to liabilities. The credit is not carried as an asset either.');
+  }
+  // CURRENT AND NON-CURRENT. Working capital deducts only what is due within
+  // twelve months, so the statement says which part that is rather than leaving
+  // a reader to wonder why the subtraction does not tie to the total.
+  const split = (L.rows || []).filter(function(r){
+    return r.leaseSplit && r.leaseSplit.nonCurrent > 0; });
+  if (split.length) {
+    const money = function(v){ return '$' + Number(v).toLocaleString('en-US',
+      { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+    n.push('Lease liabilities are split by when they fall due: '
+      + split.map(function(r){
+          return r.label + ' ' + EMD + ' ' + money(r.leaseSplit.current)
+            + ' due within twelve months and ' + money(r.leaseSplit.nonCurrent)
+            + ' not due within twelve months';
+        }).join('; ')
+      + '. Every other liability above is current. Working capital is stated as current assets '
+      + 'less CURRENT liabilities, so the non-current portion is not deducted from it.');
+  }
+  // A CREDITOR STATED TWICE IS A DEBT THAT DOES NOT EXIST.
+  //
+  // PayPal was added twice and $925.59 of invented liability reached a statement
+  // bound for the SBA. Overstating is the safer direction against a lender, but
+  // safer is not correct, and a figure a reader cannot reconcile to a creditor's
+  // own statement is the thing this whole statement exists to avoid.
+  const byName = {};
+  (STATE.finManualLiabs || []).forEach(function(x){
+    if (!x) return;
+    const k = String(x.creditor || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!k) return;
+    (byName[k] = byName[k] || []).push(x);
+  });
+  const dupes = Object.keys(byName).filter(function(k){ return byName[k].length > 1; });
+  if (dupes.length) {
+    n.push('CHECK BEFORE RELYING ON THE TOTAL. The following stated creditors are listed more '
+      + 'than once, and the same debt may therefore be counted twice: '
+      + dupes.map(function(k){
+          const g = byName[k];
+          const sum = g.reduce(function(t, x){ return t + (Number(x.amount) || 0); }, 0);
+          return String(g[0].creditor || '').trim() + ' ' + EMD + ' ' + g.length
+            + ' entries totalling $' + sum.toLocaleString('en-US',
+                { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }).join('; ')
+      + '. Liabilities above may be overstated by the duplicate.');
   }
   // ONE CREDIT LINE, SEVERAL CARDS. Named so a reader who sees three Chase
   // cards in a statement pack and one Chase row here knows why.
