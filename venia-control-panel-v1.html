@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '527';
+  const BUILD = '528';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40640,6 +40640,16 @@ function finAcctMeta(id){
 }
 // What to call a creditor on a document a bank reads. "K. LY-4213" is a feed
 // label; "Chase Ink Business Cash (...4213)" is a creditor.
+// The four digits a human would read off a label, wherever they sit: "K. LY-4213",
+// "Chase Ink Business Cash (…4213)" and "4213" all give 4213. The LAST run of
+// four is taken, because an account name that carries two numbers ends with the
+// one that identifies it.
+function finLast4(text){
+  const hit = String(text || '').match(/(\d{4})(?!.*\d{4})/);
+  return hit ? hit[1] : '';
+}
+window.finLast4 = finLast4;
+
 function finCreditorLabel(acct, meta){
   const m = meta || {};
   const name = String(m.creditor || '').trim() || String((acct && acct.name) || '').trim() || 'Unnamed account';
@@ -41005,7 +41015,18 @@ function finLiabilityLines(asAt){
     // and calling them business would count the same money twice, which is how
     // an $18,255 line gets to be a number nobody can explain. They are shown,
     // attributed to the account they belong to, and never added.
-    if (own === 'part') { row.partOf = (m && m.partOf) || ''; sameDebt.push(row); }
+    if (own === 'part') {
+      row.partOf = (m && m.partOf) || '';
+      // A ROW CARRYING THE LINE'S OWN NUMBER IS NOT ANOTHER CARD. Chase reports
+      // the Ink line under several card numbers, one of which is the line's own,
+      // so "K. LY-4213 on Chase Ink Business Cash (…4213)" came out of the
+      // statement reading as a card issued on itself. Same number is a duplicate
+      // row; a different number is an additional card. The note says each.
+      const mine = String((m && m.last4) || '').replace(/\D/g, '') || finLast4(a.name);
+      const line = finLast4(row.partOf);
+      row.sameNumber = !!(mine && line && mine === line);
+      sameDebt.push(row);
+    }
     else if (own === 'business') rows.push(row);
     else if (own === 'personal') excluded.push(row);
     else unclassified.push(row);
@@ -41034,9 +41055,12 @@ function finLiabilityLines(asAt){
       return x && !x._mirror && dupKey(x) === k; });
     const onLine = (m && m.partOf) || (carrier
       ? finCreditorLabel(carrier, finAcctMeta(carrier.id) || {}) : '');
+    const mine = String((m && m.last4) || '').replace(/\D/g, '') || finLast4(a.name);
+    const line = finLast4(onLine);
     sameDebt.push({ id: a.id, label: finCreditorLabel(a, m),
                     amount: feedAmount(a).amount, kind: (m && m.kind) || 'card',
-                    mirror: true, partOf: onLine, ownership: (m && m.ownership) || '' });
+                    mirror: true, partOf: onLine, ownership: (m && m.ownership) || '',
+                    sameNumber: !!(mine && line && mine === line) });
   });
 
   // A creditor with no bank feed is still a creditor.
@@ -41240,10 +41264,25 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
   // ONE CREDIT LINE, SEVERAL CARDS. Named so a reader who sees three Chase
   // cards in a statement pack and one Chase row here knows why.
   if (L.sameDebt && L.sameDebt.length) {
-    n.push('The following are additional cards issued on a credit line already listed above, not '
-      + 'separate obligations, and are therefore not added: '
-      + L.sameDebt.map(function(r){ return r.label
-          + (r.partOf ? ' on ' + r.partOf : ''); }).join('; ') + '.');
+    // A DIFFERENT number is another card on the line. The SAME number is the
+    // same account arriving twice from the bank. Said in one sentence, the
+    // second reads as a card issued on itself, which is how note 9 came to say
+    // "K. LY-4213 on Chase Ink Business Cash (…4213)" to an underwriter.
+    const other = L.sameDebt.filter(function(r){ return !r.sameNumber; });
+    const twice = L.sameDebt.filter(function(r){ return r.sameNumber; });
+    if (other.length) {
+      n.push('The following are additional cards issued on a credit line already listed above, '
+        + 'not separate obligations, and are therefore not added: '
+        + other.map(function(r){ return r.label
+            + (r.partOf ? ' on ' + r.partOf : ''); }).join('; ') + '.');
+    }
+    if (twice.length) {
+      n.push('The bank reports the same account more than once, under more than one name: '
+        + twice.map(function(r){
+            return (r.partOf || 'the line above') + ' is also reported as ' + r.label;
+          }).join('; ')
+        + '. Each is one account, counted once above, and is not a further obligation.');
+    }
   }
   return n;
 }
