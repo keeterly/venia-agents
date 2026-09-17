@@ -2949,7 +2949,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '539';
+  const BUILD = '540';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6462,6 +6462,9 @@ const MODULES = {
            // a record only when one of these says a person removed it, so this
            // has to reach the other device or a real delete comes straight back.
            '_tomb',
+           // Which derived items the founder has put down for now. A feed you
+           // cannot quiet is a feed you stop reading.
+           'todaySnooze',
            'todayAssign', 'activityLog', 'eniMemory',
            // What the founders put on Today themselves. Everything else on that
            // screen is derived, which is why there was no way to add a task —
@@ -6487,6 +6490,9 @@ const MODULES = {
     owns: 'press, marketing and brand — sample pulls, pitches, coverage, the editor radar, '
         + 'campaigns and the content calendar, brand voice, guidelines and references',
     keys: ['prPulls', 'workingPullId', 'prPitches', 'prCoverage', 'prEditors', 'prPrefs',
+           // Story suggestions the founder has dismissed. Hidden, not deleted:
+           // they are derived, so a delete would only bring them back tomorrow.
+           'prMomentsHidden',
            'mkCaptions', 'mkCalendar', 'mkPrefs', 'brTone', 'brPrefs', 'brandDocs', 'growthSeen',
            // SOCIAL COMMAND (Phase 0). Growth owns them like every other key, so
            // SYNC_KEYS, the module projection, access and cloud sync all keep
@@ -25136,19 +25142,59 @@ function buildTodayFocus() {
   // is done — assignment is who's on it, not a separate checklist to groom.
   const who = (typeof veniaWho === 'function') ? veniaWho() : '';
   const asg = STATE.todayAssign || {};
-  window.__todayItems = items;
+
+  // ── SNOOZE ──────────────────────────────────────────────────────
+  // Everything on this list is DERIVED, so there is nothing to tick off and
+  // nothing to delete: the condition is still true tomorrow and the row comes
+  // back. Snoozing is the only honest verb — it says "not today" without
+  // pretending the work is done, and it says when it will ask again.
+  const snz = (STATE.todaySnooze && typeof STATE.todaySnooze === 'object')
+    ? STATE.todaySnooze : {};
+  const nowMs = Date.now();
+  const asleep = (i) => !!(i.key && snz[i.key] && new Date(snz[i.key]).getTime() > nowMs);
+  const sleeping = items.filter(asleep);
+  const showSleeping = window.__todayShowSnoozed === true;
+  // A NEW LIST, not a reassignment: `items` is const, and every count below
+  // must agree about what is on screen. Snoozed rows leave the visible list,
+  // the counts, and the morning push — a row you put down should not wake you
+  // at 7am to say it is still there.
+  const visible = showSleeping ? items : items.filter(i => !asleep(i));
+
+  // ── WHERE A ROW GOES WHEN YOU TAP IT ────────────────────────────
+  // Seventeen of these carried an explicit destination and twelve did not, so
+  // half the list was inert. The key prefix already says what kind of thing the
+  // row is about; this turns that into the default. Only prefixes with a screen
+  // that certainly exists are mapped — a row that would land nowhere keeps no
+  // action rather than taking the founder somewhere wrong.
+  const FOCUS_GO = {
+    pull:   "cpGoto('pr');setTimeout(function(){agNavGo('pr','pulls')},150)",
+    buyer:  "cpGoto('sl');setTimeout(function(){agNavSl('buyers')},150)",
+    quote:  "cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)",
+    del:    "cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)",
+    inv:    "cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)",
+    owed:   "cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)",
+    sample: "cpGoto('plm');goTo('samples')",
+    tl:     "cpGoto('plm');goTo('timeline')",
+    cal:    "cpGoto('plm');goTo('timeline')"
+  };
+  items.forEach(function (i) {
+    if (i.act || !i.key) return;
+    const go = FOCUS_GO[String(i.key).split('|')[0]];
+    if (go) i.act = go;
+  });
+  window.__todayItems = visible;
   const view = (who && localStorage.getItem('venia-today-view') === 'mine') ? 'mine' : 'all';
-  const mineN = who ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who).length : 0;
-  const shown = view === 'mine' ? items.filter(i => i.key && asg[i.key] && asg[i.key].to === who) : items;
+  const mineN = who ? visible.filter(i => i.key && asg[i.key] && asg[i.key].to === who).length : 0;
+  const shown = view === 'mine' ? visible.filter(i => i.key && asg[i.key] && asg[i.key].to === who) : visible;
   // One glanceable weight for the day + a real segmented control (one control,
   // two states) instead of two unrelated pills.
-  const highN = items.filter(i => i.pri === 'high').length;
+  const highN = visible.filter(i => i.pri === 'high').length;
   const needBadge = highN
     ? `<span style="margin-left:auto;background:var(--ink);color:var(--bg);font-size:10px;letter-spacing:1px;font-weight:700;padding:4px 10px;text-transform:uppercase">${highN} need${highN === 1 ? 's' : ''} you</span>`
     : `<span style="margin-left:auto;color:var(--muted);font-size:10px;letter-spacing:1px;text-transform:uppercase">Nothing urgent</span>`;
   const segS = (on) => `background:${on?'var(--ink)':'transparent'};color:${on?'var(--bg)':'var(--muted)'};border:none;padding:5px 12px;font-size:10px;letter-spacing:1px;cursor:pointer;font-weight:${on?'700':'400'}`;
   const seg = who ? `<div style="display:inline-flex;border:1px solid var(--border-mid)">
-      <button onclick="todayView('all')" style="${segS(view==='all')}">ALL ${items.length}</button>
+      <button onclick="todayView('all')" style="${segS(view==='all')}">ALL ${visible.length}</button>
       <button onclick="todayView('mine')" style="${segS(view==='mine')}">MINE ${mineN}</button>
     </div>` : '';
   // The way to put something on this list yourself. Everything else here is
@@ -25157,7 +25203,14 @@ function buildTodayFocus() {
       style="margin-left:auto;background:none;border:1px solid var(--border-mid);color:var(--ink);
       cursor:pointer;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;
       padding:5px 10px;flex-shrink:0">＋ Add</button>`;
-  const header = `<div style="display:flex;gap:10px;align-items:center;padding:0 0 10px">${seg}${needBadge}${addBtn}</div>`;
+  const snoozeToggle = sleeping.length
+    ? `<button onclick="todayShowSnoozed()" title="Items you put off"
+        style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:10px;
+        letter-spacing:1px;text-transform:uppercase;padding:5px 2px;flex-shrink:0;
+        text-decoration:underline;text-underline-offset:3px">${
+          showSleeping ? 'Hide snoozed' : sleeping.length + ' snoozed'}</button>`
+    : '';
+  const header = `<div style="display:flex;gap:10px;align-items:center;padding:0 0 10px">${seg}${snoozeToggle}${needBadge}${addBtn}</div>`;
   const chipCol = { keeter:'var(--gold)', christine:'var(--blue)' };
   const chip = (i) => {
     if (!i.key) return '';
@@ -25175,6 +25228,11 @@ function buildTodayFocus() {
           <div style="width:3px;min-height:16px;background:${colMap[i.pri]};flex-shrink:0;border-radius:2px"></div>
           <div style="font-size:13px;color:var(--ink);line-height:1.5;flex:1">${i.text}</div>
           ${i.task ? `<button onclick="event.stopPropagation();todayTaskDone('${slEsc(i.task)}')" title="Mark done" style="background:none;border:1px solid var(--border-mid);color:var(--muted);cursor:pointer;font-size:12px;line-height:1;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%">✓</button>` : ''}
+          ${i.key ? `<button onclick="event.stopPropagation();todaySnoozeItem('${slEsc(i.key)}')"
+            title="${asleep(i) ? 'Snoozed \u2014 bring it back now' : 'Not today \u2014 ask me again tomorrow'}"
+            style="background:none;border:1px solid var(--border-mid);color:var(--muted);cursor:pointer;
+            font-size:10px;line-height:1;padding:3px 6px;flex-shrink:0;align-self:center">${
+              asleep(i) ? '\u21ba' : '\u23fe'}</button>` : ''}
           ${who ? chip(i) : ''}
           ${i.act?`<div style="font-size:10px;color:var(--muted);flex-shrink:0">→</div>`:''}
           ${i.nag?`<button onclick="event.stopPropagation();dismissNag('${i.nag}')" title="Dismiss — reconnect any time in Settings" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;flex-shrink:0">✕</button>`:''}
@@ -25184,9 +25242,9 @@ function buildTodayFocus() {
   if (homeEl) homeEl.innerHTML = html;
   // Once a day per device: surface the urgent count as a notification so
   // deadlines reach you even if you weren't planning to look.
-  try { todayDigestNotify(items); } catch(e){}
+  try { todayDigestNotify(visible); } catch(e){}
   // Keep the server-side morning digest fed (throttled; founder sessions only).
-  try { veniaDigestPublish(items); } catch(e){}
+  try { veniaDigestPublish(visible); } catch(e){}
 }
 
 // Which founder is signed in — the Supabase session is the only identity that
@@ -25211,6 +25269,34 @@ function veniaWho(){
 // These behave like the derived items on purpose: same key shape, same
 // assignment, same disappearance when the work is done. Done, not deleted —
 // a list that forgets what was on it cannot answer "did we do that".
+// NOT TODAY. Until tomorrow morning, so the row comes back when the day does
+// rather than at some arbitrary hour tonight. Tapping a snoozed row's button
+// wakes it immediately — the same control both ways, so there is nothing to
+// learn and nothing that traps a row out of sight.
+window.todaySnoozeItem = function(key){
+  if (!key) return;
+  STATE.todaySnooze = (STATE.todaySnooze && typeof STATE.todaySnooze === 'object')
+    ? STATE.todaySnooze : {};
+  if (STATE.todaySnooze[key]) delete STATE.todaySnooze[key];
+  else {
+    const t = new Date();
+    t.setDate(t.getDate() + 1); t.setHours(7, 0, 0, 0);
+    STATE.todaySnooze[key] = t.toISOString();
+  }
+  // Anything already past is dead weight; it is cleared whenever this runs so
+  // the map cannot grow forever on a workspace nobody prunes.
+  const now = Date.now();
+  Object.keys(STATE.todaySnooze).forEach(function (k) {
+    if (!(new Date(STATE.todaySnooze[k]).getTime() > now)) delete STATE.todaySnooze[k];
+  });
+  save();
+  try { renderPage(STATE.currentPage); } catch (e) {}
+};
+window.todayShowSnoozed = function(){
+  window.__todayShowSnoozed = !window.__todayShowSnoozed;
+  try { renderPage(STATE.currentPage); } catch (e) {}
+};
+
 window.todayTaskAdd = function(text){
   const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
   if (!t) return false;
@@ -27386,8 +27472,17 @@ function prMomentsBoard(){
   try { all = prMoments(); } catch (e) { return ''; }
   // Nothing to say is a legitimate answer and it is said quietly, not with an
   // empty card pretending to be a feature.
-  const live = all.filter(m => m.kind !== 'pull-out');
-  if (!live.length) return '';
+  // PUT DOWN, NOT THROWN AWAY. These are derived from records, so deleting one
+  // would only regenerate it on the next render. Dismissing hides it and says
+  // how many are hidden, because a suggestion the founder has already judged
+  // should stop asking — and should still be findable when they want it.
+  const hid = (STATE.prMomentsHidden && typeof STATE.prMomentsHidden === 'object')
+    ? STATE.prMomentsHidden : {};
+  const showHidden = window.__prShowHidden === true;
+  const notOut = all.filter(m => m.kind !== 'pull-out');
+  const live = showHidden ? notOut : notOut.filter(m => !hid[m.id]);
+  const hiddenN = notOut.length - notOut.filter(m => !hid[m.id]).length;
+  if (!live.length && !hiddenN) return '';
   const esc = (typeof slEsc === 'function') ? slEsc : (x => String(x == null ? '' : x));
   const DESK = { trade: 'Trade · WWD, BoF', culture: 'Culture · Hypebeast, Highsnobiety, Complex',
                  newsroom: 'Newsroom' };
@@ -27416,7 +27511,12 @@ function prMomentsBoard(){
       ${warn ? `<div style="font-size:10.5px;color:var(--amber,#8a6d1f);margin-top:7px">⚠ ${warn} — do not pitch the same desk twice</div>` : ''}
       <div style="margin-top:10px;display:flex;gap:7px;flex-wrap:wrap">
         <button class="btn btn-ghost btn-sm" onclick="prMomentDraft('${esc(m.id)}')">✎ Draft the pitch</button>
-        <span style="font-size:10.5px;color:var(--muted);align-self:center">${esc(m.suggest || '')}</span>
+        <span style="font-size:10.5px;color:var(--muted);align-self:center;flex:1">${esc(m.suggest || '')}</span>
+        <button onclick="prMomentHide('${esc(m.id)}')" title="${hid[m.id]
+            ? 'Hidden — bring this suggestion back'
+            : 'Not now — hide this suggestion'}"
+          style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;
+          line-height:1;padding:2px 6px;align-self:center;flex:none">${hid[m.id] ? '↺' : '×'}</button>
       </div>
     </div>`;
   }).join('');
@@ -27427,10 +27527,28 @@ function prMomentsBoard(){
       <span style="color:var(--ink);font-family:'DM Mono',monospace;letter-spacing:0">${live.length}</span>
       <span style="flex:1"></span>
       <span style="letter-spacing:0;text-transform:none;font-size:10.5px">Read from your own records — every line below cites one.</span>
+      ${hiddenN ? `<button onclick="prMomentsToggleHidden()"
+        style="background:none;border:none;color:var(--muted);cursor:pointer;letter-spacing:0;
+        text-transform:none;font-size:10.5px;text-decoration:underline;text-underline-offset:3px;
+        padding:0;flex:none">${showHidden ? 'hide the ' + hiddenN + ' put down'
+          : hiddenN + ' put down — show'}</button>` : ''}
     </div>
     ${rows}</div>`;
 }
 window.prMomentsBoard = prMomentsBoard;
+window.prMomentHide = function(id){
+  if (!id) return;
+  STATE.prMomentsHidden = (STATE.prMomentsHidden && typeof STATE.prMomentsHidden === 'object')
+    ? STATE.prMomentsHidden : {};
+  if (STATE.prMomentsHidden[id]) delete STATE.prMomentsHidden[id];
+  else STATE.prMomentsHidden[id] = new Date().toISOString();
+  save();
+  try { renderPage(STATE.currentPage); } catch (e) {}
+};
+window.prMomentsToggleHidden = function(){
+  window.__prShowHidden = !window.__prShowHidden;
+  try { renderPage(STATE.currentPage); } catch (e) {}
+};
 // Hand the moment to Enigma with its evidence attached, and let it draft.
 // NOTHING SENDS: this opens a draft, which is the whole guarantee — a misfired
 // pitch cannot be recalled, and it costs the relationship rather than the mail.
@@ -27943,6 +28061,15 @@ function prMoments(){
     // THE RULE, ENFORCED HERE RATHER THAN TRUSTED: a moment with nothing behind
     // it does not get to exist.
     if (!m || !m.evidence || !m.evidence.length || !m.evidence.every(e => e && e.ref)) return;
+    // THE SAME STORY, ONCE. Two coverage records logged 39 seconds apart put
+    // the same card on the board twice — identical headline, identical
+    // reasoning, different record id, so an id check would not have caught it.
+    // The reader does not care which row it came from; they care that it is
+    // one story.
+    const sig = String(m.headline || '').trim().toLowerCase()
+              + '|' + String(m.why || '').trim().toLowerCase();
+    if (out.some(x => (String(x.headline || '').trim().toLowerCase()
+              + '|' + String(x.why || '').trim().toLowerCase()) === sig)) return;
     m.rank = PR_RANK[m.kind] || 10;
     out.push(m);
   };
@@ -27967,7 +28094,7 @@ function prMoments(){
         // claim — whether anything ran is a separate fact nobody has yet.
         why: 'Samples went out'
           + (pull.pullDate ? ' ' + prVerbalDate(pull.pullDate) : '')
-          + ' and came back' + (d === 0 ? ' today' : d ? ' ' + d + ' days ago' : '')
+          + ' and came back' + (d === 0 ? ' today' : d ? ' ' + d + ' day' + (d === 1 ? '' : 's') + ' ago' : '')
           + '. No coverage recorded against this pull yet — chase the tearsheet, '
           + 'and the shoot itself is worth a note to the culture desks.',
         evidence: [prEv(items.length + ' samples to ' + pub + ' (' + (pull.invoiceNo || pull.id) + ')', pull.id)],
