@@ -2946,7 +2946,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '534';
+  const BUILD = '535';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6403,7 +6403,12 @@ const MODULES = {
     owns: 'the day — what needs attention, the activity log, what the founders asked for',
     // Always granted: every person with any access at all sees Today, so the
     // cross-cutting keys (the log, the assistant's memory) live here.
-    keys: ['todayAssign', 'activityLog', 'eniMemory',
+    keys: [
+           // WHAT WAS DELETED, AS OPPOSED TO WHAT NEVER ARRIVED. The merge drops
+           // a record only when one of these says a person removed it, so this
+           // has to reach the other device or a real delete comes straight back.
+           '_tomb',
+           'todayAssign', 'activityLog', 'eniMemory',
            // What the founders put on Today themselves. Everything else on that
            // screen is derived, which is why there was no way to add a task —
            // and these have to sync, or one founder's list is not the other's.
@@ -6767,6 +6772,75 @@ function _mNewer(a, b) {
 // resolves a genuine same-record conflict field-by-field instead of newest-wins
 // (used for styles and POM points, where two founders legitimately touch
 // DIFFERENT fields of the same record between syncs).
+// ══ ABSENCE IS NOT A DELETION ════════════════════════════════════════════
+//
+// A signed press pull — 7 samples, $4,000 of stock out with a stylist — was
+// created, emailed, signed, and then disappeared from the workspace. It was the
+// SECOND one: an earlier pull carries a note saying it too was reconstructed
+// from a sent email after the original record was lost. Both were recovered
+// only because the pull sheet happened to be in Gmail.
+//
+// The cause is below, in _mArray: the merge read ABSENCE as DELETION. But a
+// record missing from one side has two possible histories, and absence alone
+// cannot tell them apart — somebody deleted it, or that side never received
+// it. Guessing "deleted" destroys the record on the device that still had it;
+// that device then pushes, and it is gone everywhere, with no undo and no copy.
+//
+// So absence stops being evidence. A delete leaves a TOMBSTONE, and only a
+// tombstone authorises a drop. Deletes still propagate — they just have to be
+// declared. The failure mode flips from "a signed contract vanishes" to "a
+// deleted row comes back", and a row that comes back can be deleted again.
+var TOMB_TTL_DAYS = 400;
+var _MERGE_TOMBS = null;              // the union in force for one merge
+
+function tombMap(){
+  if (typeof STATE === 'undefined' || !STATE) return {};   // merge running outside the app
+  if (!STATE._tomb || typeof STATE._tomb !== 'object' || Array.isArray(STATE._tomb)) {
+    STATE._tomb = {};
+  }
+  return STATE._tomb;
+}
+function tombMark(id, at){
+  if (id == null || id === '') return;
+  var m = tombMap(), k = String(id);
+  if (!m[k]) m[k] = at || Date.now();
+}
+window.tombMark = tombMark;
+
+// EVERY DELETE PATH, WITHOUT TOUCHING A SINGLE CALL SITE. A record the BASELINE
+// carried and this device's own state no longer has is a record this device
+// deleted — whichever button did it. Read once at push, against the snapshot
+// this device last agreed with the cloud.
+function tombDiff(base, local){
+  if (!base || !local) return;
+  var keys = (typeof window !== 'undefined' && window.SYNC_KEYS) || [], now = Date.now();
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i], b = base[k], l = local[k];
+    if (!Array.isArray(b) || !Array.isArray(l)) continue;
+    var have = Object.create(null);
+    for (var j = 0; j < l.length; j++) {
+      var r = l[j]; if (r && r.id != null) have[String(r.id)] = 1;
+    }
+    for (var n = 0; n < b.length; n++) {
+      var o = b[n];
+      if (o && o.id != null && !have[String(o.id)]) tombMark(o.id, now);
+    }
+  }
+}
+window.tombDiff = tombDiff;
+
+function tombPrune(){
+  var m = STATE._tomb;
+  if (!m || typeof m !== 'object') return;
+  var cut = Date.now() - TOMB_TTL_DAYS * 864e5;
+  Object.keys(m).forEach(function (k) { if (!(Number(m[k]) > cut)) delete m[k]; });
+}
+window.tombPrune = tombPrune;
+
+function _tombed(id){
+  return !!(_MERGE_TOMBS && _MERGE_TOMBS[String(id)]);
+}
+
 function _mArray(base, local, cloud, conflict) {
   const B = _mById(base).m, L = _mById(local), C = _mById(cloud);
   const out = [], seen = Object.create(null);
@@ -6783,11 +6857,13 @@ function _mArray(base, local, cloud, conflict) {
     } else if (inL && !inC) {
       if (!inB) out.push(L.m[id]);                                // local added (cloud never had it)
       else if (!_mEq(L.m[id], B[id])) out.push(L.m[id]);          // cloud deleted BUT local edited → edit wins (never lose work)
-      // else: cloud deleted an untouched record → drop
+      else if (!_tombed(id)) out.push(L.m[id]);                   // NOT declared deleted → the cloud never received it; keep
+      // else: a real, declared delete → drop
     } else if (!inL && inC) {
       if (!inB) out.push(C.m[id]);                                // cloud added
       else if (!_mEq(C.m[id], B[id])) out.push(C.m[id]);          // local deleted BUT cloud edited → edit wins
-      // else: local deleted an untouched record → drop
+      else if (!_tombed(id)) out.push(C.m[id]);                   // NOT declared deleted → this device never received it; keep
+      // else: a real, declared delete → drop
     }
   });
   // Keep BOTH sides' id-less rows (activity-log entries carry no id). The old
@@ -6987,6 +7063,33 @@ window.skMergeHistory = skMergeHistory;
 function mergeSnapshots(base, local, cloud) {
   base = base || {}; local = local || {}; cloud = cloud || {};
   const out = { _who: local._who || cloud._who };
+  // A delete declared ANYWHERE counts here: the device that deleted may not be
+  // the device doing this merge. Union, never subtraction — forgetting a
+  // tombstone resurrects a record somebody deliberately removed.
+  // DECLARE THIS DEVICE'S DELETIONS BEFORE MERGING, NOT AT THE NEXT PUSH.
+  //
+  // Reading them only at push time left a hole the size of the bug it fixed:
+  // delete a style, receive a partner's sync before pushing, and the merge
+  // hands the style back — then the push diffs a baseline that already agrees
+  // with it and no tombstone is ever written. The delete is silently undone.
+  //
+  // Here it is safe in a way cloud-absence never was. `local` is THIS device's
+  // own state and this device is authoritative about it: base had the record,
+  // local does not, so somebody removed it here. A device that simply never
+  // RECEIVED a record has it in neither base nor local, so it declares nothing
+  // — which is exactly the case that used to destroy the pull.
+  try { tombDiff(base, local); } catch (e) {}
+  // STATE._tomb last, and never omitted: it is THIS device's own record of what
+  // a person deleted here. Reached through typeof, because a bare STATE is a
+  // ReferenceError — not undefined — anywhere the merge runs outside the app,
+  // and a merge that throws loses the whole sync, not one record. A merge that consulted only the three snapshots would
+  // forget a delete made since the last snapshot was taken and hand the record
+  // straight back.
+  _MERGE_TOMBS = Object.assign({}, (base && base._tomb) || {},
+                                   (cloud && cloud._tomb) || {},
+                                   (local && local._tomb) || {},
+                                   ((typeof STATE !== 'undefined' && STATE
+                                     && STATE._tomb) || {}));
   const sv = Math.max(local._schemaVersion || 0, cloud._schemaVersion || 0);
   if (sv) out._schemaVersion = sv;   // carry the highest shape version through merges
   (window.SYNC_KEYS || []).forEach(function (k) {
@@ -7119,6 +7222,9 @@ function mergeSnapshots(base, local, cloud) {
     else if (!inL && inC) { if (!inB) outls[k] = cls[k]; }
   });
   if (Object.keys(outls).length) out._ls = outls;
+  // The union goes out with the merge, so the next device to sync inherits every
+  // delete either side knew about rather than re-learning it from absence.
+  if (Object.keys(_MERGE_TOMBS || {}).length) out._tomb = _MERGE_TOMBS;
   return out;
 }
 window.mergeSnapshots = mergeSnapshots;
@@ -48713,6 +48819,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var rev = Date.now();
     try {
       var localSnap = snapshot();
+      // WHAT THIS DEVICE DELETED, read once, here, against the snapshot it last
+      // agreed with the cloud. Doing it at the push rather than at each delete
+      // button means every path is covered — including the ones nobody has
+      // written yet — and no call site has to remember.
+      try {
+        tombDiff(getBase(), localSnap);
+        tombPrune();
+        if (Object.keys(STATE._tomb || {}).length) localSnap._tomb = STATE._tomb;
+      } catch (e) {}
       // Read-modify-write: merge our local state onto the CURRENT cloud state so
       // a partner's concurrent edits to other records aren't overwritten. If the
       // read fails (offline), fall back to pushing local as-is.
