@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '542';
+  const BUILD = '543';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -35936,6 +35936,122 @@ window.slUndoTouch = function(){
   return true;
 };
 
+// CANCEL, SNOOZE, DROP — the three verbs a queue needs, and the three this one
+// did not have.
+//
+// The desk offered "Log approach" and nothing else, so a row you did not want
+// to work today had exactly one way off the screen: approach the buyer. A queue
+// you cannot say no to stops being a queue and becomes a wall — the same eight
+// names every morning, none of them actioned, and no way to tell the desk why.
+//
+// None of these delete anything. Snoozing writes nextDate, the field the queue
+// already reads as "parked until a later date", so a snooze and a booked
+// follow-up are the same fact in one place. Dropping sets the stage to Dormant,
+// which slBuyerWorkable already excludes — the account, its log and every
+// recorded approach stay in the CRM. Every one of them is undoable from the bar
+// at the top of the desk.
+window.__slDeskUndo = null;
+function slDeskStash(b, label){
+  try { window.__slDeskUndo = { prev: JSON.parse(JSON.stringify(b)), label: String(label || 'Change') }; }
+  catch (e) { window.__slDeskUndo = null; }
+}
+window.slDeskUndoNow = function(){
+  const u = window.__slDeskUndo; if (!u || !u.prev) return false;
+  const i = (STATE.slBuyers || []).findIndex(function(x){ return x && x.id === u.prev.id; });
+  if (i < 0) return false;
+  STATE.slBuyers[i] = u.prev;
+  window.__slDeskUndo = null;
+  window.__slPrevBuyer = null;
+  save();
+  try { showToast('Undone', 'info'); } catch(e){}
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  slDeskRender();
+  return true;
+};
+// Forward only. An account with a real follow-up already booked for next month
+// is not dragged back to next week by a snooze taken today.
+window.slDeskDefer = function(id, days){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  const n = Math.max(1, Math.round(Number(days) || 7));
+  const d = new Date(); d.setDate(d.getDate() + n);
+  const until = d.toISOString().slice(0, 10);
+  slDeskStash(b, 'Snoozed ' + (b.name || 'buyer'));
+  if (!b.nextDate || String(b.nextDate) < until) b.nextDate = until;
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { showToast('Back on ' + b.nextDate, 'info'); } catch(e){}
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  slDeskRender();
+};
+// NOT A DELETE. The buyer, the history and every logged approach stay exactly
+// where they are; the account simply stops being offered as work.
+window.slDeskDrop = function(id){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  if (!confirm('Stop offering ' + (b.name || 'this buyer') + ' in the queue?\n\n'
+      + 'Nothing is deleted — the account and its history stay in the CRM. It moves to '
+      + 'Dormant and the desk leaves it alone.')) return;
+  slDeskStash(b, 'Dropped ' + (b.name || 'buyer'));
+  b.stage = 'inactive';
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Wholesale: ' + (b.name || 'buyer') + ' \u2014 dropped from the desk queue'); } catch(e){}
+  try { showToast('Moved to Dormant', 'info'); } catch(e){}
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  slDeskRender();
+};
+// A PROMISE IS NOT SNOOZED. It is kept, or it is withdrawn. The ageing IS the
+// argument in that section, so there is deliberately no "later" here — only
+// Delivered, which keeps the record and how long we took, and this, for an ask
+// logged in error or since withdrawn by the buyer.
+window.slDeskOweDrop = function(id, owedId){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  const rec = (b.owed || []).find(function(x){ return x && x.id === owedId; });
+  if (!rec) return;
+  if (!confirm('Drop \u201c' + String(rec.what || 'this request') + '\u201d?\n\n'
+      + 'Only if it was logged in error or they no longer want it. If we sent it, use '
+      + 'Delivered instead — that keeps how long we took.')) return;
+  slDeskStash(b, 'Dropped a request');
+  b.owed = (b.owed || []).filter(function(x){ return !(x && x.id === owedId); });
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { showToast('Request dropped', 'info'); } catch(e){}
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  slDeskRender();
+};
+// WHERE THE SNOOZED ONES WENT. A snooze with nowhere to look is a black hole,
+// and the founder who parked six accounts in a morning has no way to find out
+// what she agreed to. This is also the forward book: an approach logged last
+// week set nextDate too, so the follow-ups already booked show up here beside
+// the deliberate parks, which is the honest reading of the field.
+window.slDeskParked = function(){
+  const today = new Date().toISOString().slice(0, 10);
+  return (STATE.slBuyers || []).filter(function(b){
+      return slBuyerWorkable(b) && b.nextDate && String(b.nextDate) > today;
+    })
+    .sort(function(a, b2){ return String(a.nextDate).localeCompare(String(b2.nextDate)); });
+};
+window.slDeskUnpark = function(id){
+  const b = (STATE.slBuyers || []).find(function(x){ return x && x.id === id; });
+  if (!b) return;
+  slDeskStash(b, 'Brought ' + (b.name || 'buyer') + ' back');
+  b.nextDate = '';
+  b.updatedAt = new Date().toISOString();
+  save();
+  try { showToast('Back in the queue', 'info'); } catch(e){}
+  slDeskRender();
+};
+window.slDeskToggleParked = function(){
+  window.__slDeskShowParked = !window.__slDeskShowParked;
+  slDeskRender();
+};
+window.slDeskMenu = function(id){
+  const m = document.getElementById('slqm-' + id); if (!m) return;
+  m.style.display = (m.style.display === 'flex') ? 'none' : 'flex';
+};
+
 
 // THE DESK SCREEN. One buyer per row, best door first, with everything needed
 // to write to them already on the row — what they stock, where they are, the
@@ -35992,6 +36108,21 @@ window.slDeskRender = function(){
       +   (b.website ? '<a class="ag-btn ag-btn-sm" href="' + slEsc(b.website) + '" target="_blank" rel="noopener">Site</a>' : '')
       +   '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slDeskTouch(\'' + slEsc(b.id) + '\')">Log approach</button>'
       +   '<button class="ag-btn ag-btn-sm" onclick="slDeskOwe(\'' + slEsc(b.id) + '\')">They asked for\u2026</button>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskMenu(\'' + slEsc(b.id) + '\')" '
+      +     'title="Not today, not this month, or not at all">Not today\u2026</button>'
+      + '</div>'
+      // Folded away by default: three ways to say no on every row is louder
+      // than the one way to say yes, and the yes is the point of the screen.
+      + '<div id="slqm-' + slEsc(b.id) + '" style="display:none;gap:6px;flex-wrap:wrap;margin-top:7px;'
+      +   'padding:7px 0 1px;border-top:1px dashed var(--border)">'
+      +   '<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);'
+      +     'align-self:center;margin-right:2px">Come back</span>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskDefer(\'' + slEsc(b.id) + '\',1)">Tomorrow</button>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskDefer(\'' + slEsc(b.id) + '\',7)">Next week</button>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskDefer(\'' + slEsc(b.id) + '\',30)">Next month</button>'
+      +   '<button class="ag-btn ag-btn-sm" onclick="slDeskDrop(\'' + slEsc(b.id) + '\')" '
+      +     'title="Moves the account to Dormant. Nothing is deleted." '
+      +     'style="margin-left:auto;color:var(--red)">Not a fit</button>'
       + '</div></div>';
   }).join('');
 
@@ -36008,13 +36139,50 @@ window.slDeskRender = function(){
       + '<div style="text-align:right;white-space:nowrap">'
       +   '<div style="font-family:\'DM Mono\',monospace;font-size:11px;font-weight:700;color:'
       +     (hot ? 'var(--red)' : 'var(--amber)') + '">' + o.days + 'd</div>'
-      +   '<button class="ag-btn ag-btn-sm" style="margin-top:4px" onclick="slDeskDelivered(\''
-      +     slEsc(o.buyerId) + '\',\'' + slEsc(o.id) + '\')">Delivered</button>'
+      +   '<div style="display:flex;gap:6px;margin-top:4px;justify-content:flex-end">'
+      +     '<button class="ag-btn ag-btn-sm" onclick="slDeskDelivered(\''
+      +       slEsc(o.buyerId) + '\',\'' + slEsc(o.id) + '\')">Delivered</button>'
+      +     '<button class="ag-btn ag-btn-sm" title="Logged in error, or they no longer want it" '
+      +       'style="color:var(--muted)" onclick="slDeskOweDrop(\''
+      +       slEsc(o.buyerId) + '\',\'' + slEsc(o.id) + '\')">Drop</button>'
+      +   '</div>'
       + '</div></div>';
   }).join('') : '';
 
-  el.innerHTML =
-      '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">'
+  // Every verb on this screen is reversible, and the only place that can say so
+  // is the screen itself: the toast has pointer-events:none, which is why
+  // slUndoTouch existed for months wired to nothing.
+  const u = window.__slDeskUndo;
+  const undoBar = u ? '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;'
+      + 'padding:8px 10px;background:var(--card);border-left:2px solid var(--ink)">'
+      + '<span style="font-size:11px;flex:1;min-width:0">' + slEsc(u.label) + '</span>'
+      + '<button class="ag-btn ag-btn-sm" onclick="slDeskUndoNow()">Undo</button></div>' : '';
+
+  const parked = (typeof slDeskParked === 'function') ? slDeskParked() : [];
+  const showParked = window.__slDeskShowParked === true;
+  const parkedHtml = !parked.length ? '' :
+      '<div style="display:flex;align-items:center;gap:8px;margin-top:14px">'
+    +   '<span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">'
+    +     parked.length + ' parked until later</span>'
+    +   '<button class="ag-btn ag-btn-sm" onclick="slDeskToggleParked()">'
+    +     (showParked ? 'Hide' : 'Show') + '</button></div>'
+    + (showParked ? parked.map(function(b2){
+        return '<div style="display:flex;gap:10px;align-items:baseline;justify-content:space-between;'
+          + 'padding:7px 0;border-bottom:1px solid var(--border)">'
+          + '<div style="font-size:12px;min-width:0">' + slEsc(b2.name || 'Unnamed') + '</div>'
+          + '<div style="display:flex;gap:8px;align-items:center;white-space:nowrap">'
+          +   '<span style="font-family:\'DM Mono\',monospace;font-size:10px;color:var(--muted)">'
+          +     slEsc(String(b2.nextDate)) + '</span>'
+          +   '<button class="ag-btn ag-btn-sm" onclick="slDeskUnpark(\'' + slEsc(b2.id) + '\')">Bring back</button>'
+          + '</div></div>';
+      }).join('')
+      + '<div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.7">'
+      + 'This is the forward book, not just the snoozes: logging an approach books the '
+      + 'follow-up on the same field, so a buyer you wrote to last week sits here until it is due.</div>'
+      : '');
+
+  el.innerHTML = undoBar
+    + '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">'
     +   '<strong>' + a.reachable + ' of ' + a.total + ' buyers can actually be reached.</strong> '
     +   'The queue below is today\'s work, closest to an order first. Everything else on this screen '
     +   'is what stands between the list and a first invoice.'
@@ -36046,6 +36214,7 @@ window.slDeskRender = function(){
         : '')
     + (rows ? '<div class="ag-sec-head"><h2 class="ag-sec-title">Approach today</h2></div>' + rows
             : '<div style="font-size:11px;color:var(--green)">Nothing to approach today — every reachable buyer has been worked or is parked until a later date.</div>')
+    + parkedHtml
     + '<div style="font-size:10px;color:var(--muted);margin-top:14px;line-height:1.7">'
     +   'Logging an approach moves the buyer, stamps the date and sets the follow-up a week out. '
     +   'Nothing here sends an email — you send it, from your own address.'
