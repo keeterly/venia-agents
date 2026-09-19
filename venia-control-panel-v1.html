@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '543';
+  const BUILD = '544';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6848,6 +6848,45 @@ function _mById(arr) {
   (arr || []).forEach(function (r) { if (r && r.id != null) m[r.id] = r; else if (r != null) noid.push(r); });
   return { m: m, noid: noid };
 }
+// AN EDIT NOBODY STAMPED STILL HAPPENED.
+//
+// _mNewer is the merge's last resort when both sides changed the same record,
+// and it reads updatedAt. Nothing in the press-pull module ever wrote one:
+// marking a sample returned set items[i].returned and called save(), leaving
+// the record carrying the timestamp it was created with. So any pull the cloud
+// had touched more recently beat the return every single time — the row flicked
+// to returned, the next sync leg landed, and it came back. Twenty call sites
+// each had to remember to stamp; not one of them did.
+//
+// So the merge stops trusting call sites. A record that differs from base is an
+// edit THIS device made since the base was taken, which is by definition more
+// recent than the base. If its stamp says otherwise the stamp is stale, and it
+// is corrected here — before it is allowed to decide anything.
+//
+// This only ever moves the both-changed tiebreak, and only toward the edit the
+// person is looking at right now. The remote edit it outranks is already safe
+// in the cloud; the local one, if it loses, is gone with no undo and no copy.
+function stampLocalEdits(base, local){
+  if (!base || !local) return;
+  var keys = (typeof window !== 'undefined' && window.SYNC_KEYS) || [];
+  var now = new Date().toISOString();
+  for (var i = 0; i < keys.length; i++){
+    var k = keys[i], B = base[k], L = local[k];
+    if (!Array.isArray(B) || !Array.isArray(L)) continue;
+    var bm = Object.create(null);
+    for (var j = 0; j < B.length; j++){ var r = B[j]; if (r && r.id != null) bm[String(r.id)] = r; }
+    for (var n = 0; n < L.length; n++){
+      var rec = L[n]; if (!rec || rec.id == null) continue;
+      var was = bm[String(rec.id)];
+      if (!was) continue;                       // new here: createdAt is already honest
+      if (_mEq(rec, was)) continue;             // untouched on this device
+      var t  = Date.parse(rec.updatedAt || rec.createdAt || '') || 0;
+      var tb = Date.parse(was.updatedAt || was.createdAt || '') || 0;
+      if (t > tb) continue;                     // somebody did stamp it; leave it alone
+      rec.updatedAt = now;
+    }
+  }
+}
 function _mNewer(a, b) {
   const ta = Date.parse((a && (a.updatedAt || a.createdAt)) || '') || 0;
   const tb = Date.parse((b && (b.updatedAt || b.createdAt)) || '') || 0;
@@ -7164,6 +7203,7 @@ function mergeSnapshots(base, local, cloud) {
   // RECEIVED a record has it in neither base nor local, so it declares nothing
   // — which is exactly the case that used to destroy the pull.
   try { tombDiff(base, local); } catch (e) {}
+  try { stampLocalEdits(base, local); } catch (e) {}
   // STATE._tomb last, and never omitted: it is THIS device's own record of what
   // a person deleted here. Reached through typeof, because a bare STATE is a
   // ReferenceError — not undefined — anywhere the merge runs outside the app,
@@ -7243,6 +7283,71 @@ function mergeSnapshots(base, local, cloud) {
           });
         });
       }
+      return;
+    }
+    // A RECORDED RETURN IS NEVER UNDONE BY A SYNC.
+    //
+    // The same lock a filed category keeps, for a stronger reason: checking a
+    // sample back in is a physical fact somebody just observed — the garment is
+    // on the rail in front of them. A stale cloud copy asserting it is still
+    // out is not new information, it is old information, and letting it win
+    // turns "$2,570 on loan" back on after the samples are home.
+    //
+    // The merge may RECORD a return this device has not seen. It may never
+    // un-record one this device is holding. Deliberately checking a sample back
+    // OUT still works, because the device doing that holds the false value
+    // locally and has nothing to restore.
+    //
+    // Counted per style rather than matched by slot: the two sides' item arrays
+    // can be ordered differently, and a pull can carry two of the same style, so
+    // restoring by index would mark the wrong sample returned.
+    if (k === 'prPulls' && (_mRecArray(l) || _mRecArray(c))) {
+      const mergedPulls = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [],
+                                  Array.isArray(c) ? c : []);
+      const lPulls = Object.create(null);
+      (Array.isArray(l) ? l : []).forEach(function (x) { if (x && x.id != null) lPulls[x.id] = x; });
+      const itemKey = function (it) {
+        return String((it && (it.styleId != null ? it.styleId : it.styleName)) || '');
+      };
+      mergedPulls.forEach(function (x) {
+        const was = x && x.id != null ? lPulls[x.id] : null;
+        if (!was || !Array.isArray(x.items) || !Array.isArray(was.items)) return;
+        const want = Object.create(null), have = Object.create(null), src = Object.create(null);
+        was.items.forEach(function (it) {
+          if (!it || !it.returned) return;
+          const kk = itemKey(it);
+          want[kk] = (want[kk] || 0) + 1;
+          if (!src[kk]) src[kk] = it;                 // the stamp to copy back
+        });
+        if (!Object.keys(want).length) return;
+        x.items.forEach(function (it) {
+          if (!it || !it.returned) return;
+          const kk = itemKey(it); have[kk] = (have[kk] || 0) + 1;
+        });
+        let put = false;
+        Object.keys(want).forEach(function (kk) {
+          let short = want[kk] - (have[kk] || 0);
+          if (short <= 0) return;
+          for (let n = 0; n < x.items.length && short > 0; n++) {
+            const it = x.items[n];
+            if (!it || it.returned || itemKey(it) !== kk) continue;
+            it.returned = true;
+            it.returnedAt = (src[kk] && src[kk].returnedAt) || it.returnedAt || null;
+            if (src[kk] && src[kk].returnCondition) it.returnCondition = src[kk].returnCondition;
+            short--; put = true;
+          }
+        });
+        // status is DERIVED from the items, so putting a return back without
+        // re-deriving it leaves the pull reading active with every sample home
+        // — which is the half of this bug the founder actually sees, because it
+        // is what decides whether the card sits in ACTIVE or in RETURNED.
+        if (put && was.status === 'returned' && x.status !== 'returned'
+            && x.items.length && x.items.every(function (o) { return o && o.returned; })) {
+          x.status = 'returned';
+          x.returnedAt = was.returnedAt || x.returnedAt || null;
+        }
+      });
+      out[k] = mergedPulls;
       return;
     }
     // A FILING IS NEVER UNDONE BY A SYNC.
