@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '549';
+  const BUILD = '550';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7248,13 +7248,38 @@ function mergeSnapshots(base, local, cloud) {
       // merge may CHANGE which factory a style is assigned to and may never
       // blank one this device is holding. Clearing still works on the device
       // doing the clearing, which is where a person watching it happen is.
-      const lStyles = Object.create(null);
+      const lStyles = Object.create(null), cStyles = Object.create(null);
       (Array.isArray(l) ? l : []).forEach(function (x) { if (x && x.id != null) lStyles[x.id] = x; });
+      (Array.isArray(c) ? c : []).forEach(function (x) { if (x && x.id != null) cStyles[x.id] = x; });
       mergedStyles.forEach(function (x) {
         const was = x && x.id != null ? lStyles[x.id] : null;
         if (!was) return;
         ['vendor', 'coo'].forEach(function (f) {
           if (!String(x[f] || '').trim() && String(was[f] || '').trim()) x[f] = was[f];
+        });
+        // A LINE SHEET FLAG IS CLEARED BY A PERSON, NOT BY IGNORANCE.
+        //
+        // Marking the carry-overs is a merchandising pass over the whole line,
+        // and losing one to a race looks identical to never having set it. Most
+        // records predate the field, so a copy that has not heard of it carries
+        // `absent` rather than false — and absent, read as a change, silently
+        // wins. That is what kept pushing the carry-overs back.
+        //
+        // But a blanket "never unset" would break the other half of the job:
+        // unticking one. A window still holding true would restore it and push
+        // it back, and the flag could be set and never cleared — which is the
+        // second complaint, not a fix for the first.
+        //
+        // So the tiebreak is WHO SPOKE LAST. A copy newer than ours saying the
+        // flag is off is a person turning it off, and it stands. A copy no
+        // newer is stale or ignorant, and ours stands.
+        ['bestSeller', 'carryOver'].forEach(function (f) {
+          if (was[f] !== true || x[f] === true) return;
+          var cRec = x && x.id != null ? cStyles[x.id] : null;
+          var tc = Date.parse((cRec && (cRec.updatedAt || cRec.createdAt)) || '') || 0;
+          var tl = Date.parse((was.updatedAt || was.createdAt) || '') || 0;
+          if (tc > tl) return;                 // they spoke later — let it clear
+          x[f] = true;
         });
       });
       out[k] = mergedStyles;
@@ -13568,6 +13593,13 @@ function openStyleModal(id=null) {
   document.querySelectorAll('#style-modal .modal-tab-panel').forEach((p,i) => p.classList.toggle('active', i===0));
 
   const isEdit = !!id;
+  // Which record the flag boxes below were filled in FOR. saveStyle() refuses
+  // to write them for any other record, so a save can never clear a flag this
+  // form was not actually showing.
+  window.__smFlagsFor = null;
+  var _bs = document.getElementById('sm-bestseller'), _co = document.getElementById('sm-carryover');
+  if (_bs) _bs.checked = false;
+  if (_co) _co.checked = false;        // cleared on EVERY open, edit or not
   // Quick-create: only essentials on new styles; full form on edit
   document.getElementById('style-modal').classList.toggle('sm-quick', !isEdit);
   document.getElementById('style-modal-title').textContent = isEdit ? 'Edit Style' : 'New Style';
@@ -13629,6 +13661,7 @@ function openStyleModal(id=null) {
     document.getElementById('sm-ws').value = s.wholesale||'';
     document.getElementById('sm-bestseller').checked = !!s.bestSeller;
     document.getElementById('sm-carryover').checked  = !!s.carryOver;
+    window.__smFlagsFor = s.id;        // now the boxes describe THIS style
     document.getElementById('sm-priority').value = s.priority||'mid';
     document.getElementById('sm-clo-status').value = s.cloStatus||'none';
     document.getElementById('sm-sid').value = s.styleId||'';
@@ -13698,6 +13731,13 @@ window.smMargins = function(){
     ? bits.join(' · ') + ' — these are what the prices above produce, and they are what the Styles sheet shows.'
     : '';
 };
+// The stored value unless this form was filled in for this record.
+function smFlagOut(elId, styleId, field){
+  var el = document.getElementById(elId);
+  var cur = (STATE.styles || []).find(function (x) { return x && x.id === styleId; });
+  if (!el || !styleId || window.__smFlagsFor !== styleId) return !!(cur && cur[field]);
+  return !!el.checked;
+}
 function saveStyle() {
   const name = document.getElementById('sm-name').value.trim().toUpperCase();
   if (!name) { toast('Style name required'); return; }
@@ -13729,8 +13769,11 @@ function saveStyle() {
     status: g('sm-status'), drop: g('sm-drop'),
     // Booleans, not strings: the line sheet asks "is it", and a '' / 'false' /
     // 'no' field is three ways to answer a yes/no question wrongly.
-    bestSeller: !!(document.getElementById('sm-bestseller') || {}).checked,
-    carryOver:  !!(document.getElementById('sm-carryover')  || {}).checked,
+    // Written only when the form was populated for this very record. On any
+    // other path the stored value stands: a save is not a statement about a
+    // field the person was never shown.
+    bestSeller: smFlagOut('sm-bestseller', id, 'bestSeller'),
+    carryOver:  smFlagOut('sm-carryover',  id, 'carryOver'),
     retail: parseFloat(g('sm-retail'))||0,
     wholesale: parseFloat(g('sm-ws'))||0,
     cogs, freight, duty, dyeCost, landed: parseFloat(landed),
