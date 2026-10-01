@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '545';
+  const BUILD = '546';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6865,45 +6865,26 @@ function _mById(arr) {
   (arr || []).forEach(function (r) { if (r && r.id != null) m[r.id] = r; else if (r != null) noid.push(r); });
   return { m: m, noid: noid };
 }
-// AN EDIT NOBODY STAMPED STILL HAPPENED.
+// WHY THERE IS NO updatedAt FIXUP HERE — 546, reverting 544.
 //
-// _mNewer is the merge's last resort when both sides changed the same record,
-// and it reads updatedAt. Nothing in the press-pull module ever wrote one:
-// marking a sample returned set items[i].returned and called save(), leaving
-// the record carrying the timestamp it was created with. So any pull the cloud
-// had touched more recently beat the return every single time — the row flicked
-// to returned, the next sync leg landed, and it came back. Twenty call sites
-// each had to remember to stamp; not one of them did.
+// 544 added stampLocalEdits(): any record differing from base got its
+// updatedAt corrected to now, so the merge's newest-wins tiebreak would stop
+// reading a creation date for an edit made a second ago.
 //
-// So the merge stops trusting call sites. A record that differs from base is an
-// edit THIS device made since the base was taken, which is by definition more
-// recent than the base. If its stamp says otherwise the stamp is stale, and it
-// is corrected here — before it is allowed to decide anything.
+// It had a defect that mattered more than the problem it solved. snapshot()
+// hands out LIVE REFERENCES — `d[k] = STATE[k]`, no copy — so writing
+// rec.updatedAt wrote straight into the founder's own records, from inside a
+// pull. Every four-minute poll, every realtime event and every tab switch
+// silently restamped everything this device had not yet published, and those
+// restamped records then went to the cloud outranking whatever the other device
+// had legitimately written later. A read path must not mutate state, and the
+// merge is the last place in this app to learn that the hard way.
 //
-// This only ever moves the both-changed tiebreak, and only toward the edit the
-// person is looking at right now. The remote edit it outranks is already safe
-// in the cloud; the local one, if it loses, is gone with no undo and no copy.
-function stampLocalEdits(base, local){
-  if (!base || !local) return;
-  var keys = (typeof window !== 'undefined' && window.SYNC_KEYS) || [];
-  var now = new Date().toISOString();
-  for (var i = 0; i < keys.length; i++){
-    var k = keys[i], B = base[k], L = local[k];
-    if (!Array.isArray(B) || !Array.isArray(L)) continue;
-    var bm = Object.create(null);
-    for (var j = 0; j < B.length; j++){ var r = B[j]; if (r && r.id != null) bm[String(r.id)] = r; }
-    for (var n = 0; n < L.length; n++){
-      var rec = L[n]; if (!rec || rec.id == null) continue;
-      var was = bm[String(rec.id)];
-      if (!was) continue;                       // new here: createdAt is already honest
-      if (_mEq(rec, was)) continue;             // untouched on this device
-      var t  = Date.parse(rec.updatedAt || rec.createdAt || '') || 0;
-      var tb = Date.parse(was.updatedAt || was.createdAt || '') || 0;
-      if (t > tb) continue;                     // somebody did stamp it; leave it alone
-      rec.updatedAt = now;
-    }
-  }
-}
+// The bug 544 was asked to fix — a recorded sample return being undone by a
+// sync — is fixed by the prPulls lock below, which never needed the stamp. If
+// the stale-stamp problem is worth solving again, it is solved by stamping at
+// the point of EDIT (one helper, called by the mutators) or on a deep copy, and
+// it ships on its own with two devices actually tested against each other.
 function _mNewer(a, b) {
   const ta = Date.parse((a && (a.updatedAt || a.createdAt)) || '') || 0;
   const tb = Date.parse((b && (b.updatedAt || b.createdAt)) || '') || 0;
@@ -7220,7 +7201,6 @@ function mergeSnapshots(base, local, cloud) {
   // RECEIVED a record has it in neither base nor local, so it declares nothing
   // — which is exactly the case that used to destroy the pull.
   try { tombDiff(base, local); } catch (e) {}
-  try { stampLocalEdits(base, local); } catch (e) {}
   // STATE._tomb last, and never omitted: it is THIS device's own record of what
   // a person deleted here. Reached through typeof, because a bare STATE is a
   // ReferenceError — not undefined — anywhere the merge runs outside the app,
@@ -49181,6 +49161,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function pushFailed(why, quiet){
     pushDirty = true;
     window.__syncRetryArmed = true;
+    // The leg itself, not just the retry note. `quiet` governs the BADGE — it
+    // never meant "do not record the failure", and reading it that way left the
+    // one honest indicator in the app reporting a stale success.
+    window.__syncStat.push = { t: new Date().toISOString(), ok: false,
+      err: syncReason(why || 'not published'), raw: String(why || '').slice(0, 140),
+      via: 'unpublished — retrying' };
     if (!quiet) { try { pendingBadge(true); } catch(e){} }
     var wait = RETRY_MS[Math.min(retryStep, RETRY_MS.length - 1)];
     retryStep++;
@@ -49198,6 +49184,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // event that makes a retry certain to work.
   //
   // Both are guarded on pushDirty: a wake is not an excuse to write.
+  window.__syncPending = function(){ return !!pushDirty; };
   function pushWake(why){
     if (!pushDirty) return;
     clearTimeout(retryTimer);
@@ -49449,7 +49436,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // refuses them — which means, without this, a Sales member would fail
       // every push and get an auth toast on every keystroke. Skip it, and let
       // the module rows be the write that counts.
-      var res = !writesBlob
+      var res = (!writesBlob || (modErr && ids.length))
         ? (modErr ? { error: { message: modErr } } : { skipped: true })
         : await c.from('venia_workspace').upsert({
             id: WS_ID, data: toPush, updated_by: clientId(),
@@ -49469,6 +49456,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // category disappearing off a transaction looks like.
       //
       // So the base only advances when what we actually pushed landed.
+      if (!ids.length && Object.keys(parts).length) {
+        syncFail('push', 'this device is not allowed to write any module — nothing has been '
+          + 'published. Your work is safe on this device; do not clear the app.');
+        window.__syncStat.push = { t: new Date().toISOString(), ok: false,
+          err: 'no writable modules — nothing was published',
+          via: 'base NOT advanced' };
+        pushFailed('no writable modules');
+        return;
+      }
       if (modErr && ids.length) {
         syncFail('push', 'module write failed (' + modErr + ') — your last change is still only on '
           + 'this device. It will be retried; do not clear the app until the next sync succeeds.');
@@ -49680,6 +49676,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } else if (!window.veniaAuthUser){
       cls = 'warn'; label = 'Signed out';
       why = 'Signed out — nothing is syncing until you sign in';
+    } else if (typeof window.__syncPending === 'function' && window.__syncPending()){
+      // UNPUBLISHED WORK OUTRANKS EVERY GREEN LEG. The pill read the last leg's
+      // recorded outcome, and a push that failed through pushFailed() recorded
+      // nothing on that leg — so it went on reporting the last time the work
+      // WAS saved, while hours of edits sat on the device and every pull handed
+      // the older cloud state back. The question this pill exists to answer is
+      // "is my work saved", and the only honest answer while a retry is armed
+      // is no.
+      cls = 'bad'; label = 'Not saved';
+      why = 'Changes on this device have not reached the server yet — they are safe here '
+          + 'and being retried. Do not clear the app or sign out. Tap for detail.';
     } else if ((st.push && st.push.ok === false) || (st.pull && st.pull.ok === false)
                || (st.modules && st.modules.ok === false)){
       var leg = (st.push && st.push.ok === false) ? st.push
