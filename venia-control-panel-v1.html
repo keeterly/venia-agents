@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '548';
+  const BUILD = '549';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -49238,6 +49238,62 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: via || 'pull' };
   }
   window.__syncAbsorb = absorbRemote;
+
+  // TWO TABS IN ONE BROWSER WERE INVISIBLE TO EACH OTHER.
+  //
+  // "Not sure where the other two windows are, but they should not mess up our
+  // syncing." Correct — and until now they could, in a way none of the sync
+  // diagnostics could show, because from the cloud's side it looks like one
+  // well-behaved client.
+  //
+  // clientId() lives in localStorage, so every tab of the same browser profile
+  // shares one id. onRemote() then discards a realtime write whose updated_by
+  // is our own id — "ignore our own echo" — which means a second tab's write is
+  // dropped on the floor. That tab goes on holding whatever STATE it had in
+  // memory when it was opened, for as long as it stays open. Touch anything in
+  // it and it writes that stale state over localStorage and pushes it, and the
+  // first tab's work is reverted by a device that never knew it had happened.
+  //
+  // The storage event is the one signal a browser gives for exactly this, and
+  // nothing was listening to it. It does not fire in the tab that wrote, so it
+  // means precisely "another tab of this profile changed the workspace".
+  //
+  // Merged, not adopted: the other tab is a peer, not an authority, and this
+  // tab may hold edits it has never seen. The same three-way merge the cloud
+  // gets, and the same promise about hands — a sibling tab is no more entitled
+  // to redraw an open picker than a partner's phone is.
+  var _tabSyncTimer = null;
+  function adoptFromSiblingTab(raw){
+    if (!raw) return;
+    if (veniaMidEdit()) {
+      clearTimeout(_tabSyncTimer);
+      _tabSyncTimer = setTimeout(function(){ adoptFromSiblingTab(raw); }, 1200);
+      return;
+    }
+    var incoming;
+    try { incoming = JSON.parse(raw); } catch (e) { return; }
+    if (!incoming || typeof incoming !== 'object') return;
+    var mine = snapshot();
+    // Convergence check, and the loop-breaker: A writes, B merges and writes,
+    // A sees B's write and merges — once the two agree there is nothing to do,
+    // so the exchange settles instead of bouncing between the tabs forever.
+    var merged;
+    try {
+      if (_mStr(incoming) === _mStr(mine)) return;
+      merged = mergeSnapshots(getBase(), mine, incoming);
+      if (_mStr(merged) === _mStr(mine)) return;
+    } catch (e) { return; }
+    applySnapshot(merged);
+    rerender();
+    window.__syncStat.tabSync = { t: new Date().toISOString(), ok: true, via: 'sibling tab' };
+    // The merge may carry records this tab holds and the other does not, so the
+    // result still owes the cloud a push.
+    schedulePush();
+  }
+  window.addEventListener('storage', function(e){
+    if (!e || e.key !== 'venia-plm-v2' || !e.newValue) return;
+    adoptFromSiblingTab(e.newValue);
+  });
   window.__syncSnapshot = function(){ return snapshot(); };
   window.__syncBase = function(snap){ if (arguments.length) setBase(snap); return getBase(); };
 
@@ -49604,16 +49660,35 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // caret anywhere, so activeElement said "not editing" every single time, and
   // the one guard protecting an in-progress edit was blind to the most common
   // way of making one.
+  // FOCUS IS NOT EDITING, and reading it as though it were is worse than the
+  // bug it was meant to fix. The Styles page autofocuses its search box, so
+  // document.activeElement is an INPUT from the moment the page finishes
+  // loading and stays one until something else is clicked. Every guard built on
+  // "is an input focused" was therefore permanently ON for a founder who had
+  // simply opened Product and not clicked anything — which silently disabled
+  // the four-minute poll and the realtime apply that this file has used that
+  // test for since long before today. A device that never pulls goes stale, and
+  // a stale device that pushes is the whole complaint.
+  //
+  // An edit in progress is one of two things: an explicit editor is OPEN (a
+  // picker, a modal — these are unambiguous), or a key has gone into a field in
+  // the last few seconds. Focus alone says nothing.
+  var MIDEDIT_KEY_MS = 6000;
+  try {
+    document.addEventListener('keydown', function(){ window.__veniaLastKey = Date.now(); }, true);
+    document.addEventListener('input',   function(){ window.__veniaLastKey = Date.now(); }, true);
+  } catch (e) {}
   function veniaMidEdit(){
     try {
-      var el = document.activeElement;
-      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.getClientRects().length) return true;
-      if (el && el.isContentEditable) return true;
-      // Every inline editor in the styles table is a `*-pop` popover.
+      // Explicit editors: open means in use, no further evidence needed.
       if (document.querySelector('[id$="-pop"]')) return true;
-      // And an open editing overlay — the style modal, the cost sheet — is the
-      // same promise: nothing rewrites the record while it is being worked on.
       if (document.querySelector('.overlay.open')) return true;
+      var el = document.activeElement;
+      if (!el) return false;
+      if (el.isContentEditable) return (Date.now() - (window.__veniaLastKey || 0)) < MIDEDIT_KEY_MS;
+      if (!/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return false;
+      if (!el.getClientRects().length) return false;
+      return (Date.now() - (window.__veniaLastKey || 0)) < MIDEDIT_KEY_MS;
     } catch (e) {}
     return false;
   }
@@ -49714,6 +49789,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             + '</span></div>';
         })()
       + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Signed in</span><span style="color:' + (u ? 'var(--green)' : 'var(--red)') + '">' + (u ? (u.email || 'yes') : 'NO — sync cannot work; sign in') + '</span></div>'
+      + (function(){
+          var me = '';
+          try { me = localStorage.getItem('venia-client-id') || ''; } catch (e) {}
+          var last = (st.pull && st.pull.by) || '';
+          var other = last && last !== me;
+          return '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">'
+            + '<span style="width:70px;color:var(--muted);flex-shrink:0">This window</span>'
+            + '<span style="flex:1;min-width:0;font-family:\'DM Mono\',monospace;font-size:10px;word-break:break-all">'
+            + (me || 'unknown')
+            + (other ? '<div style="font-family:inherit;font-size:10px;color:var(--muted);margin-top:3px">'
+                 + 'Last cloud write came from <span style="font-family:\'DM Mono\',monospace">'
+                 + String(last) + '</span> — another browser or device. Open its sync panel to '
+                 + 'identify it; tabs of the SAME browser share one id and now merge directly.'
+               + '</div>' : '')
+            + '</span></div>';
+        })()
       + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Realtime</span><span>' + (st.realtime || '—') + '</span></div>'
       + fmtLeg('Pull', st.pull) + fmtLeg('Push', st.push) + fmtLeg('Applied', st.apply)
       + (st.decision ? '<div style="font-size:10px;color:var(--muted);padding:8px 0;line-height:1.6">Boot decision: ' + st.decision + '</div>' : '')
