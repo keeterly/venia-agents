@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '547';
+  const BUILD = '548';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -49184,7 +49184,6 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // event that makes a retry certain to work.
   //
   // Both are guarded on pushDirty: a wake is not an excuse to write.
-  window.__syncPending = function(){ return !!pushDirty; };
   function pushWake(why){
     if (!pushDirty) return;
     clearTimeout(retryTimer);
@@ -49212,6 +49211,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   // True while this device holds a change the cloud has not accepted.
   window.__syncPending = function(){ return !!pushDirty; };
+  var adoptToken = 0;                 // only the newest deferred adopt may land
   // The last state we know both devices agreed on — the common ancestor the
   // 3-way merge diffs against to tell additions from deletions.
   function setBase(snap){ try { localStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
@@ -49487,9 +49487,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         var adopted = false;
         try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
         if (adopted) {
-          // Never applySnapshot(toPush) straight out — see syncReconcileAfterPush.
-          applySnapshot(syncReconcileAfterPush(localSnap, snapshot(), toPush));
-          setBase(snapshot());
+          // Deferred, never dropped, while someone is mid-edit. The push itself
+          // has already landed, so nothing is at risk in waiting: all that is
+          // postponed is adopting the partner's records onto this screen, and
+          // the base advance that goes with it. Re-checks until the hands are
+          // off, then applies exactly as it would have.
+          // ONE pending adopt, ever. Each push closes over its own localSnap
+          // and toPush, so two of them waiting on the same open modal would
+          // land oldest last — a push's result overwritten by its
+          // predecessor's. A later adopt supersedes an earlier one: it was
+          // built from a newer local snapshot and a newer cloud read.
+          var token = ++adoptToken;
+          var adopt = function(){
+            if (token !== adoptToken) return;                 // superseded
+            if (veniaMidEdit()) { setTimeout(adopt, 1200); return; }
+            applySnapshot(syncReconcileAfterPush(localSnap, snapshot(), toPush));
+            setBase(snapshot());
+          };
+          adopt();
         }
         else { setBase(localSnap); }
         pushLanded();
@@ -49575,11 +49590,37 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){ /* leave view as-is */ }
   }
 
+  // IS SOMEONE IN THE MIDDLE OF SOMETHING.
+  //
+  // "Fabric and colour undid itself again." They had, and the edit was not even
+  // lost — it reached the server seconds later. What they watched was a repaint:
+  // a realtime write from one of the other open windows landed, the merge
+  // applied, the table re-rendered, and the open fabric picker went with it,
+  // taking the choice that had just been made in it.
+  //
+  // The guard here only asked whether the caret was in an INPUT, TEXTAREA or
+  // SELECT. The inline cell editors — fabric, colourways, sizes, category,
+  // factory, flag, price — are POPOVERS. Clicking a swatch in one never puts a
+  // caret anywhere, so activeElement said "not editing" every single time, and
+  // the one guard protecting an in-progress edit was blind to the most common
+  // way of making one.
+  function veniaMidEdit(){
+    try {
+      var el = document.activeElement;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.getClientRects().length) return true;
+      if (el && el.isContentEditable) return true;
+      // Every inline editor in the styles table is a `*-pop` popover.
+      if (document.querySelector('[id$="-pop"]')) return true;
+      // And an open editing overlay — the style modal, the cost sheet — is the
+      // same promise: nothing rewrites the record while it is being worked on.
+      if (document.querySelector('.overlay.open')) return true;
+    } catch (e) {}
+    return false;
+  }
+  window.veniaMidEdit = veniaMidEdit;
   function onRemote(row){
     if (!row || !row.data || row.updated_by === clientId()) return;   // ignore our own echo
-    var el = document.activeElement;
-    var editing = el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
-    if (editing){ showReloadPill(row); return; }                       // don't clobber a live edit
+    if (veniaMidEdit()){ showReloadPill(row); return; }                // don't clobber a live edit
     absorbRemote(row, 'realtime');                                      // 3-way merge, not wholesale replace
     rerender();
     if (typeof showToast === 'function') showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
@@ -49629,8 +49670,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // Never merge mid-edit — but only a VISIBLE field counts. A hidden field
     // (e.g. the auth gate's passcode input after unlock) can hold stale focus
     // forever, and treating it as "editing" would silently kill convergence.
-    var el = document.activeElement;
-    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && el.getClientRects().length > 0) return;
+    if (veniaMidEdit()) return;
     var row = await pullRow();
     if (row && row.data && row.updated_by !== clientId()){
       absorbRemote(row, 'poll');
