@@ -2960,7 +2960,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '546';
+  const BUILD = '547';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -49513,7 +49513,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
   }
   function schedulePush(){
-    if (applyingRemote) return;                 // don't echo a state we just pulled
+    // applySnapshot() is synchronous from start to finish, so nothing a person
+    // does can land inside this flag — the only save() it suppresses is the
+    // echo applySnapshot fires itself to persist what it just merged. (547
+    // briefly marked that echo as unpublished work, which would have pinned
+    // every device at "Not saved" after every pull. Edits made during the
+    // PUSH's awaits are the real hazard, and syncReconcileAfterPush owns them.)
+    if (applyingRemote) return;
     clearTimeout(pushTimer);
     pushTimer = setTimeout(pushNow, 1500);
   }
@@ -49530,13 +49536,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // across the wire on every pull.
       var res = await c.from('venia_module_data').select('*')
         .eq('workspace_id', WS_ID).in('module', MODULE_IDS);
-      if (res.error){ window.__syncStat.modulePull = { ok:false, err: res.error.message }; return null; }
+      if (res.error){
+        window.__syncStat.modulePull = { ok:false, err: res.error.message };
+        syncFail('pull', res.error.message);
+        return null;
+      }
       var rows = res.data || [];
       if (!rows.length) return null;
       var newest = rows.reduce(function(a,b){
         return (Date.parse(b.updated_at||'')||0) > (Date.parse(a.updated_at||'')||0) ? b : a; });
       window.__syncStat.modulePull = { ok:true, rows: rows.length,
         modules: rows.map(function(r){ return r.module; }).join(','), cloudAt: newest.updated_at };
+      window.__syncStat.pull = { t: new Date().toISOString(), ok: true, rows: rows.length,
+        via: rows.length + ' module rows', cloudAt: newest.updated_at, by: newest.updated_by };
       return { data: moduleAssemble(rows), updated_at: newest.updated_at,
                updated_by: newest.updated_by, rev: newest.rev, _fromModules: true };
     } catch(e){ window.__syncStat.modulePull = { ok:false, err: e && e.message }; return null; }
@@ -49645,6 +49657,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     ov.addEventListener('click', function(e){ if (e.target === ov) ov.remove(); });
     ov.innerHTML = '<div style="background:var(--bg);max-width:480px;width:100%;padding:18px;max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">'
       + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:10px">⇅ Sync status · Build ' + (st.build || '?') + '</div>'
+      + (function(){
+          var pend = (typeof window.__syncPending === 'function') && window.__syncPending();
+          var r = st.retry;
+          return '<div style="display:flex;gap:8px;padding:8px 10px;margin-bottom:8px;font-size:11px;'
+            + 'background:' + (pend ? 'rgba(192,57,43,.08)' : 'rgba(39,174,96,.08)') + ';'
+            + 'border-left:2px solid ' + (pend ? 'var(--red)' : 'var(--green)') + '">'
+            + '<span style="width:70px;color:var(--muted);flex-shrink:0">On server</span>'
+            + '<span style="flex:1;min-width:0;color:' + (pend ? 'var(--red)' : 'var(--green)') + '">'
+            + (pend
+                ? 'NO — this device is holding changes the server has not taken. They are safe '
+                  + 'here; do not clear the app or sign out.'
+                  + (r ? '<div style="color:var(--muted);margin-top:3px">retry ' + (r.attempt || 1)
+                       + ' in ' + Math.round((r.inMs || 0) / 1000) + 's · ' + String(r.why || '') + '</div>' : '')
+                : 'Yes — everything on this device has been published.')
+            + '</span></div>';
+        })()
       + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Signed in</span><span style="color:' + (u ? 'var(--green)' : 'var(--red)') + '">' + (u ? (u.email || 'yes') : 'NO — sync cannot work; sign in') + '</span></div>'
       + '<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span style="width:70px;color:var(--muted)">Realtime</span><span>' + (st.realtime || '—') + '</span></div>'
       + fmtLeg('Pull', st.pull) + fmtLeg('Push', st.push) + fmtLeg('Applied', st.apply)
