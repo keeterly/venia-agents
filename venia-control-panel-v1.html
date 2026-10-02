@@ -1772,6 +1772,12 @@ html.no-settings  [data-space="settings"]{ display:none !important; }
 .sl-q-item{border:1px solid var(--border);background:var(--bg);padding:10px 11px;margin-bottom:8px}
 .sl-q-item .sl-qi-top{display:flex;gap:6px;align-items:center}
 .sl-q-item .sl-qi-style{flex:1;min-width:0;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:7px;font-size:11px}
+/* Typed but not yet a style: say so on the field rather than letting the line
+   look complete and then drop out of the quote at save time. */
+.sl-q-item .sl-qi-unmatched{border-color:var(--amber);background:rgba(211,84,0,.06)}
+.sl-q-item .sl-qi-note-f{display:flex;flex-direction:column;gap:3px;margin-top:8px}
+.sl-q-item .sl-qi-note-f span{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)}
+.sl-q-item .sl-qi-note{background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:7px;font-size:11px;width:100%}
 .sl-q-item .sl-qi-del{flex-shrink:0;width:30px;height:30px;background:none;border:1px solid var(--border);color:var(--muted);cursor:pointer;font-size:11px;line-height:1}
 .sl-q-item .sl-qi-del:hover{border-color:var(--red);color:var(--red)}
 .sl-q-item .sl-qi-mid{display:flex;gap:8px;align-items:flex-end;margin-top:8px;flex-wrap:wrap}
@@ -2960,7 +2966,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '551';
+  const BUILD = '552';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -39097,7 +39103,8 @@ function agBuildQuotesSection() {
         <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
         <div style="display:flex;gap:6px;align-items:center">
           <div class="ag-lr-mono" style="font-size:10px">${(q.createdAt||'').slice(0,10)}</div>
-          ${q.status==='accepted' && !q.orderId ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="event.stopPropagation();slCreateOrderFromQuote('${q.id}')">→ Order</button>` : ''}
+          ${!q.orderId && (q.items||[]).length ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="event.stopPropagation();slCreateOrderFromQuote('${q.id}')">→ Order</button>` : ''}
+          ${(q.items||[]).length ? `<button class="ag-btn ag-btn-sm" title="Order confirmation with photos, to send to the buyer" onclick="event.stopPropagation();slConfirmDoc('quote','${q.id}')">▤ For buyer</button>` : ''}
           <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenQuoteModal('${q.id}')">Edit</button>
         </div>
       </div>`).join('');
@@ -39142,6 +39149,63 @@ function slQuoteStyleOpts(sel) {
   return `<option value="">— style —</option>` + (STATE.styles||[]).filter(s => s.status !== 'archived').map(s =>
     `<option value="${s.id}" data-ws="${s.wholesale||0}" data-name="${slEsc(s.styleId ? s.styleId + ' ' + (s.name||'') : (s.name||''))}" ${sel===s.id?'selected':''}>${slEsc((s.styleId||'') + ' — ' + (s.name||''))} ($${s.wholesale||0} ws)</option>`).join('');
 }
+// ── TYPABLE STYLE LOOKUP ──────────────────────────────────────────────────
+// A <select> of 109 styles is a scroll, and it can only be searched by the
+// opening letters of whatever label the browser decides to match on. A buyer
+// calls a piece by its name; a line sheet calls it by its number; whoever is
+// building the quote has one or the other in front of them. So: a text box with
+// a datalist, matching on EITHER, and a hidden field carrying the id that
+// everything downstream already reads.
+function slStyleLabel(s){
+  if (!s) return '';
+  return ((s.styleId || '') + (s.styleId && s.name ? ' \u2014 ' : '') + (s.name || '')).trim();
+}
+// One datalist for the whole quote, not one per line.
+function slStyleDatalist(){
+  if (document.getElementById('sl-style-options')) return '';
+  const opts = (STATE.styles || []).filter(s => s && s.status !== 'archived')
+    .map(s => '<option value="' + slEsc(slStyleLabel(s)) + '">' + slEsc(
+      (s.fabric ? s.fabric + ' \u00b7 ' : '') + (s.wholesale ? s.wholesale + ' ws' : '')) + '</option>').join('');
+  return '<datalist id="sl-style-options">' + opts + '</datalist>';
+}
+// Resolve what was typed. Exact label, then style number, then name, then a
+// substring on either — so "etherea" and "WB01" both land. Ambiguous stays
+// unresolved rather than guessing which skirt was meant.
+window.slStyleFromText = function(txt){
+  const q = String(txt || '').trim().toLowerCase();
+  if (!q) return null;
+  const live = (STATE.styles || []).filter(s => s && s.status !== 'archived');
+  const hit = live.find(s => slStyleLabel(s).toLowerCase() === q)
+    || live.find(s => String(s.styleId || '').toLowerCase() === q)
+    || live.find(s => String(s.name || '').toLowerCase() === q);
+  if (hit) return hit;
+  const parts = live.filter(s => String(s.styleId || '').toLowerCase().indexOf(q) >= 0
+    || String(s.name || '').toLowerCase().indexOf(q) >= 0
+    || slStyleLabel(s).toLowerCase().indexOf(q) >= 0);
+  return parts.length === 1 ? parts[0] : null;
+};
+window.slQuoteStylePick = function(el){
+  const row = el.closest('.sl-q-item'); if (!row) return;
+  const st = slStyleFromText(el.value);
+  const hid = row.querySelector('.sl-qi-styleid');
+  if (hid) hid.value = st ? st.id : '';
+  row.dataset.styleid = st ? st.id : '';
+  el.classList.toggle('sl-qi-unmatched', !st && !!String(el.value || '').trim());
+  if (!st) { slQuoteRecalc(); return; }
+  el.value = slStyleLabel(st);
+  const ws = row.querySelector('.sl-qi-ws');
+  if (ws && !parseFloat(ws.value)) ws.value = st.wholesale || '';
+  const color = row.querySelector('.sl-qi-color');
+  if (color && st.colors) color.placeholder = st.colors;
+  const holder = row.querySelector('.sl-qi-sizes');
+  if (holder) {
+    const prev = {};
+    row.querySelectorAll('.sl-qi-sz').forEach(i => { if (i.value) prev[i.dataset.size] = i.value; });
+    holder.innerHTML = slQuoteSizesFor(st).map(sz => slQuoteSzCell(sz, prev[sz])).join('');
+  }
+  try { slQuoteSeasonSync(); } catch (e) {}
+  slQuoteRecalc();
+};
 function slQuoteItemRowHTML(it) {
   it = it || {};
   const style = it.styleId ? (STATE.styles||[]).find(s => s.id === it.styleId) : null;
@@ -39152,8 +39216,13 @@ function slQuoteItemRowHTML(it) {
   if (!it.sizes && it.qty && sizes.length) sizeVals[sizes[0]] = it.qty;
   const colorHint = style && style.colors ? slEsc(style.colors) : 'Colorway';
   return `<div class="sl-q-item" data-styleid="${it.styleId||''}">
+    ${slStyleDatalist()}
     <div class="sl-qi-top">
-      <select class="sl-qi-style" onchange="slQuoteStyleChanged(this)">${slQuoteStyleOpts(it.styleId)}</select>
+      <input class="sl-qi-style" type="text" list="sl-style-options" autocomplete="off"
+        placeholder="Type a style name or number — ETHEREA, or WB01"
+        value="${slEsc(style ? slStyleLabel(style) : '')}"
+        oninput="slQuoteStylePick(this)" onchange="slQuoteStylePick(this)">
+      <input type="hidden" class="sl-qi-styleid" value="${slEsc(it.styleId||'')}">
       <button type="button" class="sl-qi-del" title="Remove line" onclick="this.closest('.sl-q-item').remove();slQuoteRecalc()">✕</button>
     </div>
     <div class="sl-qi-mid">
@@ -39166,6 +39235,8 @@ function slQuoteItemRowHTML(it) {
       <div class="sl-qi-sizes">${sizes.map(sz => slQuoteSzCell(sz, sizeVals[sz])).join('')}</div>
       <span class="sl-qi-units">0 units</span>
     </div>
+    <label class="sl-qi-field sl-qi-note-f"><span>Note</span><input class="sl-qi-note" type="text"
+      value="${slEsc(it.note||'')}" placeholder="Anything the buyer should see against this line"></label>
   </div>`;
 }
 // When the style changes: price it, and rebuild the size run for that style
@@ -39226,14 +39297,17 @@ window.slQuoteAddItem = function(it){
 };
 window.slQuoteReadItems = function(){
   return [...document.querySelectorAll('#sl-q-items .sl-q-item')].map(r => {
-    const sel = r.querySelector('.sl-qi-style');
-    const opt = sel && sel.selectedOptions[0];
+    const hid = r.querySelector('.sl-qi-styleid');
+    const sid = hid ? hid.value : (r.dataset.styleid || '');
+    const st = (STATE.styles || []).find(x => x && x.id === sid);
     const sizes = {}; let units = 0;
     r.querySelectorAll('.sl-qi-sz').forEach(i => { const n = parseInt(i.value,10)||0; if (n>0){ sizes[i.dataset.size]=n; units+=n; } });
     const ws = parseFloat(r.querySelector('.sl-qi-ws').value) || 0;
+    const note = (r.querySelector('.sl-qi-note') || {}).value;
     return {
-      styleId: sel ? sel.value : '',
-      name: opt ? (opt.dataset.name || '') : '',
+      styleId: sid,
+      name: st ? ((st.styleId ? st.styleId + ' ' : '') + (st.name || '')).trim() : '',
+      note: note ? String(note).trim() : '',
       color: (r.querySelector('.sl-qi-color')||{}).value ? r.querySelector('.sl-qi-color').value.trim() : '',
       sizes,
       qty: units,
@@ -39412,11 +39486,202 @@ function slTouchAccount(name, text) {
   if (/order created/i.test(String(text||'')) && b.stage !== 'closed' && b.stage !== 'inactive') b.stage = 'active';
 }
 
+// ══ THE DOCUMENT THE BUYER ACTUALLY RECEIVES ═══════════════════════════════
+//
+// A quote could become an order and there it stopped: the order lived in the
+// app as a row, and what went to the store was whatever got retyped into an
+// email. A buyer confirming four thousand euros of stock needs to see WHICH
+// pieces — a style code and a colour name are not how anyone recognises a
+// garment they chose in a showroom. So the confirmation leads with the photo.
+//
+// One document for a quote and for an order, because they are the same list of
+// garments at different moments: a quote prints PRO FORMA and says the prices
+// hold until it is accepted; an order prints ORDER CONFIRMATION and says what
+// has been booked. Nothing is retyped and nothing can drift between them.
+function slMoney(v, cur){
+  var n = Number(v) || 0, c = String(cur || 'USD').toUpperCase();
+  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: c,
+    maximumFractionDigits: 0 }).format(n); }
+  catch (e) { return (c === 'EUR' ? '€' : c === 'GBP' ? '£' : '$') + Math.round(n).toLocaleString(); }
+}
+// The size run as a buyer reads it: only the sizes actually taken, in run order,
+// each with its count. A bare total of 12 units tells a warehouse nothing.
+function slSizeRun(it){
+  var sz = it && it.sizes;
+  if (!sz || typeof sz !== 'object') return '';
+  var order = ['XXS','XS','S','M','L','XL','XXL','OS','ONE SIZE','0','2','4','6','8','10','12','14'];
+  var keys = Object.keys(sz).filter(function(k){ return Number(sz[k]) > 0; });
+  keys.sort(function(a, b){
+    var ia = order.indexOf(String(a).toUpperCase()), ib = order.indexOf(String(b).toUpperCase());
+    if (ia < 0) ia = 99; if (ib < 0) ib = 99;
+    return ia - ib || String(a).localeCompare(String(b));
+  });
+  return keys.map(function(k){ return k + ' × ' + sz[k]; }).join('   ');
+}
+// The garment behind a line. Quote and order items both carry styleId = the
+// style RECORD id, so the photo, the code and the real name all come from the
+// one place they are maintained.
+function slDocStyle(it){
+  var id = it && it.styleId;
+  return (STATE.styles || []).find(function (s) { return s && s.id === id; }) || null;
+}
+window.slConfirmDoc = function(kind, id){
+  var src = kind === 'order'
+    ? (STATE.slOrders || []).find(function (x) { return x && x.id === id; })
+    : (STATE.slQuotes || []).find(function (x) { return x && x.id === id; });
+  if (!src) { showToast('Could not find that ' + kind, 'error'); return; }
+  var items = (src.items || []).filter(Boolean);
+  if (!items.length) { showToast('Nothing on this ' + kind + ' to send yet', 'warning'); return; }
+  var isOrder = kind === 'order';
+  var cur = src.currency || 'USD';
+  var esc = function (v) { return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+
+  var units = 0, subtotal = 0;
+  var rows = items.map(function (it) {
+    var st = slDocStyle(it);
+    var qty = Number(it.qty) || 0;
+    var ws  = Number(it.ws) || 0;
+    var line = qty * ws;
+    units += qty; subtotal += line;
+    // The name on the line may already carry the code ("VN-SS27-WB01 ETHEREA
+    // SKIRT"); don't print it twice.
+    var code = (st && st.styleId) || '';
+    var nm = String(it.name || (st && st.name) || 'Style').trim();
+    if (code && nm.toUpperCase().indexOf(String(code).toUpperCase()) === 0) {
+      nm = nm.slice(code.length).trim();
+    }
+    var photo = (st && st.photoUrl) || '';
+    var run = slSizeRun(it);
+    return '<tr>'
+      + '<td class="ph">' + (photo
+          ? '<img src="' + esc(photo) + '" alt="">'
+          : '<span class="no">photo<br>to follow</span>') + '</td>'
+      + '<td><div class="nm">' + esc(nm) + '</div>'
+      +   (code ? '<div class="cd">' + esc(code) + '</div>' : '')
+      +   (st && st.fabric ? '<div class="cd">' + esc(st.fabric) + '</div>' : '')
+      +   (it.note ? '<div class="nt">' + esc(it.note) + '</div>' : '') + '</td>'
+      + '<td>' + esc(it.color || (st && st.colors) || '—') + '</td>'
+      + '<td class="run">' + (run ? esc(run) : '—') + '</td>'
+      + '<td class="n">' + qty + '</td>'
+      + '<td class="n">' + esc(slMoney(ws, cur)) + '</td>'
+      + '<td class="n b">' + esc(slMoney(line, cur)) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  var disc = Number(src.discountPct) || 0;
+  var discVal = disc > 0 ? subtotal * disc / 100 : 0;
+  var total = subtotal - discVal;
+  var stored = Number(src.total) || 0;
+  if (stored && Math.abs(stored - total) > 1) {
+    try { showToast('Heads up — this ' + kind + ' records '
+      + slMoney(stored, cur) + ' but its lines come to ' + slMoney(total, cur)
+      + '. The document prints the lines; fix the ' + kind + ' if that is wrong.', 'warning', 7000); } catch (e) {}
+  }
+  var title = isOrder ? 'Order Confirmation' : 'Pro Forma';
+  var ref = isOrder ? ('Order ' + (src.id || '')) : ('Quote ' + (src.id || ''));
+  var acct = src.account || src.buyerName || 'Account';
+  var ship = src.shipStart || src.deliveryDate || '';
+  var terms = src.terms || ((STATE.slPrefs && STATE.slPrefs.terms) || '');
+  var moq = (STATE.slPrefs && STATE.slPrefs.moq) || '';
+
+  var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
+    + esc(title + ' — ' + acct) + '</title><style>'
+    + '*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}'
+    + '@page{size:A4 portrait;margin:12mm}'
+    + 'body{font-family:Helvetica Neue,Helvetica,Arial,sans-serif;color:#111;margin:0;font-size:9pt;'
+    +   'padding:14mm 12mm;max-width:210mm;margin-left:auto;margin-right:auto}'
+    + '@media print{body{padding:0;max-width:none}}'
+    + 'header{display:flex;justify-content:space-between;align-items:flex-end;'
+    +   'border-bottom:1.5px solid #111;padding-bottom:5mm;margin-bottom:5mm}'
+    + 'header .b svg{display:block}'
+    + '.doc{text-align:right}.doc .t{font-size:11pt;letter-spacing:3px;text-transform:uppercase}'
+    + '.doc .r{font-family:ui-monospace,Menlo,monospace;font-size:8pt;color:#666;margin-top:2mm}'
+    + '.meta{display:flex;gap:10mm;flex-wrap:wrap;margin-bottom:6mm}'
+    + '.meta div{font-size:8pt}.meta .k{letter-spacing:1.5px;text-transform:uppercase;color:#888;margin-bottom:1mm}'
+    + '.meta .v{font-size:10pt}'
+    + 'table{width:100%;border-collapse:collapse}'
+    + 'th{font-size:7.5pt;letter-spacing:1.5px;text-transform:uppercase;color:#888;text-align:left;'
+    +   'border-bottom:1px solid #111;padding:0 0 2mm}'
+    + 'td{border-bottom:1px solid #e8e8e8;padding:3mm 0;vertical-align:top}'
+    + 'td.ph{width:24mm;padding-right:4mm}'
+    + 'td.ph img{width:20mm;height:26mm;object-fit:cover;display:block;border:1px solid #eee}'
+    + 'td.ph .no{display:flex;width:20mm;height:26mm;align-items:center;justify-content:center;'
+    +   'border:1px dashed #ccc;color:#aaa;font-size:6.5pt;text-align:center;line-height:1.3}'
+    + '.nm{font-size:10pt;font-weight:600}'
+    + '.cd{font-family:ui-monospace,Menlo,monospace;font-size:7.5pt;color:#777;margin-top:1mm}'
+    + '.nt{font-size:8pt;color:#111;margin-top:1.5mm;font-style:italic}'
+    + '.run{font-family:ui-monospace,Menlo,monospace;font-size:8pt;white-space:nowrap}'
+    + 'td.n{text-align:right;white-space:nowrap}td.b{font-weight:700}'
+    + 'tfoot td{border:none;padding-top:3mm}'
+    + '.tot{margin-top:6mm;border-top:1.5px solid #111;padding-top:4mm;display:flex;justify-content:flex-end}'
+    + '.tot table{width:auto}.tot td{border:none;padding:1.5mm 0 1.5mm 10mm;font-size:9pt}'
+    + '.tot .g{font-size:13pt;font-weight:700}'
+    + '.foot{margin-top:8mm;border-top:1px solid #ddd;padding-top:4mm;font-size:7.5pt;color:#666;line-height:1.7}'
+    + '@media print{.noprint{display:none}}'
+    + '.noprint{position:sticky;top:0;display:flex;gap:8px;justify-content:flex-end;'
+    +   'margin:-6mm 0 6mm;z-index:9}'
+    + '.noprint button{font-family:inherit;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;'
+    +   'padding:8px 14px;border:1px solid #111;background:#111;color:#fff;cursor:pointer}'
+    + '</style></head><body>'
+    + '<div class="noprint"><button onclick="window.print()">↓ Save as PDF</button></div>'
+    + '<header><span class="b">'
+    + (typeof brandMark === 'function' ? brandMark(84) : '<strong>VENIA</strong>')
+    + '</span><div class="doc"><div class="t">' + esc(title) + '</div>'
+    + '<div class="r">' + esc(ref) + ' · ' + new Date().toISOString().slice(0, 10) + '</div></div></header>'
+    + '<div class="meta">'
+    +   '<div><div class="k">Account</div><div class="v">' + esc(acct) + '</div></div>'
+    +   (src.season ? '<div><div class="k">Season</div><div class="v">' + esc(src.season) + '</div></div>' : '')
+    +   (ship ? '<div><div class="k">Delivery</div><div class="v">' + esc(ship) + '</div></div>' : '')
+    +   '<div><div class="k">Currency</div><div class="v">' + esc(String(cur).toUpperCase()) + '</div></div>'
+    + '</div>'
+    + '<table><thead><tr><th></th><th>Style</th><th>Colourway</th><th>Sizes</th>'
+    +   '<th style="text-align:right">Units</th><th style="text-align:right">Wholesale</th>'
+    +   '<th style="text-align:right">Total</th></tr></thead><tbody>' + rows + '</tbody></table>'
+    + '<div class="tot"><table>'
+    +   '<tr><td>Units</td><td style="text-align:right">' + units + '</td></tr>'
+    +   '<tr><td>Subtotal</td><td style="text-align:right">' + esc(slMoney(subtotal, cur)) + '</td></tr>'
+    +   (disc > 0 ? '<tr><td>Discount ' + disc + '%</td><td style="text-align:right">−'
+         + esc(slMoney(discVal, cur)) + '</td></tr>' : '')
+    +   '<tr><td class="g">Total</td><td class="g" style="text-align:right">'
+         + esc(slMoney(total, cur)) + '</td></tr>'
+    + '</table></div>'
+    + '<div class="foot">'
+    +   (isOrder
+        ? 'This confirms the order above as booked. '
+        : 'This is a pro forma for confirmation — prices and availability hold until it is accepted. ')
+    +   'VENIA Collection — wholesale, ' + esc(String(cur).toUpperCase()) + ', FOB. '
+    +   (moq ? 'Minimum order ' + esc(moq) + '. ' : '')
+    +   (terms ? '<br>Terms: ' + esc(terms) + '. ' : '')
+    +   (src.cancelDate ? '<br>Cancel date: ' + esc(src.cancelDate) + '. ' : '')
+    +   (src.notes ? '<br>' + esc(src.notes) : '')
+    +   '<br>To order: sales@veniacollection.com · veniacollection.com'
+    + '</div></body></html>';
+
+  var w = window.open('', '_blank', 'width=900,height=1000');
+  if (!w) { showToast('Allow pop-ups to open the document', 'warning'); return; }
+  w.document.write(html); w.document.close();
+  try { logActivity('Sales: ' + title.toLowerCase() + ' opened for ' + acct
+    + ' — ' + items.length + ' styles, ' + slMoney(total, cur)); } catch (e) {}
+};
+
 // Accepted quote → wholesale order, items and total carried over — no re-typing.
 window.slCreateOrderFromQuote = function(quoteId) {
   const q = (STATE.slQuotes||[]).find(x => x.id === quoteId);
   if (!q) return;
   if (q.orderId) { showToast('Already converted — order #' + q.orderId, 'info'); return; }
+  if (!(q.items || []).length) { showToast('This quote has no styles on it yet', 'warning'); return; }
+  // THE BUTTON USED TO APPEAR ONLY ON AN ACCEPTED QUOTE, so a buyer saying yes
+  // on a draft had no route to an order at all — the one path from a quote to
+  // revenue was hidden behind a field nobody had thought to change. The
+  // acceptance is the event; the status is bookkeeping that follows it. Confirm
+  // and set it, rather than refusing.
+  if (q.status !== 'accepted') {
+    if (!confirm('Create the wholesale order from this quote?\n\n'
+        + (q.buyerName || 'The account') + ' · ' + (q.items || []).length + ' styles · '
+        + slMoney(q.total || 0, q.currency) + '\n\nThe quote will be marked accepted.')) return;
+    q.status = 'accepted';
+  }
   if (!STATE.slOrders) STATE.slOrders = dbGet('slOrders') || [];
   const id = 'ORD-' + Date.now().toString(36).toUpperCase();
   const rec = {
@@ -39430,7 +39695,7 @@ window.slCreateOrderFromQuote = function(quoteId) {
     cancelDate: q.cancelDate || '',
     discountPct: q.discountPct || 0,
     units: q.units || (q.items||[]).reduce((s,it)=>s+(it.qty||0),0),
-    items: (q.items||[]).map(it => ({ styleId: it.styleId, name: it.name, color: it.color||'', qty: it.qty, ws: it.ws, sizes: it.sizes || null })),
+    items: (q.items||[]).map(it => ({ styleId: it.styleId, name: it.name, color: it.color||'', qty: it.qty, ws: it.ws, sizes: it.sizes || null, note: it.note || '' })),
     deliveryDate: q.shipStart || '',
     notes: 'From quote ' + q.id + (q.season ? ' · ' + q.season : ''),
     quoteId: q.id,
@@ -39448,6 +39713,12 @@ window.slCreateOrderFromQuote = function(quoteId) {
   try { logActivity('Wholesale order ' + id + ' created from quote ' + q.id + ' — ' + rec.account); } catch(e){}
   showToast('Order ' + id + ' created from quote', 'success');
   try { agNavGo('sl','orders'); } catch(e){}
+  // The order exists; what the buyer needs is the document. Offer it rather
+  // than leaving them to find it.
+  setTimeout(function(){
+    try { if (confirm('Order ' + id + ' created.\n\nOpen the buyer\'s confirmation — '
+        + 'photos, colourways, sizes and totals — to send now?')) slConfirmDoc('order', id); } catch(e){}
+  }, 350);
 };
 
 function slDeleteQuote(id) {
@@ -40248,7 +40519,10 @@ function agBuildOrdersSection() {
         <div class="ag-lr-mono">${o.items ? o.items.length+' style'+(o.items.length!==1?'s':'') : '—'}</div>
         <div class="ag-lr-mono">$${((o.total||0)/1000).toFixed(1)}k</div>
         <div><span class="ag-badge" style="background:${STATUS_COLORS[o.status]||'var(--muted)'};color:#fff">${STATUS_LABELS[o.status]||o.status}</span></div>
-        <div class="ag-lr-mono">${o.deliveryDate||'—'}</div>
+        <div class="ag-lr-mono" style="display:flex;gap:8px;align-items:center;justify-content:space-between">
+          <span>${o.deliveryDate||'—'}</span>
+          <button class="ag-btn ag-btn-sm" title="Order confirmation with photos, to send to the buyer" onclick="event.stopPropagation();slConfirmDoc('order','${o.id}')">▤ For buyer</button>
+        </div>
       </div>`).join('')
     }
   </div>
