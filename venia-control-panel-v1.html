@@ -2982,7 +2982,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '554';
+  const BUILD = '555';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6514,6 +6514,8 @@ const CATALOG_STYLE_FIELDS = [
   // sheet is a Sales document, so a flag that stayed in Product would never
   // reach the page it exists for.
   'bestSeller', 'carryOver',
+  // Where this style sits in the running order of its category — same reason.
+  'lsRank',
 ];
 const MODULES = {
   home: {
@@ -37858,9 +37860,32 @@ window.slSetWsMoq = function(id, v){
 // Reusing it rather than writing a second list is what stops the two drifting.
 // Sorting here rather than in one exporter means the preview, the list export
 // and the visual sheet cannot disagree about the order of the same line.
+// A LINE HAS A RUNNING ORDER, AND IT IS A DECISION, NOT AN ALPHABET.
+//
+// The sheet grouped by RP_CATS and then sorted by name inside each category, so
+// the first thing a buyer saw was whichever top happened to start with an A.
+// A line is merchandised: the opening look leads, the carry-overs sit where
+// they earn their place, and the order is argued over. That order now lives in
+// the workspace — STATE.lsCatOrder for the categories, and an lsRank on each
+// style for its place within one — and because slLsStyles() is the single sort
+// behind the preview, the list export AND the visual sheet, arranging it once
+// moves all three. Nothing arranged by hand can be silently reordered later.
+//
+// Both fall back to exactly today's behaviour: a category nobody has placed
+// keeps its RP_CATS position, and an unranked style still sorts by name after
+// the ranked ones. An empty running order changes nothing.
 function slLsCatRank(c){
-  const i = (typeof RP_CATS !== 'undefined' ? RP_CATS : []).indexOf(String(c||'').trim());
-  return i < 0 ? 99 : i;                 // anything off the list sorts last
+  const t = String(c||'').trim();
+  const own = ((window.STATE && STATE.lsCatOrder) || []).indexOf(t);
+  if (own >= 0) return own;                        // placed by hand, in that order
+  const i = (typeof RP_CATS !== 'undefined' ? RP_CATS : []).indexOf(t);
+  return i < 0 ? 900 : 500 + i;                    // then the canonical order, then the rest
+}
+// Where a style sits inside its category. Unranked sorts after every ranked one
+// so adding a style never silently displaces the arrangement.
+function slLsRank(s){
+  const r = Number(s && s.lsRank);
+  return (isFinite(r) && r >= 0) ? r : Infinity;
 }
 function slLsStyles(){
   return (STATE.styles||[]).filter(s => s.status !== 'archived'
@@ -37871,10 +37896,145 @@ function slLsStyles(){
       if (ra !== rb) return ra - rb;
       // Two unknown categories still group together rather than interleaving.
       const ca = String(a.category||''), cb = String(b.category||'');
-      if (ra === 99 && ca !== cb) return ca.localeCompare(cb);
+      if (ra >= 900 && ca !== cb) return ca.localeCompare(cb);
+      const qa = slLsRank(a), qb = slLsRank(b);
+      if (qa !== qb) return qa - qb;
       return String(a.name||'').localeCompare(String(b.name||''));
     });
 }
+// ══ ARRANGING THE RUNNING ORDER ════════════════════════════════════════════
+// Up and down rather than drag: it works with a trackpad, a touchscreen and a
+// keyboard, it cannot drop a style into the wrong category by accident, and on
+// a list of a hundred pieces it is the only one that can be used precisely.
+let LS_ORD_CAT = null;                       // which category's styles are open
+// The categories actually present in the line, in the order the sheet prints
+// them — so the editor can only ever show what a buyer would see.
+function slOrdCats(){
+  const seen = [];
+  slLsStyles().forEach(function (s) {
+    const c = String(s.category || '').trim() || 'Uncategorised';
+    if (seen.indexOf(c) < 0) seen.push(c);
+  });
+  return seen;                                // slLsStyles already sorted them
+}
+function slOrdStyles(cat){
+  return slLsStyles().filter(function (s) {
+    return (String(s.category || '').trim() || 'Uncategorised') === cat; });
+}
+window.slOrderOpen = function(){
+  const ex = document.getElementById('sl-ord-modal'); if (ex) ex.remove();
+  const cats = slOrdCats();
+  if (!cats.length) { showToast('No styles in this season to arrange', 'warning'); return; }
+  if (!LS_ORD_CAT || cats.indexOf(LS_ORD_CAT) < 0) LS_ORD_CAT = cats[0];
+  const ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'sl-ord-modal';
+  ov.addEventListener('click', function (e) { if (e.target === ov) ov.remove(); });
+  ov.innerHTML = '<div class="modal" style="width:860px;max-width:94vw" onclick="event.stopPropagation()">'
+    + '<div class="modal-head"><div class="modal-title">Running order</div>'
+    + '<button class="modal-close" onclick="document.getElementById(\'sl-ord-modal\').remove()" aria-label="Close">&times;</button></div>'
+    + '<div class="modal-body" id="sl-ord-body"></div></div>';
+  document.body.appendChild(ov);
+  slOrderRender();
+};
+function slOrdRow(label, sub, up, down, extra){
+  return '<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;'
+    + 'border-bottom:1px solid var(--border)' + (extra || '') + '">'
+    + '<div style="flex:1;min-width:0"><div style="font-size:12px">' + label + '</div>'
+    + (sub ? '<div style="font-size:10px;color:var(--muted)">' + sub + '</div>' : '') + '</div>'
+    + '<div style="display:flex;gap:4px;flex-shrink:0">'
+    + '<button class="ag-btn ag-btn-sm" ' + (up ? 'onclick="' + up + '"' : 'disabled style="opacity:.3"') + ' title="Move up">↑</button>'
+    + '<button class="ag-btn ag-btn-sm" ' + (down ? 'onclick="' + down + '"' : 'disabled style="opacity:.3"') + ' title="Move down">↓</button>'
+    + '</div></div>';
+}
+window.slOrderRender = function(){
+  const el = document.getElementById('sl-ord-body'); if (!el) return;
+  const cats = slOrdCats();
+  if (cats.indexOf(LS_ORD_CAT) < 0) LS_ORD_CAT = cats[0];
+  const styles = slOrdStyles(LS_ORD_CAT);
+  const esc = (typeof slEsc === 'function') ? slEsc : function (v) { return String(v == null ? '' : v); };
+  el.innerHTML =
+      '<div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">'
+    +   'This is the order the sheet prints in — the preview, the list export and the '
+    +   'visual sheet all read it. Arrange the categories on the left and the pieces '
+    +   'inside one on the right. Anything you have not placed keeps its usual spot.'
+    + '</div>'
+    + '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">'
+    +   '<div style="flex:1 1 260px;min-width:240px">'
+    +     '<div class="micro-label" style="margin-bottom:6px">Categories</div>'
+    +     '<div style="border:1px solid var(--border)">'
+    +       cats.map(function (c, i) {
+            return slOrdRow(
+              '<span style="cursor:pointer" onclick="slOrderPick(\'' + esc(c).replace(/'/g, "\\'") + '\')">'
+                + esc(c) + '</span>',
+              slOrdStyles(c).length + ' style' + (slOrdStyles(c).length === 1 ? '' : 's'),
+              i > 0 ? 'slOrderMoveCat(' + i + ',-1)' : '',
+              i < cats.length - 1 ? 'slOrderMoveCat(' + i + ',1)' : '',
+              c === LS_ORD_CAT ? ';background:var(--bg-off)' : '');
+          }).join('')
+    +     '</div>'
+    +   '</div>'
+    +   '<div style="flex:1 1 380px;min-width:300px">'
+    +     '<div class="micro-label" style="margin-bottom:6px">' + esc(LS_ORD_CAT) + '</div>'
+    +     '<div style="border:1px solid var(--border);max-height:48vh;overflow:auto">'
+    +       (styles.length ? styles.map(function (st, i) {
+            return slOrdRow(esc(st.name || 'Unnamed'),
+              esc(st.styleId || '') + (st.fabric ? ' · ' + esc(st.fabric) : ''),
+              i > 0 ? 'slOrderMoveStyle(' + i + ',-1)' : '',
+              i < styles.length - 1 ? 'slOrderMoveStyle(' + i + ',1)' : '');
+          }).join('') : '<div style="padding:16px;font-size:11px;color:var(--muted)">Nothing here</div>')
+    +     '</div>'
+    +   '</div>'
+    + '</div>'
+    + '<div style="display:flex;gap:8px;margin-top:16px;align-items:center">'
+    +   '<button class="ag-btn ag-btn-sm" onclick="slOrderReset()" title="Back to category order and A–Z">↺ Reset to default</button>'
+    +   '<span style="font-size:10px;color:var(--muted);margin-left:auto">Saved as you go</span>'
+    + '</div>';
+};
+window.slOrderPick = function(c){ LS_ORD_CAT = c; slOrderRender(); };
+window.slOrderMoveCat = function(i, d){
+  const cats = slOrdCats();
+  const j = i + d;
+  if (j < 0 || j >= cats.length) return;
+  const next = cats.slice();
+  const moved = next.splice(i, 1)[0];
+  next.splice(j, 0, moved);
+  // Store the WHOLE visible order, not just the pair that moved: a partial list
+  // would leave the rest to fall back on RP_CATS and the two orders would fight.
+  STATE.lsCatOrder = next;
+  save();
+  slOrderRender();
+};
+window.slOrderMoveStyle = function(i, d){
+  const list = slOrdStyles(LS_ORD_CAT);
+  const j = i + d;
+  if (j < 0 || j >= list.length) return;
+  const next = list.slice();
+  const moved = next.splice(i, 1)[0];
+  next.splice(j, 0, moved);
+  // Dense ranks across the whole category, so the arrangement is total and a
+  // style added later lands after it rather than in the middle of it.
+  const at = new Date().toISOString();
+  next.forEach(function (st, n) {
+    const real = (STATE.styles || []).find(function (x) { return x && x.id === st.id; });
+    if (real && real.lsRank !== n) { real.lsRank = n; real.updatedAt = at; }
+  });
+  save();
+  slOrderRender();
+};
+window.slOrderReset = function(){
+  if (!confirm('Put the running order back to the default?\n\n'
+      + 'Categories return to Tops, Bottoms, Outerwear, Dresses, Accessories, '
+      + 'and every style sorts by name again.')) return;
+  delete STATE.lsCatOrder;
+  const at = new Date().toISOString();
+  (STATE.styles || []).forEach(function (st) {
+    if (st && st.lsRank != null) { delete st.lsRank; st.updatedAt = at; }
+  });
+  save();
+  try { logActivity('Line sheet: running order reset to default'); } catch (e) {}
+  slOrderRender();
+};
+
 function agBuildLineSheetsSection() {
   if (!STATE.slLinesheets) STATE.slLinesheets = [];
   const seasons = (typeof rpSeasons === 'function') ? rpSeasons() : [];
@@ -37929,6 +38089,7 @@ function agBuildLineSheetsSection() {
     <div class="ag-sec-head"><h2 class="ag-sec-title">${slEsc(seasonLabel)} Line Sheet Preview</h2>
       <div class="ag-sec-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <select onchange="SL_LS_SEASON=this.value;agNavSl('linesheets')" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${seasonOpts}</select>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slOrderOpen()" title="Arrange the categories, and the pieces inside one — every export reads it">&#x21C5; Running order</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slLsOpen()" title="One row per style, every number in one table — choose which prices it carries">&#x21D3; Export list</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slVlsOpen()" title="Landscape, photo first, a few styles per page">&#x25A6; Export visual</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slFreezeLinesheet()" title="Snapshot this sheet — versioned, immutable, order forms come from it">❄ Freeze</button>
