@@ -2971,8 +2971,16 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     </div>
   </div>
 
-  <div style="margin-top:18px">
-    <a href="?portal" style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a8a8a;text-decoration:none;border-bottom:1px solid #3a3a3a;padding-bottom:2px">Sales team sign-in →</a>
+  <!-- Two doors, because there are two kinds of person who are not a founder
+       and their credentials are not interchangeable. A TEAM MEMBER (granted
+       modules in Settings -> Team & Access) signs in with a VENIA email and
+       password against Supabase. A FREELANCE SALES AGENT signs in to the
+       portal, whose accounts live in venia_agents and are checked by an edge
+       function. One link for both sent members to the portal, where their
+       password cannot work and the error says only that it does not. -->
+  <div style="margin-top:18px;display:flex;flex-direction:column;gap:11px;align-items:center">
+    <a href="?team" style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a8a8a;text-decoration:none;border-bottom:1px solid #3a3a3a;padding-bottom:2px">Team sign-in →</a>
+    <a href="?portal" style="font-size:11px;letter-spacing:2px;text-transform:uppercase;color:#8a8a8a;text-decoration:none;border-bottom:1px solid #3a3a3a;padding-bottom:2px">Sales agent portal →</a>
   </div>
 
   <div class="vag-footer" id="vag-footer">© VENIA Collection</div>
@@ -2982,7 +2990,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '556';
+  const BUILD = '557';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3081,6 +3089,21 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
       document.body.innerHTML = '<div id="ag-root" style="min-height:100vh;background:#fff;flex:1 1 auto;width:100%"></div>';
     });
   }
+  // Team member front door (?team). A person who holds modules in Settings ->
+  // Team & Access signs in with the email and password VENIA set for them. The
+  // door skips the access code deliberately: her credential is a real Supabase
+  // session, and the database decides what it will send her, which is a harder
+  // wall than a shared code. The alternative was handing the founders' code to
+  // everyone who is granted a single module.
+  window.VENIA_TEAM = /[?&]team(?:[=&]|$)/.test(location.search);
+  // Once she has signed in here, the bare address works on this device too --
+  // she should not have to keep a query string. Set ONLY for a non-founder
+  // (see veniaEntrySignIn): on a founder's phone the access code is what
+  // stands between a thief and the workspace.
+  try { if (localStorage.getItem('venia_team_door') === '1') window.VENIA_TEAM = true; } catch (e) {}
+  if (window.VENIA_TEAM && !window.VENIA_AGENT && !window.VENIA_SHARE) {
+    $('venia-auth-gate').classList.add('hidden');
+  }
   // Password recovery (?reset=1 / #type=recovery / #error=...). See the
   // recovery module for the screen itself; this only has to decide, before the
   // first paint, that the gate is not what should be on screen.
@@ -3117,6 +3140,10 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
     $('venia-auth-gate').classList.add('hidden');
     sessionStorage.setItem(KEY, '1');
   }
+  // A member signing in with her VENIA account has cleared a higher bar than
+  // the access code; the sign-in form calls this so a reload does not drop her
+  // back onto a gate she has no code for.
+  window.veniaGateUnlock = unlock;
   function toast(msg){ const e=$('vag-error'); e.textContent=msg; e.classList.add('visible'); setTimeout(()=>{e.classList.remove('visible'); e.textContent='Incorrect access code';},2200); }
 
   // ── base64url <-> ArrayBuffer ──
@@ -3222,6 +3249,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // ── Boot ──
   (async function boot(){
     if (window.VENIA_SHARE) return;               // share view: gate stays hidden, no Face ID prompt
+    if (window.VENIA_TEAM) return;                // member door: the sign-in form is the gate
     if (sessionStorage.getItem(KEY) === '1') { unlock(); return; }
     if (localStorage.getItem(CRED) && await platformAuth()) {
       $('vag-faceid').classList.add('show');
@@ -4032,6 +4060,9 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
                 <strong>Set password</strong> on their row — that makes the login and gives
                 you the details to send them. Today is always included, otherwise they sign
                 in to a screen that cannot load.
+                <br><br>They sign in at <strong>creator.veniacollection.com/?team</strong> with
+                that email and password — no access code, and not the sales agent portal,
+                which is a different set of accounts entirely.
               </div>
             </div>
           </div>
@@ -49749,7 +49780,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (String(pw).length < 10) { showToast('At least 10 characters', 'warning'); return; }
     try {
       var r = await teamCall({ action:'setpw', email: email, password: String(pw) });
-      var url = (window.VENIA_PUBLIC_BASE || location.origin);
+      // /?team, not the bare host: the bare host is the access-code gate, and
+      // a member has no access code. Sending her there is sending her nowhere.
+      var url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?team';
       var msg = 'Sign in at ' + url + '\nEmail: ' + email + '\nPassword: ' + pw;
       try { await navigator.clipboard.writeText(msg); showToast((r.created ? 'Login created' : 'Password reset') + ' — details copied, send them to ' + email, 'success'); }
       catch(e){ prompt('Send these to ' + email + ':', msg); }
@@ -52191,10 +52224,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     var o = document.createElement('div');
     o.id = 'venia-signin';
     o.style.cssText = 'position:fixed;inset:0;z-index:9500;background:#0a0a0a;color:#fff;display:none;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
+    // Through the member door this screen IS the front door, and the founder
+    // wording ("private to you and Christine", their two names as shortcuts,
+    // a reset email only they can receive) reads as someone else's app.
+    var MEMBER = !!window.VENIA_TEAM;
     o.innerHTML =
       brandMark(176)
       + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Secure sign-in</div>'
-      + '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Sign in with your VENIA account so your workspace stays private to you and Christine. You\'ll only do this once on this device.</div>'
+      + (MEMBER
+        ? '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Sign in with the email and password VENIA set up for you. You\'ll only do this once on this device.</div>'
+        : '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Sign in with your VENIA account so your workspace stays private to you and Christine. You\'ll only do this once on this device.</div>')
       + '<div id="vsi-pick" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;justify-content:center"></div>'
       + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
       +   '<input id="vsi-email" type="email" autocomplete="username" placeholder="you@veniacollection.com" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;border-radius:0;background:#151515;color:#fff;outline:none">'
@@ -52202,11 +52241,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       +   '<button onclick="veniaEntrySignIn()" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;border-radius:0;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Sign in</button>'
       + '</div>'
       + '<div id="vsi-error" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center"></div>'
-      + '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">First time on this device? Enter your VENIA email and choose a password — your account is created automatically.</div>'
-      + '<button id="vsi-forgot" onclick="veniaForgotPassword()" style="margin-top:16px;background:none;border:none;color:#8a8a8a;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border-bottom:1px solid #3a3a3a;padding:0 0 3px">Forgot password?</button>';
+      + (MEMBER
+        ? '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">Forgotten it? VENIA can set you a new password — there is no reset email on this account.</div>'
+        : '<div style="font-size:11px;color:#6a6a6a;margin-top:10px;text-align:center;max-width:300px;line-height:1.5">First time on this device? Enter your VENIA email and choose a password — your account is created automatically.</div>'
+          + '<button id="vsi-forgot" onclick="veniaForgotPassword()" style="margin-top:16px;background:none;border:none;color:#8a8a8a;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border-bottom:1px solid #3a3a3a;padding:0 0 3px">Forgot password?</button>');
     document.body.appendChild(o);
     var pick = o.querySelector('#vsi-pick');
-    EMAILS.forEach(function(e){
+    (MEMBER ? [] : EMAILS).forEach(function(e){
       var b = document.createElement('button');
       b.textContent = e.split('@')[0];
       b.style.cssText = 'background:#1c1c1c;border:1px solid #333;color:#ddd;font-size:11px;padding:8px 14px;border-radius:0;cursor:pointer';
@@ -52236,6 +52277,13 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }
       window.veniaAuthUser = res.data.user;
       if (window.veniaAuthRefresh) window.veniaAuthRefresh();
+      // Remember the door, so the bare address works here next time -- but
+      // never on a founder device, where removing the access code would leave
+      // a persisted Supabase session as the only thing protecting a lost phone.
+      if (EMAILS.indexOf(email) < 0) {
+        try { localStorage.setItem('venia_team_door', '1'); } catch (e) {}
+      }
+      if (window.veniaGateUnlock) window.veniaGateUnlock();
       hide();
       if (window.showToast) showToast('✓ Signed in as ' + email, 'success');
       try { logActivity('Signed in: ' + email); } catch(e){}
