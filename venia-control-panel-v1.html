@@ -2982,7 +2982,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '555';
+  const BUILD = '556';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6572,7 +6572,13 @@ const MODULES = {
   sales: {
     label: 'Sales', space: 'sl', nav: true,
     owns: 'wholesale — the buyers CRM, stockist outreach, quotes, orders, line sheets, account health',
-    keys: ['slBuyers', 'slQuotes', 'slOrders', 'slLinesheets', 'slPrefs'],
+    keys: ['slBuyers', 'slQuotes', 'slOrders', 'slLinesheets', 'slPrefs',
+           // THE SEASON RATE. A pricing decision, not a device preference: the
+           // rate a line sheet quotes all season has to be the same rate on
+           // both founders' machines and on an agent's. It was in no module at
+           // all, so it never left the browser it was typed into — and a device
+           // without it converts nothing while still printing the symbol.
+           'fxRates'],
     ls: [],
   },
   money: {
@@ -39280,6 +39286,7 @@ function agBuildQuotesSection() {
         <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
         <div style="display:flex;gap:6px;align-items:center">
           <div class="ag-lr-mono" style="font-size:10px">${(q.createdAt||'').slice(0,10)}</div>
+          ${slQuoteNeedsFx(q) ? `<button class="ag-btn ag-btn-sm" title="Marked ${slEsc(q.currency)} but holding US dollar figures" style="color:var(--amber);border-color:var(--amber)" onclick="event.stopPropagation();slQuoteFixFx('${q.id}')">⚠ ${slEsc(q.currency)}?</button>` : ''}
           ${!q.orderId && (q.items||[]).length ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="event.stopPropagation();slCreateOrderFromQuote('${q.id}')">→ Order</button>` : ''}
           ${(q.items||[]).length ? `<button class="ag-btn ag-btn-sm" title="Order confirmation with photos, to send to the buyer" onclick="event.stopPropagation();slConfirmDoc('quote','${q.id}')">▤ For buyer</button>` : ''}
           <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenQuoteModal('${q.id}')">Edit</button>
@@ -39372,12 +39379,19 @@ window.slQuoteStylePick = function(el){
   el.value = slStyleLabel(st);
   const ws = row.querySelector('.sl-qi-ws');
   // A LINE ADDED TO A EUR QUOTE MUST BE SEEDED IN EUR. The style's wholesale is
-  // USD; seeding it raw would put a dollar figure back onto a euro quote one
-  // line at a time — the same bug, arriving later and harder to see.
+  // USD; seeding it raw would put a dollar figure onto a euro quote one line at
+  // a time — the same bug, arriving later and harder to see.
   if (ws && !parseFloat(ws.value)) {
     const qcur = slQuoteCurrency();
-    ws.value = qcur === 'USD' ? (st.wholesale || '')
-                              : (slFxFromUsd(st.wholesale || 0, qcur) || '');
+    if (qcur === 'USD') { ws.value = st.wholesale || ''; }
+    else if (fxRate(qcur) > 0 || fxEnsureRate(qcur)) {
+      ws.value = slFxFromUsd(st.wholesale || 0, qcur) || '';
+    } else {
+      // No season rate and the founder declined to set one. Leave it EMPTY
+      // rather than seeding a dollar figure under a euro sign.
+      ws.value = '';
+      try { showToast('No ' + qcur + ' rate yet — type this price yourself, or set the rate', 'warning'); } catch (e) {}
+    }
   }
   const color = row.querySelector('.sl-qi-color');
   if (color && st.colors) color.placeholder = st.colors;
@@ -39584,6 +39598,50 @@ window.slQuoteRecalc = function(){
   if (sub2) sub2.textContent = (disc>0 && hasItems) ? (slMoneyC(cur, sub) + ' − ' + disc + '%') : '';
   if (manual) manual.style.display = hasItems ? 'none' : '';
 };
+// A QUOTE WRITTEN BEFORE THE CURRENCY WAS CONVERTED HOLDS DOLLARS.
+//
+// Until build 554 the currency selector changed only the symbol, so a quote
+// marked EUR carries USD figures — ECLIPSE COAT at 740 reading €740 when the
+// line sheet says €681. Those quotes are identifiable exactly: a non-USD
+// currency with no fxRate recorded against it, because 554 stamps the rate on
+// every quote it prices.
+//
+// They cannot be repaired by toggling the currency. That path assumes the
+// stored number really is in the stored currency, so EUR→USD→EUR on this quote
+// would treat 740 as euros and make it worse. It needs its own one-way fix.
+function slQuoteNeedsFx(q){
+  return !!(q && q.currency && q.currency !== 'USD' && !(Number(q.fxRate) > 0)
+            && (q.items || []).some(function (it) { return Number(it && it.ws) > 0; }));
+}
+window.slQuoteFixFx = function(id){
+  const q = (STATE.slQuotes || []).find(function (x) { return x && x.id === id; });
+  if (!q || !slQuoteNeedsFx(q)) return;
+  const cur = q.currency;
+  if (!fxEnsureRate(cur)) return;
+  const r = fxRate(cur);
+  if (!(r > 0)) return;
+  const lines = (q.items || []).filter(function (it) { return Number(it && it.ws) > 0; });
+  const ex = lines[0];
+  if (!confirm('This quote is marked ' + cur + ' but its prices were never converted — '
+      + 'they are the US dollar figures.\n\n'
+      + 'Convert all ' + lines.length + ' line' + (lines.length > 1 ? 's' : '')
+      + ' at your season rate of ' + r + '?\n\n'
+      + 'For example ' + (ex.name || 'the first line') + ': '
+      + ex.ws + ' \u2192 ' + Math.round(Number(ex.ws) * r) + ' ' + cur + '.')) return;
+  lines.forEach(function (it) { it.ws = Math.round(Number(it.ws) * r); });
+  q.items.forEach(function (it) { if (!(Number(it.ws) > 0)) it.ws = 0; });
+  const sub = (q.items || []).reduce(function (t, it) {
+    return t + (Number(it.qty) || 0) * (Number(it.ws) || 0); }, 0);
+  q.total = Math.round(sub * (1 - (Number(q.discountPct) || 0) / 100) * 100) / 100;
+  q.fxBase = 'USD';
+  q.fxRate = r;
+  q.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Quote ' + q.id + ' repriced into ' + cur + ' at ' + r + ' — it had been holding USD figures'); } catch (e) {}
+  try { showToast('Converted to ' + cur + ' at ' + r + ' \u2014 total is now '
+    + slMoney(q.total, cur), 'success'); } catch (e) {}
+  slOpenQuoteModal(id);
+};
 function slOpenQuoteModal(id, prefillBuyer) {
   if (!STATE.slQuotes) STATE.slQuotes = [];
   const q = id ? STATE.slQuotes.find(x => x.id === id) : null;
@@ -39617,7 +39675,11 @@ function slOpenQuoteModal(id, prefillBuyer) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
         <div><div style="${lbl}">Season</div><input id="sl-q-season" type="text" style="${fld}" value="${slEsc(q?.season || slQuoteSeasonGuess())}" placeholder="Season" oninput="this.dataset.touched='1'"></div>
-        <div><div style="${lbl}">Currency</div><select id="sl-q-currency" style="${fld}" data-prev="${slEsc(q?.currency||'USD')}" onchange="slQuoteCurrencyChanged(this)">${curOpts}</select></div>
+        <div><div style="${lbl}">Currency</div><select id="sl-q-currency" style="${fld}" data-prev="${slEsc(q?.currency||'USD')}" onchange="slQuoteCurrencyChanged(this)">${curOpts}</select>${
+          slQuoteNeedsFx(q) ? `<div style="margin-top:6px;padding:8px 10px;background:rgba(211,84,0,.08);border-left:2px solid var(--amber);font-size:10.5px;line-height:1.6">
+            These prices were never converted — they are the US dollar figures under a ${slEsc(cur)} sign.
+            <button class="ag-btn ag-btn-sm" style="margin-top:6px;display:block" onclick="slQuoteFixFx('${slEsc(q.id)}')">Convert to ${slEsc(cur)} at the season rate</button>
+          </div>` : ''}</div>
         <div><div style="${lbl}">Discount %</div><input id="sl-q-discount" type="number" min="0" max="100" step="1" style="${fld}" value="${q?.discountPct||''}" placeholder="0" oninput="slQuoteRecalc()"></div>
       </div>
       <div>
@@ -39680,9 +39742,19 @@ function slSaveQuote(existingId) {
     // WHAT THE NUMBERS ON THIS QUOTE MEAN. Stored so the buyer document can say
     // it, the order inherits it, and a quote sent in March still reads the same
     // in June whatever the rate has done since.
-    fxBase:    'USD',
-    fxRate:    (document.getElementById('sl-q-currency')?.value || 'USD') === 'USD'
-                 ? 1 : (fxRate(document.getElementById('sl-q-currency').value) || 0),
+    // WHAT THE NUMBERS MEAN, recorded either way. A quote priced BY HAND in
+    // euros on a device with no season rate has no conversion to describe — it
+    // is already in its own currency — and stamping a 0 would have left it
+    // flagged as unconverted for ever. Only a quote with NO stamp at all
+    // predates the conversion, and that is what slQuoteNeedsFx looks for.
+    fxBase:    (function(){
+                 const c = document.getElementById('sl-q-currency')?.value || 'USD';
+                 return (c === 'USD' || fxRate(c) > 0) ? 'USD' : c;
+               })(),
+    fxRate:    (function(){
+                 const c = document.getElementById('sl-q-currency')?.value || 'USD';
+                 return c === 'USD' ? 1 : (fxRate(c) > 0 ? fxRate(c) : 1);
+               })(),
     season:    (document.getElementById('sl-q-season')?.value||'').trim(),
     items:     items,
     total:     items.length ? Math.round(computed * 100) / 100 : (parseFloat(document.getElementById('sl-q-total')?.value)||0),
@@ -39902,6 +39974,7 @@ window.slConfirmDoc = function(kind, id){
         : 'This is a pro forma for confirmation — prices and availability hold until it is accepted. ')
     +   'VENIA Collection — wholesale, ' + esc(String(cur).toUpperCase()) + ', FOB. '
     +   (String(cur).toUpperCase() !== 'USD' && Number(src.fxRate) > 0
+        && Number(src.fxRate) !== 1 && String(src.fxBase || 'USD').toUpperCase() === 'USD'
         ? 'Converted at ' + esc(src.fxRate) + ' ' + esc(String(cur).toUpperCase())
           + ' to 1 USD, the season rate. ' : '')
     +   (moq ? 'Minimum order ' + esc(moq) + '. ' : '')
@@ -39924,6 +39997,14 @@ window.slCreateOrderFromQuote = function(quoteId) {
   if (!q) return;
   if (q.orderId) { showToast('Already converted — order #' + q.orderId, 'info'); return; }
   if (!(q.items || []).length) { showToast('This quote has no styles on it yet', 'warning'); return; }
+  // Booking an order out of an unconverted quote carries the wrong price into
+  // the order, the confirmation and the invoice. Stop at the one place it can
+  // still be caught.
+  if (slQuoteNeedsFx(q)) {
+    showToast('This quote is marked ' + q.currency + ' but holds US dollar figures — convert it first', 'error', 6000);
+    slQuoteFixFx(q.id);
+    return;
+  }
   // THE BUTTON USED TO APPEAR ONLY ON AN ACCEPTED QUOTE, so a buyer saying yes
   // on a draft had no route to an order at all — the one path from a quote to
   // revenue was hidden behind a field nobody had thought to change. The
