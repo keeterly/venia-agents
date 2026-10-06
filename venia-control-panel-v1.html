@@ -2990,7 +2990,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '557';
+  const BUILD = '558';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -39313,7 +39313,7 @@ function agBuildQuotesSection() {
     : quotes.map(q => `
       <div class="ag-list-row" style="cursor:pointer" onclick="slOpenQuoteDetail('${q.id}')">
         <div><div class="ag-lr-name">${q.buyerName||'Unnamed account'}</div><div class="ag-lr-sub">${(q.items||q.styles||[]).length ? (q.items||q.styles||[]).length + ' styles · ' : ''}${q.season||''}${q.orderId ? ' · → #' + q.orderId : ''}</div></div>
-        <div class="ag-lr-mono" style="font-size:11px;font-weight:600">$${(q.total||0).toLocaleString()}</div>
+        <div class="ag-lr-mono" style="font-size:11px;font-weight:600">${slMoney(q.total||0, q.currency)}</div>
         <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
         <div style="display:flex;gap:6px;align-items:center">
           <div class="ag-lr-mono" style="font-size:10px">${(q.createdAt||'').slice(0,10)}</div>
@@ -39330,7 +39330,7 @@ function agBuildQuotesSection() {
     </div>
     <div class="ag-list" id="sl-quotes-list">
       <div class="ag-list-row ag-list-row-h"><div>Account</div><div>Total</div><div>Status</div><div>Created / Actions</div></div>
-      <div id="sl-quotes-list">${list}</div>
+      <div id="sl-quotes-rows">${list}</div>
     </div>
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Agent Actions</h2></div>
@@ -40075,7 +40075,7 @@ window.slCreateOrderFromQuote = function(quoteId) {
   STATE.slOrders.unshift(rec);
   q.orderId = id;
   dbSet('slOrders', STATE.slOrders);
-  slTouchAccount(rec.account, 'Wholesale order created — #' + id + ' · $' + Math.round(rec.total).toLocaleString());
+  slTouchAccount(rec.account, 'Wholesale order created — #' + id + ' · ' + slMoney(rec.total, rec.currency));
   save();
   try { logActivity('Wholesale order ' + id + ' created from quote ' + q.id + ' — ' + rec.account); } catch(e){}
   showToast('Order ' + id + ' created from quote', 'success');
@@ -40849,7 +40849,18 @@ function agBuildOrdersSection() {
   const STATUS_COLORS = { draft:'var(--muted)', confirmed:'var(--blue)', production:'var(--amber)', shipped:'var(--ink)', delivered:'var(--green)', cancelled:'var(--red)' };
   const STATUS_LABELS = { draft:'Draft', confirmed:'Confirmed', production:'In Production', shipped:'Shipped', delivered:'Delivered', cancelled:'Cancelled' };
 
-  const totalBooked = orders.filter(o => o.status !== 'cancelled').reduce((s,o) => s+(o.total||0), 0);
+  // An order's own frozen rate, not today's: the book is what was sold.
+  // Summing a EUR order's face value into a dollar total overstates it by the
+  // whole exchange rate, silently, on the one number this page leads with.
+  const slOrderUsd = (o) => {
+    const t = Number(o && o.total) || 0, r = Number(o && o.fxRate) || 0;
+    const c = String((o && o.currency) || 'USD').toUpperCase();
+    return (c !== 'USD' && r > 0) ? t / r : t;
+  };
+  const orderCurs = [...new Set(orders.filter(o => o.status !== 'cancelled')
+    .map(o => String(o.currency || 'USD').toUpperCase()))];
+  const mixedCur = orderCurs.length > 1 || (orderCurs.length === 1 && orderCurs[0] !== 'USD');
+  const totalBooked = orders.filter(o => o.status !== 'cancelled').reduce((s,o) => s+slOrderUsd(o), 0);
   const open = orders.filter(o => !['delivered','cancelled'].includes(o.status)).length;
   const shipped = orders.filter(o => o.status === 'shipped').length;
   const delivered = orders.filter(o => o.status === 'delivered').length;
@@ -40863,7 +40874,7 @@ function agBuildOrdersSection() {
     </div>
   </div>
   <div class="ag-stats">
-    <div class="ag-stat"><div class="ag-stat-l">Total Booked</div><div class="ag-stat-v">$${(totalBooked/1000).toFixed(1)}k</div><div class="ag-stat-s">all active orders</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Total Booked</div><div class="ag-stat-v">$${(totalBooked/1000).toFixed(1)}k</div><div class="ag-stat-s">all active orders${mixedCur ? ' · in USD at each order’s rate' : ''}</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Open Orders</div><div class="ag-stat-v">${open}</div><div class="ag-stat-s">in progress</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Shipped</div><div class="ag-stat-v">${shipped}</div><div class="ag-stat-s">awaiting receipt</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Delivered</div><div class="ag-stat-v">${delivered}</div><div class="ag-stat-s">completed</div></div>
@@ -40884,7 +40895,7 @@ function agBuildOrdersSection() {
           <div class="ag-lr-sub">#${escHtml(o.id||'—')}</div>
         </div>
         <div class="ag-lr-mono">${o.items ? o.items.length+' style'+(o.items.length!==1?'s':'') : '—'}</div>
-        <div class="ag-lr-mono">$${((o.total||0)/1000).toFixed(1)}k</div>
+        <div class="ag-lr-mono">${slCur(o.currency)}${((o.total||0)/1000).toFixed(1)}k</div>
         <div><span class="ag-badge" style="background:${STATUS_COLORS[o.status]||'var(--muted)'};color:#fff">${STATUS_LABELS[o.status]||o.status}</span></div>
         <div class="ag-lr-mono">
           <span>${o.deliveryDate||'—'}</span>
@@ -41203,8 +41214,8 @@ function slOpenOrderDetail(id) {
         const bad = p.status === 'void' || p.status === 'uncollectible';
         const col = paid ? 'var(--green)' : bad ? 'var(--red)' : 'var(--amber)';
         const amounts = (p.amountPaid || p.amountRemaining)
-          ? ` · $${Math.round(p.amountPaid||0).toLocaleString()} paid${p.amountRemaining?` / $${Math.round(p.amountRemaining).toLocaleString()} open`:''}` : '';
-        const ded = p.deduction ? `<div style="font-size:10px;color:var(--red);margin-top:2px">− $${Math.round(p.deduction).toLocaleString()} deduction${p.deductionNote?' · '+slEsc(p.deductionNote):''}</div>` : '';
+          ? ` · ${slMoneyC(cur, p.amountPaid||0)} paid${p.amountRemaining?` / ${slMoneyC(cur, p.amountRemaining)} open`:''}` : '';
+        const ded = p.deduction ? `<div style="font-size:10px;color:var(--red);margin-top:2px">− ${slMoneyC(cur, p.deduction)} deduction${p.deductionNote?' · '+slEsc(p.deductionNote):''}</div>` : '';
         return `<div style="font-size:11px"><span style="color:${col};font-weight:700">${paid?'✓ paid':slEsc(p.status)}</span>${p.dueDate&&!paid?' · due '+slEsc(p.dueDate):(p.at?' · '+slEsc(String(p.at).slice(0,10)):'')}${amounts}${p.url?' · <a href="'+slEsc(p.url)+'" target="_blank" rel="noopener" style="color:var(--ink)">view invoice</a>':''}
           ${!bad?` · <a onclick="slSetOrderDeduction('${o.id}')" style="color:var(--muted);cursor:pointer;text-decoration:underline">${p.deduction?'edit':'log'} deduction</a>`:''}</div>${ded}`;
       })()
@@ -41238,7 +41249,7 @@ function slOpenOrderDetail(id) {
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
         <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');slOpenOrderModal('${o.id}')">&#x270E; Edit</button>
 
-        <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');agentSend('sl','Order #${slEsc(o.id)} for ${slEsc(o.account||'')} — status ${slEsc(o.status||'')}, $${o.total||0}, delivery ${slEsc(o.deliveryDate||'TBD')}. What should I do next?')">&#x2726; Ask the agent</button>
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('sl-ord-modal');agentSend('sl','Order #${slEsc(o.id)} for ${slEsc(o.account||'')} — status ${slEsc(o.status||'')}, ${slMoneyC(cur, o.total||0)}, delivery ${slEsc(o.deliveryDate||'TBD')}. What should I do next?')">&#x2726; Ask the agent</button>
         ${o.status === 'cancelled' ? '' : `<button class="btn btn-ghost btn-sm" onclick="slCancelOrder('${o.id}')" title="Keeps the record, stops it counting toward booked, AR and the P&amp;L">&#x2298; Cancel order</button>`}
         <button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="slDeleteOrder('${o.id}')" title="Removes the record entirely — for a row that should never have existed">Delete</button>
       </div>
@@ -49932,10 +49943,20 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // pull that is the cloud as we just saw it. Then a push sees exactly the
   // edits we have not published, and a deletion we made stays a deletion
   // instead of coming back as "the cloud added it".
+  // Returns TRUE only when the merge actually moved something. A pull that
+  // changes nothing is the common case -- a partner's push arrives as several
+  // events, and all but the first find the work already merged -- and
+  // repainting for it is a visible flash of the whole page for no reason.
+  // When the comparison itself fails, say "changed": a missed repaint loses
+  // a partner's work from the screen, a spare one only blinks.
   function absorbRemote(row, via){
+    var before = null;
+    try { before = _mStr(snapshot()); } catch (e) { before = null; }
     applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
     setBase(row.data);
     window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: via || 'pull' };
+    if (before == null) return true;
+    try { return _mStr(snapshot()) !== before; } catch (e) { return true; }
   }
   window.__syncAbsorb = absorbRemote;
 
@@ -50393,10 +50414,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     return false;
   }
   window.veniaMidEdit = veniaMidEdit;
-  function onRemote(row){
+  function onRemote(row, via){
     if (!row || !row.data || row.updated_by === clientId()) return;   // ignore our own echo
     if (veniaMidEdit()){ showReloadPill(row); return; }                // don't clobber a live edit
-    absorbRemote(row, 'realtime');                                      // 3-way merge, not wholesale replace
+    if (!absorbRemote(row, via || 'realtime')) return;                  // merged to the same thing — nothing to show
     rerender();
     if (typeof showToast === 'function') showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
   }
@@ -50413,6 +50434,19 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     document.body.appendChild(b);
   }
 
+  // ONE PUSH IS NINE ROWS. Every module the partner touched arrives as its own
+  // postgres_changes event, and each one used to pull the whole set, merge it
+  // and repaint -- so a single save on the other phone redrew this screen up to
+  // nine times in a second. That is the flicker. The rows of one push land
+  // together; wait for the burst to finish, then pull once.
+  var _modPullTimer = null;
+  function pullModulesSoon(){
+    clearTimeout(_modPullTimer);
+    _modPullTimer = setTimeout(function(){
+      pullModules().then(function(row){ if (row) onRemote(row, 'realtime (modules)'); })
+                   .catch(function(){});
+    }, 600);
+  }
   function startRealtime(){
     var c = sb(); if (!c || channel) return;
     channel = c.channel('venia_ws_live')
@@ -50433,7 +50467,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             function(payload){
               window.__syncStat.realtimeModules = 'event ' + new Date().toISOString();
               if (payload && payload.new && payload.new.updated_by === clientId()) return;  // our own echo
-              pullModules().then(function(row){ if (row) onRemote(row); });
+              pullModulesSoon();
             })
         .subscribe(function(status){ window.__syncStat.realtimeModules = status + ' ' + new Date().toISOString(); });
     } catch(e){ window.__syncStat.realtimeModules = 'failed: ' + (e && e.message); }
@@ -50448,8 +50482,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (veniaMidEdit()) return;
     var row = await pullRow();
     if (row && row.data && row.updated_by !== clientId()){
-      absorbRemote(row, 'poll');
-      rerender();
+      if (absorbRemote(row, 'poll')) rerender();
     }
   }
   setInterval(pullAndMergeSilent, 4 * 60 * 1000);
@@ -50611,11 +50644,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           // Last cloud write was ours — but that is not proof our copy matches
           // it, so merge rather than assume. Cheap, and it closes the loop that
           // left this device permanently short of records.
-          var mine = ''; try { mine = _mStr(snapshot()); } catch (e) { mine = ''; }
-          absorbRemote(row, 'boot (ours)');
-          var differs = false;
-          try { differs = _mStr(snapshot()) !== mine; } catch (e) { differs = false; }
-          if (differs) rerender();
+          if (absorbRemote(row, 'boot (ours)')) rerender();
         }
       } else {
         // OUR LOCAL IS NEWER — BUT NEWER IS NOT THE SAME AS COMPLETE.
@@ -50639,7 +50668,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // merge unions both sides, which is the safe reading when we cannot tell
         // an addition from a deletion — the worst case is a stale record a person
         // can delete, rather than real work nobody knows is gone.
-        if (row && row.data) { absorbRemote(row, 'boot (local newer — merged, not overwritten)'); rerender(); }
+        if (row && row.data && absorbRemote(row, 'boot (local newer — merged, not overwritten)')) rerender();
         pushNow();                    // publish the union (pushNow sets base)
       }
     } else {
