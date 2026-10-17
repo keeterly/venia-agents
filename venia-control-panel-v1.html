@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '562';
+  const BUILD = '563';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -39339,7 +39339,9 @@ function agBuildQuotesSection() {
     ? `<div style="padding:40px 20px;text-align:center;color:var(--muted);font-size:11px">No quotes yet — create your first</div>`
     : quotes.map(q => `
       <div class="ag-list-row" style="cursor:pointer" onclick="slOpenQuoteDetail('${q.id}')">
-        <div><div class="ag-lr-name">${q.buyerName||'Unnamed account'}</div><div class="ag-lr-sub">${(q.items||q.styles||[]).length ? (q.items||q.styles||[]).length + ' styles · ' : ''}${q.season||''}${q.orderId ? ' · → #' + q.orderId : ''}</div></div>
+        <div><div class="ag-lr-name">${q.buyerName||'Unnamed account'}</div><div class="ag-lr-sub">${(q.items||q.styles||[]).length ? (q.items||q.styles||[]).length + ' styles · ' : ''}${q.season||''}${q.orderId ? ' · → #' + q.orderId
+          : q.orderCancelled ? ' · <span style="color:var(--red)">order ' + slEsc(q.orderCancelled) + ' cancelled</span>'
+          : ''}</div></div>
         <div class="ag-lr-mono" style="font-size:11px;font-weight:600">${slMoney(q.total||0, q.currency)}</div>
         <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
         <div style="display:flex;gap:6px;align-items:center">
@@ -40113,6 +40115,7 @@ window.slCreateOrderFromQuote = function(quoteId) {
   };
   STATE.slOrders.unshift(rec);
   q.orderId = id;
+  delete q.orderCancelled;          // there is a live order again; say so
   dbSet('slOrders', STATE.slOrders);
   slTouchAccount(rec.account, 'Wholesale order created — #' + id + ' · ' + slMoney(rec.total, rec.currency));
   save();
@@ -41116,10 +41119,37 @@ window.slCancelOrder = function(id){
   o.status = 'cancelled';
   o.cancelledAt = new Date().toISOString();
   o.updatedAt = o.cancelledAt;
+  // THE QUOTE WAS LEFT TIED TO THE DEAD ORDER. slCreateOrderFromQuote stamps
+  // q.orderId, the row hides "→ Order" while it is set, and nothing ever
+  // cleared it -- so an account that cancelled and then came back could not be
+  // booked from its own quote again. The link is released here; the order keeps
+  // its quoteId, so the history is still readable from the side that is dead.
+  var q = (STATE.slQuotes || []).find(function (x) { return x && x.orderId === id; });
+  if (q) {
+    q.orderId = '';
+    q.orderCancelled = id;
+    q.updatedAt = o.cancelledAt;
+    // An accepted quote still counts as booked on the Overview, which after a
+    // cancellation is a number nobody meant. Which way it should go is theirs
+    // to say: the account may be out for the season, or re-booking next week.
+    if (q.status === 'accepted') {
+      if (confirm('Mark the quote as declined as well?\n\n'
+          + 'OK — ' + (q.buyerName || 'they') + ' are not taking this season. It leaves the '
+          + 'pipeline and stops counting as a select in Best Sellers.\n\n'
+          + 'Cancel — keep the quote open, so you can book it again.')) {
+        q.status = 'declined';
+      } else {
+        q.status = 'sent';
+      }
+    }
+    try { dbSet('slQuotes', STATE.slQuotes); } catch(e){}
+  }
   try { dbSet('slOrders', STATE.slOrders); } catch(e){}
   save();
-  try { logActivity('Order cancelled: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)); } catch(e){}
-  toast('Order cancelled — it no longer counts toward booked, AR or the P&L');
+  try { logActivity('Order cancelled: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)
+    + (q ? ' · quote ' + q.id + ' → ' + q.status : '')); } catch(e){}
+  toast('Order cancelled — it no longer counts toward booked, AR or the P&L'
+    + (q ? '. The quote can be booked again.' : ''));
   slAfterOrderChange(id);
 };
 
@@ -41137,7 +41167,17 @@ window.slDeleteOrder = function(id){
             + 'money will no longer be explained by anything in the app.' : ''))) return;
   // Undoable while the toast is up. Deleting the wrong row is the one mistake
   // here that cannot be typed back in — items, payment, terms and all.
-  window.__slDeleted = { at: Date.now(), idx, order: JSON.parse(JSON.stringify(o)) };
+  // The quote pointed at this order and would have gone on pointing at it
+  // after the row was gone -- a link to nothing, with "→ Order" still hidden
+  // behind it. Released, and restored by the undo along with everything else.
+  var qd = (STATE.slQuotes || []).find(function (x) { return x && x.orderId === o.id; });
+  window.__slDeleted = { at: Date.now(), idx, order: JSON.parse(JSON.stringify(o)),
+                         quoteId: qd ? qd.id : null, quoteStatus: qd ? qd.status : null };
+  if (qd) {
+    qd.orderId = '';
+    qd.updatedAt = new Date().toISOString();
+    try { dbSet('slQuotes', STATE.slQuotes); } catch(e){}
+  }
   list.splice(idx, 1);
   try { dbSet('slOrders', STATE.slOrders); } catch(e){}
   save();
@@ -41172,6 +41212,16 @@ window.slUndoDeleteOrder = function(){
   window.__slDeleted = null;
   if (!STATE.slOrders) STATE.slOrders = [];
   STATE.slOrders.splice(Math.min(d.idx, STATE.slOrders.length), 0, d.order);
+  // Undo means undo: the quote goes back to pointing at the order it made.
+  if (d.quoteId) {
+    var qu = (STATE.slQuotes || []).find(function (x) { return x && x.id === d.quoteId; });
+    if (qu) {
+      qu.orderId = d.order.id;
+      if (d.quoteStatus) qu.status = d.quoteStatus;
+      qu.updatedAt = new Date().toISOString();
+      try { dbSet('slQuotes', STATE.slQuotes); } catch(e){}
+    }
+  }
   try { dbSet('slOrders', STATE.slOrders); } catch(e){}
   save();
   try { logActivity('Order delete undone: ' + d.order.id); } catch(e){}
