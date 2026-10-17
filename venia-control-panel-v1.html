@@ -1725,6 +1725,13 @@ html.no-settings  [data-space="settings"]{ display:none !important; }
 #sl-quotes-list .ag-list-row{grid-template-columns:1fr 110px 90px minmax(230px,auto)}
 #sl-orders-list .ag-list-row{grid-template-columns:1fr 90px 90px 110px minmax(210px,auto)}
 #sl-best-list .ag-list-row{grid-template-columns:1fr 64px 64px 96px minmax(150px,auto);cursor:default}
+#sl-best-list .sl-best-open{cursor:pointer}
+#sl-best-list .sl-best-caret{display:inline-block;width:12px;color:var(--muted);font-size:9px;margin-right:4px}
+/* The breakdown under a row: inset and quieter, so the ranking still reads as
+   the list and these read as its parts rather than as more entries in it. */
+#sl-best-list .sl-best-kid{background:var(--bg-off);padding-top:9px;padding-bottom:9px}
+#sl-best-list .sl-best-kid > div:first-child{padding-left:26px;border-left:2px solid var(--border-mid,var(--border));margin-left:4px}
+#sl-best-list .sl-best-kid .ag-lr-name{font-size:11.5px;font-weight:500}
 /* The action cell is a row of its own: the date, then whatever buttons the
    record has earned, wrapping rather than escaping the table. */
 #sl-quotes-list .ag-list-row > div:last-child,
@@ -3003,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '561';
+  const BUILD = '562';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -41520,7 +41527,8 @@ function slExportOrders() {
 // three styles; rolled up it is the most-taken piece in the line. By style
 // number is still one click away, for cutting tickets.
 var SL_BEST_SEASON = null;
-var SL_BEST_GROUP  = 'piece';        // piece (colourways together) | style
+var SL_BEST_GROUP  = 'piece';        // piece (colourways together) | style | colour | fabric
+var SL_BEST_OPEN   = {};             // which rows have their breakdown showing
 var SL_BEST_SORT   = 'accounts';     // accounts | units | value | ordered
 
 // Quotes and orders are written in the buyer's currency. Comparing them means
@@ -41530,6 +41538,20 @@ function slBestUsd(v, cur, rate){
   var n = Number(v) || 0, r = Number(rate) || 0;
   return (String(cur || 'USD').toUpperCase() !== 'USD' && r > 0) ? n / r : n;
 }
+function slBestNorm(v){ return String(v == null ? '' : v).trim().toUpperCase().replace(/\s+/g, ' '); }
+// THE COLOURWAY A LINE REPRESENTS. What the buyer wrote on the line wins --
+// it is the record of what was actually asked for. The style record's own
+// colourway is the fallback, and most lines fall back, because the colour
+// field on a quote is optional and usually left empty.
+//
+// Commas are NOT split. A style offered in "Black, Ivory" with no colour on
+// the line means nobody chose; splitting it would invent two selects out of
+// one, and the whole point of this screen is to count what really happened.
+function slBestColour(it, st){
+  var c = String((it && it.color) || '').trim();
+  return c || String((st && st.colors) || '').trim();
+}
+function slBestFabric(st){ return String((st && st.fabric) || '').trim(); }
 function slBestStyleOf(it){
   if (!it || it.styleId == null) return null;
   return (STATE.styles || []).find(function (s) { return s && s.id === it.styleId; }) || null;
@@ -41563,20 +41585,46 @@ function slBestRows(season, group){
   var add = function (it, acct, cur, rate, side) {
     var st = slBestStyleOf(it);
     var name = String((st && st.name) || it.name || 'Unnamed').trim();
-    // A line with no style record behind it still counts — it was selected.
-    // Group it by the name it was quoted under rather than dropping it.
-    var key = (group === 'style' && it.styleId != null && st)
-      ? ('#' + it.styleId) : ('~' + name.toUpperCase());
-    var r = rows[key] || (rows[key] = { key: key, name: name, codes: {}, ids: {}, cat: '',
+    var colour = slBestColour(it, st);
+    var fabric = slBestFabric(st);
+    var key, label;
+    if (group === 'style')       { key = (it.styleId != null && st) ? ('#' + it.styleId) : ('~' + name.toUpperCase()); label = name; }
+    else if (group === 'colour') { key = '%' + (slBestNorm(colour) || '(unspecified)'); label = colour || 'Colourway not recorded'; }
+    else if (group === 'fabric') { key = '&' + (slBestNorm(fabric) || '(unspecified)'); label = fabric || 'Fabric not recorded'; }
+    else                         { key = '~' + name.toUpperCase(); label = name; }
+    var r = rows[key] || (rows[key] = { key: key, name: label, group: group, codes: {}, ids: {},
+      cat: '', colours: {}, fabrics: {}, pieces: {}, kids: {},
       q: { acct: {}, units: 0, usd: 0 }, o: { acct: {}, units: 0, usd: 0 } });
     if (st && st.styleId) r.codes[String(st.styleId).trim()] = 1;
     if (st && st.id != null) r.ids[st.id] = 1;
     if (!r.cat && st && st.category) r.cat = st.category;
+    if (colour) r.colours[colour] = 1;
+    if (fabric) r.fabrics[fabric] = 1;
+    r.pieces[name.toUpperCase()] = 1;
+
+    // EVERY ROW CARRIES ITS OWN BREAKDOWN, one line per style record under it.
+    // Under a piece those lines are its colourways; under a fabric they are the
+    // pieces cut from it. Same shape either way, so one expander serves all.
+    var kk = (st && st.id != null) ? ('#' + st.id) : ('~' + name.toUpperCase());
+    var kid = r.kids[kk] || (r.kids[kk] = { key: kk, name: name,
+      code: (st && st.styleId) ? String(st.styleId).trim() : '',
+      colour: String((st && st.colors) || '').trim(),
+      fabric: fabric, id: (st && st.id != null) ? st.id : null,
+      asked: {}, q: { acct: {}, units: 0, usd: 0 }, o: { acct: {}, units: 0, usd: 0 } });
+    // What the buyer wrote on the line, when it is not what the style record
+    // says. "Asked for OXBLOOD" against a style that only exists in black is a
+    // request, and it was invisible everywhere until now.
+    var wrote = String((it && it.color) || '').trim();
+    if (wrote && slBestNorm(wrote) !== slBestNorm(kid.colour)) kid.asked[wrote] = 1;
+
     var qty = Number(it.qty) || 0;
-    var b = side === 'o' ? r.o : r.q;
-    if (acct) b.acct[acct] = 1;
-    b.units += qty;
-    b.usd += slBestUsd(qty * (Number(it.ws) || 0), cur, rate);
+    var usd = slBestUsd(qty * (Number(it.ws) || 0), cur, rate);
+    [r, kid].forEach(function (t) {
+      var b = side === 'o' ? t.o : t.q;
+      if (acct) b.acct[acct] = 1;
+      b.units += qty;
+      b.usd += usd;
+    });
   };
   (STATE.slQuotes || []).forEach(function (q) {
     if (!q || q.status === 'declined') return;       // a no is not a select
@@ -41588,25 +41636,37 @@ function slBestRows(season, group){
     if (season !== 'all' && slBestOrderSeason(o) !== season) return;
     (o.items || []).forEach(function (it) { if (it) add(it, String(o.account || '').trim(), o.currency, o.fxRate, 'o'); });
   });
-  return Object.keys(rows).map(function (k) {
-    var r = rows[k];
-    // An account that ORDERED it has selected it, whether or not the quote
-    // behind the order lives in here.
+  var totals = function (t) {
     var all = {};
-    Object.keys(r.q.acct).forEach(function (a) { all[a] = 1; });
-    Object.keys(r.o.acct).forEach(function (a) { all[a] = 1; });
-    r.who      = Object.keys(all).sort();
-    r.accounts = r.who.length;
-    r.units    = r.q.units;  r.usd  = r.q.usd;
-    r.oUnits   = r.o.units;  r.oUsd = r.o.usd;
-    r.oAccounts = Object.keys(r.o.acct).length;
-    r.codeList = Object.keys(r.codes).sort();
-    r.idList   = Object.keys(r.ids);
-    r.ways     = r.codeList.length || r.idList.length;
-    r.flagged  = r.idList.length > 0 && r.idList.every(function (id) {
+    Object.keys(t.q.acct).forEach(function (a) { all[a] = 1; });
+    Object.keys(t.o.acct).forEach(function (a) { all[a] = 1; });
+    t.who = Object.keys(all).sort();
+    t.accounts = t.who.length;
+    t.units = t.q.units;  t.usd  = t.q.usd;
+    t.oUnits = t.o.units; t.oUsd = t.o.usd;
+    t.oAccounts = Object.keys(t.o.acct).length;
+    return t;
+  };
+  return Object.keys(rows).map(function (k) {
+    var r = totals(rows[k]);
+    r.codeList   = Object.keys(r.codes).sort();
+    r.idList     = Object.keys(r.ids);
+    r.colourList = Object.keys(r.colours).sort();
+    r.fabricList = Object.keys(r.fabrics).sort();
+    r.pieceCount = Object.keys(r.pieces).length;
+    r.ways       = r.codeList.length || r.idList.length;
+    r.flagged    = r.idList.length > 0 && r.idList.every(function (id) {
       var st = (STATE.styles || []).find(function (s) { return s && String(s.id) === String(id); });
       return !!(st && st.bestSeller);
     });
+    r.children = Object.keys(r.kids).map(function (c) {
+      var kid = totals(r.kids[c]);
+      kid.askedList = Object.keys(kid.asked).sort();
+      return kid;
+    }).sort(function (a, b) {
+      return b.units - a.units || b.accounts - a.accounts || String(a.name).localeCompare(String(b.name));
+    });
+    delete r.kids;
     return r;
   });
 }
@@ -41623,8 +41683,15 @@ function slBestSorted(rows, how){
 }
 window.slBestSet = function(what, val){
   if (what === 'season') SL_BEST_SEASON = val;
-  if (what === 'group')  SL_BEST_GROUP  = val;
+  // Rows mean something different under each axis, so a breakdown left open
+  // under one would reopen against an unrelated row under the next.
+  if (what === 'group')  { SL_BEST_GROUP = val; SL_BEST_OPEN = {}; }
   if (what === 'sort')   SL_BEST_SORT   = val;
+  try { agNavSl('bestsellers'); } catch (e) {}
+};
+window.slBestToggle = function(enc){
+  var key = decodeURIComponent(String(enc || ''));
+  if (SL_BEST_OPEN[key]) delete SL_BEST_OPEN[key]; else SL_BEST_OPEN[key] = 1;
   try { agNavSl('bestsellers'); } catch (e) {}
 };
 // The ⚑ the line sheet already reads, set from what the season actually did
@@ -41651,12 +41718,24 @@ window.slBestExport = function(){
   var rows = slBestSorted(slBestRows(season, SL_BEST_GROUP), SL_BEST_SORT);
   if (!rows.length) { showToast('Nothing to export for ' + season, 'warning'); return; }
   var q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
-  var csv = [['Rank','Piece','Style numbers','Category','Accounts','Units selected',
-              'Value selected (USD)','Units ordered','Value ordered (USD)','Accounts'].map(q).join(',')]
-    .concat(rows.map(function (r, i) {
-      return [i + 1, r.name, r.codeList.join(' '), r.cat, r.accounts, r.units,
-              Math.round(r.usd), r.oUnits, Math.round(r.oUsd), r.who.join('; ')].map(q).join(',');
-    })).join('\n');
+  var head = ['Rank','Line','Level','Style numbers','Category','Colourway','Fabric',
+              'Accounts','Units selected','Value selected (USD)','Units ordered',
+              'Value ordered (USD)','Asked for','Who'];
+  var out = [];
+  rows.forEach(function (r, i) {
+    out.push([i + 1, r.name, ({ piece:'piece', style:'style', colour:'colourway', fabric:'fabric' }[SL_BEST_GROUP] || 'piece'),
+              r.codeList.join(' '), r.cat, r.colourList.join(' / '), r.fabricList.join(' / '),
+              r.accounts, r.units, Math.round(r.usd), r.oUnits, Math.round(r.oUsd), '',
+              r.who.join('; ')]);
+    // The breakdown rides along so the file answers the same questions the
+    // screen does -- a flat export of the top line alone loses the colourways.
+    if (r.children.length > 1) r.children.forEach(function (c) {
+      out.push(['', r.name + ' \u2014 ' + (c.colour || c.code || c.name), 'breakdown',
+                c.code, r.cat, c.colour, c.fabric, c.accounts, c.units, Math.round(c.usd),
+                c.oUnits, Math.round(c.oUsd), c.askedList.join(' / '), c.who.join('; ')]);
+    });
+  });
+  var csv = [head.map(q).join(',')].concat(out.map(function (row) { return row.map(q).join(','); })).join('\n');
   var a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'VENIA-Best-Sellers-' + String(season).replace(/[^A-Za-z0-9]+/g, '') + '.csv';
@@ -41698,13 +41777,13 @@ function agBuildBestSellersSection(){
   var value = rows.reduce(function (s, r) { return s + r.usd; }, 0);
   var oUnits = rows.reduce(function (s, r) { return s + r.oUnits; }, 0);
   var top = rows.slice().sort(function (a, b) { return b.accounts - a.accounts || b.units - a.units; })[0];
-  var label = SL_BEST_GROUP === 'style' ? 'style' : 'piece';
+  var NOUN = { piece:'Pieces', style:'Styles', colour:'Colourways', fabric:'Fabrics' };
 
   var head = '<div class="ag-stats">'
     + '<div class="ag-stat"><div class="ag-stat-l">Most selected</div>'
     +   '<div class="ag-stat-v" style="font-size:15px;line-height:1.3">' + esc(top.name) + '</div>'
     +   '<div class="ag-stat-s">' + top.accounts + ' of ' + Object.keys(accts).length + ' accounts</div></div>'
-    + '<div class="ag-stat"><div class="ag-stat-l">' + (SL_BEST_GROUP === 'style' ? 'Styles' : 'Pieces') + ' selected</div>'
+    + '<div class="ag-stat"><div class="ag-stat-l">' + (NOUN[SL_BEST_GROUP] || 'Pieces') + ' selected</div>'
     +   '<div class="ag-stat-v">' + rows.length + '</div><div class="ag-stat-s">across ' + Object.keys(accts).length + ' accounts</div></div>'
     + '<div class="ag-stat"><div class="ag-stat-l">Units selected</div>'
     +   '<div class="ag-stat-v">' + units + '</div><div class="ag-stat-s">' + oUnits + ' of them ordered</div></div>'
@@ -41713,16 +41792,59 @@ function agBuildBestSellersSection(){
     +   '<div class="ag-stat-s">USD at each record’s rate</div></div>'
     + '</div>';
 
+  var few = function (arr, n) {
+    return esc(arr.slice(0, n).join(' · ')) + (arr.length > n ? ' +' + (arr.length - n) : '');
+  };
+  var ordCell = function (t) {
+    return '<span class="ag-lr-mono" style="font-size:10px;color:'
+      + (t.oUnits ? 'var(--green)' : 'var(--muted)') + '">'
+      + (t.oUnits ? t.oUnits + ' ordered' : 'not ordered') + '</span>';
+  };
   var list = rows.map(function (r, i) {
     var sub = [];
-    if (r.codeList.length) sub.push(esc(r.codeList.slice(0, 3).join(' · ')
-      + (r.codeList.length > 3 ? ' +' + (r.codeList.length - 3) : '')));
-    if (r.cat) sub.push(esc(r.cat));
-    if (SL_BEST_GROUP === 'piece' && r.ways > 1) sub.push(r.ways + ' colourways');
-    return '<div class="ag-list-row">'
+    if (SL_BEST_GROUP === 'colour' || SL_BEST_GROUP === 'fabric') {
+      sub.push(r.pieceCount + ' piece' + (r.pieceCount === 1 ? '' : 's'));
+      var other = SL_BEST_GROUP === 'colour' ? r.fabricList : r.colourList;
+      if (other.length) sub.push(few(other, 3));
+    } else {
+      if (r.codeList.length) sub.push(few(r.codeList, 3));
+      if (r.cat) sub.push(esc(r.cat));
+      if (SL_BEST_GROUP === 'piece' && r.ways > 1) sub.push(r.ways + ' colourways');
+      if (SL_BEST_GROUP === 'style' && r.fabricList.length) sub.push(few(r.fabricList, 2));
+    }
+    // One child is the row saying itself twice — there is nothing to break down.
+    var open = !!SL_BEST_OPEN[r.key];
+    var canOpen = r.children.length > 1
+      || (r.children.length === 1 && r.children[0].askedList.length > 0);
+    var kids = (open && canOpen) ? r.children.map(function (c) {
+      var cs = [];
+      if (c.code) cs.push(esc(c.code));
+      if (c.colour) cs.push(esc(c.colour));
+      if (c.fabric) cs.push(esc(c.fabric));
+      if (!cs.length) cs.push('no colourway or fabric on the style record');
+      var asked = c.askedList.length
+        ? '<div class="ag-lr-sub" style="margin-top:2px;color:var(--amber)">asked for — '
+          + esc(c.askedList.join(', ')) + '</div>' : '';
+      return '<div class="ag-list-row sl-best-kid">'
+        + '<div><div class="ag-lr-name">'
+        +   (SL_BEST_GROUP === 'piece' ? esc(c.colour || c.code || c.name)
+                                       : esc(c.name) + (c.colour ? ' · ' + esc(c.colour) : ''))
+        + '</div><div class="ag-lr-sub">' + cs.join(' · ') + '</div>'
+        + '<div class="ag-lr-sub" style="margin-top:2px">' + esc(c.who.join(', ')) + '</div>'
+        + asked + '</div>'
+        + '<div class="ag-lr-mono">' + c.accounts + '</div>'
+        + '<div class="ag-lr-mono">' + c.units + '</div>'
+        + '<div class="ag-lr-mono">$' + Math.round(c.usd).toLocaleString() + '</div>'
+        + '<div>' + ordCell(c) + '</div></div>';
+    }).join('') : '';
+
+    return '<div class="ag-list-row' + (canOpen ? ' sl-best-open' : '') + '"'
+      + (canOpen ? ' onclick="slBestToggle(\'' + encodeURIComponent(r.key) + '\')"' : '') + '>'
       + '<div><div class="ag-lr-name">'
       +   '<span style="color:var(--muted);font-family:\'DM Mono\',monospace;font-size:10px;margin-right:8px">'
-      +   String(i + 1).padStart(2, '0') + '</span>' + esc(r.name)
+      +   String(i + 1).padStart(2, '0') + '</span>'
+      +   (canOpen ? '<span class="sl-best-caret">' + (open ? '▾' : '▸') + '</span>' : '')
+      +   esc(r.name)
       +   (r.flagged ? ' <span title="Flagged Best Seller on the line sheet" style="color:var(--gold,#c9a96e)">⚑</span>' : '')
       + '</div>'
       + '<div class="ag-lr-sub">' + sub.join(' · ') + '</div>'
@@ -41730,14 +41852,15 @@ function agBuildBestSellersSection(){
       + '<div class="ag-lr-mono" style="font-weight:700">' + r.accounts + '</div>'
       + '<div class="ag-lr-mono">' + r.units + '</div>'
       + '<div class="ag-lr-mono">$' + Math.round(r.usd).toLocaleString() + '</div>'
-      + '<div>'
-      +   '<span class="ag-lr-mono" style="font-size:10px;color:' + (r.oUnits ? 'var(--green)' : 'var(--muted)') + '">'
-      +     (r.oUnits ? r.oUnits + ' ordered' : 'not ordered') + '</span>'
-      +   '<button class="ag-btn ag-btn-sm ' + (r.flagged ? 'ag-btn-primary' : 'ag-btn-ghost') + '"'
-      +     ' title="' + (r.flagged ? 'Remove the Best Seller flag' : 'Flag as a Best Seller')
-      +     ' — the line sheet reads it"'
-      +     ' onclick="event.stopPropagation();slBestFlag(\'' + encodeURIComponent(r.key) + '\')">⚑</button>'
-      + '</div></div>';
+      + '<div>' + ordCell(r)
+      // A colourway or a fabric is not a thing the line sheet can flag, and
+      // bulk-setting every style under one from here would be a surprise.
+      +   (SL_BEST_GROUP === 'colour' || SL_BEST_GROUP === 'fabric' ? ''
+          : '<button class="ag-btn ag-btn-sm ' + (r.flagged ? 'ag-btn-primary' : 'ag-btn-ghost') + '"'
+            + ' title="' + (r.flagged ? 'Remove the Best Seller flag' : 'Flag as a Best Seller')
+            + ' — the line sheet reads it"'
+            + ' onclick="event.stopPropagation();slBestFlag(\'' + encodeURIComponent(r.key) + '\')">⚑</button>')
+      + '</div></div>' + kids;
   }).join('');
 
   return '<div class="ag-sec-head"><h2 class="ag-sec-title">Best Sellers</h2>'
@@ -41751,6 +41874,8 @@ function agBuildBestSellersSection(){
     +     '<span class="micro-label" style="margin-right:4px">Count</span>'
     +     chip('group', 'piece', 'By piece', SL_BEST_GROUP === 'piece', 'Colourways of one piece counted together — how a buyer thinks about the line')
     +     chip('group', 'style', 'By style number', SL_BEST_GROUP === 'style', 'Every style record on its own — what you cut and ship')
+    +     chip('group', 'colour', 'By colourway', SL_BEST_GROUP === 'colour', 'Which colourways the season is taking, across every piece')
+    +     chip('group', 'fabric', 'By fabric', SL_BEST_GROUP === 'fabric', 'Which fabrics the season is taking — what to commit to the mill')
     +   '</div>'
     +   '<div style="display:flex;gap:4px;align-items:center">'
     +     '<span class="micro-label" style="margin-right:4px">Rank by</span>'
@@ -41762,7 +41887,8 @@ function agBuildBestSellersSection(){
     + '</div>'
     + head
     + '<div class="ag-list" id="sl-best-list">'
-    +   '<div class="ag-list-row ag-list-row-h"><div>' + (SL_BEST_GROUP === 'style' ? 'Style' : 'Piece')
+    +   '<div class="ag-list-row ag-list-row-h"><div>'
+    +   ({ piece:'Piece', style:'Style', colour:'Colourway', fabric:'Fabric' }[SL_BEST_GROUP] || 'Piece')
     +   ' / accounts that selected it</div><div>Accts</div><div>Units</div><div>Value</div><div>Ordered</div></div>'
     +   list
     + '</div>'
@@ -41770,6 +41896,11 @@ function agBuildBestSellersSection(){
     +   'Selected = on a quote. Ordered = confirmed on an order. Declined quotes and cancelled '
     +   'orders are left out. Value is USD at the rate frozen on each record, so a EUR quote and '
     +   'a USD one can be compared. ⚑ sets the Best Seller flag the line sheet reads.'
+    + '<br>A row with more than one line behind it opens — under a piece that is its '
+    +   'colourways, under a fabric the pieces cut from it. The colourway is what the buyer '
+    +   'wrote on the quote line, or the style’s own where the line was left blank; an '
+    +   '<span style="color:var(--amber)">asked for</span> line is a colour requested that the '
+    +   'style record does not carry.'
     + '</div>'
     + '<div style="margin-top:24px">'
     +   '<div class="ag-sec-head"><h2 class="ag-sec-title">Agent Actions</h2></div>'
