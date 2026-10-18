@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '565';
+  const BUILD = '566';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -25180,13 +25180,58 @@ function buildTodayFocus() {
     if (days > 0) items.push({key:'pull|'+p.id, pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${(p.items||[]).map(i=>i.styleName).join(', ')})`});
     else if (days > -3) items.push({key:'pull|'+p.id, pri:'med', text:`PR Pull due soon — ${p.client}`});
   });
-  // 2. Pipeline follow-ups (Buyers CRM): overdue planned moves surface here.
+  // 2. Pipeline follow-ups (Buyers CRM): planned moves that did not happen.
+  //
+  // "The tasks are completely useless and overwhelming. Many of these buyers
+  // already had follow-ups." Both true, and they were the same fault.
+  //
+  // This pushed ONE ROW PER BUYER with a past nextDate, unbounded, every one of
+  // them high priority past a week. On a real CRM that is sixty-one identical
+  // lines that say "Follow up <name> — Follow up (30d overdue)", and a focus
+  // list of sixty-one things is a focus list of nothing. It also drowned the
+  // nine other kinds of item on this screen — the overdue sample, the invoice
+  // past due, the market week — which are the ones that actually cost money.
+  //
+  // And it never asked whether the follow-up had since happened. It read
+  // nextDate alone, so an account you spoke to yesterday still read as thirty
+  // days overdue: the day this was written, One O One had been contacted that
+  // morning (their quote was marked not taken) and Today still said "Follow up
+  // One O One (40d overdue)".
+  //
+  // So: a move you have since made is done, and the rest is three rows and a
+  // count. Nothing is hidden — the full list is the CRM, which is where you
+  // work it anyway.
   const _today = now.toISOString().slice(0,10);
+  const _d10 = (v) => String(v || '').slice(0, 10);
+  const _late = [];
   (STATE.slBuyers||[]).forEach(b => {
     if (b.stage === 'inactive' || !b.nextDate || b.nextDate >= _today) return;
+    // Spoken to on or after the day it was planned for: it happened. The
+    // nextDate is just stale, and nagging about it is how this list lost its
+    // credibility. (lastContact is sometimes a date and sometimes a full
+    // timestamp, so compare the day only.)
+    if (_d10(b.lastContact) >= _d10(b.nextDate)) return;
     const days = Math.floor((now - new Date(b.nextDate + 'T00:00:00')) / 86400000);
-    items.push({key:'buyer|'+b.id, pri: days >= 7 ? 'high' : 'med', text:`Follow up ${b.name}${b.nextAction ? ' — ' + b.nextAction : ''} (${days}d overdue)`});
+    // "Follow up" as the next action adds nothing to "Follow up <name>".
+    const act = String(b.nextAction || '').trim();
+    _late.push({ b: b, days: days, act: /^follow[\s-]*up\.?$/i.test(act) ? '' : act });
   });
+  // The named slots go to the moves that say what to do — a row carrying
+  // "Call 707-433-2800 and ask for Chris" is worth reading; a bare name is a
+  // line in a list. Oldest first inside each group.
+  _late.sort((x, y) => (y.act ? 1 : 0) - (x.act ? 1 : 0) || y.days - x.days);
+  const FOCUS_BUYERS = 3;
+  _late.slice(0, FOCUS_BUYERS).forEach(x => {
+    items.push({ key:'buyer|'+x.b.id, pri: x.days >= 7 ? 'high' : 'med',
+      text:`Follow up ${x.b.name}${x.act ? ' — ' + x.act : ''} (${x.days}d overdue)` });
+  });
+  if (_late.length > FOCUS_BUYERS) {
+    const rest = _late.slice(FOCUS_BUYERS);
+    const oldest = rest.reduce((a, c) => (c.days > a.days ? c : a), rest[0]);
+    items.push({ key:'buyers-more', pri:'med',
+      text:`${rest.length} more planned follow-up${rest.length === 1 ? '' : 's'} overdue in the CRM — oldest is ${oldest.b.name} (${oldest.days}d)`,
+      act:"cpGoto('sl');setTimeout(function(){agNavSl('buyers')},150)" });
+  }
   // 2b. WHAT WE OWE A BUYER. Not a move we planned -- a thing they asked us
   // for and have not received. This is the one that went missing for four
   // months, because nothing in the app could hold an inbound request.
