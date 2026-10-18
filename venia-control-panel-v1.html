@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '563';
+  const BUILD = '564';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -39335,20 +39335,31 @@ function agBuildQuotesSection() {
   const quotes = STATE.slQuotes;
   const statusColor = { draft:'var(--muted)', sent:'var(--blue)', accepted:'var(--green)', declined:'var(--red)', expired:'var(--muted)' };
 
+  // A quote that did not land drops to the bottom rather than out: the live
+  // pipeline reads first, and the history stays one scroll away. Nothing in
+  // this app deletes a quote -- what a buyer chose, and why they walked, is
+  // worth more next season than the row is worth gone.
+  const deadRank = (q) => (q && (q.status === 'declined' || q.status === 'expired')) ? 1 : 0;
+  const ordered = quotes.map((q, i) => [q, i]).sort((a, b) =>
+    (deadRank(a[0]) - deadRank(b[0])) || (a[1] - b[1])).map(x => x[0]);
+
   const list = quotes.length === 0
     ? `<div style="padding:40px 20px;text-align:center;color:var(--muted);font-size:11px">No quotes yet — create your first</div>`
-    : quotes.map(q => `
-      <div class="ag-list-row" style="cursor:pointer" onclick="slOpenQuoteDetail('${q.id}')">
+    : ordered.map(q => `
+      <div class="ag-list-row" style="cursor:pointer${deadRank(q) ? ';opacity:.72' : ''}" onclick="slOpenQuoteDetail('${q.id}')">
         <div><div class="ag-lr-name">${q.buyerName||'Unnamed account'}</div><div class="ag-lr-sub">${(q.items||q.styles||[]).length ? (q.items||q.styles||[]).length + ' styles · ' : ''}${q.season||''}${q.orderId ? ' · → #' + q.orderId
           : q.orderCancelled ? ' · <span style="color:var(--red)">order ' + slEsc(q.orderCancelled) + ' cancelled</span>'
-          : ''}</div></div>
+          : ''}</div>${q.status === 'declined' ? `<div class="ag-lr-sub" style="margin-top:2px;color:var(--red)">not taken — ${slEsc(q.declinedReason || 'no reason recorded')}${q.declinedNote ? ' · ' + slEsc(q.declinedNote) : ''}</div>` : ''}</div>
         <div class="ag-lr-mono" style="font-size:11px;font-weight:600">${slMoney(q.total||0, q.currency)}</div>
         <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
         <div style="display:flex;gap:6px;align-items:center">
           <div class="ag-lr-mono" style="font-size:10px">${(q.createdAt||'').slice(0,10)}</div>
           ${slQuoteNeedsFx(q) ? `<button class="ag-btn ag-btn-sm" title="Marked ${slEsc(q.currency)} but holding US dollar figures" style="color:var(--amber);border-color:var(--amber)" onclick="event.stopPropagation();slQuoteFixFx('${q.id}')">⚠ ${slEsc(q.currency)}?</button>` : ''}
-          ${!q.orderId && (q.items||[]).length ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="event.stopPropagation();slCreateOrderFromQuote('${q.id}')">→ Order</button>` : ''}
+          ${q.status !== 'declined' && !q.orderId && (q.items||[]).length ? `<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="event.stopPropagation();slCreateOrderFromQuote('${q.id}')">→ Order</button>` : ''}
           ${(q.items||[]).length ? `<button class="ag-btn ag-btn-sm" title="Order confirmation with photos, to send to the buyer" onclick="event.stopPropagation();slConfirmDoc('quote','${q.id}')">▤ For buyer</button>` : ''}
+          ${q.status === 'declined'
+            ? `<button class="ag-btn ag-btn-sm" title="Put it back on the pipeline" onclick="event.stopPropagation();slQuoteReopen('${q.id}')">↺ Reopen</button>`
+            : `<button class="ag-btn ag-btn-ghost ag-btn-sm" title="They did not take it — keeps the quote and records why" onclick="event.stopPropagation();slQuoteLost('${q.id}')">✕</button>`}
           <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();slOpenQuoteModal('${q.id}')">Edit</button>
         </div>
       </div>`).join('');
@@ -39357,6 +39368,7 @@ function agBuildQuotesSection() {
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:16px">
       <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slOpenQuoteModal(null)">+ New Quote</button>
     </div>
+    ${slLostSummary(quotes)}
     <div class="ag-list" id="sl-quotes-list">
       <div class="ag-list-row ag-list-row-h"><div>Account</div><div>Total</div><div>Status</div><div>Created / Actions</div></div>
       <div id="sl-quotes-rows">${list}</div>
@@ -39866,6 +39878,127 @@ function slTouchAccount(name, text) {
   // the stage where it was is what let the pipeline report zero accounts
   // doing business against a live order book.
   if (/order created/i.test(String(text||'')) && b.stage !== 'closed' && b.stage !== 'inactive') b.stage = 'active';
+}
+
+// ══ A QUOTE THAT DID NOT LAND ══════════════════════════════════════════════
+// "How do we handle a quote that gets cancelled?" — until now, by opening Edit,
+// finding Status in a modal of fifteen fields, picking Declined and saving. It
+// worked, and nobody would ever find it, so quotes that died stayed on the
+// pipeline forever and the line's own numbers counted selects from accounts
+// that had walked.
+//
+// Two things were missing, and the second matters more than the first.
+//
+// ONE TAP, on the row where the quote lives. ✕ is as close to hand as → Order.
+//
+// AND A REASON, because "declined" on its own is a dead end. The reason is the
+// only part of a lost quote worth keeping: price, minimums, timing, budget, a
+// competitor, or silence. Six of those answers across a season is the brief for
+// the next one. A free-text box would have given prose nobody can add up, so
+// the reasons are a fixed list with room for a note beside it.
+var SL_LOST_REASONS = ['Price too high', 'Minimums too high', 'Budget cut',
+                       'Timing / delivery', 'Went with another brand', 'Went quiet'];
+var SL_LOST_PICK = null;
+
+window.slQuoteLost = function(id){
+  var q = (STATE.slQuotes || []).find(function (x) { return x && x.id === id; });
+  if (!q) return;
+  SL_LOST_PICK = SL_LOST_REASONS[0];
+  var ex = document.getElementById('sl-lost-modal'); if (ex) ex.remove();
+  var ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'sl-lost-modal';
+  ov.addEventListener('click', function (e) { if (e.target === ov) ov.remove(); });
+  ov.innerHTML = '<div class="modal" style="width:440px;max-width:94vw" onclick="event.stopPropagation()">'
+    + '<div class="modal-head"><div class="modal-title">Not taken</div>'
+    +   '<button class="modal-close" aria-label="Close" onclick="document.getElementById(\'sl-lost-modal\').remove()">&#x2715;</button></div>'
+    + '<div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:14px">'
+    +   '<div style="font-size:11px;color:var(--muted);line-height:1.7">'
+    +     '<strong style="color:var(--ink)">' + slEsc(q.buyerName || 'This account') + '</strong> · '
+    +     slEsc(q.season || '') + ' · ' + slMoney(q.total || 0, q.currency)
+    +     '<br>It leaves the pipeline and stops counting as a select in Best Sellers. '
+    +     'The quote stays on the list, and you can reopen it.'
+    +   '</div>'
+    +   '<div><div class="micro-label" style="margin-bottom:7px">Why</div>'
+    +     '<div id="sl-lost-reasons" style="display:flex;flex-wrap:wrap;gap:6px"></div></div>'
+    +   '<div><div class="micro-label" style="margin-bottom:6px">Anything worth remembering</div>'
+    +     '<input id="sl-lost-note" type="text" placeholder="Optional — what they actually said" '
+    +       'style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);'
+    +       'background:var(--bg);color:var(--ink);font-size:12px;font-family:inherit"></div>'
+    +   '<div style="display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:12px">'
+    +     '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'sl-lost-modal\').remove()">Cancel</button>'
+    +     '<button class="btn btn-gold btn-sm" onclick="slQuoteLostSave(\'' + slEsc(id) + '\')">Mark not taken</button>'
+    +   '</div></div></div>';
+  document.body.appendChild(ov);
+  slLostPaintReasons();
+};
+function slLostPaintReasons(){
+  var box = document.getElementById('sl-lost-reasons'); if (!box) return;
+  box.innerHTML = SL_LOST_REASONS.map(function (r) {
+    return '<button class="ag-btn ag-btn-sm ' + (r === SL_LOST_PICK ? 'ag-btn-primary' : 'ag-btn-ghost') + '"'
+      + ' onclick="slLostPick(' + JSON.stringify(r).replace(/"/g, '&quot;') + ')">' + slEsc(r) + '</button>';
+  }).join('');
+}
+window.slLostPick = function(r){ SL_LOST_PICK = r; slLostPaintReasons(); };
+window.slQuoteLostSave = function(id){
+  var q = (STATE.slQuotes || []).find(function (x) { return x && x.id === id; });
+  if (!q) return;
+  var note = ((document.getElementById('sl-lost-note') || {}).value || '').trim();
+  var at = new Date().toISOString();
+  q.status = 'declined';
+  q.declinedAt = at;
+  q.declinedReason = SL_LOST_PICK || SL_LOST_REASONS[0];
+  q.declinedNote = note;
+  q.updatedAt = at;
+  try { dbSet('slQuotes', STATE.slQuotes); } catch (e) {}
+  // THE ACCOUNT'S OWN HISTORY. Accepting a quote wrote a line here and losing
+  // one wrote nothing, so next season you opened the buyer and there was no
+  // record they had ever passed, let alone why.
+  try {
+    slTouchAccount(q.buyerName, 'Quote not taken — ' + q.declinedReason
+      + (note ? ' · ' + note : '') + ' · ' + slMoney(q.total || 0, q.currency));
+  } catch (e) {}
+  save();
+  try { logActivity('Quote not taken: ' + q.id + ' — ' + (q.buyerName || '') + ' · ' + q.declinedReason); } catch (e) {}
+  var m = document.getElementById('sl-lost-modal'); if (m) m.remove();
+  showToast('Marked not taken — ' + q.declinedReason + '. It has left the pipeline.', 'success');
+  try { agNavSl('quotes'); } catch (e) {}
+};
+window.slQuoteReopen = function(id){
+  var q = (STATE.slQuotes || []).find(function (x) { return x && x.id === id; });
+  if (!q) return;
+  if (!confirm('Reopen this quote for ' + (q.buyerName || 'this account') + '?\n\n'
+      + 'It goes back on the pipeline as SENT and counts as a select again. '
+      + 'The reason it was lost is cleared.')) return;
+  var at = new Date().toISOString();
+  q.status = 'sent';
+  delete q.declinedAt; delete q.declinedReason; delete q.declinedNote;
+  q.updatedAt = at;
+  try { dbSet('slQuotes', STATE.slQuotes); } catch (e) {}
+  try { slTouchAccount(q.buyerName, 'Quote reopened — ' + slMoney(q.total || 0, q.currency)); } catch (e) {}
+  save();
+  try { logActivity('Quote reopened: ' + q.id + ' — ' + (q.buyerName || '')); } catch (e) {}
+  showToast('Reopened — back on the pipeline', 'success');
+  try { agNavSl('quotes'); } catch (e) {}
+};
+// What a season lost, and to what. Six answers is a brief for the next one.
+function slLostSummary(quotes){
+  var dead = (quotes || []).filter(function (q) { return q && q.status === 'declined'; });
+  if (!dead.length) return '';
+  var tally = {}, top = '', high = 0, usd = 0;
+  dead.forEach(function (q) {
+    var r = q.declinedReason || 'No reason recorded';
+    tally[r] = (tally[r] || 0) + 1;
+    if (tally[r] > high) { high = tally[r]; top = r; }
+    var rate = Number(q.fxRate) || 0, t = Number(q.total) || 0;
+    usd += (String(q.currency || 'USD').toUpperCase() !== 'USD' && rate > 0) ? t / rate : t;
+  });
+  return '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:baseline;padding:10px 14px;'
+    + 'border:1px solid var(--border);background:var(--bg-off);margin-bottom:14px;font-size:11px">'
+    + '<span style="color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;font-size:9.5px">Not taken</span>'
+    + '<span><strong>' + dead.length + '</strong> quote' + (dead.length === 1 ? '' : 's') + '</span>'
+    + '<span style="color:var(--muted)">$' + Math.round(usd).toLocaleString() + ' USD</span>'
+    + '<span style="color:var(--muted)">most often: <strong style="color:var(--ink)">' + slEsc(top) + '</strong>'
+    + (high > 1 ? ' (' + high + ')' : '') + '</span></div>';
 }
 
 // ══ THE DOCUMENT THE BUYER ACTUALLY RECEIVES ═══════════════════════════════
