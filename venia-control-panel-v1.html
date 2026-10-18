@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '564';
+  const BUILD = '565';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40273,10 +40273,85 @@ function slDeleteQuote(id) {
   showToast('Quote deleted');
 }
 
+// ── OPENING A QUOTE ───────────────────────────────────────────────────────
+// Clicking a quote used to fire a chat prompt at the agent. Not a shortcut to
+// the agent: THE ONLY thing the row click did. You tapped a buyer to see their
+// quote and got "Ranking who needs you first…" and a spinner, with the quote
+// itself still unopened — there was no screen in the app that showed one.
+//
+// So: the quote. What they chose, in the currency it was written in, with the
+// verbs that belong to it. Asking the agent is still here, as the button it
+// should always have been.
 function slOpenQuoteDetail(id) {
   const q = (STATE.slQuotes||[]).find(x => x.id === id);
   if (!q) return;
-  agentSend('sl', 'I have a quote out to ' + (q.buyerName||'a buyer') + ' for $' + (q.total||0).toLocaleString() + ' (' + (q.season||'FW26') + '). Status: ' + (q.status||'sent') + '. Notes: ' + (q.notes||'none') + '. What should I do next? Draft any necessary communication.');
+  const lbl = 'font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px';
+  const cur = q.currency || 'USD';
+  const items = (q.items || []).filter(Boolean);
+  const units = items.reduce((s, it) => s + (Number(it.qty) || 0), 0);
+  const lines = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.ws) || 0), 0);
+  const sizeLine = (it) => {
+    const s = it.sizes && Object.keys(it.sizes).length
+      ? Object.keys(it.sizes).map(k => k + ' ' + it.sizes[k]).join('  ') : '';
+    return s ? `<div style="font-size:9.5px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px">${slEsc(s)}</div>` : '';
+  };
+  const itemsHtml = items.length
+    ? `<div><div style="${lbl}">Styles · ${units} unit${units === 1 ? '' : 's'}</div>${items.map(it => {
+        const st = (STATE.styles || []).find(x => x && x.id === it.styleId);
+        const code = (st && st.styleId) ? st.styleId : '';
+        return `<div style="padding:7px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px">
+            <span>${slEsc(it.name || code || 'Style')}${it.color ? ' <span style="color:var(--muted)">· ' + slEsc(it.color) + '</span>' : ''}</span>
+            <span style="font-family:'DM Mono',monospace;white-space:nowrap">${it.qty || 0} × ${slMoneyC(cur, it.ws || 0)} = ${slMoneyC(cur, (it.qty||0)*(it.ws||0))}</span>
+          </div>${sizeLine(it)}${it.note ? `<div style="font-size:10px;color:var(--ink);font-style:italic;margin-top:2px">${slEsc(it.note)}</div>` : ''}
+        </div>`; }).join('')}
+        <div style="display:flex;justify-content:space-between;gap:8px;font-size:12px;font-weight:700;padding:9px 0 0">
+          <span>Total</span><span style="font-family:'DM Mono',monospace">${slMoneyC(cur, lines)}</span></div>
+        ${Math.abs((Number(q.total)||0) - lines) > 1 ? `<div style="font-size:10px;color:var(--amber);margin-top:4px">The quote records ${slMoneyC(cur, q.total||0)} — the lines come to ${slMoneyC(cur, lines)}. Edit to reconcile.</div>` : ''}</div>`
+    : `<div style="font-size:11px;color:var(--muted)">No styles on this quote yet — Edit to add them.</div>`;
+  const bits = [];
+  if (q.terms) bits.push('Terms: ' + slEsc(q.terms));
+  if (q.shipStart || q.cancelDate) bits.push('Delivery: ' + slEsc(q.shipStart || 'TBD') + (q.cancelDate ? ' → cancel ' + slEsc(q.cancelDate) : ''));
+  if (q.discountPct) bits.push(q.discountPct + '% discount applied');
+  if (String(cur).toUpperCase() !== 'USD' && Number(q.fxRate) > 0) bits.push('Rate ' + q.fxRate + ' ' + String(cur).toUpperCase() + ' to 1 USD, frozen on this quote');
+  const termsHtml = bits.length ? `<div><div style="${lbl}">Terms &amp; delivery</div><div style="font-size:11px;line-height:1.7">${bits.join('<br>')}</div></div>` : '';
+  const lostHtml = q.status === 'declined'
+    ? `<div style="border-left:2px solid var(--red);padding-left:10px">
+         <div style="${lbl};color:var(--red)">Not taken</div>
+         <div style="font-size:11px;line-height:1.7">${slEsc(q.declinedReason || 'No reason recorded')}${q.declinedNote ? '<br>' + slEsc(q.declinedNote) : ''}${q.declinedAt ? '<br><span style="color:var(--muted)">' + slEsc(String(q.declinedAt).slice(0,10)) + '</span>' : ''}</div></div>`
+    : '';
+  const ex = document.getElementById('sl-quote-detail'); if (ex) ex.remove();
+  const ov = document.createElement('div');
+  ov.className = 'overlay open'; ov.id = 'sl-quote-detail';
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+  const close = `document.getElementById('sl-quote-detail').remove()`;
+  ov.innerHTML = `<div class="modal" style="width:540px;max-width:94vw" onclick="event.stopPropagation()">
+    <div class="modal-head"><div class="modal-title">${slEsc(q.buyerName || 'Quote')}</div>
+      <button class="modal-close" aria-label="Close" onclick="${close}">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow-y:auto">
+      <div style="font-size:11px;color:var(--muted);line-height:1.7">
+        <strong style="color:var(--ink)">${slMoneyC(cur, q.total || 0)}</strong>
+        · ${slEsc(String(q.status || 'draft').toUpperCase())} · ${slEsc(q.season || 'no season')}
+        ${q.createdAt ? ' · quoted ' + slEsc(String(q.createdAt).slice(0,10)) : ''}
+        ${q.orderId ? '<br>Booked as order ' + slEsc(q.orderId)
+          : q.orderCancelled ? '<br><span style="color:var(--red)">Order ' + slEsc(q.orderCancelled) + ' was cancelled</span>' : ''}
+        ${q.notes ? '<br>' + slEsc(q.notes) : ''}
+      </div>
+      ${lostHtml}
+      ${itemsHtml}
+      ${termsHtml}
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn btn-ghost btn-sm" onclick="${close};slOpenQuoteModal('${slEsc(q.id)}')">&#x270E; Edit</button>
+        ${items.length ? `<button class="btn btn-ghost btn-sm" onclick="slConfirmDoc('quote','${slEsc(q.id)}')">&#x25A4; For buyer</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="${close};agentSend('sl','I have a quote out to ${slEsc(q.buyerName||'a buyer')} for ${slEsc(slMoneyC(cur, q.total||0))} (${slEsc(q.season||'')}). Status: ${slEsc(q.status||'sent')}. Notes: ${slEsc(q.notes||'none')}. What should I do next? Draft any necessary communication.')">&#x2726; Ask the agent</button>
+        ${q.status === 'declined'
+          ? `<button class="btn btn-ghost btn-sm" onclick="${close};slQuoteReopen('${slEsc(q.id)}')">&#x21BA; Reopen</button>`
+          : `<button class="btn btn-ghost btn-sm" style="color:var(--red);border-color:var(--red)" onclick="${close};slQuoteLost('${slEsc(q.id)}')">&#x2715; Not taken</button>`}
+        ${q.status !== 'declined' && !q.orderId && items.length
+          ? `<button class="btn btn-gold btn-sm" onclick="${close};slCreateOrderFromQuote('${slEsc(q.id)}')">&#x2192; Order</button>` : ''}
+      </div>
+    </div></div>`;
+  document.body.appendChild(ov);
 }
 
 function slOpenLinesheetModal() {
