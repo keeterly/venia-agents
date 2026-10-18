@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '566';
+  const BUILD = '567';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -38327,6 +38327,9 @@ window.SL_VLS = { perPage: 3, cols: 0, genders: [], currency: 'USD', photosOnly:
   // to an account that sets its own price, should be able to quote the
   // wholesale without it — and empty === every one, as with genders.
   retail: true,
+  // A title page, and a divider before each section. Both off by default: the
+  // sheet that exists today is the one people are used to receiving.
+  titlePage: false, titleLine: '', sectionBy: '', dividers: true, divTitles: {},
   // AND THE WHOLESALE, WHICH IS THE ONE THAT MATTERS. A sheet going to press,
   // to a stylist, or to a buyer before terms are agreed should carry the line
   // without carrying what it costs. Like retail, the number must be ABSENT from
@@ -38445,6 +38448,77 @@ function slVlsGenderOf(s){
   if (/^u/.test(g)) return 'unisex';
   return 'unspecified';
 }
+// ── A TITLE PAGE, AND A DIVIDER BEFORE EACH SECTION ───────────────────────
+// A line sheet is a document a buyer sits with, and it opened mid-garment.
+// Nothing said what collection it was, and nothing marked where womenswear
+// ended and menswear began — the reader found out by noticing the clothes had
+// changed.
+//
+// Both pages are BLANK WHITE with the words in the middle, on purpose. A
+// divider that carries a photo is another page of product; what it has to do
+// is stop the eye, which white does better than anything printed on it.
+//
+// The words are theirs. Defaults are filled in from the section itself, and
+// every one is editable — "WOMENSWEAR" is a guess, "WOMEN · SS27" might be the
+// house style, and the sheet should not argue.
+function slVlsSectionKey(r, by){
+  if (by === 'gender') {
+    const g = String((r && r.gender) || '').trim().toLowerCase();
+    if (/^w/.test(g)) return 'womens';
+    if (/^m/.test(g)) return 'mens';
+    if (/^u/.test(g)) return 'unisex';
+    return 'unspecified';
+  }
+  if (by === 'category') return String((r && r.category) || '').trim() || 'Uncategorised';
+  return String((r && r.vendor) || '').trim() || 'Factory not set';
+}
+const SL_VLS_GENDER_LABEL = { womens:'WOMENSWEAR', mens:'MENSWEAR', unisex:'UNISEX', unspecified:'THE REST' };
+const SL_VLS_GENDER_ORDER = ['womens','mens','unisex','unspecified'];
+function slVlsSectionLabel(key, by){
+  if (by === 'gender') return SL_VLS_GENDER_LABEL[key] || String(key).toUpperCase();
+  return String(key).toUpperCase();
+}
+// The sections this sheet will actually produce, in the order it will print
+// them, with however many styles each one carries.
+window.slVlsSections = function(){
+  const by = SL_VLS.sectionBy || '';
+  if (!by) return [];
+  const counts = {};
+  slVlsStyles().forEach(function (s) {
+    const k = slVlsSectionKey(slVlsRowFrom(s), by);
+    counts[k] = (counts[k] || 0) + 1;
+  });
+  let keys = Object.keys(counts);
+  if (by === 'gender') {
+    keys.sort(function (a, b) { return SL_VLS_GENDER_ORDER.indexOf(a) - SL_VLS_GENDER_ORDER.indexOf(b); });
+  } else {
+    keys.sort(function (a, b) {
+      // Whatever is unfiled sorts last: it is the work to do, not a section.
+      const na = /not set|uncategorised/i.test(a), nb = /not set|uncategorised/i.test(b);
+      if (na !== nb) return na ? 1 : -1;
+      if (by === 'category' && typeof slLsCatRank === 'function') {
+        const d = slLsCatRank(a) - slLsCatRank(b); if (d) return d;
+      }
+      return a.localeCompare(b);
+    });
+  }
+  return keys.map(function (k) {
+    return { key: k, n: counts[k],
+             title: (SL_VLS.divTitles || {})[k] != null
+               ? SL_VLS.divTitles[k] : slVlsSectionLabel(k, by) };
+  });
+};
+window.slVlsSetDiv = function(key, v){
+  if (!SL_VLS.divTitles) SL_VLS.divTitles = {};
+  SL_VLS.divTitles[key] = String(v == null ? '' : v);
+  try { slVlsPreview(); } catch (e) {}
+};
+window.slVlsSectionBy = function(v){
+  SL_VLS.sectionBy = v || '';
+  // Grouping by factory is the same idea under another name; one switch owns it.
+  SL_VLS.byVendor = (v === 'vendor');
+  try { slVlsOpen(); } catch (e) {}
+};
 // The styles this sheet will carry, after the season the preview is on and
 // whatever genders are ticked. No ticks means every gender — the same thing the
 // dialog says, so the button and the sheet can never disagree.
@@ -38544,11 +38618,42 @@ window.slVlsOpen = function(){
           <input type="checkbox" id="sl-vls-cogs" ${SL_VLS.cogs===true?'checked':''} onchange="SL_VLS.cogs=this.checked;slVlsCount()" style="accent-color:var(--red)">
           Show cost of goods <span style="color:var(--red)">— internal</span>
         </label>
-        ${slVlsVendors().length > 1 ? `<label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer;padding-bottom:6px"
-               title="Each factory's styles start on their own page, headed with their name and numbered within their own section — so one export covers every maker and each of them can be sent only their part.">
-          <input type="checkbox" id="sl-vls-byvendor" ${SL_VLS.byVendor?'checked':''} onchange="SL_VLS.byVendor=this.checked;slVlsCount()" style="accent-color:var(--ink)">
-          One section per factory
-        </label>` : ''}
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:10px;letter-spacing:1.6px;text-transform:uppercase;color:var(--muted)">Cover &amp; sections</div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer"
+               title="A blank white page in front: the wordmark and the season in the middle, no page number and no running head. It is the cover, not page one.">
+          <input type="checkbox" id="sl-vls-title" ${SL_VLS.titlePage?'checked':''} onchange="SL_VLS.titlePage=this.checked;slVlsOpen()" style="accent-color:var(--ink)">
+          Title page
+        </label>
+        ${SL_VLS.titlePage ? `<input type="text" id="sl-vls-titleline" value="${slEsc(SL_VLS.titleLine||'')}"
+            placeholder="A line under the season — optional"
+            oninput="SL_VLS.titleLine=this.value;slVlsPreview()"
+            style="width:100%;box-sizing:border-box;padding:7px 9px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:11px;font-family:inherit">` : ''}
+        <div style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink)">
+          <span style="flex:0 0 auto">Split into sections by</span>
+          <select onchange="slVlsSectionBy(this.value)"
+                  style="flex:1;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 7px;font-size:11px">
+            <option value="" ${!SL_VLS.sectionBy?'selected':''}>Nothing — one run</option>
+            <option value="gender" ${SL_VLS.sectionBy==='gender'?'selected':''}>Menswear / Womenswear / Unisex</option>
+            <option value="category" ${SL_VLS.sectionBy==='category'?'selected':''}>Category</option>
+            ${slVlsVendors().length > 1 ? `<option value="vendor" ${SL_VLS.sectionBy==='vendor'?'selected':''}>Factory</option>` : ''}
+          </select>
+        </div>
+        ${SL_VLS.sectionBy ? `
+          <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ink);cursor:pointer"
+                 title="A blank white page before each section with its name in the middle. Untick it to keep the sections and their page numbering without the divider.">
+            <input type="checkbox" ${SL_VLS.dividers!==false?'checked':''} onchange="SL_VLS.dividers=this.checked;slVlsPreview()" style="accent-color:var(--ink)">
+            Divider page before each
+          </label>
+          ${SL_VLS.dividers!==false ? `<div style="display:flex;flex-direction:column;gap:5px">
+            <div style="font-size:10px;color:var(--muted);line-height:1.6">What each divider says — yours to change.</div>
+            ${slVlsSections().map(x => `<div style="display:flex;align-items:center;gap:7px">
+              <input type="text" value="${slEsc(x.title)}" oninput="slVlsSetDiv('${slEsc(x.key)}',this.value)"
+                style="flex:1;min-width:0;padding:6px 8px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:11px;font-family:inherit;letter-spacing:1px">
+              <span style="flex:0 0 auto;font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${x.n}</span>
+            </div>`).join('')}
+          </div>` : ''}` : ''}
       </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
@@ -38779,27 +38884,40 @@ window.slVlsDoc = function(opts){
   // tall a photo happens to render is how you get four styles on one page and
   // one orphan on the next.
   const pages = [];
-  if (opts.groupBy === 'vendor') {
+  // ONE SECTION PER <AXIS>, each opening on a divider and starting on its own
+  // page. Factory grouping was already this, hard-wired to the vendor; it is
+  // the same machinery with the key chosen rather than assumed, so womenswear
+  // and menswear get what the factories had.
+  const sectionBy = SL_VLS.sectionBy || (opts.groupBy === 'vendor' ? 'vendor' : '');
+  if (sectionBy) {
+    const groups = {};
+    rows.forEach(function (r) {
+      const k = slVlsSectionKey(r, sectionBy);
+      (groups[k] = groups[k] || []).push(r);
+    });
+    const order = slVlsSections().map(function (x) { return x.key; })
+      .filter(function (k) { return groups[k]; });
+    // A key the section list did not predict still prints -- a sheet must never
+    // silently drop a style because a grouping helper disagreed with itself.
+    Object.keys(groups).forEach(function (k) { if (order.indexOf(k) < 0) order.push(k); });
+    order.forEach(function (k) {
+      const g = groups[k];
+      const title = (SL_VLS.divTitles || {})[k] != null
+        ? SL_VLS.divTitles[k] : slVlsSectionLabel(k, sectionBy);
+      if (SL_VLS.dividers !== false && String(title).trim()) {
+        const d = []; d.divider = String(title).trim(); d.group = k;
+        d.sub = g.length + ' style' + (g.length === 1 ? '' : 's');
+        pages.push(d);
+      }
+      for (let i = 0; i < g.length; i += per) { const pg = g.slice(i, i + per); pg.group = k; pages.push(pg); }
+    });
+  } else if (false) {
     // ONE SECTION PER FACTORY, each starting on its own page. A maker should
     // receive the styles they make and nothing else, and a page that mixes two
     // factories cannot be sent to either. Grouping here rather than exporting
     // once per factory keeps it a single action and a single file — browsers
     // block the second popup anyway.
-    const groups = {};
-    rows.forEach(function(r){
-      const k = String(r.vendor || '').trim() || 'Factory not set';
-      (groups[k] = groups[k] || []).push(r);
-    });
-    Object.keys(groups).sort(function(a, b){
-      // Whatever has no factory on file sorts last: it is the work to do, not
-      // a maker to send to.
-      if (a === 'Factory not set') return 1;
-      if (b === 'Factory not set') return -1;
-      return a.localeCompare(b);
-    }).forEach(function(k){
-      const g = groups[k];
-      for (let i = 0; i < g.length; i += per) { const pg = g.slice(i, i + per); pg.group = k; pages.push(pg); }
-    });
+    /* superseded by the general section pager above */
   } else {
     for (let i = 0; i < rows.length; i += per) pages.push(rows.slice(i, i + per));
   }
@@ -38925,7 +39043,24 @@ window.slVlsDoc = function(opts){
       </div>
     </div>`;
   };
-  const body = pages.map((pg, i) => `<section class="pg">
+  // THE TITLE PAGE. Blank white, the mark and the season in the middle, and a
+  // line of their own underneath if they want one. It carries no page number
+  // and no running head: it is the cover, not page one of nineteen.
+  const titleHtml = SL_VLS.titlePage ? `<section class="pg cover">
+      <div class="cv">
+        <div class="cv-b">${brandMark(220)}</div>
+        <div class="cv-s">${esc(seasonLabel)}</div>
+        ${String(SL_VLS.titleLine || '').trim()
+          ? `<div class="cv-l">${esc(String(SL_VLS.titleLine).trim())}</div>` : ''}
+        ${delivery ? `<div class="cv-d">Delivery ${esc(delivery)}</div>` : ''}
+      </div>
+    </section>` : '';
+  const body = titleHtml + pages.map((pg, i) => pg.divider ? `<section class="pg cover">
+      <div class="cv">
+        <div class="cv-s cv-div">${esc(pg.divider)}</div>
+        ${pg.sub ? `<div class="cv-d">${esc(pg.sub)}</div>` : ''}
+      </div>
+    </section>` : `<section class="pg">
       <header><span class="b">${brandMark(76)}</span><span>${esc(seasonLabel)}${
         // The running head named the wholesale on every page. A sheet without
         // one should not, and a sheet with no prices at all should say so where
@@ -38951,11 +39086,14 @@ window.slVlsDoc = function(opts){
         (function(){ const c=[...new Set(pg.map(x=>String(x.category||'').trim()).filter(Boolean))];
           return c.length ? ' · ' + esc(c.join(' / ')) : ''; })()
       }</span><span>${(function(){
-        if (!pg.group) return (i+1) + ' / ' + pages.length;
+        // Covers are not pages of the sheet, so they are not counted and do
+        // not shift the numbering of the pages that are.
+        const real = pages.filter(function(x){ return !x.divider; });
+        if (!pg.group) return (real.indexOf(pg) + 1) + ' / ' + real.length;
         // Within the factory: "2 / 3" of THEIR pages, because that is the
         // document they receive. A maker holding page 7 of 19 cannot tell
         // whether they have all of theirs.
-        const mine = pages.filter(function(x){ return x.group === pg.group; });
+        const mine = pages.filter(function(x){ return x.group === pg.group && !x.divider; });
         return (mine.indexOf(pg) + 1) + ' / ' + mine.length;
       })()}</span></header>
       <div class="grid">${pg.map(card).join('')}${
@@ -38990,6 +39128,19 @@ window.slVlsDoc = function(opts){
        card ended up 287mm tall on a 182mm page. */
     .pg{page-break-after:always;display:flex;flex-direction:column;height:196mm}
     .pg:last-child{page-break-after:auto}
+    /* A COVER IS A BLANK WHITE PAGE WITH THE WORDS IN THE MIDDLE. No running
+       head, no footer, no page number, nothing printed to the edges -- what it
+       has to do is stop the eye, and white does that better than anything that
+       could be put on it. */
+    .pg.cover{align-items:center;justify-content:center;background:#fff}
+    .cv{text-align:center;max-width:150mm}
+    .cv-b{display:flex;justify-content:center;color:#111;margin-bottom:10mm}
+    .cv-b svg{display:block}
+    .cv-s{font-size:15pt;letter-spacing:8px;text-transform:uppercase;color:#111}
+    /* A section divider has no wordmark above it, so it carries the weight. */
+    .cv-div{font-size:19pt;letter-spacing:10px}
+    .cv-l{font-size:10pt;letter-spacing:2px;text-transform:uppercase;color:#555;margin-top:6mm;line-height:1.9}
+    .cv-d{font-size:8.5pt;letter-spacing:2.4px;text-transform:uppercase;color:#888;margin-top:7mm}
 
     header{display:flex;justify-content:space-between;align-items:baseline;font-size:8pt;
       letter-spacing:1.4px;text-transform:uppercase;color:#666;border-bottom:1.5px solid #111;padding-bottom:4mm}
@@ -39182,7 +39333,11 @@ function slLinesheetFoot(currency, delivery, frozenLine, opts){
     + (frozenLine ? '<br>' + frozenLine : '');
 }
 function slLsRowFrom(s){
-  return { code:s.styleId||'', name:s.name||'', category:s.category||'', season:s.season||'',
+  // gender rides along because the sheet can now SPLIT on it. The dialog has
+  // filtered by gender for a while, but it read the style; the row did not
+  // carry it, so anything working from rows alone saw every piece as
+  // unspecified.
+  return { code:s.styleId||'', gender:s.gender||'', name:s.name||'', category:s.category||'', season:s.season||'',
     fabric:s.fabric||'', colors:s.colors||'', sizes:s.sizes||'', wholesale:s.wholesale||0,
     retail:s.retail||0, moq: slMoqFor(s), photo: s.photoUrl||'',
     // A line sheet is also a customs and compliance document. Country of origin
