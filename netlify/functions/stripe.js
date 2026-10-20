@@ -71,6 +71,16 @@ export default async (req) => {
     if (!ok) return json({ error: 'Not authorized — enter your VENIA access code to move a card hold.' }, 401, cors);
   }
 
+  // THE CURRENCY WAS HARDCODED TO USD, in both the checkout session and the
+  // invoice. Every VENIA wholesale order this season is written in EUR, so an
+  // invoice for a EUR 4,400 order billed the buyer USD 4,400 — a different sum
+  // of money, in a currency nobody agreed, with the order's own paperwork
+  // saying something else. Honour what the caller is actually selling in, and
+  // refuse anything that is not a currency this app can quote.
+  const CUR_OK = ['usd', 'eur', 'gbp'];
+  const cur = CUR_OK.includes(String(body.currency || '').toLowerCase())
+    ? String(body.currency).toLowerCase() : 'usd';
+
   const form = (o) => Object.entries(o)
     .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v)).join('&');
   const call = async (path, data, method = 'POST') => {
@@ -89,7 +99,7 @@ export default async (req) => {
       if (amt > 5000000) return json({ error: 'Amount too large' }, 400);   // $50k sanity cap
       const s = await call('checkout/sessions', {
         mode: 'payment',
-        'line_items[0][price_data][currency]': 'usd',
+        'line_items[0][price_data][currency]': cur,
         'line_items[0][price_data][product_data][name]': body.description || 'VENIA sample pull deposit',
         'line_items[0][price_data][unit_amount]': amt,
         'line_items[0][quantity]': 1,
@@ -156,7 +166,7 @@ export default async (req) => {
       });
       if (inv.error) return json({ error: inv.error.message }, 400, cors);
       const item = await call('invoiceitems', {
-        customer: customerId, invoice: inv.id, amount: amt, currency: 'usd',
+        customer: customerId, invoice: inv.id, amount: amt, currency: cur,
         description: String(body.description || LINE[kind]).slice(0, 300),
       });
       if (item.error) return json({ error: item.error.message }, 400, cors);
