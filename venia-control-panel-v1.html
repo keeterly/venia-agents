@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '569';
+  const BUILD = '570';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40296,7 +40296,10 @@ window.slConfirmDoc = function(kind, id){
   var title = isOrder ? 'Order Confirmation' : 'Pro Forma';
   var ref = isOrder ? ('Order ' + (src.id || '')) : ('Quote ' + (src.id || ''));
   var acct = src.account || src.buyerName || 'Account';
-  var ship = src.shipStart || src.deliveryDate || '';
+  // deliveryDate FIRST: it is the field the order editor writes, so it is the
+  // one a founder has actually changed. Reading shipStart first is what made
+  // the paper disagree with the screen.
+  var ship = src.deliveryDate || src.shipStart || '';
   var terms = src.terms || ((STATE.slPrefs && STATE.slPrefs.terms) || '');
   var moq = (STATE.slPrefs && STATE.slPrefs.moq) || '';
 
@@ -40414,10 +40417,12 @@ window.slConfirmDoc = function(kind, id){
         var pays = [];
         try { pays = slOrderPayments(src) || []; } catch (e) { pays = []; }
         var payFor = function (k) { return pays.filter(function (x) { return x && x.key === k; })[0] || null; };
-        var due = function (l) {
-          if (!src.createdAt || !l.days) return l.when || '';
-          var d = new Date(src.createdAt); d.setDate(d.getDate() + l.days);
-          return (l.when ? l.when + ' · ' : '') + 'by ' + d.toISOString().slice(0, 10);
+        var due = function (l, p) {
+          var d = '';
+          try { d = slDueDate(src, l, p); } catch (e) { d = ''; }
+          // No date yet (a net term with no invoice raised) is not a date to
+          // invent -- it is the term, said plainly.
+          return (l.when ? l.when : '') + (d ? (l.when ? ' · ' : '') + 'by ' + d : '');
         };
         var rows = sched.map(function (l) {
           var p = payFor(l.key);
@@ -40426,7 +40431,7 @@ window.slConfirmDoc = function(kind, id){
           return '<tr>'
             + '<td>' + esc(l.label) + (l.pct < 100 ? ' <span class="pc">' + l.pct + '%</span>' : '') + '</td>'
             + '<td class="n">' + esc(slMoney(l.amount, cur)) + '</td>'
-            + '<td>' + esc(due(l)) + (l.note ? ' · ' + esc(l.note) : '') + '</td>'
+            + '<td>' + esc(due(l, p)) + (l.note ? ' · ' + esc(l.note) : '') + '</td>'
             + '<td class="n">' + (paid ? '<span class="pd">Paid</span>'
                 : link ? '<a class="pay" href="' + esc(link) + '">Pay now</a>'
                 : '<span class="tb">Invoice to follow</span>') + '</td></tr>';
@@ -40444,8 +40449,10 @@ window.slConfirmDoc = function(kind, id){
         if (!sched.length || !String(src.terms || '').trim()) return '';
         return '<div class="pay-b"><div class="pay-h">Payment, once confirmed</div>'
           + '<table class="pay-t"><tbody>' + sched.map(function (l) {
+              var d = ''; try { d = slDueDate(src, l, null); } catch (e) {}
               return '<tr><td>' + esc(l.label) + (l.pct < 100 ? ' <span class="pc">' + l.pct + '%</span>' : '')
-                + '</td><td class="n">' + esc(slMoney(l.amount, cur)) + '</td><td>' + esc(l.when || '') + '</td></tr>';
+                + '</td><td class="n">' + esc(slMoney(l.amount, cur)) + '</td><td>'
+                + esc((l.when || '') + (d ? (l.when ? ' · ' : '') + 'by ' + d : '')) + '</td></tr>';
             }).join('') + '</tbody></table></div>';
       })())
     + '<div class="foot">'
@@ -41495,7 +41502,15 @@ function slSaveOrder() {
     account:      g('slom-account'),
     status:       g('slom-status'),
     total:        parseFloat(g('slom-total'))||0,
+    // TWO FIELDS MEANT ONE THING AND DRIFTED APART. An order carries both
+    // shipStart (from the quote) and deliveryDate (what this editor writes),
+    // and the buyer's confirmation read shipStart while the Orders list read
+    // deliveryDate. So changing the delivery here moved one of them and the
+    // document went on printing the other: Devastator's order said 2027-02-15
+    // on screen and 2027-01-15 on the paper sent to the buyer. They are the
+    // same date; the editor now writes both.
     deliveryDate: g('slom-delivery'),
+    shipStart:    g('slom-delivery'),
     notes:        g('slom-notes'),
     updatedAt:    new Date().toISOString(),
   };
@@ -41764,7 +41779,10 @@ function slOpenOrderDetail(id) {
         <div style="flex:1;min-width:150px">
           <div style="font-size:11px;color:var(--ink)">${slEsc(l.label)}${l.pct<100?` <span style="color:var(--muted)">${l.pct}%</span>`:''}
             <span style="font-family:'DM Mono',monospace">· ${slMoneyC(cur, l.amount)}</span></div>
-          <div style="font-size:9.5px;color:var(--muted)">${slEsc(l.when||'')}${l.note?' · '+slEsc(l.note):''}
+          <div style="font-size:9.5px;color:var(--muted)">${(function(){
+            var d = ''; try { d = slDueDate(o, l, p); } catch(e){}
+            return slEsc((l.when||'') + (d ? (l.when?' · ':'') + 'by ' + d : ''));
+          })()}${l.note?' · '+slEsc(l.note):''}
             <span style="color:${col}">${word}</span>${p&&p.url?` · <a href="${slEsc(p.url)}" target="_blank" rel="noopener" style="color:var(--ink)">open</a>`:''}</div>
         </div>
         ${!p ? `<button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderInvoice('${o.id}','${l.key}')">Invoice</button>
@@ -41848,25 +41866,69 @@ function slTermsSchedule(terms, total){
   // independently can leave the two adding up to a cent more or less than the
   // order, and an invoice pair that does not reconcile to the total is an
   // argument with a buyer waiting to happen.
+  // `basis` is what the date is counted FROM, and it was the missing piece.
+  // Every line carried only a number of days, so a balance due "before ship"
+  // was dated thirty days after the ORDER — on Devastator's order that put the
+  // 70% three months before the shipment it was meant to precede. A balance
+  // before ship is due against the ship date; a deposit is due against the
+  // order; a net term runs from the invoice.
   const split = (dep) => {
     const d = amt(dep);
     return [
-      { key:'deposit', label:'Deposit', pct:dep,     amount:d,                              when:'on order',    days:7  },
-      { key:'balance', label:'Balance', pct:100-dep, amount:Math.round(((Number(total)||0)-d)*100)/100, when:'before ship', days:30 },
+      { key:'deposit', label:'Deposit', pct:dep,     amount:d,                              when:'on order',    days:7,  basis:'order' },
+      { key:'balance', label:'Balance', pct:100-dep, amount:Math.round(((Number(total)||0)-d)*100)/100, when:'before ship', days:30, basis:'ship' },
     ];
   };
   if (/^30% deposit/.test(t)) return split(30);
   if (/^50% deposit/.test(t)) return split(50);
   if (/^Proforma/i.test(t))
-    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'before ship', days:14 }];
+    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'before ship', days:14, basis:'ship' }];
   if (/^Credit card on file/i.test(t))
-    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'on order', days:1, card:true }];
+    return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'on order', days:1, card:true, basis:'order' }];
   const net = t.match(/Net\s*(\d+)/i);
   if (net) return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100),
-    when:'net ' + net[1], days:parseInt(net[1],10),
+    when:'net ' + net[1], days:parseInt(net[1],10), basis:'invoice',
     note: /^2\/10/.test(t) ? '2% off if paid within 10 days' : '' }];
-  return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'', days:14,
+  return [{ key:'full', label:'Payment in full', pct:100, amount:amt(100), when:'', days:14, basis:'invoice',
             note: t ? '' : 'No terms set on this order — billing once, in full.' }];
+}
+// WHEN THIS INSTALMENT IS ACTUALLY DUE, as a date, from the one basis that
+// applies. Written once because three screens were each guessing differently:
+// the document counted days from the order, the order screen printed the bare
+// words "before ship", and Stripe was told net-30 regardless.
+//
+// A Stripe invoice that already exists WINS, because the date on it is the one
+// the buyer received; nothing we compute afterwards is more true than that.
+function slOrderShipDate(o){
+  return String((o && (o.deliveryDate || o.shipStart)) || '').slice(0, 10);
+}
+function slDueDate(o, line, paid){
+  var plus = function (iso, d) {
+    var t = new Date(String(iso).slice(0, 10) + 'T00:00:00');
+    if (isNaN(t)) return '';
+    t.setDate(t.getDate() + (Number(d) || 0));
+    return t.toISOString().slice(0, 10);
+  };
+  if (paid && paid.dueDate) return String(paid.dueDate).slice(0, 10);
+  var basis = line && line.basis;
+  if (basis === 'ship') {
+    var ship = slOrderShipDate(o);
+    // Due BEFORE the ship date, not on it — the goods do not leave unpaid.
+    return ship ? plus(ship, -(Number(line.shipLead) || 0)) : '';
+  }
+  if (basis === 'order') return o && o.createdAt ? plus(o.createdAt, line.days) : '';
+  // 'invoice': only knowable once one exists; until then it is the term, not a date.
+  return paid && paid.at ? plus(paid.at, line.days) : '';
+}
+// How many days a Stripe invoice should give, so the invoice's own due date
+// lands on the date the paperwork promises rather than a flat thirty.
+function slDueDays(o, line){
+  var want = slDueDate(o, line, null);
+  if (!want) return Number(line.days) || 14;
+  var ms = new Date(want + 'T00:00:00') - new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00');
+  var d = Math.round(ms / 86400000);
+  // Stripe caps at 60 and cannot be given a date in the past.
+  return Math.max(1, Math.min(60, d || Number(line.days) || 14));
 }
 // One payment record per instalment. Orders invoiced before this build carry a
 // single `o.payment`; it is folded in as the first instalment rather than
@@ -41908,7 +41970,10 @@ window.slOrderInvoice = async function(orderId, key){
     kind: 'wholesale', currency: o.currency || 'USD', amount: line.amount, email, name: o.account || '',
     description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label
       + (line.pct < 100 ? ' (' + line.pct + '%)' : ''),
-    days: line.days,
+    // The invoice's own due date has to land where the confirmation says it
+    // does. It was a flat net-30 from whenever the invoice happened to be
+    // raised, which is how the 70% ended up on a third, unrelated date.
+    days: (function(){ try { return slDueDays(o, line); } catch (e) { return line.days; } })(),
   });
   if (!inv || inv.error) { showToast(String((inv && inv.error) || 'Stripe did not answer'), 'error'); return; }
   slOrderPayments(o).push({ key: line.key, label: line.label, pct: line.pct, amount: line.amount,
