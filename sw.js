@@ -1,16 +1,28 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v567';
+const CACHE = 'venia-shell-v568';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
-  // Auto-update: activate the new worker as soon as it's installed instead of
-  // waiting for the user to tap an "Update" ribbon. On iOS the app resumes the
-  // old page for days and that ribbon often never showed, leaving devices stuck
-  // on an old build. The page reloads once on controllerchange (see the HTML
-  // registration), so a fresh deploy lands on the next open with no tapping.
-  self.skipWaiting();
+  // NO skipWaiting() HERE, and that is the whole point.
+  //
+  // It used to activate every new worker the moment it installed. Activating
+  // calls clients.claim(), claiming fires controllerchange in every open tab,
+  // and the page answered that by arming itself to reload the next time it lost
+  // focus. So after any deploy — and the app checks for one every sixty seconds
+  // — every open tab reloaded itself as soon as the founder switched tabs or
+  // away from the browser. That is the flickering: the screen being thrown away
+  // and rebuilt behind their back, at a rate set by how often we ship.
+  //
+  // The page already has the right mechanism and never got to use it: a ribbon
+  // that says a new version is ready, with an Update button. It needs a WAITING
+  // worker to offer, and skipWaiting() meant there was never one.
+  //
+  // So the new worker waits. The ribbon appears. Tapping Update activates it and
+  // reloads once, deliberately. And a device still cannot get stuck on an old
+  // build: a waiting worker activates by itself as soon as every tab of the app
+  // is closed, which is what happens at the end of any day.
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
 });
 
