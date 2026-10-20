@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '568';
+  const BUILD = '569';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40349,6 +40349,29 @@ window.slConfirmDoc = function(kind, id){
     // the later rule won, in print too, and the black SAVE AS PDF button has
     // been printing on the front page of every pro forma and order
     // confirmation sent to a buyer since the document shipped.
+    + '.pay-b{margin-top:7mm;border-top:1.5px solid #111;padding-top:4mm;page-break-inside:avoid}'
+    + '.pay-h{font-size:7.5pt;letter-spacing:1.5px;text-transform:uppercase;color:#888;margin-bottom:2.5mm}'
+    + '.pay-t{width:100%;border-collapse:collapse}'
+    + '.pay-t th{font-size:7pt;letter-spacing:1.2px;text-transform:uppercase;color:#aaa;'
+    +   'text-align:left;border:none;padding:0 0 1.5mm;font-weight:400}'
+    + '.pay-t td{border-bottom:1px solid #eee;padding:2mm 0;font-size:9pt;vertical-align:middle}'
+    + '.pay-t tr:last-child td{border-bottom:none}'
+    // Right-aligned columns butt straight into the next one unless told not to:
+    // the header read "AMOUNTDUE" and the row "€2,200on order".
+    + '.pay-t .n{text-align:right;white-space:nowrap;padding-right:6mm}'
+    + '.pay-t td:last-child,.pay-t th:last-child{padding-right:0}'
+    + '.pay-t col.c1{width:34%}.pay-t col.c2{width:22%}.pay-t col.c3{width:28%}.pay-t col.c4{width:16%}'
+    + '.pay-t .pc{color:#888;font-size:7.5pt}'
+    + '.pay-t .tb{color:#aaa;font-size:8pt}'
+    + '.pay-t .pd{color:#1c7c3c;font-weight:700;font-size:8.5pt;letter-spacing:1px;text-transform:uppercase}'
+    // A button on screen, a readable address on paper: a printed "Pay now"
+    // that hides its own URL is a dead end in an envelope.
+    + '.pay-t a.pay{display:inline-block;background:#111;color:#fff;text-decoration:none;'
+    +   'padding:1.6mm 4mm;font-size:8pt;letter-spacing:1.2px;text-transform:uppercase}'
+    + '.pay-n{font-size:7.5pt;color:#888;margin-top:2.5mm}'
+    + '@media print{.pay-t a.pay{background:none;color:#111;padding:0;text-decoration:underline}'
+    +   '.pay-t a.pay::after{content:" — " attr(href);font-size:6.5pt;letter-spacing:0;'
+    +   'text-transform:none;color:#666;word-break:break-all}}'
     + '@media print{.noprint{display:none;margin:0;padding:0;border:none}}'
     + '</style></head><body>'
     + '<div class="noprint"><button onclick="window.print()">↓ Save as PDF</button></div>'
@@ -40373,6 +40396,58 @@ window.slConfirmDoc = function(kind, id){
     +   '<tr><td class="g">Total</td><td class="g" style="text-align:right">'
          + esc(slMoney(total, cur)) + '</td></tr>'
     + '</table></div>'
+    // WHAT IS DUE, WHEN, AND HOW TO PAY IT.
+    //
+    // The confirmation said "Terms: 50% deposit" in the footer and stopped
+    // there. A buyer reading it could not tell what the deposit came to, when
+    // it was due, or where to send the money — so every order needed a second
+    // email, and the Stripe link lived on a clipboard rather than on the
+    // document. This is the same schedule the order screen shows, printed for
+    // the person who has to pay it, with the live link where one exists.
+    //
+    // Pro formas get the schedule but no links: there is nothing to pay until
+    // the order is booked.
+    + (isOrder ? (function(){
+        var sched = [];
+        try { sched = slTermsSchedule(src.terms || '', total) || []; } catch (e) { return ''; }
+        if (!sched.length) return '';
+        var pays = [];
+        try { pays = slOrderPayments(src) || []; } catch (e) { pays = []; }
+        var payFor = function (k) { return pays.filter(function (x) { return x && x.key === k; })[0] || null; };
+        var due = function (l) {
+          if (!src.createdAt || !l.days) return l.when || '';
+          var d = new Date(src.createdAt); d.setDate(d.getDate() + l.days);
+          return (l.when ? l.when + ' · ' : '') + 'by ' + d.toISOString().slice(0, 10);
+        };
+        var rows = sched.map(function (l) {
+          var p = payFor(l.key);
+          var paid = p && p.status === 'paid';
+          var link = (!paid && p && p.url) ? p.url : '';
+          return '<tr>'
+            + '<td>' + esc(l.label) + (l.pct < 100 ? ' <span class="pc">' + l.pct + '%</span>' : '') + '</td>'
+            + '<td class="n">' + esc(slMoney(l.amount, cur)) + '</td>'
+            + '<td>' + esc(due(l)) + (l.note ? ' · ' + esc(l.note) : '') + '</td>'
+            + '<td class="n">' + (paid ? '<span class="pd">Paid</span>'
+                : link ? '<a class="pay" href="' + esc(link) + '">Pay now</a>'
+                : '<span class="tb">Invoice to follow</span>') + '</td></tr>';
+        }).join('');
+        return '<div class="pay-b"><div class="pay-h">Payment</div>'
+          + '<table class="pay-t"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>'
+          +   '<thead><tr><th>Instalment</th><th class="n">Amount</th>'
+          +   '<th>Due</th><th class="n"> </th></tr></thead><tbody>' + rows + '</tbody></table>'
+          + (sched.some(function (l) { var p = payFor(l.key); return !p || !p.url; })
+              ? '<div class="pay-n">An invoice is sent for anything without a link above.</div>' : '')
+          + '</div>';
+      })() : (function(){
+        var sched = [];
+        try { sched = slTermsSchedule(src.terms || '', total) || []; } catch (e) { return ''; }
+        if (!sched.length || !String(src.terms || '').trim()) return '';
+        return '<div class="pay-b"><div class="pay-h">Payment, once confirmed</div>'
+          + '<table class="pay-t"><tbody>' + sched.map(function (l) {
+              return '<tr><td>' + esc(l.label) + (l.pct < 100 ? ' <span class="pc">' + l.pct + '%</span>' : '')
+                + '</td><td class="n">' + esc(slMoney(l.amount, cur)) + '</td><td>' + esc(l.when || '') + '</td></tr>';
+            }).join('') + '</tbody></table></div>';
+      })())
     + '<div class="foot">'
     +   (isOrder
         ? 'This confirms the order above as booked. '
@@ -41828,7 +41903,9 @@ window.slOrderInvoice = async function(orderId, key){
   // it, and every wholesale invoice sent before this build went out labelled as
   // a stylist pull because the caller never passed it.
   const inv = await prStripe('invoice', {
-    kind: 'wholesale', amount: line.amount, email, name: o.account || '',
+    // The order's own currency. Without it Stripe billed every order in USD,
+    // whatever the paperwork said.
+    kind: 'wholesale', currency: o.currency || 'USD', amount: line.amount, email, name: o.account || '',
     description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label
       + (line.pct < 100 ? ' (' + line.pct + '%)' : ''),
     days: line.days,
@@ -41855,7 +41932,7 @@ window.slOrderCardLink = async function(orderId, key){
   const email = (buyer && buyer.email) || '';
   showToast('Creating card link…', 'info');
   const s = await prStripe('create', {
-    amount: line.amount, email,
+    currency: o.currency || 'USD', amount: line.amount, email,
     description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label,
   });
   if (!s || s.error || !s.url) { showToast(String((s && s.error) || 'Stripe did not answer'), 'error'); return; }
