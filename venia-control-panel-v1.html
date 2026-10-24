@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '573';
+  const BUILD = '574';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -51244,8 +51244,38 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   var adoptToken = 0;                 // only the newest deferred adopt may land
   // The last state we know both devices agreed on — the common ancestor the
   // 3-way merge diffs against to tell additions from deletions.
-  function setBase(snap){ try { localStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
-  function getBase(){ try { var s = localStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
+  // THE MERGE BASE BELONGS TO ONE TAB, NOT TO THE BROWSER.
+  //
+  // "If I have 2 tabs open, one of them glitches." It did, and this is why.
+  //
+  // The base of a three-way merge means "the last state THIS client agreed
+  // with the cloud". It lived in localStorage, which every tab of a profile
+  // shares -- so two tabs kept one base between them while holding entirely
+  // separate STATE in memory. Tab A publishes a new style and the push
+  // advances the shared base to include it. Tab B never had that style: its
+  // next pull reads base=has-it, local=hasn't, cloud=has-it, concludes that
+  // THIS DEVICE deleted it, drops it, and pushes the deletion. A's work is
+  // reverted minutes later by a tab nobody was looking at.
+  //
+  //   mergeSnapshots(base[O,E], mine[O], cloud[O,E])  ->  [O]        E deleted
+  //   mergeSnapshots(base[O],   mine[O], cloud[O,E])  ->  [O,E]      E kept
+  //
+  // sessionStorage is the right home: private to the tab, and it survives a
+  // reload, so a tab keeps its agreement point the way it always did.
+  //
+  // Nothing is migrated in from the old shared key on purpose. A fresh tab
+  // starts with no base, and a null base makes mergeSnapshots union the two
+  // sides -- it can never infer a deletion. Inheriting another tab's
+  // agreement point is the bug above; starting null costs at most one
+  // resurrected row, and only in the sliver before the boot pull sets the
+  // base from the cloud (pushNow refuses to run before that pull anyway).
+  function setBase(snap){ try { sessionStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
+  function getBase(){ try { var s = sessionStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
+  // And clear the shared one, once. A tab still running an older build reads
+  // that key every merge; emptied, it reads null and unions instead, so the
+  // forgotten window cannot delete anything either. It will write its own
+  // agreement point back on its next pull, which is correct for it.
+  try { localStorage.removeItem('venia-sync-base'); } catch(e){}
   // EVERY PULL COMES THROUGH HERE, and the base it leaves behind is what the
   // CLOUD held — never our own unpublished edits.
   //
@@ -51333,6 +51363,49 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.addEventListener('storage', function(e){
     if (!e || e.key !== 'venia-plm-v2' || !e.newValue) return;
     adoptFromSiblingTab(e.newValue);
+  });
+
+  // A FORGOTTEN WINDOW IS USUALLY AN OLD ONE.
+  //
+  // The tab that causes trouble is the one nobody has looked at since before
+  // the last deploy -- behind on code, holding state from another hour. Tabs
+  // cannot see each other, but they share localStorage, so the newest build
+  // open in this browser is one key away. A tab behind it says so instead of
+  // quietly disagreeing with its sibling.
+  //
+  // It is told, not silenced: a tab that refuses to publish is how work gets
+  // lost, and this is a heuristic. Everything it holds is already on the
+  // device, so reloading keeps all of it.
+  var _bn = function (v) { var n = parseInt(v, 10); return isNaN(n) ? 0 : n; };
+  function veniaStaleTabNotice(newest){
+    if (document.getElementById('venia-stale-tab')) return;
+    window.__veniaStaleTab = newest;
+    var d = document.createElement('div');
+    d.id = 'venia-stale-tab';
+    d.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#8a1c1c;'
+      + 'color:#fff;padding:10px 16px;font-size:12px;line-height:1.5;display:flex;gap:12px;'
+      + 'align-items:center;justify-content:center;flex-wrap:wrap;'
+      + 'font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
+    d.innerHTML = '<span>This tab is running build ' + (window.VENIA_BUILD || '?')
+      + ' \u2014 build ' + newest + ' is open in another window. Reload this one before you '
+      + 'keep working in it. Nothing is lost: everything here is saved on this device.</span>';
+    var r = document.createElement('button');
+    r.textContent = 'Reload';
+    r.style.cssText = 'background:#fff;color:#8a1c1c;border:none;padding:6px 14px;font-size:12px;'
+      + 'font-weight:700;cursor:pointer;font-family:inherit';
+    r.onclick = function(){ location.reload(); };
+    d.appendChild(r);
+    document.body.appendChild(d);
+  }
+  try {
+    var _mine = _bn(window.VENIA_BUILD);
+    var _seen = _bn(localStorage.getItem('venia-build'));
+    if (_mine > _seen) localStorage.setItem('venia-build', String(_mine));
+    else if (_seen > _mine) veniaStaleTabNotice(_seen);
+  } catch (e) {}
+  window.addEventListener('storage', function(e){
+    if (!e || e.key !== 'venia-build' || !e.newValue) return;
+    if (_bn(e.newValue) > _bn(window.VENIA_BUILD)) veniaStaleTabNotice(_bn(e.newValue));
   });
   window.__syncSnapshot = function(){ return snapshot(); };
   window.__syncBase = function(snap){ if (arguments.length) setBase(snap); return getBase(); };
