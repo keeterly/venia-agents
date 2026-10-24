@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '572';
+  const BUILD = '573';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -37457,6 +37457,16 @@ function slOpenBuyerModal(id) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
         <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Postcode / Zip</div>
+          <input id="sl-b-postcode" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.postcode||'')}" placeholder="4000">
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Customer ID</div>
+          <input id="sl-b-customerId" type="text" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.customerId||'')}" placeholder="Your account number for them">
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div>
           <div style="font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase">Phone</div>
           <input id="sl-b-phone" type="tel" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px" value="${slEsc(b?.phone||'')}" placeholder="+1 615 555 0100">
         </div>
@@ -37515,6 +37525,8 @@ function slSaveBuyer(existingId) {
     email:       contacts[0]?.email || '',
     website:     (document.getElementById('sl-b-website')?.value||'').trim(),
     address:     (document.getElementById('sl-b-address')?.value||'').trim(),
+    postcode:    (document.getElementById('sl-b-postcode')?.value||'').trim(),
+    customerId:  (document.getElementById('sl-b-customerId')?.value||'').trim(),
     phone:       (document.getElementById('sl-b-phone')?.value||'').trim(),
     connection:  (document.getElementById('sl-b-connection')?.value||'').trim(),
     notes:       (document.getElementById('sl-b-notes')?.value||'').trim(),
@@ -40303,6 +40315,98 @@ window.slConfirmDoc = function(kind, id){
   var terms = src.terms || ((STATE.slPrefs && STATE.slPrefs.terms) || '');
   var moq = (STATE.slPrefs && STATE.slPrefs.moq) || '';
 
+  // WHO THIS IS FOR, AND HOW IT TRAVELS.
+  //
+  // The confirmation named the account and nothing else -- no contact, no
+  // telephone, no address to ship to, no salesperson, no carrier. A buyer
+  // could not tell from it where the goods were going, and neither could a
+  // freight forwarder. Everything below is read from the account record and
+  // the order; nothing here is invented, and any line without a value is left
+  // out rather than printed empty.
+  var prefs = (STATE.slPrefs && !Array.isArray(STATE.slPrefs)) ? STATE.slPrefs : {};
+  var byr = null;
+  try {
+    var want = String(acct || '').trim().toLowerCase();
+    byr = (STATE.slBuyers || []).find(function (x) {
+      return x && String(x.name || '').trim().toLowerCase() === want;
+    }) || null;
+  } catch (e) { byr = null; }
+  var bv = function (k) { return byr ? String(byr[k] == null ? '' : byr[k]).trim() : ''; };
+  // The order wins over the season default: an account that ships on its own
+  // carrier says so on its own order without moving everybody else.
+  var dv = function (k) {
+    return String(src[k] || prefs[k] || '').trim();
+  };
+
+  // "Country, Zip" is one line on the sheet this replaces, and reads badly
+  // when only one half is known.
+  var cityZip = [bv('location'), bv('postcode')].filter(Boolean).join(' ');
+  var ctryZip = [bv('country'), bv('postcode')].filter(Boolean).join(', ');
+
+  var kvRows = function (pairs) {
+    return pairs.filter(function (r) { return r[1]; }).map(function (r) {
+      return '<tr><td class="l">' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td></tr>';
+    }).join('');
+  };
+  var kvBlock = function (head, pairs) {
+    var body = kvRows(pairs);
+    if (!body) return '';
+    return '<div><div class="hk">' + esc(head) + '</div><table>' + body + '</table></div>';
+  };
+
+  var clientBlk = kvBlock('Client', [
+    ['Name', bv('contactName')], ['Store', acct],
+    ['Telephone', bv('phone')], ['Email', bv('email')]]);
+  // A free-typed ship-to on the order replaces the account address entirely --
+  // if someone has written one out, it is because the account address is wrong
+  // for this order.
+  var shipTo = String(src.shipTo || '').trim();
+  var shipBlk = shipTo
+    ? '<div><div class="hk">Ship to</div><div class="free">' + esc(shipTo).replace(/\n/g, '<br>') + '</div></div>'
+    : kvBlock('Ship to', [
+        ['Store Name', acct], ['Address', bv('address')],
+        ['City', cityZip], ['Country, Zip', ctryZip]]);
+  var refBlk = kvBlock('', [
+    ['Date', String(src.createdAt || '').slice(0, 10) || new Date().toISOString().slice(0, 10)],
+    [isOrder ? 'Order #' : 'Quote #', src.id || ''],
+    ['Invoice #', String(src.invoiceNo || '').trim()],
+    ['Customer ID', bv('customerId')],
+    ['Season', src.season || ''],
+    ['Delivery', ship],
+    ['Currency', String(cur).toUpperCase()]]);
+
+  var band = [['Salesperson', dv('salesperson')], ['Ship Method', dv('shipMethod')],
+              ['Ship Terms', dv('shipTerms')], ['Ship Acct No.', dv('shipAcct')],
+              ['Method of Payment', dv('payMethod')], ['Payment Terms', terms]]
+             .filter(function (r) { return r[1]; });
+  var bandHtml = band.length
+    ? '<div class="band" style="grid-template-columns:repeat(' + band.length + ',1fr)">'
+      + band.map(function (r) {
+          return '<div><div class="k">' + esc(r[0]) + '</div><div class="v">' + esc(r[1]) + '</div></div>';
+        }).join('') + '</div>'
+    : '';
+
+  // HOW TO WIRE IT. Printed only once there is something to print -- an empty
+  // bank block on a document going to a buyer is worse than none.
+  // The third flag is monospace: it is for the strings a buyer has to copy into
+  // their bank without a transposed digit. A name or an address set in
+  // monospace just reads like a telegram.
+  var bank = [['Beneficiary', prefs.bankBeneficiary, 0], ['Bank', prefs.bankName, 0],
+              ['Bank address', prefs.bankAddress, 0], ['Account number', prefs.bankAccount, 1],
+              ['Routing / ABA', prefs.bankRouting, 1], ['IBAN', prefs.bankIban, 1],
+              ['SWIFT / BIC', prefs.bankSwift, 1], ['', prefs.bankNote, 0]]
+             .filter(function (r) { return String(r[1] || '').trim(); });
+  var bankHtml = bank.length
+    ? '<div class="bank"><div class="bh">Payment by bank transfer</div><table>'
+      + bank.map(function (r) {
+          return '<tr><td class="l">' + esc(r[0]) + '</td><td'
+            + (r[2] ? ' class="mn"' : '') + '>' + esc(String(r[1]).trim()) + '</td></tr>';
+        }).join('')
+      + '</table><div class="bn">Please quote ' + esc(src.id || '')
+      + ' as the payment reference, and send the remittance advice to '
+      + 'sales@veniacollection.com. Bank charges are the sender\'s.</div></div>'
+    : '';
+
   var html = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>'
     + esc(title + ' — ' + acct) + '</title><style>'
     + '*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}'
@@ -40315,6 +40419,29 @@ window.slConfirmDoc = function(kind, id){
     + 'header .b svg{display:block}'
     + '.doc{text-align:right}.doc .t{font-size:11pt;letter-spacing:3px;text-transform:uppercase}'
     + '.doc .r{font-family:ui-monospace,Menlo,monospace;font-size:8pt;color:#666;margin-top:2mm}'
+    + '.hb{display:grid;grid-template-columns:1fr 1fr 0.85fr;gap:7mm;margin-bottom:4mm;'
+    +   'align-items:start}'
+    + '.hb .hk{font-size:7pt;letter-spacing:1.5px;text-transform:uppercase;color:#888;'
+    +   'border-bottom:1px solid #e8e8e8;padding-bottom:1.2mm;margin-bottom:1.8mm;min-height:3.2mm}'
+    + '.hb table{width:100%;border-collapse:collapse;table-layout:fixed}'
+    + '.hb td{border:none;padding:0.7mm 0;font-size:8.5pt;vertical-align:top;'
+    +   'overflow-wrap:anywhere}'
+    + '.hb td.l{color:#999;width:40%;padding-right:2.5mm}'
+    + '.hb .free{font-size:8.5pt;line-height:1.5;white-space:pre-line}'
+    + '.band{display:grid;gap:4mm;border-top:1px solid #111;border-bottom:1px solid #e8e8e8;'
+    +   'padding:2.5mm 0;margin-bottom:5mm}'
+    + '.band .k{font-size:6.5pt;letter-spacing:1.2px;text-transform:uppercase;color:#999;'
+    +   'margin-bottom:1mm}'
+    + '.band .v{font-size:8.5pt;line-height:1.35;overflow-wrap:anywhere}'
+    + '.bank{margin-top:7mm;border-top:1.5px solid #111;padding-top:4mm;page-break-inside:avoid}'
+    + '.bank .bh{font-size:7.5pt;letter-spacing:1.5px;text-transform:uppercase;color:#888;'
+    +   'margin-bottom:2.5mm}'
+    + '.bank table{width:100%;border-collapse:collapse;table-layout:fixed}'
+    + '.bank td{border:none;padding:1mm 0;font-size:8.5pt;vertical-align:top;'
+    +   'overflow-wrap:anywhere}'
+    + '.bank td.l{color:#999;width:34mm;padding-right:4mm}'
+    + '.bank td.mn{font-family:ui-monospace,Menlo,monospace;font-size:8.5pt;letter-spacing:0.3px}'
+    + '.bank .bn{font-size:7.5pt;color:#666;margin-top:3mm;line-height:1.6}'
     + '.meta{display:flex;gap:10mm;flex-wrap:wrap;margin-bottom:6mm}'
     + '.meta div{font-size:8pt}.meta .k{letter-spacing:1.5px;text-transform:uppercase;color:#888;margin-bottom:1mm}'
     + '.meta .v{font-size:10pt}'
@@ -40392,12 +40519,8 @@ window.slConfirmDoc = function(kind, id){
     + (typeof brandMark === 'function' ? brandMark(84) : '<strong>VENIA</strong>')
     + '</span><div class="doc"><div class="t">' + esc(title) + '</div>'
     + '<div class="r">' + esc(ref) + ' · ' + new Date().toISOString().slice(0, 10) + '</div></div></header>'
-    + '<div class="meta">'
-    +   '<div><div class="k">Account</div><div class="v">' + esc(acct) + '</div></div>'
-    +   (src.season ? '<div><div class="k">Season</div><div class="v">' + esc(src.season) + '</div></div>' : '')
-    +   (ship ? '<div><div class="k">Delivery</div><div class="v">' + esc(ship) + '</div></div>' : '')
-    +   '<div><div class="k">Currency</div><div class="v">' + esc(String(cur).toUpperCase()) + '</div></div>'
-    + '</div>'
+    + '<div class="hb">' + clientBlk + shipBlk + refBlk + '</div>'
+    + bandHtml
     + '<table><thead><tr><th></th><th>Style</th><th>Colourway</th><th>Sizes</th>'
     +   '<th style="text-align:right">Units</th><th style="text-align:right">Wholesale</th>'
     +   '<th style="text-align:right">Total</th></tr></thead><tbody>' + rows + '</tbody></table>'
@@ -40465,6 +40588,7 @@ window.slConfirmDoc = function(kind, id){
                 + esc((l.when || '') + (d ? (l.when ? ' · ' : '') + 'by ' + d : '')) + '</td></tr>';
             }).join('') + '</tbody></table></div>';
       })())
+    + bankHtml
     + '<div class="foot">'
     +   (isOrder
         ? 'This confirms the order above as booked. '
@@ -40475,7 +40599,6 @@ window.slConfirmDoc = function(kind, id){
         ? 'Converted at ' + esc(src.fxRate) + ' ' + esc(String(cur).toUpperCase())
           + ' to 1 USD, the season rate. ' : '')
     +   (moq ? 'Minimum order ' + esc(moq) + '. ' : '')
-    +   (terms ? '<br>Terms: ' + esc(terms) + '. ' : '')
     +   (src.cancelDate ? '<br>Cancel date: ' + esc(src.cancelDate) + '. ' : '')
     +   (src.notes ? '<br>' + esc(src.notes) : '')
     +   '<br>To order: sales@veniacollection.com · veniacollection.com'
@@ -41283,6 +41406,72 @@ function agBuildSlPrefsSection() {
       </div>
 
       <div class="ag-pref-card">
+        <div class="ag-pref-card-title">Order Document</div>
+        <div style="font-size:10px;line-height:1.5;color:var(--muted);margin:-2px 0 10px">Printed in the band across the top of every order confirmation.
+          An order can override any of these for itself.</div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Salesperson</label>
+          <input class="ag-pref-input" id="slp-salesperson" placeholder="e.g. Christine / Keeter" value="${escHtml(p.salesperson||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Ship Method</label>
+          <input class="ag-pref-input" id="slp-shipMethod" placeholder="e.g. AIR" value="${escHtml(p.shipMethod||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Ship Terms</label>
+          <input class="ag-pref-input" id="slp-shipTerms" placeholder="e.g. DHL · FOB Los Angeles" value="${escHtml(p.shipTerms||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Ship Account No.</label>
+          <input class="ag-pref-input" id="slp-shipAcct" placeholder="Their carrier account, if they ship on their own" value="${escHtml(p.shipAcct||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Method of Payment</label>
+          <input class="ag-pref-input" id="slp-payMethod" placeholder="e.g. Card or bank transfer" value="${escHtml(p.payMethod||'')}">
+        </div>
+      </div>
+
+      <div class="ag-pref-card">
+        <div class="ag-pref-card-title">Bank Transfer Details</div>
+        <div style="font-size:10px;line-height:1.5;color:var(--muted);margin:-2px 0 10px">Printed at the foot of every order confirmation so a buyer can wire
+          instead of paying by card. Leave them blank and the block does not print at all. Type them
+          straight in here — they are account details, so do not send them through a chat
+          or an email to get them in.</div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Beneficiary</label>
+          <input class="ag-pref-input" id="slp-bankBeneficiary" placeholder="The name on the account" value="${escHtml(p.bankBeneficiary||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Bank</label>
+          <input class="ag-pref-input" id="slp-bankName" placeholder="Bank name" value="${escHtml(p.bankName||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Bank Address</label>
+          <input class="ag-pref-input" id="slp-bankAddress" placeholder="Branch address" value="${escHtml(p.bankAddress||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Account Number</label>
+          <input class="ag-pref-input" id="slp-bankAccount" placeholder="For USD payments" value="${escHtml(p.bankAccount||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Routing / ABA</label>
+          <input class="ag-pref-input" id="slp-bankRouting" placeholder="For USD payments" value="${escHtml(p.bankRouting||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">IBAN</label>
+          <input class="ag-pref-input" id="slp-bankIban" placeholder="For EUR payments" value="${escHtml(p.bankIban||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">SWIFT / BIC</label>
+          <input class="ag-pref-input" id="slp-bankSwift" placeholder="For international payments" value="${escHtml(p.bankSwift||'')}">
+        </div>
+        <div class="ag-pref-row">
+          <label class="ag-pref-label">Extra line</label>
+          <input class="ag-pref-input" id="slp-bankNote" placeholder="Anything else their bank needs" value="${escHtml(p.bankNote||'')}">
+        </div>
+      </div>
+
+      <div class="ag-pref-card">
         <div class="ag-pref-card-title">Agent Voice</div>
         <div class="ag-pref-row">
           <label class="ag-pref-label">Sales Agent Notes</label>
@@ -41310,6 +41499,12 @@ function slSavePrefs() {
   STATE.slPrefs.inactiveAlert    = g('slp-inactiveAlert');
   STATE.slPrefs.reorderThreshold = g('slp-reorderThreshold');
   STATE.slPrefs.voiceNotes       = g('slp-voiceNotes');
+  // The order-document band, and the wire details at its foot.
+  ['salesperson','shipMethod','shipTerms','shipAcct','payMethod',
+   'bankBeneficiary','bankName','bankAddress','bankAccount','bankRouting',
+   'bankIban','bankSwift','bankNote'].forEach(function (k) {
+    STATE.slPrefs[k] = g('slp-' + k);
+  });
   dbSet('slPrefs', STATE.slPrefs);
   if (typeof toast === 'function') toast('Sales preferences saved');
 }
@@ -41512,6 +41707,21 @@ function slOpenOrderModal(id) {
           <div class="fg"><label class="fl">Total ($)</label><input id="slom-total" type="number" placeholder="0" class="fi"></div>
           <div class="fg"><label class="fl">Delivery Date</label><input id="slom-delivery" type="date" class="fi"></div>
           <div class="fg full"><label class="fl">Notes</label><textarea id="slom-notes" class="ft" rows="3"></textarea></div>
+          <div class="fg full" style="border-top:1px solid var(--border);padding-top:12px;margin-top:2px">
+            <div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Order document</div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.5;margin-top:4px">
+              Prints across the top of the buyer's confirmation. Leave any of these blank to use the
+              Sales Settings default.</div>
+          </div>
+          <div class="fg"><label class="fl">Invoice #</label><input id="slom-invoiceNo" placeholder="Your own number" class="fi"></div>
+          <div class="fg"><label class="fl">Payment Terms</label><input id="slom-terms" placeholder="50% deposit / 50% before ship" class="fi"></div>
+          <div class="fg"><label class="fl">Salesperson</label><input id="slom-salesperson" class="fi"></div>
+          <div class="fg"><label class="fl">Method of Payment</label><input id="slom-payMethod" class="fi"></div>
+          <div class="fg"><label class="fl">Ship Method</label><input id="slom-shipMethod" class="fi"></div>
+          <div class="fg"><label class="fl">Ship Terms</label><input id="slom-shipTerms" class="fi"></div>
+          <div class="fg"><label class="fl">Ship Acct No.</label><input id="slom-shipAcct" class="fi"></div>
+          <div class="fg"><label class="fl">Cancel Date</label><input id="slom-cancel" type="date" class="fi"></div>
+          <div class="fg full"><label class="fl">Ship to, if not the account address</label><textarea id="slom-shipTo" class="ft" rows="2" placeholder="Leave blank to ship to the address on the account"></textarea></div>
         </div>
       </div>
       <div class="modal-foot">
@@ -41527,6 +41737,15 @@ function slOpenOrderModal(id) {
   set('slom-total',    o?.total||'');
   set('slom-delivery', o?.deliveryDate||'');
   set('slom-notes',    o?.notes||'');
+  set('slom-invoiceNo',  o?.invoiceNo||'');
+  set('slom-terms',      o?.terms||'');
+  set('slom-salesperson',o?.salesperson||'');
+  set('slom-payMethod',  o?.payMethod||'');
+  set('slom-shipMethod', o?.shipMethod||'');
+  set('slom-shipTerms',  o?.shipTerms||'');
+  set('slom-shipAcct',   o?.shipAcct||'');
+  set('slom-cancel',     o?.cancelDate||'');
+  set('slom-shipTo',     o?.shipTo||'');
   const title = document.getElementById('sl-order-modal-title');
   if (title) title.textContent = id ? 'Edit Order' : 'New Order';
   window._slEditOrderId = id || null;
@@ -41553,6 +41772,17 @@ function slSaveOrder() {
     notes:        g('slom-notes'),
     updatedAt:    new Date().toISOString(),
   };
+  // The document fields are read only when their input is actually on screen.
+  // rec is merged over the stored order, so reading a missing element as ''
+  // would quietly blank the order's payment terms -- and the terms are what
+  // the deposit schedule is computed from.
+  [['invoiceNo','slom-invoiceNo'], ['terms','slom-terms'],
+   ['salesperson','slom-salesperson'], ['payMethod','slom-payMethod'],
+   ['shipMethod','slom-shipMethod'], ['shipTerms','slom-shipTerms'],
+   ['shipAcct','slom-shipAcct'], ['cancelDate','slom-cancel'],
+   ['shipTo','slom-shipTo']].forEach(([k, eid]) => {
+    if (document.getElementById(eid)) rec[k] = g(eid);
+  });
   const idx = STATE.slOrders.findIndex(x=>x.id===id);
   // MERGE onto the existing record — the old code replaced it wholesale, which
   // silently wiped items[] and payment{} off any order created from a quote.
