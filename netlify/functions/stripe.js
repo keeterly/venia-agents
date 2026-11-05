@@ -9,6 +9,13 @@
 //       hold:true authorizes without capturing (capture_method=manual) so you
 //       can release or capture after the samples come back.
 //       → { id, url }
+//   {action:'paylink', amount, currency, description, ref}
+//       Creates a Stripe PAYMENT LINK for an order instalment. Unlike a
+//       Checkout session this URL does not expire, which is the whole point:
+//       it is printed into the order confirmation PDF a buyer opens days or
+//       months later. Capped at one completed payment.
+//       → { id: 'plink_...', url }
+//   {action:'paylink_status', id}          → { paid, payment_status, sessions, payment_intent }
 //   {action:'status', id}                 → { payment_status, status, payment_intent }
 //   {action:'capture', payment_intent}    → { status }   (capture a hold)
 //   {action:'cancel',  payment_intent}    → { status }   (release a hold)
@@ -60,7 +67,11 @@ export default async (req) => {
   // 'invoice' creates and SENDS a real invoice to a buyer's inbox — it was the
   // one money action left ungated, exploitable by any caller forging an Origin
   // header. Gated fail-closed like the card actions.
-  const GATED = ['capture', 'cancel', 'invoice', 'invoice_status', 'invoice_find'];
+  // 'paylink' mints a URL that can be paid by anyone holding it and never
+//  expires on its own, so it is gated like the other money actions rather
+//  than left on the Origin check the 24-hour 'create' session relies on.
+  const GATED = ['capture', 'cancel', 'invoice', 'invoice_status', 'invoice_find',
+                 'paylink', 'paylink_status'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
     // Fail CLOSED: if the gate hash isn't configured, refuse the money action
@@ -185,6 +196,59 @@ export default async (req) => {
       if (sent.error) return json({ error: sent.error.message }, 400, cors);
       return json({ id: inv.id, total,
         hosted_invoice_url: fin.hosted_invoice_url || sent.hosted_invoice_url || '' });
+    }
+    // A CHECKOUT SESSION IS A 24-HOUR LINK, AND THE PDF IS NOT A 24-HOUR
+    // DOCUMENT.
+    //
+    // The order confirmation prints PAY NOW against each instalment and is
+    // then emailed to the buyer. Those buttons carried a Checkout session
+    // URL, and a Checkout session expires 24 hours after it is created --
+    // that is Stripe's maximum, not a default we could raise. So every
+    // confirmation sent to a buyer arrived with dead buttons the next day,
+    // and the buyer saw "You're all done here. You've either completed your
+    // payment or this checkout session has timed out." Devastator's balance
+    // was not even due until 2027-02-15, fifteen months after the link it was
+    // given stopped working.
+    //
+    // A Payment Link has no expiry. It stays live until it is deactivated or
+    // until its completed-session limit is reached, which is what a printed
+    // document needs.
+    //
+    // Capped at ONE completed payment: the URL travels in a PDF and whoever
+    // holds it can pay, so a deposit cannot be collected twice by forwarding
+    // the file. after_completion is left at Stripe's default hosted
+    // confirmation on purpose -- the old session redirected the buyer to the
+    // internal tool's domain, and a buyer has no business landing there.
+    if (body.action === 'paylink') {
+      const amt = Math.round(Number(body.amount) * 100);
+      if (!amt || amt < 50) return json({ error: 'Amount must be at least 0.50' }, 400, cors);
+      if (amt > 20000000) return json({ error: 'Amount too large' }, 400, cors);
+      const ref = String(body.ref || '').slice(0, 120);
+      const link = await call('payment_links', Object.assign({
+        'line_items[0][price_data][currency]': cur,
+        'line_items[0][price_data][product_data][name]':
+          String(body.description || 'VENIA wholesale order').slice(0, 250),
+        'line_items[0][price_data][unit_amount]': amt,
+        'line_items[0][quantity]': 1,
+        'restrictions[completed_sessions][limit]': 1,
+      }, ref ? { 'metadata[venia_ref]': ref,
+                 'payment_intent_data[metadata][venia_ref]': ref } : {}));
+      if (link.error) return json({ error: link.error.message }, 400, cors);
+      return json({ id: link.id, url: link.url }, 200, cors);
+    }
+    // Whether a payment link has been paid. There is no payment_status filter
+    // on the list, so read the sessions it produced and look at each one: the
+    // 'complete' status only means the buyer finished the form, which is not
+    // the same as money having moved.
+    if (body.action === 'paylink_status') {
+      const list = await call('checkout/sessions?limit=100&payment_link='
+        + encodeURIComponent(String(body.id || '')), {}, 'GET');
+      if (list.error) return json({ error: list.error.message }, 400, cors);
+      const rows = list.data || [];
+      const won = rows.filter(function (r) { return r && r.payment_status === 'paid'; })[0] || null;
+      return json({ paid: !!won, payment_status: won ? 'paid' : 'unpaid',
+                    sessions: rows.length,
+                    payment_intent: won ? won.payment_intent : null }, 200, cors);
     }
     if (body.action === 'status') {
       const s = await call('checkout/sessions/' + encodeURIComponent(body.id), {}, 'GET');

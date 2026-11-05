@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '574';
+  const BUILD = '575';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40557,10 +40557,19 @@ window.slConfirmDoc = function(kind, id){
           // invent -- it is the term, said plainly.
           return (l.when ? l.when : '') + (d ? (l.when ? ' · ' : '') + 'by ' + d : '');
         };
+        // A PRE-575 RECORD HOLDS A 24-HOUR CHECKOUT SESSION URL.
+        //
+        // Printing one puts a timed-out Stripe page in front of the buyer,
+        // which is the whole fault this build exists to fix. So it counts as
+        // no link at all: the row falls back to "Invoice to follow", and the
+        // founder is told before the document leaves the building.
+        var expired = 0;
         var rows = sched.map(function (l) {
           var p = payFor(l.key);
           var paid = p && p.status === 'paid';
-          var link = (!paid && p && p.url) ? p.url : '';
+          var durable = p && p.url && !(p.sessionId && !p.linkId);
+          if (!paid && p && p.url && !durable) expired++;
+          var link = (!paid && durable) ? p.url : '';
           return '<tr>'
             + '<td>' + esc(l.label) + (l.pct < 100 ? ' <span class="pc">' + l.pct + '%</span>' : '') + '</td>'
             + '<td class="n">' + esc(slMoney(l.amount, cur)) + '</td>'
@@ -40569,6 +40578,12 @@ window.slConfirmDoc = function(kind, id){
                 : link ? '<a class="pay" href="' + esc(link) + '">Pay now</a>'
                 : '<span class="tb">Invoice to follow</span>') + '</td></tr>';
         }).join('');
+        if (expired) {
+          try { showToast(expired + ' payment link' + (expired > 1 ? 's on this order have' : ' on this order has')
+            + ' expired and ' + (expired > 1 ? 'are' : 'is') + ' left off the document. '
+            + 'Make ' + (expired > 1 ? 'new ones' : 'a new one') + ' on the order before you send it.',
+            'warning', 8000); } catch (e) {}
+        }
         return '<div class="pay-b"><div class="pay-h">Payment</div>'
           + '<table class="pay-t"><colgroup><col class="c1"><col class="c2"><col class="c3"><col class="c4"></colgroup>'
           +   '<thead><tr><th>Instalment</th><th class="n">Amount</th>'
@@ -42040,9 +42055,13 @@ function slOpenOrderDetail(id) {
       const paid = st === 'paid';
       const bad = st === 'void' || st === 'uncollectible';
       const col = paid ? 'var(--green)' : bad ? 'var(--red)' : st ? 'var(--amber)' : 'var(--muted)';
+      // A pre-575 record holds a Checkout session, which Stripe expires 24
+      // hours after it was made. Those links are dead and the buyer sees a
+      // timed-out page, so the row says so instead of reporting "sent".
+      const dead = !!(p && p.sessionId && !p.linkId && p.status === 'link');
       const word = paid ? '✓ paid'
         : st === 'invoiced' ? 'invoiced' + (p.amountRemaining ? ' · $' + Math.round(p.amountRemaining).toLocaleString() + ' open' : '')
-        : st === 'link' ? 'card link sent'
+        : st === 'link' ? (dead ? 'link expired — make a new one' : 'payment link sent')
         : st ? slEsc(st) : 'not billed';
       return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 0;border-bottom:1px solid var(--border)">
         <div style="flex:1;min-width:150px">
@@ -42052,10 +42071,11 @@ function slOpenOrderDetail(id) {
             var d = ''; try { d = slDueDate(o, l, p); } catch(e){}
             return slEsc((l.when||'') + (d ? (l.when?' · ':'') + 'by ' + d : ''));
           })()}${l.note?' · '+slEsc(l.note):''}
-            <span style="color:${col}">${word}</span>${p&&p.url?` · <a href="${slEsc(p.url)}" target="_blank" rel="noopener" style="color:var(--ink)">open</a>`:''}</div>
+            <span style="color:${dead ? 'var(--red)' : col}">${word}</span>${p&&p.url&&!dead?` · <a href="${slEsc(p.url)}" target="_blank" rel="noopener" style="color:var(--ink)">open</a>`:''}</div>
         </div>
         ${!p ? `<button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderInvoice('${o.id}','${l.key}')">Invoice</button>
-                <button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderCardLink('${o.id}','${l.key}')">Card link</button>` : ''}
+                <button class="btn btn-ghost btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderCardLink('${o.id}','${l.key}')">Payment link</button>`
+          : (p.status === 'link' ? `<button class="btn ${dead?'btn-gold':'btn-ghost'} btn-sm" style="font-size:9.5px;padding:4px 8px" onclick="slOrderCardLink('${o.id}','${l.key}')">${dead?'New link':'Replace link'}</button>` : '')}
       </div>`;
     }).join('');
     const owed = Math.max(0, (Number(o.total)||0) - paidSum);
@@ -42255,27 +42275,50 @@ window.slOrderInvoice = async function(orderId, key){
   showToast('✓ ' + line.label + ' invoice sent to ' + email, 'success');
   slOpenOrderDetail(orderId);
 };
-// The other way to be paid: a Stripe Checkout link for this instalment. The
-// buyer enters the card themselves — VENIA never holds card details, which is
-// the same rail the pull sheet uses.
+// The other way to be paid: a Stripe link for this instalment. The buyer
+// enters the card themselves — VENIA never holds card details, which is the
+// same rail the pull sheet uses.
+//
+// A PAYMENT LINK, NOT A CHECKOUT SESSION. This URL is printed into the order
+// confirmation PDF and emailed; a Checkout session dies 24 hours after it is
+// made (Stripe's maximum), so every one of those buttons was dead by the time
+// a buyer got round to it. A payment link has no expiry.
+//
+// Re-mintable, because the ones already sent are dead: asking for a link on an
+// instalment that has an unpaid one REPLACES it rather than refusing. Settled
+// and invoiced instalments are still left alone — a second link against an
+// open Stripe invoice is how an account pays twice.
 window.slOrderCardLink = async function(orderId, key){
   const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return;
   const line = slTermsSchedule(o.terms, o.total).find(l => l.key === key); if (!line) return;
-  if (slOrderPayFor(o, key)) { showToast('That instalment is already being collected', 'info'); return; }
+  const had = slOrderPayFor(o, key);
+  if (had && (had.status === 'paid' || had.status === 'void')) {
+    showToast('That instalment is already settled', 'info'); return; }
+  if (had && had.status !== 'link') {
+    showToast('That instalment is on a Stripe invoice — collect it there rather than '
+      + 'adding a second way to pay', 'info'); return; }
+  if (had && !confirm('Replace the payment link for ' + line.label + '?\n\n'
+      + 'The old link stops being the one on any confirmation you send from now on. '
+      + 'Anyone still holding the old URL can use it until you deactivate it in Stripe.')) return;
   const buyer = (STATE.slBuyers||[]).find(x => String(x.name||'').trim().toLowerCase() === String(o.account||'').trim().toLowerCase());
   const email = (buyer && buyer.email) || '';
-  showToast('Creating card link…', 'info');
-  const s = await prStripe('create', {
+  showToast(had ? 'Replacing payment link…' : 'Creating payment link…', 'info');
+  const s = await prStripe('paylink', {
     currency: o.currency || 'USD', amount: line.amount, email,
+    ref: o.id + ':' + line.key,
     description: 'VENIA wholesale — order #' + o.id + ' · ' + line.label,
   });
   if (!s || s.error || !s.url) { showToast(String((s && s.error) || 'Stripe did not answer'), 'error'); return; }
-  slOrderPayments(o).push({ key: line.key, label: line.label, pct: line.pct, amount: line.amount,
-    method: 'card', status: 'link', sessionId: s.id, url: s.url, at: new Date().toISOString() });
+  const rec = { key: line.key, label: line.label, pct: line.pct, amount: line.amount,
+    method: 'card', status: 'link', linkId: s.id, url: s.url, at: new Date().toISOString() };
+  if (had) { Object.assign(had, rec); delete had.sessionId; }
+  else slOrderPayments(o).push(rec);
   dbSet('slOrders', STATE.slOrders); save();
-  try { logActivity('Wholesale ' + line.label.toLowerCase() + ' card link created — order ' + o.id); } catch(e){}
-  try { await navigator.clipboard.writeText(s.url); showToast('✓ Card link copied — send it to ' + (o.account||'the buyer'), 'success'); }
-  catch(e){ showToast('✓ Card link ready', 'success'); }
+  try { logActivity('Wholesale ' + line.label.toLowerCase() + ' payment link '
+    + (had ? 'replaced' : 'created') + ' — order ' + o.id); } catch(e){}
+  try { await navigator.clipboard.writeText(s.url); showToast('✓ Payment link copied — it does not expire. '
+    + 'Re-export the confirmation to send it to ' + (o.account||'the buyer'), 'success', 6000); }
+  catch(e){ showToast('✓ Payment link ready — re-export the confirmation to send it', 'success', 6000); }
   slOpenOrderDetail(orderId);
 };
 // Ask Stripe what actually happened, for every instalment. Same idea as the
@@ -42287,7 +42330,14 @@ window.slOrderPayCheck = async function(orderId, quiet){
   for (const p of slOrderPayments(o)) {
     if (p.status === 'paid' || p.status === 'void') continue;
     try {
-      if (p.method === 'card' && p.sessionId) {
+      if (p.method === 'card' && p.linkId) {
+        const r = await prStripe('paylink_status', { id: p.linkId });
+        if (r && !r.error && r.paid) {
+          p.status = 'paid'; p.paidAt = new Date().toISOString(); changed++;
+        }
+      } else if (p.method === 'card' && p.sessionId) {
+        // Pre-575 records: a 24-hour Checkout session. Still read, because one
+        // of them may have been paid inside its day.
         const r = await prStripe('status', { id: p.sessionId });
         if (r && !r.error && r.payment_status === 'paid') {
           p.status = 'paid'; p.paidAt = new Date().toISOString(); changed++;
