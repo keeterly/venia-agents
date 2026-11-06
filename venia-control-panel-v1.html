@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '579';
+  const BUILD = '580';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -40701,8 +40701,23 @@ window.slConfirmDoc = function(kind, id){
   var w = window.open('', '_blank', 'width=900,height=1000');
   if (!w) { showToast('Allow pop-ups to open the document', 'warning'); return; }
   w.document.write(html); w.document.close();
-  try { logActivity('Sales: ' + title.toLowerCase() + ' opened for ' + acct
-    + ' — ' + items.length + ' styles, ' + slMoney(total, cur)); } catch (e) {}
+  // ONE LINE PER DOCUMENT PER DAY. Every preview logged, so checking a
+  // confirmation before sending it -- photos loaded? terms right? -- put seven
+  // copies of the same line in the last fifteen on Today. Opening it is worth
+  // noting once a day; the repeats were noise burying the rest of the log.
+  // The id is in the line so two orders for one account stay apart, and the
+  // check reads the log itself, so the other founder's open counts too once
+  // their log has synced.
+  try {
+    var day = function (ts) { var d = new Date(ts); return isNaN(d) ? '' : d.toLocaleDateString('en-CA'); };
+    var today = day(Date.now());
+    var tag = title.toLowerCase() + ' #' + id + ' opened';
+    var seen = (STATE.activityLog || []).some(function (e) {
+      return e && typeof e.msg === 'string' && e.msg.indexOf(tag) >= 0 && day(e.ts) === today;
+    });
+    if (!seen) logActivity('Sales: ' + tag + ' for ' + acct
+      + ' — ' + items.length + ' styles, ' + slMoney(total, cur));
+  } catch (e) {}
 };
 
 // Accepted quote → wholesale order, items and total carried over — no re-typing.
@@ -41943,8 +41958,8 @@ window.slCancelOrder = function(id){
   const o = (STATE.slOrders||[]).find(x => x.id === id); if (!o) return;
   if (o.status === 'cancelled') { toast('That order is already cancelled'); return; }
   const paid = o.payment && o.payment.status === 'paid';
-  if (!confirm('Cancel order #' + id + ' — ' + (o.account || 'no account') + ', $'
-      + Math.round(o.total || 0).toLocaleString() + '?\n\n'
+  if (!confirm('Cancel order #' + id + ' — ' + (o.account || 'no account') + ', '
+      + slMoney(o.total, o.currency) + '?\n\n'
       + 'It stays on the record but stops counting: booked, open orders, AR, the season '
       + 'roll-up and the P&L all skip a cancelled order.'
       + (paid ? '\n\nNOTE: this order is marked PAID. Cancelling does not refund anything.' : ''))) return;
@@ -41978,7 +41993,7 @@ window.slCancelOrder = function(id){
   }
   try { dbSet('slOrders', STATE.slOrders); } catch(e){}
   save();
-  try { logActivity('Order cancelled: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)
+  try { logActivity('Order cancelled: ' + id + ' — ' + (o.account||'') + ' ' + slMoney(o.total, o.currency)
     + (q ? ' · quote ' + q.id + ' → ' + q.status : '')); } catch(e){}
   toast('Order cancelled — it no longer counts toward booked, AR or the P&L'
     + (q ? '. The quote can be booked again.' : ''));
@@ -41990,8 +42005,8 @@ window.slDeleteOrder = function(id){
   const idx = list.findIndex(x => x.id === id); if (idx < 0) return;
   const o = list[idx];
   const paid = o.payment && (o.payment.status === 'paid' || o.payment.amountPaid);
-  if (!confirm('DELETE order #' + id + ' — ' + (o.account || 'no account') + ', $'
-      + Math.round(o.total || 0).toLocaleString() + '?\n\n'
+  if (!confirm('DELETE order #' + id + ' — ' + (o.account || 'no account') + ', '
+      + slMoney(o.total, o.currency) + '?\n\n'
       + 'This removes the record entirely, on both devices. For an order that was real and fell '
       + 'through, Cancel is the right move — it keeps the history and still stops it counting.'
       + (paid
@@ -42013,7 +42028,10 @@ window.slDeleteOrder = function(id){
   list.splice(idx, 1);
   try { dbSet('slOrders', STATE.slOrders); } catch(e){}
   save();
-  try { logActivity('Order DELETED: ' + id + ' — ' + (o.account||'') + ' $' + Math.round(o.total||0)); } catch(e){}
+  // In the order's own currency. A euro order was logged as "$" and a bare
+  // number -- a different currency, on the one line that is left to say what
+  // the deleted record was worth.
+  try { logActivity('Order DELETED: ' + id + ' — ' + (o.account||'') + ' ' + slMoney(o.total, o.currency)); } catch(e){}
   slDeletedPill(o);
   slAfterOrderChange(id);
 };
@@ -42030,7 +42048,7 @@ function slDeletedPill(o){
     + 'letter-spacing:1px;cursor:pointer;font-family:Helvetica Neue,Helvetica,Arial,sans-serif;'
     + 'box-shadow:0 6px 24px rgba(0,0,0,.28);max-width:92vw';
   b.textContent = 'Deleted #' + (o.id || '') + ' · ' + (o.account || 'no account')
-    + ' · $' + Math.round(o.total || 0).toLocaleString() + '  —  UNDO';
+    + ' · ' + slMoney(o.total, o.currency) + '  —  UNDO';
   b.onclick = function(){ slUndoDeleteOrder(); };
   document.body.appendChild(b);
   // Long enough to change your mind, and it goes on its own rather than
