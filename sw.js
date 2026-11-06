@@ -1,7 +1,7 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v576';
+const CACHE = 'venia-shell-v577';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -67,6 +67,10 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;                       // leave API POST/PATCH alone
   const url = new URL(req.url);
   if (url.pathname.startsWith('/.netlify/')) return;      // never touch serverless functions
+  // The Claude connector's sign-in and endpoint. A navigation to /oauth/authorize
+  // would otherwise be cached AS THE APP SHELL below, and an offline open would
+  // then show the sign-in page instead of VENIA OS.
+  if (url.pathname === '/mcp' || url.pathname.startsWith('/oauth/') || url.pathname.startsWith('/.well-known/')) return;
   if (url.origin !== self.location.origin) return;        // don't cache APIs or fonts
 
   // App shell: network-first so updates land when online, cache when offline.
