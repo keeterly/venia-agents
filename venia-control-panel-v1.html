@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '582';
+  const BUILD = '583';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5177,6 +5177,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button onclick="bulkExport()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↓ Export</button>
         <button onclick="clearBulkSelection()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:14px;cursor:pointer;margin-left:auto">✕</button>
       </div>
+      <div id="styles-check" style="display:none"></div>
       <div class="tbl-wrap tbl-sticky">
         <!-- Header + widths are rendered from STYLE_COLS (see stRenderHead) so
              the Columns menu and the drag-to-resize grips have one source of
@@ -10497,6 +10498,58 @@ function stSeasonFilterOptions(){
     .concat(opts.map(o => '<option value="' + esc(o) + '">' + esc(o) + '</option>')).join('');
   if (sel.innerHTML !== want) { const keep = sel.value; sel.innerHTML = want; sel.value = keep; }
 }
+// PRODUCT CHECK. Three mistakes that reach a line sheet, a quote or an order
+// and look fine in the row they live in: a style code that names another
+// season (an SS27 style coded SS28), a style with no retail or wholesale price,
+// and a one-size accessory (scarf, hat, belt) carrying a garment size run.
+// Flags only: nothing here changes a style. Tapping a line opens the style.
+// Archived styles and runway-only pieces (not sold) are left out.
+const ST_ONE_SIZE = /\b(SCARF|SCARVES|STOLE|SHAWL|HAT|CAP|BEANIE|CLOCHE|BERET|BELT|GLOVES?|BAG|TOTE|CLUTCH|WALLET)\b/i;
+function stProductCheck(){
+  const out = [];
+  const seasonTok = (v) => { const m = String(v || '').toUpperCase().match(/\b(SS|FW|AW|PF|RS|HO)\s?(\d{2})\b/); return m ? m[1] + m[2] : ''; };
+  (STATE.styles || []).forEach(s => {
+    if (!s || s.status === 'archived') return;
+    if (/runway\s*only/i.test(String(s.season || ''))) return;
+    const name = s.name || s.styleId || 'Untitled style';
+    const why = [];
+    const codeSeason = seasonTok(String(s.styleId || '').replace(/-/g, ' '));
+    const season = seasonTok(s.season);
+    if (codeSeason && season && codeSeason !== season) why.push(`code ${s.styleId} says ${codeSeason}, season is ${season}`);
+    const noRetail = !(Number(s.retail) > 0), noWs = !(Number(s.wholesale) > 0);
+    if (noRetail && noWs) why.push('no price');
+    else if (noRetail) why.push('no retail price');
+    else if (noWs) why.push('no wholesale price');
+    const run = String(s.sizes || '').toUpperCase().split(/[\s,\/]+/).filter(Boolean);
+    if (ST_ONE_SIZE.test(name) && run.some(z => ['XS','S','M','L','XL','XXL'].indexOf(z) >= 0))
+      why.push(`sized ${run.join(', ')} — one size expected`);
+    if (why.length) out.push({ id: s.id, name, season: s.season || '', why });
+  });
+  return out;
+}
+window.stCheckToggle = function(){ window.__stCheckOpen = !window.__stCheckOpen; try { stRenderCheck(); } catch(e){} };
+function stRenderCheck(){
+  const el = document.getElementById('styles-check');
+  if (!el) return;
+  const list = stProductCheck();
+  if (!list.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const open = window.__stCheckOpen === true;
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  el.style.display = '';
+  el.innerHTML = `<div style="border:1px solid var(--amber);padding:10px 14px;margin:0 0 12px;font-size:11px;line-height:1.6">
+      <div onclick="stCheckToggle()" style="display:flex;gap:10px;align-items:baseline;cursor:pointer">
+        <span style="letter-spacing:1.5px;text-transform:uppercase;font-size:10px;font-weight:700;color:var(--amber)">Product check</span>
+        <span>${list.length} style${list.length === 1 ? '' : 's'} to fix before they reach a line sheet</span>
+        <span style="margin-left:auto;color:var(--muted);font-size:10px;text-decoration:underline">${open ? 'hide' : 'show'}</span>
+      </div>
+      ${open ? list.map(x => `<div onclick="openDp('${esc(x.id)}')" style="display:flex;gap:10px;padding:6px 0;border-top:1px solid var(--border);cursor:pointer">
+          <span style="font-weight:600">${esc(x.name)}</span>
+          <span style="color:var(--muted)">${esc(x.season)}</span>
+          <span style="margin-left:auto;text-align:right">${esc(x.why.join(' · '))}</span>
+        </div>`).join('') : ''}
+    </div>`;
+}
+
 function renderStyles() {
   // Before anything can return early: deleting the last style leaves the list
   // empty, and the empty-state branch below returns without ever reaching
@@ -10601,6 +10654,7 @@ function renderStyles() {
     ffBtn.style.borderColor = STATE.flagFilter ? 'var(--ink)' : '';
   }
   setTimeout(plmSalesRefresh, 0);
+  try { stRenderCheck(); } catch(e){}
   updateBulkBar();
   // Archive-season button: only when a specific season is picked in a live view.
   const asBtn = document.getElementById('btn-archive-season');
@@ -21442,7 +21496,7 @@ function prDeletePull(pullId, opts) {
   const out = (p.items||[]).filter(i => !i.returned).length;
   // Only warn about lost samples when items are actually still out; drafts /
   // fully-returned pulls delete on a single confirm.
-  const msg = out > 0
+  const msg = (out > 0 && p.status !== 'draft')
     ? `Delete "${p.client}"? ${out} sample${out>1?'s are':' is'} still checked out — deleting loses that record.`
     : `Delete ${p.status==='draft'?'draft ':''}"${p.client}"? This can't be undone.`;
   if (!(opts && opts.skipConfirm) && !confirm(msg)) return;
@@ -25221,6 +25275,28 @@ function buildTodayFocus() {
     if (days > 0) items.push({key:'pull|'+p.id, pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${out.map(i=>i.styleName).join(', ')})${still}`});
     else if (days > -3) items.push({key:'pull|'+p.id, pri:'med', text:`PR Pull due soon — ${p.client}`});
   });
+  // 1b. Draft pulls whose dates have passed. The loop above only watches
+  //     pulls that were sent ('active'), so a pull left as a draft after its
+  //     shoot vanished from view: either the pieces really went out and nobody
+  //     is chasing them, or the draft is dead and clutters the list. Today asks
+  //     which — Mark sent (it went out; normal tracking takes over) or Delete
+  //     (asks first, in the app).
+  const todayIso = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  (STATE.prPulls||[]).filter(p => p.status === 'draft').forEach(p => {
+    const endIso = p.returnDate || p.pullDate || p.shootDate;
+    if (!endIso) return;
+    const end = new Date(String(endIso).slice(0,10) + 'T00:00:00');
+    if (isNaN(end) || !(end < todayIso)) return;
+    const fmt = d => { const x = new Date(String(d).slice(0,10) + 'T00:00:00'); return isNaN(x) ? '' : x.toLocaleDateString('en-US',{month:'short',day:'numeric'}); };
+    const span = p.pullDate && p.returnDate && p.pullDate !== p.returnDate ? `${fmt(p.pullDate)} to ${fmt(p.returnDate)}` : fmt(endIso);
+    const n = (p.items||[]).filter(i => i && !i.returned).length;
+    const pieces = n ? ` — ${n} piece${n===1?'':'s'} not checked in` : '';
+    const id = slEsc(p.id);
+    items.push({key:'pull|'+p.id+'|draft', pri:'med',
+      text:`Draft pull never sent — ${p.client||'Untitled'}, ${span} has passed${pieces}`,
+      btns:[{label:'Mark sent', title:'It went out — track it as a sent pull', on:`todayDraftPullSent('${id}')`},
+            {label:'Delete', title:'Delete this draft (asks first)', on:`todayDraftPullDelete('${id}')`}]});
+  });
   // 2. Pipeline follow-ups (Buyers CRM): planned moves that did not happen.
   //
   // "The tasks are completely useless and overwhelming. Many of these buyers
@@ -25607,6 +25683,7 @@ function buildTodayFocus() {
         `<div class="focus-row" style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)${i.act?';cursor:pointer':''}"${i.act?` onclick="${i.act.replace(/"/g,'&quot;')}"`:''}>
           <div style="width:3px;min-height:16px;background:${colMap[i.pri]};flex-shrink:0;border-radius:2px"></div>
           <div style="font-size:13px;color:var(--ink);line-height:1.5;flex:1">${i.text}</div>
+          ${(i.btns||[]).map(b => `<button onclick="event.stopPropagation();${b.on.replace(/"/g,'&quot;')}" title="${b.title||''}" style="background:none;border:1px solid var(--border-mid);color:var(--ink);cursor:pointer;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700;line-height:1;padding:5px 8px;flex-shrink:0;align-self:center">${b.label}</button>`).join('')}
           ${i.task ? `<button onclick="event.stopPropagation();todayTaskDone('${slEsc(i.task)}')" title="Mark done" style="background:none;border:1px solid var(--border-mid);color:var(--muted);cursor:pointer;font-size:12px;line-height:1;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border-radius:50%">✓</button>` : ''}
           ${i.key ? `<button onclick="event.stopPropagation();todaySnoozeItem('${slEsc(i.key)}')"
             title="${asleep(i) ? 'Snoozed \u2014 bring it back now' : 'Not today \u2014 ask me again tomorrow'}"
@@ -25675,6 +25752,26 @@ window.todaySnoozeItem = function(key){
 window.todayShowSnoozed = function(){
   window.__todayShowSnoozed = !window.__todayShowSnoozed;
   try { renderPage(STATE.currentPage); } catch (e) {}
+};
+
+// Old draft pulls on Today. Mark sent says the pieces went out: the pull
+// becomes a sent ('active') pull, so the overdue chase above takes over. No
+// email is sent. Delete goes through prDeletePull, which asks first.
+window.todayDraftPullSent = function(id){
+  const p = (STATE.prPulls||[]).find(x => x && x.id === id);
+  if (!p || p.status !== 'draft') return false;
+  p.status = 'active';
+  p.markedSentAt = new Date().toISOString();
+  save();
+  try { logActivity(`PR Pull marked sent from Today: ${p.client}`); } catch(e){}
+  try { toast(`${p.client} marked sent`); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  return true;
+};
+window.todayDraftPullDelete = function(id){
+  const before = (STATE.prPulls||[]).length;
+  try { prDeletePull(id); } catch(e){}
+  if ((STATE.prPulls||[]).length !== before) { try { buildTodayFocus(); } catch(e){} }
 };
 
 window.todayTaskAdd = function(text){
@@ -42356,6 +42453,36 @@ function slOrderPaidTotal(o){
 //     so it is not counted twice. A logged deduction applies once per order.
 // Each line: { key, label, amount, status, billed, paid, open, dueDate,
 //              paidAt, at, deduction, legacy }.
+// AN ORDER'S MONEY IN DOLLARS, FOR TOTALS ONLY.
+//
+// Money summed every order's face value as if it were dollars, so a euro order
+// of 3,752 read as $3,752 in revenue, receivables, collected and the cash
+// calendar. Each order keeps showing its own currency; only a total converts,
+// at the rate the order froze from its quote (EUR per $1), else the season
+// rate set on the line sheet. Both are read, never written. With no rate at
+// all the amount stays at face value and the note says so.
+function slUsdRate(cur, frozen){
+  const c = String(cur || 'USD').toUpperCase();
+  if (c === 'USD') return { rate: 1, src: 'usd' };
+  const r = Number(frozen);
+  if (r > 0 && r !== 1) return { rate: r, src: 'order' };
+  const sr = (typeof fxRate === 'function') ? fxRate(c) : 0;
+  if (sr > 0) return { rate: sr, src: 'season' };
+  return { rate: 0, src: 'none' };
+}
+function slToUsd(amt, cur, frozen, seen){
+  const n = Number(amt) || 0;
+  const c = String(cur || 'USD').toUpperCase();
+  if (c === 'USD') return n;
+  const x = slUsdRate(c, frozen);
+  if (seen) seen[c + '|' + x.src + '|' + x.rate] = { cur: c, src: x.src, rate: x.rate };
+  return x.rate > 0 ? n / x.rate : n;
+}
+function slFxNote(seen){
+  return Object.values(seen || {}).map(v => v.src === 'none'
+    ? v.cur + ' has no rate set, so it is added at face value'
+    : v.cur + ' converted at ' + v.rate + ' ' + v.cur + ' to $1 (' + (v.src === 'order' ? 'the rate frozen on the order' : 'your season rate') + ')').join(' · ');
+}
 function slOrderReceivables(o){
   if (!o) return [];
   const num = (v) => Number(v) || 0;
@@ -45739,11 +45866,16 @@ function cmdMoneyData(opts) {
   const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
   const orders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled')
     .filter(o => !endT || slOrderBookedAt(o) <= endT);
-  const wsYtd = orders.filter(o => slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
-  const wsAll = orders.reduce((s,o) => s + (o.total||0), 0);
+  // Every wholesale figure below is in dollars: each order converts at its
+  // own rate (slToUsd), and fxSeen records which rates were used so the
+  // screen can say so.
+  const fxSeen = {};
+  const oUsd = (o, amt) => slToUsd(amt, o && o.currency, o && o.fxRate, fxSeen);
+  const wsYtd = orders.filter(o => slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + oUsd(o, o.total||0), 0);
+  const wsAll = orders.reduce((s,o) => s + oUsd(o, o.total||0), 0);
   const quotes = STATE.slQuotes || [];
-  const pipeSent = quotes.filter(q => q.status === 'sent').reduce((s,q) => s + (q.total||0), 0);
-  const pipeAccepted = quotes.filter(q => q.status === 'accepted' && !q.orderId).reduce((s,q) => s + (q.total||0), 0);
+  const pipeSent = quotes.filter(q => q.status === 'sent').reduce((s,q) => s + oUsd(q, q.total||0), 0);
+  const pipeAccepted = quotes.filter(q => q.status === 'accepted' && !q.orderId).reduce((s,q) => s + oUsd(q, q.total||0), 0);
   // AR truth: booked ≠ collected. Collected = Stripe-confirmed payments minus
   // recorded deductions; everything still open gets an aging bucket (net-14
   // terms assumed when Stripe didn't supply a due date).
@@ -45767,14 +45899,16 @@ function cmdMoneyData(opts) {
     // paidAt is stamped when a device first observes the invoice settle
     // (see slRefreshInvoices); legacy rows without it fall back to booking.
     const collectedYtd = pay.paidAt ? (pay.paidAt >= jan1iso) : inYtd;
-    if (pay.status === 'paid') { if (collectedYtd) wsCollectedYtd += (pay.paid || 0) - (pay.deduction || 0); return; }
+    if (pay.status === 'paid') { if (collectedYtd) wsCollectedYtd += oUsd(o, (pay.paid || 0) - (pay.deduction || 0)); return; }
     if (pay.status === 'void' || pay.status === 'uncollectible') return;
-    if (collectedYtd && pay.paid) wsCollectedYtd += pay.paid - (pay.deduction || 0);
+    if (collectedYtd && pay.paid) wsCollectedYtd += oUsd(o, pay.paid - (pay.deduction || 0));
     const dueIso = pay.dueDate || '';
     const days = dueIso ? Math.floor((arNow - new Date(dueIso + 'T00:00:00')) / 86400000) : 0;
     const openAmt = pay.open || 0;
     if (!(openAmt > 0)) return;
-    arOpen.push({ id: o.id, label: pay.label || '', account: o.account||'', currency: o.currency || 'USD', open: openAmt, days,
+    // open is DOLLARS (every total reads it); openNative is what the buyer owes.
+    arOpen.push({ id: o.id, label: pay.label || '', account: o.account||'', currency: o.currency || 'USD',
+                  open: oUsd(o, openAmt), openNative: openAmt, days,
                   bucket: days<=0?'current':days<=30?'1–30d':days<=60?'31–60d':days<=90?'61–90d':'90d+' });
     });
   });
@@ -45968,7 +46102,7 @@ function cmdMoneyData(opts) {
     const st = (STATE.styles||[]).find(x => x.id === it.styleId);
     const r = seasonRow(k);
     const q = it.qty || 0;
-    r.wsRev += (it.ws || 0) * q;
+    r.wsRev += oUsd(o, (it.ws || 0) * q);
     r.wsUnits += q;
     r.cogs += (st && typeof landedCost === 'function' ? (landedCost(st) || 0) : 0) * q;
     if (o.account) r.accounts[o.account] = 1;
@@ -45998,6 +46132,7 @@ function cmdMoneyData(opts) {
   }).filter(r => r.rev > 0 || r.units > 0 || r.made > 0)
     .sort((a,b) => String(b.season).localeCompare(String(a.season)));
   return { p, wsYtd, wsAll, wsCollectedYtd, arOpen, pipeSent, pipeAccepted, dtcCogsYtd, wsCogsYtd, spend, dtcAmbiguous, seasonRows,
+           fxNote: slFxNote(fxSeen),
            opexYtd, opexUncat, opexBy, bankOpex, opexTotal,
            mfgViaCogs, mfgViaOpex, mfgOpexBy,
            ownerDraw, ownerInvest, loanOut, loanIn, interestPaid,
@@ -46032,6 +46167,7 @@ window.cmdRenderMoney = function() {
       <div class="ag-stat"><div class="ag-stat-l">Operating expense YTD</div><div class="ag-stat-v">${money(d.opexTotal)}</div><div class="ag-stat-s">${d.bankOpex ? 'rent, payroll, software, marketing — from the bank feed' : 'budget tracker — connect the bank for the real number'}</div></div>
       <div class="ag-stat"><div class="ag-stat-l">Operating YTD</div><div class="ag-stat-v" style="color:${d.operating<0?'var(--red)':'var(--green)'}">${money(d.operating)}</div><div class="ag-stat-s">revenue − COGS − operating expense</div></div>
     </div>
+    ${d.fxNote ? `<div style="padding:8px 14px;border:1px solid var(--border);font-size:10.5px;color:var(--muted);margin-bottom:16px">Totals in US dollars. ${slEsc(d.fxNote)}.</div>` : ''}
     ${!d.hasDtc ? `<div style="padding:12px 14px;border:1px solid var(--border);background:var(--bg-off);font-size:10.5px;color:var(--muted);margin-bottom:16px">Shopify hasn't reported yet this session — DTC lines show $0 until the pulse loads (it refreshes automatically).</div>` : ''}
     <div class="money-cols">
     <section>
@@ -46075,7 +46211,7 @@ window.cmdRenderMoney = function() {
     <div class="money-block">
       ${d.arOpen.map(a => `<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11.5px;cursor:pointer" onclick="slOpenOrderDetail('${a.id}')">
         <span>#${slEsc(a.id)}${a.label ? ' · ' + slEsc(a.label.toLowerCase()) : ''} <span style="color:var(--muted)">· ${slEsc(a.account)}</span></span>
-        <span style="font-family:'DM Mono',monospace;white-space:nowrap"><span style="color:${a.days>30?'var(--red)':a.days>0?'var(--amber)':'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-right:8px">${a.bucket}${a.days>0?' · '+a.days+'d over':''}</span>$${Math.round(a.open).toLocaleString()}</span>
+        <span style="font-family:'DM Mono',monospace;white-space:nowrap"><span style="color:${a.days>30?'var(--red)':a.days>0?'var(--amber)':'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-right:8px">${a.bucket}${a.days>0?' · '+a.days+'d over':''}</span>${String(a.currency||'USD').toUpperCase() !== 'USD' ? slMoney(a.openNative, a.currency) + ' <span style="color:var(--muted);font-size:10px">≈ $' + Math.round(a.open).toLocaleString() + '</span>' : '$' + Math.round(a.open).toLocaleString()}</span>
       </div>`).join('')}
     </div></section>` : ''}
     <section>
@@ -46135,7 +46271,7 @@ function veniaFinanceContext(){
     if (p.at) parts.push('DTC pulse: last 30d ' + money(p.r30||0) + ' across ' + (p.n30||0) + ' orders (prior 30d ' + money(p.rPrev||0) + ')');
     else parts.push('DTC pulse: Shopify has not reported this session — DTC lines read $0 until it loads. Say so instead of treating DTC as zero.');
     if (d.arOpen.length) parts.push('AR — open invoices (oldest first):\n' + d.arOpen.slice(0,12).map(a =>
-      '• #' + a.id + (a.label ? ' ' + a.label.toLowerCase() : '') + ' ' + a.account + ' — ' + money(a.open) + ' open, ' + a.bucket + (a.days>0 ? ' (' + a.days + 'd overdue)' : '')
+      '• #' + a.id + (a.label ? ' ' + a.label.toLowerCase() : '') + ' ' + a.account + ' — ' + (String(a.currency||'USD').toUpperCase() !== 'USD' ? slMoney(a.openNative, a.currency) + ' (' + money(a.open) + ')' : money(a.open)) + ' open, ' + a.bucket + (a.days>0 ? ' (' + a.days + 'd overdue)' : '')
     ).join('\n') + (d.arOpen.length>12 ? '\n…+' + (d.arOpen.length-12) + ' more' : ''));
     else parts.push('AR: no open invoices.');
     parts.push('Pipeline (not yet revenue): quotes out ' + money(d.pipeSent) + ', accepted-not-yet-ordered ' + money(d.pipeAccepted));
@@ -46532,10 +46668,10 @@ function veniaFinOpsContext(){
     const ords = (S.slOrders || []).filter(o => o && o.status !== 'cancelled');
     if (ords.length) {
       const byAcct = {};
-      ords.forEach(o => { const k = o.account || 'unknown'; byAcct[k] = (byAcct[k] || 0) + (o.total || 0); });
+      ords.forEach(o => { const k = o.account || 'unknown'; byAcct[k] = (byAcct[k] || 0) + slToUsd(o.total || 0, o.currency, o.fxRate); });
       const top = Object.entries(byAcct).sort((a,b) => b[1]-a[1]);
       const conc = top.length && ords.length ? Math.round((top[0][1] / top.reduce((s,x)=>s+x[1],0)) * 100) : 0;
-      parts.push('WHOLESALE ORDER BOOK (' + ords.length + ' live orders, ' + money(ords.reduce((s,o)=>s+(o.total||0),0)) + ' booked):\n'
+      parts.push('WHOLESALE ORDER BOOK (' + ords.length + ' live orders, ' + money(ords.reduce((s,o)=>s+slToUsd(o.total||0, o.currency, o.fxRate),0)) + ' booked, in USD):\n'
         + ords.slice(0, 15).map(o => {
             const p = o.payment || {};
             const how = p.invoiceId ? 'invoiced' : (p.method ? 'recorded (' + p.method + ')' : '');
@@ -46547,7 +46683,7 @@ function veniaFinOpsContext(){
                     p.amountRemaining != null ? money(p.amountRemaining) + ' outstanding' : '',
                    ].filter(Boolean).join(', '))
               : 'NOT INVOICED — nothing recorded against it';
-            return '• #' + o.id + ' ' + (o.account||'?') + ' — ' + money(o.total||0) + ' | ' + (o.status||'')
+            return '• #' + o.id + ' ' + (o.account||'?') + ' — ' + slMoney(o.total||0, o.currency) + ' | ' + (o.status||'')
               + (o.deliveryDate ? ' | deliver ' + o.deliveryDate : '') + ' | ' + pay;
           }).join('\n') + more(ords, 15)
         + '\n• Top account is ' + top[0][0] + ' at ' + conc + '% of the book'
@@ -46639,10 +46775,12 @@ function finCashCalendar(days){
       // the terms give them. Orders with no instalments keep the path below.
       const lines = slOrderReceivables(o);
       if (lines.length && !lines[0].legacy) {
+        const cur = String(o.currency || 'USD').toUpperCase();
         lines.forEach(ln => {
           if (['paid','void','uncollectible'].indexOf(ln.status) >= 0 || !(ln.open > 0)) return;
           const what = ln.label + ' #' + o.id;
-          const who = ' — ' + (o.account||'');
+          const who = ' — ' + (o.account||'') + (cur !== 'USD' ? ' (' + slMoney(ln.open, cur) + ')' : '');
+          ln = Object.assign({}, ln, { open: slToUsd(ln.open, cur, o.fxRate) });
           const due = ln.dueDate
             || (!ln.billed && o.deliveryDate ? iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)) : '');
           if (due && new Date(due + 'T00:00:00') < today) push(iso(today), 'in', ln.open, 'Overdue ' + what.charAt(0).toLowerCase() + what.slice(1) + who, 'ar', 'expected');
@@ -46653,14 +46791,14 @@ function finCashCalendar(days){
       }
       const pay = o.payment;
       if (pay && pay.invoiceId && ['paid','void','uncollectible'].indexOf(pay.status) < 0) {
-        const amt = pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0);
+        const amt = slToUsd(pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0), o.currency, o.fxRate);
         const due = pay.dueDate || (pay.at ? iso(new Date(new Date(pay.at).getTime() + 14*864e5)) : '');
         // Already-overdue invoices land today: they are collectible now.
         if (due && new Date(due + 'T00:00:00') < today) push(iso(today), 'in', amt, 'Overdue invoice #' + o.id + ' — ' + (o.account||''), 'ar', 'expected');
         else push(due, 'in', amt, 'Invoice #' + o.id + ' due — ' + (o.account||''), 'ar', 'committed');
       } else if (!pay || !pay.invoiceId) {
         // Not invoiced yet: expect the invoice around delivery, paid on net-14.
-        if (o.deliveryDate) push(iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)), 'in', o.total||0,
+        if (o.deliveryDate) push(iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)), 'in', slToUsd(o.total||0, o.currency, o.fxRate),
           'Order #' + o.id + ' — invoice after delivery — ' + (o.account||''), 'ws', 'expected');
       }
     });
@@ -46907,7 +47045,7 @@ function cfoPlanVariance(){
     const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
     const mStart = key + '-01T00:00:00.000Z';
     const ws = (STATE.slOrders || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= mStart)
-      .reduce((s,o) => s + (o.total||0), 0);
+      .reduce((s,o) => s + slToUsd(o.total||0, o.currency, o.fxRate), 0);
     // Exact calendar month-to-date when the pulse has it; the trailing-30-day
     // figure only as a fallback, and flagged so nothing presents it as exact.
     const exact = pulse.mtd != null && pulse.at;
