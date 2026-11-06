@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '580';
+  const BUILD = '581';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -51499,12 +51499,16 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // lost", and a copy in IndexedDB (not localStorage, which the live
   // workspace already fills) is what makes that true even if the merge is
   // ever wrong. The last five are kept; window.veniaUnsavedBackups() lists them.
+  // Resolves once the copy is written (or could not be), so a caller that is
+  // about to reload — the save-fix auto-update — can wait for it first.
   function unsavedBackup(why){
+    return new Promise(function(done){
     try {
-      if (!window.indexedDB) return;
+      if (!window.indexedDB) return done(false);
       var snap = snapshot();
       var req = indexedDB.open('venia-safety', 1);
       req.onupgradeneeded = function(){ try { req.result.createObjectStore('unsaved', { keyPath: 't' }); } catch (e) {} };
+      req.onerror = function(){ done(false); };
       req.onsuccess = function(){
         try {
           var db = req.result, tx = db.transaction('unsaved', 'readwrite'), st = tx.objectStore('unsaved');
@@ -51514,11 +51518,28 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             var ks = (keys.result || []).sort();
             ks.slice(0, Math.max(0, ks.length - 5)).forEach(function(k){ try { st.delete(k); } catch (e) {} });
           };
-          tx.oncomplete = function(){ try { db.close(); } catch (e) {} };
-        } catch (e) {}
+          tx.oncomplete = function(){ try { db.close(); } catch (e) {} done(true); };
+          tx.onerror = tx.onabort = function(){ done(false); };
+        } catch (e) { done(false); }
       };
-    } catch (e) {}
+    } catch (e) { done(false); }
+    });
   }
+  window.veniaUnsavedBackup = unsavedBackup;
+  // True while this device's saves are genuinely failing: a change is owed to
+  // the cloud and the last push was refused, or saving is paused for sign-in.
+  // Not while the app is still starting, and not while offline — a new build
+  // cannot fix a missing network.
+  window.__syncFailing = function(){
+    try {
+      var p = window.__syncStat && window.__syncStat.push;
+      if (!pushDirty || !p || p.ok !== false) return false;
+      if (navigator.onLine === false) return false;
+      if (/sync not started|no client/i.test(String(p.raw || ''))) return false;
+      if (/^no network connection/i.test(String(p.err || ''))) return false;
+      return true;
+    } catch (e) { return false; }
+  };
   window.veniaUnsavedBackups = function(){
     return new Promise(function(res){
       try {
@@ -60615,7 +60636,9 @@ document.addEventListener('keydown', function(e){
     document.getElementById('vag-update-btn').onclick = function () {
       userAccepted = true;
       this.textContent = 'Updating…';
-      worker.postMessage({ type: 'SKIP_WAITING' });
+      // The ribbon can outlive its worker: a newer build arriving while it is
+      // up replaces the one it was shown for. Activate whatever is waiting now.
+      ((swReg && swReg.waiting) || worker).postMessage({ type: 'SKIP_WAITING' });
       // The button said "Updating…" and then nothing happened, because the
       // reload was deferred until the page was backgrounded (see
       // controllerchange below). That deferral protects someone mid-task from
@@ -60625,13 +60648,89 @@ document.addEventListener('keydown', function(e){
       // word "Updating…" sitting there for the rest of the session.
       setTimeout(swReload, 3500);
     };
-    document.getElementById('vag-update-x').onclick = function () { bar.remove(); };
+    // Dismissing hides the ribbon, it does not turn the update down for good:
+    // the waiting build is still there, and a device that never takes it stays
+    // on old code. So the ribbon comes back on a later build check (see
+    // RIBBON_SNOOZE_MS), or straight away if a newer build arrives meanwhile.
+    document.getElementById('vag-update-x').onclick = function () {
+      dismissedAt = Date.now();
+      dismissedWorker = worker;
+      bar.remove();
+    };
+  }
+
+  // ── THE RIBBON COMES BACK ──
+  // It used to be shown once per worker and, once dismissed, never again until
+  // a reload — and an iOS PWA or a Mac tab left open can go days without one.
+  // That is how a device sat on an old build after a fix had shipped.
+  var RIBBON_SNOOZE_MS = 15 * 60 * 1000;
+  var swReg = null;
+  var dismissedAt = 0, dismissedWorker = null;
+  function offerWaiting(reg) {
+    var w = reg && reg.waiting;
+    if (!w || !navigator.serviceWorker.controller) return;
+    if (w === dismissedWorker && (Date.now() - dismissedAt) < RIBBON_SNOOZE_MS) return;
+    showUpdatePrompt(w);
+  }
+
+  // ── SAVE FIXES LOAD THEMSELVES ──
+  // The ribbon waits for a tap, which is right for an ordinary build: nobody
+  // should have their screen reloaded under them for a new feature. It is wrong
+  // for a build that fixes SAVING on a device whose saves are failing. There
+  // every minute spent waiting is another change that only exists on this
+  // device, and the person may never see the ribbon at all.
+  //
+  // So when the waiting build says it carries a save fix this page does not
+  // have (sw.js SAVES_FIXED_IN is newer than this page's build), and this
+  // device's saves are failing right now, the page loads it by itself:
+  //   - not while someone is typing or has an editor open (it waits);
+  //   - after saving the workspace to this device and taking a copy into the
+  //     IndexedDB backups, so a reload cannot lose an edit;
+  //   - nothing is pushed first. The fresh page starts with its own boot sync,
+  //     so a device that has not agreed with the cloud for over 48 hours still
+  //     sets its old copy aside rather than publishing it (Build 578).
+  // One try per worker; if it does not take, the ribbon is still there.
+  var autoTried = null;
+  function askBuild(worker) {
+    return new Promise(function (res) {
+      try {
+        var ch = new MessageChannel();
+        var t = setTimeout(function () { res(null); }, 3000);
+        ch.port1.onmessage = function (e) { clearTimeout(t); res(e.data || null); };
+        worker.postMessage({ type: 'BUILD_INFO' }, [ch.port2]);
+      } catch (e) { res(null); }
+    });
+  }
+  function autoLoadSaveFix(reg) {
+    var w = reg && reg.waiting;
+    if (!w || w === autoTried || !navigator.serviceWorker.controller) return;
+    if (typeof window.__syncFailing !== 'function' || !window.__syncFailing()) return;
+    askBuild(w).then(function (info) {
+      var mine = parseInt(window.VENIA_BUILD || '0', 10) || 0;
+      var fixedIn = info ? (parseInt(info.savesFixedIn || '0', 10) || 0) : 0;
+      if (!fixedIn || fixedIn <= mine) return;          // no save fix this page lacks
+      if (reg.waiting !== w || w === autoTried) return;
+      if (!window.__syncFailing()) return;              // recovered meanwhile
+      if (typeof window.veniaMidEdit === 'function' && window.veniaMidEdit()) return;   // next check
+      autoTried = w;
+      try { if (typeof window.save === 'function') window.save(); } catch (e) {}
+      var backup = (typeof window.veniaUnsavedBackup === 'function')
+        ? window.veniaUnsavedBackup('before loading save fix (Build ' + (info.build || '?') + ')')
+        : Promise.resolve(false);
+      // A backup that hangs must not hold the fix back forever.
+      Promise.race([backup, new Promise(function (r) { setTimeout(r, 4000); })]).then(function () {
+        userAccepted = true;
+        w.postMessage({ type: 'SKIP_WAITING' });
+        setTimeout(swReload, 3500);
+      });
+    });
   }
 
   window.addEventListener('load', function () {
     navigator.serviceWorker.register('/sw.js').then(function (reg) {
+      swReg = reg;
       // An update was downloaded on a previous visit and is already waiting.
-      if (reg.waiting && navigator.serviceWorker.controller) showUpdatePrompt(reg.waiting);
+      if (reg.waiting && navigator.serviceWorker.controller) { showUpdatePrompt(reg.waiting); autoLoadSaveFix(reg); }
 
       // A new worker began installing — prompt once it finishes (and only if an
       // old worker is already in control, i.e. this is an update, not a first install).
@@ -60639,13 +60738,16 @@ document.addEventListener('keydown', function(e){
         var nw = reg.installing;
         if (!nw) return;
         nw.addEventListener('statechange', function () {
-          if (nw.state === 'installed' && navigator.serviceWorker.controller) showUpdatePrompt(nw);
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) { showUpdatePrompt(nw); autoLoadSaveFix(reg); }
         });
       });
 
       // Poll for a fresh deploy: on tab focus and every 60s. iOS PWAs resume the
       // same page for days, so without this a new build would never be noticed.
-      var poll = function () { reg.update().catch(function () {}); };
+      // Each check also re-offers a dismissed ribbon once its snooze is up, and
+      // loads a save fix by itself where saves are failing (see above).
+      var check = function () { offerWaiting(reg); autoLoadSaveFix(reg); };
+      var poll = function () { reg.update().catch(function () {}).then(check); };
       setInterval(poll, 60000);
       document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
     }).catch(function () { /* file:// or unsupported — ignore */ });
