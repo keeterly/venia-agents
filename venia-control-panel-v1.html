@@ -3010,7 +3010,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '576';
+  const BUILD = '577';
   const BUILD_DATE = '2026.09.08';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -53609,6 +53609,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // Who this is decides what they can reach, so the two are read together —
     // signing in, out, or as someone else all land here.
     try { if (window.veniaLoadAccess) veniaLoadAccess(); } catch(e){}
+    // Anything Claude proposed through the connector, for this person.
+    try { if (window.veniaClaudeInbox) veniaClaudeInbox.check(); } catch(e){}
   }
   window.veniaAuthRefresh = refresh;
 
@@ -60356,6 +60358,187 @@ document.addEventListener('keydown', function(e){
       if (userAccepted) swReload();
     });
   });
+})();
+</script>
+<script>
+/* ══════════════════════════════════════════════════════════
+   FROM CLAUDE — the connector's inbox (Build 577)
+
+   Claude, connected at /mcp, can read VENIA OS as you and PROPOSE changes.
+   It never writes the workspace itself: each proposal is one venia_action
+   object in venia_claude_inbox, and it lands only here, on a tap, through
+   agentRunAction — the same handlers, checklist, Undo and module checks
+   Enigma's own actions use. Dismiss leaves the workspace untouched.
+
+   The pill appears only when something is waiting, so the app looks exactly
+   as it did for anyone who never connects Claude.
+   ══════════════════════════════════════════════════════════ */
+;(function(){
+  var rows = [];
+  var busy = false;
+  function sbc(){ return window.__sbClient || null; }
+  function esc(s){ try { return escHtml(String(s == null ? '' : s)); } catch(e){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return '&#' + c.charCodeAt(0) + ';'; }); } }
+  function note(msg, type){ try { showToast(msg, type || 'info'); } catch(e){ try { toast(msg, type); } catch(_){} } }
+
+  function css(){
+    if (document.getElementById('vci-css')) return;
+    var st = document.createElement('style');
+    st.id = 'vci-css';
+    st.textContent =
+      '#vci-pill{position:fixed;right:calc(16px + var(--sar,0px));bottom:calc(16px + var(--sab,0px));z-index:9000;'
+      + 'background:var(--ink,#000);color:var(--accent-inv,#fff);border:0;padding:10px 14px;font:11px/1 inherit;'
+      + 'letter-spacing:.14em;text-transform:uppercase;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.18)}'
+      + '#vci-sheet{position:fixed;inset:0;z-index:9001;background:rgba(0,0,0,.35);display:flex;justify-content:flex-end}'
+      + '#vci-panel{background:var(--bg,#fff);color:var(--ink,#000);width:min(440px,100%);height:100%;overflow-y:auto;'
+      + 'padding:calc(20px + var(--sat,0px)) 18px calc(24px + var(--sab,0px));border-left:1px solid var(--border,#e0e0e0)}'
+      + '#vci-panel h2{font-size:11px;letter-spacing:.2em;text-transform:uppercase;margin:0 0 4px}'
+      + '#vci-panel .vci-sub{color:var(--muted,#595959);font-size:12px;margin:0 0 16px}'
+      + '.vci-row{border-top:1px solid var(--border,#e0e0e0);padding:14px 0}'
+      + '.vci-sum{font-size:14px;margin:0 0 4px}.vci-meta{color:var(--muted,#595959);font-size:11px;margin:0 0 10px}'
+      + '.vci-btns button{font-size:11px;letter-spacing:.12em;text-transform:uppercase;padding:7px 12px;margin-right:8px;'
+      + 'cursor:pointer;border:1px solid var(--ink,#000);background:var(--bg,#fff);color:var(--ink,#000)}'
+      + '.vci-btns button.vci-go{background:var(--ink,#000);color:var(--accent-inv,#fff)}'
+      + '.vci-out:empty{display:none}.vci-out{margin-top:10px}'
+      + '#vci-close{float:right;border:0;background:none;font-size:20px;line-height:1;cursor:pointer;color:inherit}';
+    document.head.appendChild(st);
+  }
+
+  async function myEmail(){
+    var c = sbc(); if (!c || !c.auth) return '';
+    try { var r = await c.auth.getSession(); return (r.data && r.data.session && r.data.session.user && r.data.session.user.email || '').toLowerCase(); }
+    catch(e){ return ''; }
+  }
+
+  function paintPill(){
+    css();
+    var p = document.getElementById('vci-pill');
+    if (!rows.length) { if (p) p.remove(); return; }
+    if (!p) {
+      p = document.createElement('button');
+      p.id = 'vci-pill';
+      p.type = 'button';
+      p.onclick = function(){ window.veniaClaudeInbox.open(); };
+      document.body.appendChild(p);
+    }
+    p.textContent = 'From Claude · ' + rows.length;
+  }
+
+  // Missing table (migration not applied yet), signed out, offline: all mean
+  // "nothing to show", never an error on screen.
+  async function check(){
+    var c = sbc(); if (!c) return;
+    var em = await myEmail(); if (!em) { rows = []; paintPill(); return; }
+    try {
+      var r = await c.from('venia_claude_inbox').select('id,summary,action,created_at,status')
+        .eq('email', em).eq('status', 'pending').order('created_at', { ascending: true }).limit(50);
+      rows = (r && !r.error && Array.isArray(r.data)) ? r.data : [];
+    } catch(e){ rows = []; }
+    // The pill only: re-rendering an open panel would throw away a checklist
+    // the founder is halfway through ticking.
+    paintPill();
+  }
+
+  function render(list){
+    if (!list) return;
+    if (!rows.length) { list.innerHTML = '<p class="vci-sub">Nothing waiting.</p>'; return; }
+    list.innerHTML = rows.map(function(r){
+      var when = '';
+      try { when = new Date(r.created_at).toLocaleString(); } catch(e){}
+      var type = (r.action && r.action.type) || '';
+      return '<div class="vci-row" data-id="' + esc(r.id) + '">'
+        + '<p class="vci-sum">' + esc(r.summary || type) + '</p>'
+        + '<p class="vci-meta">' + esc(type.replace(/_/g, ' ')) + (when ? ' · ' + esc(when) : '') + '</p>'
+        + '<div class="vci-btns"><button type="button" class="vci-go" data-act="apply">Review &amp; apply</button>'
+        + '<button type="button" data-act="dismiss">Dismiss</button></div>'
+        + '<div class="vci-out"></div></div>';
+    }).join('');
+    list.querySelectorAll('.vci-row').forEach(function(el){
+      el.querySelector('[data-act="apply"]').onclick = function(){ apply(el.getAttribute('data-id'), el); };
+      el.querySelector('[data-act="dismiss"]').onclick = function(){ decide(el.getAttribute('data-id'), 'dismissed', el); };
+    });
+  }
+
+  async function decide(id, status, el){
+    var c = sbc(); if (!c) return;
+    var em = await myEmail();
+    try {
+      var r = await c.from('venia_claude_inbox').update({ status: status, decided_at: new Date().toISOString(), decided_by: em })
+        .eq('id', id);
+      if (r && r.error) throw r.error;
+    } catch(e){ note('Could not update that proposal — ' + (e && e.message || 'try again'), 'error'); return false; }
+    rows = rows.filter(function(r){ return r.id !== id; });
+    if (el && status === 'dismissed') el.remove();
+    paintPill();
+    return true;
+  }
+
+  async function apply(id, el){
+    if (busy) return;
+    var row = rows.find(function(r){ return r.id === id; });
+    if (!row || !row.action) return;
+    // The merge needs to know what the cloud holds before anything is applied
+    // on top of it. Until the first pull has landed, wait.
+    if (!window.__sbSyncDone) { note('Still syncing with the cloud — try again in a moment', 'info'); return; }
+    busy = true;
+    var out = el.querySelector('.vci-out');
+    var a = row.action, res = null, ok = true;
+    try {
+      if (a.type === 'today_task_add') ok = !!(window.todayTaskAdd && todayTaskAdd(a.text));
+      else if (a.type === 'today_task_done') ok = !!(window.todayTaskDone && todayTaskDone(a.id));
+      else if (typeof agentRunAction === 'function') res = agentRunAction('cp', JSON.parse(JSON.stringify(a)), out);
+      else ok = false;
+    } catch(e){
+      ok = false;
+      try { appendAgentNote(out, '⚠ That change did NOT save — ' + (e && e.message || 'something went wrong') + '.'); } catch(_){}
+    }
+    busy = false;
+    if (res && res.denied) { await decide(id, 'denied', el); el.querySelector('.vci-btns').remove(); return; }
+    if (!ok) { if (!out.innerHTML) out.textContent = 'That one could not be applied — it may already be done.'; return; }
+    var btns = el.querySelector('.vci-btns');
+    // A proposal that creates records, or touches more than one, opens
+    // Enigma's own checklist in `out`. It is decided only when the founder
+    // answers that checklist: "Apply ticked" removes the card (applied), and
+    // Cancel or nothing ticked leaves a note in it (dismissed). Closing the
+    // panel first leaves the proposal pending, to come back to.
+    if (res && res.held) {
+      if (btns) btns.style.display = 'none';
+      var hid = res.id;
+      var t = setInterval(function(){
+        if (!document.body.contains(el)) { clearInterval(t); return; }
+        if (window.__agHold && window.__agHold[hid]) return;
+        clearInterval(t);
+        var applied = !document.getElementById('agrv-card-' + hid);
+        decide(id, applied ? 'applied' : 'dismissed', applied ? null : el).then(function(){
+          if (applied) { try { logActivity('Applied from Claude: ' + String(row.summary || a.type).slice(0, 80)); } catch(e){} }
+          else if (btns) btns.remove();
+        });
+      }, 400);
+      return;
+    }
+    await decide(id, 'applied', el);
+    if (btns) btns.remove();
+    if (!out.innerHTML) out.textContent = 'Applied.';
+    try { logActivity('Applied from Claude: ' + String(row.summary || a.type).slice(0, 80)); } catch(e){}
+  }
+
+  function open(){
+    css();
+    var old = document.getElementById('vci-sheet'); if (old) old.remove();
+    var sh = document.createElement('div');
+    sh.id = 'vci-sheet';
+    sh.innerHTML = '<div id="vci-panel" role="dialog" aria-label="From Claude">'
+      + '<button id="vci-close" type="button" aria-label="Close">×</button>'
+      + '<h2>From Claude</h2><p class="vci-sub">Changes Claude proposed through the connector. Nothing here has been applied yet.</p>'
+      + '<div id="vci-list"></div></div>';
+    sh.addEventListener('click', function(e){ if (e.target === sh) sh.remove(); });
+    sh.querySelector('#vci-close').onclick = function(){ sh.remove(); };
+    document.body.appendChild(sh);
+    render(sh.querySelector('#vci-list'));
+  }
+
+  window.veniaClaudeInbox = { check: check, open: open };
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible') check(); });
+  setInterval(function(){ if (document.visibilityState === 'visible') check(); }, 5 * 60 * 1000);
 })();
 </script>
 </body>
