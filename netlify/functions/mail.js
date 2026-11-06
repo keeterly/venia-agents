@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Server-side sender so VENIA's mail comes FROM VENIA.
 //
 // A mailto: link cannot set a From address — the phone's mail app picks the
@@ -18,11 +19,8 @@
 //   {action:'ping'}   → { configured, from }        (no gate — the UI asks this)
 //   {action:'send', to, subject, text, html?, replyTo?, cc?}
 //                     → { id }                      (gated)
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function originAllowed(req) {
   const o = req.headers.get('origin');
   if (o) return ALLOWED_ORIGINS.has(o);

@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Server-side Stripe proxy for stylist-pull deposits & holds.
 // The secret key lives in the STRIPE_SECRET_KEY env var (Netlify → Site
 // configuration → Environment variables) so it never reaches the browser.
@@ -23,11 +24,8 @@
 // Origin on these POSTs; a present-but-foreign Origin is a third-party trying
 // to spin up Checkout sessions against the account — reject it. (capture/cancel
 // keep their separate access-code gate below.)
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function originAllowed(req) {
   const o = req.headers.get('origin');
   if (o) return ALLOWED_ORIGINS.has(o);          // Origin present → must be ours

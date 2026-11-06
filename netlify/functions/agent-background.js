@@ -1,4 +1,5 @@
 import webpush from 'web-push';
+import { VENIA_ORIGINS } from './_shared/origins.js';
 
 // Server-side delegate worker. The "-background" suffix makes Netlify return
 // 202 to the caller immediately and let this run for up to 15 minutes — so the
@@ -13,11 +14,8 @@ import webpush from 'web-push';
 const SB_URL = 'https://unxfaeqjskzzmhyrekqx.supabase.co';
 const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVueGZhZXFqc2t6em1oeXJla3F4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NDgxMTQsImV4cCI6MjA5MzQyNDExNH0.tqKiJJZE9iz29g9hIscLeMir4PhBMeTU8fbI04eC6xY';
 
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function originAllowed(req) {
   const o = req.headers.get('origin');
   if (o) return ALLOWED_ORIGINS.has(o);
