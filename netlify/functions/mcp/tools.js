@@ -105,6 +105,117 @@ export function newestActivity(log, n) {
     .slice().sort((a, b) => t(b) - t(a)).slice(0, n);
 }
 
+// ── wholesale orders ────────────────────────────────────────────────────────
+// The order read used to pick a dozen plain fields, so payments (an array of
+// objects) never made it out and Claude could not tell a paid order from an
+// open one. These mirror the app's slTermsSchedule / slDueDate / slOrderPayments
+// so the connector says what the order screen says. Read-only: nothing here
+// creates, sends or changes a payment.
+const SYM = { USD: '$', EUR: '€', GBP: '£', JPY: '¥', CAD: 'C$', AUD: 'A$' };
+export function moneyIn(code, n) {
+  const c = String(code || 'USD').toUpperCase();
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  const cents = v % 1 ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : {};
+  return (SYM[c] || c + ' ') + v.toLocaleString('en-US', cents);
+}
+export function termsSchedule(terms, total) {
+  const t = String(terms || '').trim();
+  const tot = Number(total) || 0;
+  const amt = (pct) => Math.round(tot * pct) / 100;
+  const split = (dep) => {
+    const d = amt(dep);
+    return [
+      { key: 'deposit', label: 'Deposit', pct: dep, amount: d, basis: 'order', days: 7 },
+      { key: 'balance', label: 'Balance', pct: 100 - dep, amount: Math.round((tot - d) * 100) / 100, basis: 'ship', days: 30 },
+    ];
+  };
+  if (/^30% deposit/.test(t)) return split(30);
+  if (/^50% deposit/.test(t)) return split(50);
+  if (/^Proforma/i.test(t)) return [{ key: 'full', label: 'Payment in full', pct: 100, amount: amt(100), basis: 'ship', days: 14 }];
+  if (/^Credit card on file/i.test(t)) return [{ key: 'full', label: 'Payment in full', pct: 100, amount: amt(100), basis: 'order', days: 1 }];
+  const net = t.match(/Net\s*(\d+)/i);
+  return [{ key: 'full', label: 'Payment in full', pct: 100, amount: amt(100), basis: 'invoice', days: net ? parseInt(net[1], 10) : 14 }];
+}
+const plusDays = (iso, d) => {
+  const t = new Date(String(iso).slice(0, 10) + 'T00:00:00Z');
+  if (isNaN(t)) return '';
+  t.setUTCDate(t.getUTCDate() + (Number(d) || 0));
+  return t.toISOString().slice(0, 10);
+};
+const shipDateOf = (o) => String((o && (o.deliveryDate || o.shipStart)) || '').slice(0, 10);
+function dueDateOf(o, line, rec) {
+  if (rec && rec.dueDate) return String(rec.dueDate).slice(0, 10);
+  if (line.basis === 'ship') return shipDateOf(o);
+  if (line.basis === 'order') return o.createdAt ? plusDays(o.createdAt, line.days) : '';
+  return rec && rec.at ? plusDays(rec.at, line.days) : '';
+}
+// What each status means in words, so "link" is not read as "paid".
+const PAY_STATUS = {
+  paid: 'paid', link: 'payment link sent, not paid', invoiced: 'invoiced, not paid',
+  void: 'void', uncollectible: 'uncollectible',
+};
+export function orderPayments(o) {
+  const recs = Array.isArray(o.payments) ? o.payments.filter((p) => p && typeof p === 'object')
+    : (o.payment && o.payment.status ? [o.payment] : []);
+  const sched = termsSchedule(o.terms, o.total);
+  // An old single o.payment is the first instalment, as the app folds it in.
+  const byKey = (k, i) => recs.find((p) => p.key === k) || (!Array.isArray(o.payments) && i === 0 ? recs[0] : null);
+  const cur = o.currency || 'USD';
+  const lines = sched.map((line, i) => {
+    const rec = byKey(line.key, i);
+    const status = rec ? String(rec.status || 'pending') : 'not billed';
+    const paidAmt = status === 'paid' ? (Number(rec.amountPaid) || Number(rec.amount) || line.amount)
+      : (Number(rec && rec.amountPaid) || 0);
+    const out = {
+      label: line.label, pct: line.pct, amount: Number(rec && rec.amount) || line.amount,
+      amountText: moneyIn(cur, Number(rec && rec.amount) || line.amount),
+      status, statusText: PAY_STATUS[status] || status, paid: paidAmt,
+    };
+    const due = dueDateOf(o, line, rec);
+    if (due) out.due = due;
+    if (rec && rec.paidAt) out.paidAt = String(rec.paidAt).slice(0, 10);
+    if (rec && rec.at) out.billedAt = String(rec.at).slice(0, 10);
+    if (rec && rec.method) out.method = rec.method;
+    if (rec && Number(rec.deduction) > 0) out.deduction = Number(rec.deduction);
+    return out;
+  });
+  const paid = lines.reduce((s, l) => s + (Number(l.paid) || 0), 0);
+  const tot = Number(o.total) || 0;
+  return { lines, paid, balance: Math.round((tot - paid) * 100) / 100,
+    summary: moneyIn(cur, paid) + ' paid of ' + moneyIn(cur, tot) };
+}
+// Orders carry no season of their own: it lives on the quote they came from,
+// or in the "From quote … · SS27" note the app writes.
+export function orderSeason(o, quotes) {
+  if (o.season) return String(o.season);
+  const q = (quotes || []).find((x) => x && (x.id === o.quoteId || (o.id && x.orderId === o.id)));
+  if (q && q.season) return String(q.season);
+  const m = String(o.notes || '').match(/·\s*((?:SS|FW|AW|PF|RS|Resort|Pre-?Fall)\s?\d{2,4})\b/i);
+  return m ? m[1] : '';
+}
+export function orderView(o, quotes, seasonCal) {
+  const season = orderSeason(o, quotes);
+  const cal = season && seasonCal && seasonCal[season];
+  const win = {};
+  const start = shipDateOf(o);
+  if (start) win.ships = start;
+  if (o.cancelDate) win.cancelDate = String(o.cancelDate).slice(0, 10);
+  if (cal && cal.deliveryStart) win.season = cal.deliveryStart + (cal.deliveryEnd ? ' to ' + cal.deliveryEnd : '');
+  const pay = orderPayments(o);
+  const out = {
+    id: o.id, account: o.account || o.buyer || o.buyerName || '', status: o.status || '',
+    season: season || undefined, currency: String(o.currency || 'USD').toUpperCase(),
+    total: Number(o.total) || 0, totalText: moneyIn(o.currency, o.total),
+    units: o.units, terms: o.terms || undefined,
+    deliveryWindow: Object.keys(win).length ? win : undefined,
+    payments: pay.lines, paid: pay.paid, balance: pay.balance, paymentSummary: pay.summary,
+    booked: o.createdAt ? String(o.createdAt).slice(0, 10) : undefined,
+    quoteId: o.quoteId || undefined,
+  };
+  Object.keys(out).forEach((k) => out[k] === undefined && delete out[k]);
+  return out;
+}
+
 // ── read tools ──────────────────────────────────────────────────────────────
 const readTools = [
   {
@@ -188,14 +299,17 @@ const readTools = [
       return text({
         buyer: slim(b),
         quotes: (arr(mods, 'sales', 'slQuotes') || []).filter(mentions).map((q) => slim(q)),
-        orders: (arr(mods, 'sales', 'slOrders') || []).filter(mentions).map((o) => slim(o)),
+        // Same view as list_orders, so payments read the same in both places.
+        orders: (arr(mods, 'sales', 'slOrders') || []).filter(mentions).map((o) => orderView(o,
+          arr(mods, 'sales', 'slQuotes') || [],
+          (moduleData(mods, 'product') || {}).seasonCal || (moduleData(mods, 'catalog') || {}).seasonCal || null)),
       });
     },
   },
   {
     name: 'list_orders',
     title: 'List wholesale orders',
-    description: 'Wholesale orders in VENIA OS (Sales) with status, totals and payments.',
+    description: 'Wholesale orders in VENIA OS (Sales): account, status, season, total in the order\'s own currency, the delivery window, and each payment instalment (deposit, balance or full) with its amount, due date and status. A status of "link" means a payment link was sent and is NOT paid.',
     inputSchema: {
       type: 'object',
       properties: { status: S.str('Optional status'), buyer: S.str('Optional buyer name'), season: S.str('Optional season, e.g. SS27'), ...limitProp },
@@ -203,10 +317,11 @@ const readTools = [
     run(mods, a) {
       const list = arr(mods, 'sales', 'slOrders');
       if (!list) return noAccess('Sales orders');
-      const out = list.filter((o) => (!a.status || eqi(o.status, a.status))
-        && (!a.buyer || has(o, a.buyer)) && (!a.season || has(o, a.season)));
-      return text({ total: out.length, orders: out.slice(0, clampLimit(a.limit)).map((o) => compact(o,
-        ['id', 'number', 'buyer', 'buyerName', 'store', 'season', 'status', 'total', 'currency', 'paid', 'balance', 'date', 'dueDate', 'deliveryStart', 'deliveryEnd'])) });
+      const quotes = arr(mods, 'sales', 'slQuotes') || [];
+      const cal = (moduleData(mods, 'product') || {}).seasonCal || (moduleData(mods, 'catalog') || {}).seasonCal || null;
+      const out = list.filter((o) => o && (!a.status || eqi(o.status, a.status))
+        && (!a.buyer || has(o, a.buyer)) && (!a.season || eqi(orderSeason(o, quotes), a.season) || has(o, a.season)));
+      return text({ total: out.length, orders: out.slice(0, clampLimit(a.limit)).map((o) => orderView(o, quotes, cal)) });
     },
   },
   {
