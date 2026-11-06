@@ -9,7 +9,7 @@ const CACHE = 'venia-shell-v593';
 // Update (see "SAVE FIXES LOAD THEMSELVES" in the app). Every other build
 // leaves it alone and keeps waiting for the tap, as before.
 const BUILD = '593';
-const SAVES_FIXED_IN = '578';
+const SAVES_FIXED_IN = '593';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
