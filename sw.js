@@ -1,14 +1,14 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v581';
+const CACHE = 'venia-shell-v582';
 // The last build that fixed SAVING. Bump this (to that build's number) only in
 // a build that fixes how changes reach the cloud. An open page on an older
 // build asks the waiting worker for it, and a page whose saves are failing
 // loads a newer save fix by itself instead of waiting for someone to tap
 // Update (see "SAVE FIXES LOAD THEMSELVES" in the app). Every other build
 // leaves it alone and keeps waiting for the tap, as before.
-const BUILD = '581';
+const BUILD = '582';
 const SAVES_FIXED_IN = '578';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 

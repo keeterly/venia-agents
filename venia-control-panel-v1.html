@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '581';
+  const BUILD = '582';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -25208,10 +25208,17 @@ function buildTodayFocus() {
   const items = [];
   const now = new Date();
   // 1. Overdue PR pulls
+  //    Only the pieces still out: naming ones already checked back in sent the
+  //    chase after samples that are on the rail. A pull with nothing left out
+  //    is not overdue, whatever its status says.
   (STATE.prPulls||[]).filter(p => p.status==='active').forEach(p => {
+    const all = (p.items||[]).filter(Boolean);
+    const out = all.filter(i => !i.returned);
+    if (all.length && !out.length) return;
     const due = new Date(p.returnDate||p.dueDate||p.createdAt);
     const days = Math.floor((now-due)/86400000);
-    if (days > 0) items.push({key:'pull|'+p.id, pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${(p.items||[]).map(i=>i.styleName).join(', ')})`});
+    const still = out.length < all.length ? ` — ${out.length} of ${all.length} still out` : '';
+    if (days > 0) items.push({key:'pull|'+p.id, pri:'high', text:`PR Pull overdue ${days}d — ${p.client} (${out.map(i=>i.styleName).join(', ')})${still}`});
     else if (days > -3) items.push({key:'pull|'+p.id, pri:'med', text:`PR Pull due soon — ${p.client}`});
   });
   // 2. Pipeline follow-ups (Buyers CRM): planned moves that did not happen.
@@ -25365,14 +25372,20 @@ function buildTodayFocus() {
   });
   // 6c. Invoices genuinely past due (real AR, not "invoice was sent"): only
   //     items past the Stripe due date (or invoice date + 14d terms) surface.
+  //     Instalment orders count each billed deposit or balance (invoice or
+  //     payment link) on its own due date; older orders read o.payment as before.
   (STATE.slOrders || dbGet('slOrders') || []).forEach(o => {
-    const p = o.payment; if (!p || !p.invoiceId) return;
-    if (['paid','void','uncollectible'].indexOf(p.status) >= 0) return;
-    const dueIso = p.dueDate || (p.at ? new Date(new Date(p.at).getTime() + 14*86400000).toISOString().slice(0,10) : '');
-    if (!dueIso) return;
-    const over = Math.round((midnight - new Date(dueIso + 'T00:00:00')) / 86400000);
-    if (over > 0) items.push({key:'inv|'+o.id, pri:'high', text:`Invoice #${o.id} (${o.account}) is ${over}d past due — $${Math.round((p.amountRemaining!=null?p.amountRemaining:o.total)||0).toLocaleString()} outstanding`,
-                              act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
+    if (o.status === 'cancelled') return;
+    slOrderReceivables(o).forEach(p => {
+      if (!p.billed || (p.legacy && !p.invoiceId)) return;
+      if (['paid','void','uncollectible'].indexOf(p.status) >= 0 || !(p.open > 0)) return;
+      const dueIso = p.dueDate;
+      if (!dueIso) return;
+      const over = Math.round((midnight - new Date(dueIso + 'T00:00:00')) / 86400000);
+      const what = p.legacy ? `Invoice #${o.id}` : `${p.label} for #${o.id}`;
+      if (over > 0) items.push({key:'inv|'+o.id+(p.legacy?'':'|'+p.key), pri:'high', text:`${what} (${o.account}) is ${over}d past due — ${slMoney(p.open, o.currency)} outstanding`,
+                                act:"cpGoto('sl');setTimeout(function(){agNavGo('sl','orders')},150)"});
+    });
   });
   // 6b. Production POs: factory payments coming due, and ex-factory dates near.
   (STATE.pos||[]).filter(po => !['received','cancelled'].includes(po.status)).forEach(po => {
@@ -28469,11 +28482,15 @@ function prMoments(){
         suggest: 'Chase ' + (pull.contact || pub) + ' for the tearsheet' });
     } else if (pull.status === 'active') {
       const due = prDaysSince(pull.returnDate);
+      // Count what is actually still out, not every piece that went.
+      const out = items.filter(i => i && !i.returned);
+      const outRetail = out.length < items.length
+        ? out.reduce((t, i) => t + (Number(i.retail) || 0), 0) : (Number(pull.totalRetail) || 0);
       if (due !== null && due > 0) {
         push({ id: 'M-late-' + pull.id, kind: 'pull-overdue', desk: 'newsroom',
           at: pull.returnDate,
           headline: pub + ' is ' + due + ' day' + (due === 1 ? '' : 's') + ' past return',
-          why: items.length + ' samples still out, ' + (pull.totalRetail ? '$' + Number(pull.totalRetail).toLocaleString() + ' ' : '')
+          why: out.length + ' sample' + (out.length === 1 ? '' : 's') + ' still out, ' + (outRetail ? '$' + outRetail.toLocaleString() + ' ' : '')
              + 'on loan. Chasing them is also the natural moment to ask where the story is.',
           evidence: [prEv((pull.invoiceNo || pull.id) + ' — return by ' + pull.returnDate, pull.id)],
           suggest: 'Chase the return and the tearsheet together' });
@@ -42177,6 +42194,20 @@ function slOpenOrderDetail(id) {
       catch(e){} finally { window.__slInvRefreshing = false; }
     })(o.id);
   }
+  // The same for instalments: a deposit or balance paid by link or invoice
+  // shows as paid when the order is opened, without tapping Check Stripe.
+  // Read-only status checks; skipped when this order was checked in the last
+  // two minutes, so the reopen after a change does not ask again.
+  (function(){
+    const live = (o.payments || []).filter(p => p && ['paid','void','uncollectible'].indexOf(p.status) < 0
+      && (p.linkId || p.sessionId || p.invoiceId));
+    if (!live.length || (window.__slOrdChecking || {})[o.id]) return;
+    const last = live.reduce((m, p) => Math.max(m, Date.parse(p.checkedAt || '') || 0), 0);
+    if (Date.now() - last < 2*60*1000) return;
+    (window.__slOrdChecking = window.__slOrdChecking || {})[o.id] = true;
+    Promise.resolve().then(() => slOrderPayCheck(o.id, true)).catch(() => {})
+      .finally(() => { delete window.__slOrdChecking[o.id]; });
+  })();
   const ex = document.getElementById('sl-ord-modal'); if (ex) ex.remove();
   const ov = document.createElement('div');
   ov.className = 'overlay'; ov.id = 'sl-ord-modal';
@@ -42307,6 +42338,75 @@ function slOrderPaidTotal(o){
   return slOrderPayments(o).filter(p => p.status === 'paid')
     .reduce((s,p) => s + (Number(p.amountPaid) || Number(p.amount) || 0), 0);
 }
+// WHAT AN ORDER OWES, ONE LINE PER INSTALMENT, FOR THE MONEY READERS.
+//
+// Money (AR, collected, the cash calendar) and Today read only the old single
+// `o.payment`. Since instalments arrived, a deposit or balance billed by link or
+// invoice lives in `o.payments` and `o.payment` is often absent, so an order
+// with two open payment links read as owing nothing at all.
+//
+// Read-only: unlike slOrderPayments this never writes to the order, because
+// it runs inside renders. Shapes:
+//   - no instalment records: the old `o.payment` as one line for the order,
+//     exactly as the readers used it before (nothing billed → no lines);
+//   - instalment records: one line per instalment in the terms, billed or not.
+//     A recorded wire (record_payment writes `o.payment`, not an instalment) is
+//     credited to the unpaid instalments in order, deposit first; an
+//     `o.payment` that only mirrors one of the instalment invoices is ignored
+//     so it is not counted twice. A logged deduction applies once per order.
+// Each line: { key, label, amount, status, billed, paid, open, dueDate,
+//              paidAt, at, deduction, legacy }.
+function slOrderReceivables(o){
+  if (!o) return [];
+  const num = (v) => Number(v) || 0;
+  const plus = (iso, d) => { const t = new Date(iso); return isNaN(t) ? '' : new Date(t.getTime() + d*86400000).toISOString().slice(0,10); };
+  const legacy = o.payment && o.payment.status ? o.payment : null;
+  const recs = Array.isArray(o.payments) ? o.payments.filter(p => p && typeof p === 'object' && p.status) : [];
+  if (!recs.length) {
+    if (!legacy) return [];
+    const st = legacy.status;
+    return [{ key: 'order', label: '', amount: num(o.total), status: st, billed: true, legacy: true,
+      paid: st === 'paid' ? (legacy.amountPaid != null ? num(legacy.amountPaid) : num(o.total)) : num(legacy.amountPaid),
+      open: st === 'paid' ? 0 : (legacy.amountRemaining != null ? num(legacy.amountRemaining) : num(o.total)),
+      dueDate: legacy.dueDate || (legacy.at ? plus(legacy.at, 14) : ''),
+      paidAt: legacy.paidAt || null, at: legacy.at || '', invoiceId: legacy.invoiceId || '',
+      deduction: num(legacy.deduction) }];
+  }
+  const ids = recs.map(p => p.invoiceId).filter(Boolean);
+  const mirror = !!(legacy && legacy.invoiceId && ids.indexOf(legacy.invoiceId) >= 0);
+  let wire = legacy && !mirror ? num(legacy.amountPaid) : 0;
+  const wireAt = legacy && !mirror ? (legacy.paidAt || null) : null;
+  let deduction = legacy ? num(legacy.deduction) : 0;
+  const lines = slTermsSchedule(o.terms, o.total).map(line => {
+    const p = recs.find(r => r.key === line.key) || null;
+    const amount = num(p && p.amount) || num(line.amount);
+    const status = p ? String(p.status) : '';
+    const gone = status === 'void' || status === 'uncollectible';
+    let paid = status === 'paid' ? (p.amountPaid != null ? num(p.amountPaid) : amount) : num(p && p.amountPaid);
+    let open = (status === 'paid' || gone) ? 0
+      : (p && p.amountRemaining != null ? num(p.amountRemaining) : Math.max(0, amount - paid));
+    let due = '';
+    try { due = slDueDate(o, line, p) || ''; } catch (e) {}
+    if (!due && p && p.at) due = plus(p.at, 14);
+    return { key: line.key, label: line.label, amount, status, billed: !!p, legacy: false,
+      paid, open, dueDate: due, paidAt: (p && p.paidAt) || null, at: (p && p.at) || '',
+      invoiceId: (p && p.invoiceId) || '', deduction: 0 };
+  });
+  lines.forEach(l => {
+    if (!(wire > 0) || l.status === 'paid' || l.status === 'void' || l.status === 'uncollectible' || !(l.open > 0)) return;
+    const take = Math.min(wire, l.open);
+    wire -= take; l.paid = Math.round((l.paid + take) * 100) / 100; l.open = Math.round((l.open - take) * 100) / 100;
+    l.billed = true;
+    if (!l.at) l.at = (legacy && legacy.at) || '';
+    if (l.open <= 0) { l.status = 'paid'; l.paidAt = l.paidAt || wireAt; }
+    else if (!l.status) l.status = 'open';
+  });
+  if (deduction > 0) {
+    const first = lines.find(l => l.paid > 0);
+    if (first) first.deduction = deduction;
+  }
+  return lines;
+}
 // Send ONE instalment as a Stripe invoice — the buyer gets an email with a pay
 // link, which is how a wholesale account expects to be billed.
 window.slOrderInvoice = async function(orderId, key){
@@ -42435,6 +42535,7 @@ window.slOrderPayCheck = async function(orderId, quiet){
           else if (r.status === 'uncollectible') p.status = 'uncollectible';
           if (r.amount_paid != null) p.amountPaid = r.amount_paid;
           if (r.amount_remaining != null) p.amountRemaining = r.amount_remaining;
+          if (r.due_date) p.dueDate = r.due_date;
           if (r.hosted_invoice_url) p.url = r.hosted_invoice_url;
           if (was !== p.status) changed++;
         }
@@ -42454,6 +42555,52 @@ window.slOrderPayCheck = async function(orderId, quiet){
   } else if (!quiet) showToast('No change — Stripe says the same as before', 'info');
   return changed;
 };
+// PAID LINKS WERE ONLY NOTICED WHEN SOMEONE TAPPED "CHECK STRIPE".
+//
+// The boot sweep (slRefreshInvoiceStatuses) reads the old single o.payment
+// invoice only, so a deposit or balance paid through its payment link, or an
+// instalment invoice, stayed "not paid" on Money and Today until a founder
+// opened the order and asked. This sweeps every order with an instalment that
+// is still open and has something Stripe can answer for (a link, an old
+// Checkout session or an invoice), through the same slOrderPayCheck the button
+// uses, quietly.
+//
+// STATUS READS ONLY: paylink_status, status and invoice_status. Nothing here
+// creates, changes, cancels or refunds a payment.
+//
+// Same moments the pull reconcile uses: boot, the app coming back to the
+// foreground, and a five-minute timer while it is on screen; opening an order
+// checks that order on its own (see slOpenOrderDetail). A sweep runs at most once every four minutes and asks about at
+// most 12 orders, so a phone opened and closed all day stays cheap.
+window.slReconcileOrderPayments = async function(why){
+  const now = Date.now();
+  if (window.__slOrdSweepBusy) return 0;
+  if (window.__slOrdSweepAt && now - window.__slOrdSweepAt < 4*60*1000) return 0;
+  const open = (STATE.slOrders || []).filter(o => o && o.status !== 'cancelled' && Array.isArray(o.payments)
+    && o.payments.some(p => p && ['paid','void','uncollectible'].indexOf(p.status) < 0
+      && (p.linkId || p.sessionId || p.invoiceId)));
+  if (!open.length) return 0;
+  window.__slOrdSweepBusy = true; window.__slOrdSweepAt = now;
+  let changed = 0;
+  try {
+    for (const o of open.slice(0, 12)) {
+      try { changed += (await slOrderPayCheck(o.id, true)) || 0; } catch (e) {}
+    }
+  } finally { window.__slOrdSweepBusy = false; }
+  if (changed) {
+    try { if (typeof cmdRenderMoney === 'function' && document.getElementById('cmd-money-body')) cmdRenderMoney(); } catch (e) {}
+    try { buildTodayFocus(); } catch (e) {}
+  }
+  return changed;
+};
+;(function(){
+  const go = (why) => { try { slReconcileOrderPayments(why); } catch (e) {} };
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible') setTimeout(() => go('visible'), 1500);
+  });
+  setInterval(() => { if (document.visibilityState === 'visible') go('timer'); }, 5 * 60 * 1000);
+  setTimeout(() => go('boot'), 21000);   // after the initial sync settles, as the invoice sweep does
+})();
 
 // Wholesale invoicing through the same Stripe rail PR pulls already use.
 // Kept for older call sites: bill the first instalment the terms describe.
@@ -45603,9 +45750,15 @@ function cmdMoneyData(opts) {
   const arOpen = [];
   let wsCollectedYtd = 0;
   const arNow = new Date();
+  // One pass per INSTALMENT (slOrderReceivables). Reading only o.payment
+  // left every deposit and balance billed by link or invoice out of AR and
+  // collected, so an order with two open payment links showed nothing owed.
+  // An order with no instalments yields its old o.payment as one line, read
+  // exactly as before; an instalment nobody has billed yet is not AR.
   orders.forEach(o => {
-    const pay = o.payment; if (!pay || !pay.status) return;
     const inYtd = slOrderBookedAt(o) >= jan1iso;
+    slOrderReceivables(o).forEach(pay => {
+    if (!pay.billed) return;
     // COLLECTED is dated by when the money ARRIVED, not when the order was
     // booked. Dating it by booking meant an order placed last December and
     // paid in February never appeared in this year's collections, while one
@@ -45614,14 +45767,16 @@ function cmdMoneyData(opts) {
     // paidAt is stamped when a device first observes the invoice settle
     // (see slRefreshInvoices); legacy rows without it fall back to booking.
     const collectedYtd = pay.paidAt ? (pay.paidAt >= jan1iso) : inYtd;
-    if (pay.status === 'paid') { if (collectedYtd) wsCollectedYtd += ((pay.amountPaid != null ? pay.amountPaid : o.total) || 0) - (pay.deduction || 0); return; }
+    if (pay.status === 'paid') { if (collectedYtd) wsCollectedYtd += (pay.paid || 0) - (pay.deduction || 0); return; }
     if (pay.status === 'void' || pay.status === 'uncollectible') return;
-    if (collectedYtd && pay.amountPaid) wsCollectedYtd += pay.amountPaid - (pay.deduction || 0);
-    const dueIso = pay.dueDate || (pay.at ? new Date(new Date(pay.at).getTime() + 14*86400000).toISOString().slice(0,10) : '');
+    if (collectedYtd && pay.paid) wsCollectedYtd += pay.paid - (pay.deduction || 0);
+    const dueIso = pay.dueDate || '';
     const days = dueIso ? Math.floor((arNow - new Date(dueIso + 'T00:00:00')) / 86400000) : 0;
-    const openAmt = (pay.amountRemaining != null ? pay.amountRemaining : o.total) || 0;
-    arOpen.push({ id: o.id, account: o.account||'', open: openAmt, days,
+    const openAmt = pay.open || 0;
+    if (!(openAmt > 0)) return;
+    arOpen.push({ id: o.id, label: pay.label || '', account: o.account||'', currency: o.currency || 'USD', open: openAmt, days,
                   bucket: days<=0?'current':days<=30?'1–30d':days<=60?'31–60d':days<=90?'61–90d':'90d+' });
+    });
   });
   arOpen.sort((a,b) => b.days - a.days);
   // DTC COGS: real landed cost × units actually sold (YTD bucket).
@@ -45919,7 +46074,7 @@ window.cmdRenderMoney = function() {
     ${d.arOpen.length ? `<section><div class="ag-sec-head"><h2 class="ag-sec-title">Accounts receivable — open invoices</h2></div>
     <div class="money-block">
       ${d.arOpen.map(a => `<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11.5px;cursor:pointer" onclick="slOpenOrderDetail('${a.id}')">
-        <span>#${slEsc(a.id)} <span style="color:var(--muted)">· ${slEsc(a.account)}</span></span>
+        <span>#${slEsc(a.id)}${a.label ? ' · ' + slEsc(a.label.toLowerCase()) : ''} <span style="color:var(--muted)">· ${slEsc(a.account)}</span></span>
         <span style="font-family:'DM Mono',monospace;white-space:nowrap"><span style="color:${a.days>30?'var(--red)':a.days>0?'var(--amber)':'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-right:8px">${a.bucket}${a.days>0?' · '+a.days+'d over':''}</span>$${Math.round(a.open).toLocaleString()}</span>
       </div>`).join('')}
     </div></section>` : ''}
@@ -45980,7 +46135,7 @@ function veniaFinanceContext(){
     if (p.at) parts.push('DTC pulse: last 30d ' + money(p.r30||0) + ' across ' + (p.n30||0) + ' orders (prior 30d ' + money(p.rPrev||0) + ')');
     else parts.push('DTC pulse: Shopify has not reported this session — DTC lines read $0 until it loads. Say so instead of treating DTC as zero.');
     if (d.arOpen.length) parts.push('AR — open invoices (oldest first):\n' + d.arOpen.slice(0,12).map(a =>
-      '• #' + a.id + ' ' + a.account + ' — ' + money(a.open) + ' open, ' + a.bucket + (a.days>0 ? ' (' + a.days + 'd overdue)' : '')
+      '• #' + a.id + (a.label ? ' ' + a.label.toLowerCase() : '') + ' ' + a.account + ' — ' + money(a.open) + ' open, ' + a.bucket + (a.days>0 ? ' (' + a.days + 'd overdue)' : '')
     ).join('\n') + (d.arOpen.length>12 ? '\n…+' + (d.arOpen.length-12) + ' more' : ''));
     else parts.push('AR: no open invoices.');
     parts.push('Pipeline (not yet revenue): quotes out ' + money(d.pipeSent) + ', accepted-not-yet-ordered ' + money(d.pipeAccepted));
@@ -46478,6 +46633,24 @@ function finCashCalendar(days){
     // ── IN: receivables with a due date, and orders that will invoice ─────
     const orders = (STATE.slOrders || []).filter(o => o && o.status !== 'cancelled');
     orders.forEach(o => {
+      // INSTALMENT ORDERS: each deposit and balance on its own date. Billed
+      // ones (invoice or payment link) are committed on their due date, or
+      // land today when overdue; ones not billed yet are expected on the date
+      // the terms give them. Orders with no instalments keep the path below.
+      const lines = slOrderReceivables(o);
+      if (lines.length && !lines[0].legacy) {
+        lines.forEach(ln => {
+          if (['paid','void','uncollectible'].indexOf(ln.status) >= 0 || !(ln.open > 0)) return;
+          const what = ln.label + ' #' + o.id;
+          const who = ' — ' + (o.account||'');
+          const due = ln.dueDate
+            || (!ln.billed && o.deliveryDate ? iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)) : '');
+          if (due && new Date(due + 'T00:00:00') < today) push(iso(today), 'in', ln.open, 'Overdue ' + what.charAt(0).toLowerCase() + what.slice(1) + who, 'ar', 'expected');
+          else if (ln.billed) push(due, 'in', ln.open, what + ' due' + who, 'ar', 'committed');
+          else push(due, 'in', ln.open, what + ', not billed yet' + who, 'ws', 'expected');
+        });
+        return;
+      }
       const pay = o.payment;
       if (pay && pay.invoiceId && ['paid','void','uncollectible'].indexOf(pay.status) < 0) {
         const amt = pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0);
