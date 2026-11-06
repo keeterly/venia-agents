@@ -51495,11 +51495,51 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       raw: String(why || 'no session').slice(0, 140), via: 'paused for sign-in' };
     signinBanner(true);
   }
-  function resumeAfterSignIn(why){
+  // AN OLD COPY IS KEPT, NOT MERGED.
+  //
+  // A device that has not agreed with the cloud for days holds a picture of
+  // the workspace from back then. Merging it in would let that old picture win
+  // fields the other founder has changed since, and a two-week-old copy is far
+  // more likely to undo real work than to add any. Keeter's call: don't copy it
+  // in. So past STALE_MS the device takes the cloud as it is, keeps its own copy
+  // in IndexedDB (veniaUnsavedBackups()), pushes nothing, and says so.
+  var STALE_MS = 48 * 3600 * 1000;
+  function lastAgreedAt(){
+    var a = 0, r = 0;
+    try { a = parseInt(localStorage.getItem('venia-cloud-agreed-at') || '0', 10) || 0; } catch (e) {}
+    try { r = parseInt(localStorage.getItem('venia-sync-rev') || '0', 10) || 0; } catch (e) {}
+    return Math.max(a, r);   // venia-sync-rev: a device from before this build
+  }
+  function localIsStale(){
+    var t = lastAgreedAt();
+    return !t || (Date.now() - t) > STALE_MS;
+  }
+  function setAsideStaleLocal(row, why){
+    var since = lastAgreedAt();
+    unsavedBackup('set aside, not merged: ' + (why || 'stale'));
+    applySnapshot(row.data);
+    // This device's old deletions are part of the old copy: do not replay them.
+    try { STATE._tomb = Object.assign({}, (row.data && row.data._tomb) || {}); } catch (e) {}
+    setBase(row.data);
+    pushLanded();
+    try { rerender(); } catch (e) {}
+    var when = since ? new Date(since).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'a while';
+    window.__syncStat.decision = 'local copy last agreed ' + when + ' — set aside (backup kept), cloud applied';
+    try {
+      showToast('This device hadn\u2019t synced since ' + when + ', so it now shows the latest VENIA data. '
+        + 'Its older unsaved changes were not copied in; a backup is kept on this device.', 'info');
+    } catch (e) {}
+  }
+  async function resumeAfterSignIn(why){
     if (!authPaused) return;
     authPaused = false;
     signinBanner(false);
     unsavedBackup('before first push after sign-in');
+    if (localIsStale()) {
+      var row = null;
+      try { row = await pullRow(); } catch (e) { row = null; }
+      if (row && row.data) { setAsideStaleLocal(row, why || 'signed back in'); return; }
+    }
     // pushWake is a no-op unless something is owed, and it resets the backoff.
     pushWake(why || 'signed back in');
   }
@@ -51552,7 +51592,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // agreement point is the bug above; starting null costs at most one
   // resurrected row, and only in the sliver before the boot pull sets the
   // base from the cloud (pushNow refuses to run before that pull anyway).
-  function setBase(snap){ try { sessionStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
+  function setBase(snap){
+    try { sessionStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){}
+    try { localStorage.setItem('venia-cloud-agreed-at', String(Date.now())); } catch(e){}
+  }
   function getBase(){ try { var s = sessionStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
   // And clear the shared one, once. A tab still running an older build reads
   // that key every merge; emptied, it reads null and unions instead, so the
@@ -52311,6 +52354,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       (Array.isArray(d0.prPulls) && d0.prPulls.length) ||
       (Array.isArray(d0.materials) && d0.materials.length)
     ));
+    if (cloudOk && !FRESH_BROWSER && localIsStale()){
+      _logDecision('cloudOk=true, local copy older than 48h → set aside (backup kept), cloud applied');
+      setAsideStaleLocal(row, 'boot');
+      return;
+    }
     if (cloudOk){
       var cloudRev = row.rev || 0;
       // Apply the cloud copy when this browser is fresh (no real local data),
