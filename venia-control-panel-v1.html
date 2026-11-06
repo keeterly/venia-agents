@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '583';
+  const BUILD = '584';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -21427,6 +21427,65 @@ window.prCartRetail = function(idx, v){
 };
 window.prCartName = function(idx, v){ if (PR_CART[idx]) PR_CART[idx].styleName = String(v||'').trim(); };
 
+// ── A PIECE WITH NO VALUE ─────────────────────────────────────────────────
+// Pieces went out on pull sheets at $0: a one-off whose value was never typed,
+// and styles whose library record has no retail price. The sheet the borrower
+// signs says VENIA may invoice for a lost piece "at full retail value", and for
+// those pieces that value was nothing. So a piece without a value is flagged
+// wherever the sheet is about to leave: the Items tab gives it a value box,
+// the Review tab lists it, and finalizing, emailing or printing a sheet stops
+// to ask first. The value is set on the pull, never on the style.
+function prNoValue(items){
+  return (items||[]).filter(it => it && !(Number(it.retail) > 0));
+}
+function prItemLabel(it){
+  const nm = String((it && (it.styleName || it.styleCode)) || '').trim() || 'Unnamed piece';
+  return nm + (it && it.size ? ' (' + it.size + ')' : '');
+}
+// Before a saved pull's sheet goes out. Returns false to stop. OK adds the
+// values one by one (a cancelled box stops the send), Cancel goes on without.
+function prValueGate(pull, verb){
+  if (!pull) return false;
+  const miss = prNoValue(pull.items);
+  if (!miss.length) return true;
+  const n = miss.length;
+  if (!confirm(n + (n === 1 ? ' piece on this pull has' : ' pieces on this pull have') + ' no value:\n\n'
+      + miss.map(it => '• ' + prItemLabel(it)).join('\n')
+      + '\n\nIf a piece is lost or damaged, the sheet states nothing to invoice for.'
+      + '\n\nOK — add the values now.\nCancel — ' + verb + ' without them.')) return true;
+  let added = 0;
+  for (const it of miss) {
+    const v = prompt('Retail value in dollars for ' + prItemLabel(it) + ':', '');
+    if (v === null) { toast('Not ' + (verb === 'print' ? 'printed' : 'sent') + ' — add the values and try again', 'warn'); return false; }
+    const num = parseFloat(String(v).replace(/[^0-9.]/g, ''));
+    if (num > 0) { it.retail = num; added++; }
+  }
+  if (added) {
+    pull.totalRetail = (pull.items||[]).reduce((t, i) => t + (Number(i && i.retail) || 0), 0);
+    pull.updatedAt = new Date().toISOString();
+    save();
+    try { logActivity('Pull ' + (pull.invoiceNo || pull.id) + ': value added to ' + added + ' piece(s) before the sheet went out'); } catch(e){}
+  }
+  return true;
+}
+// The Items tab, before finalizing: back to Items to fill in, or go on.
+function prCartValueGate(){
+  const miss = prNoValue(PR_CART);
+  if (!miss.length) return true;
+  const n = miss.length;
+  if (!confirm(n + (n === 1 ? ' piece has' : ' pieces have') + ' no value:\n\n'
+      + miss.map(it => '• ' + prItemLabel(it)).join('\n')
+      + '\n\nIf a piece is lost or damaged, the sheet states nothing to invoice for.'
+      + '\n\nOK — add the values first.\nCancel — finalize without them.')) return true;
+  try { prCartTab('styles', document.querySelectorAll('#pr-cart-modal .modal-tab')[1]); } catch(e){}
+  setTimeout(function(){
+    const i = PR_CART.findIndex(it => it && !(Number(it.retail) > 0));
+    const el = document.getElementById('pr-oneoff-retail-' + i);
+    if (el) { try { el.focus(); el.scrollIntoView({ block: 'center' }); } catch(e){} }
+  }, 80);
+  return false;
+}
+
 function prItemStyle(item){
   if (!item) return null;
   return (STATE.styles||[]).find(x => x.id === item.styleId)
@@ -22585,11 +22644,11 @@ function prRenderCart() {
       <input class="fi fi-mono" style="width:70px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Size" value="${item.size}" oninput="PR_CART[${idx}].size=this.value" title="Size">
       <input class="fi" style="width:90px;min-height:auto;padding:4px 6px;font-size:11px" placeholder="Color" value="${item.color}" oninput="PR_CART[${idx}].color=this.value" title="Color">
       <input class="fi fi-mono" style="width:120px;min-height:auto;padding:4px 6px;font-size:10px" placeholder="NFC tag ID" value="${item.nfcTag||''}" oninput="PR_CART[${idx}].nfcTag=this.value" title="NFC tag ID">
-      ${item.oneOff && !prItemStyle(item)
-        ? `<span style="display:inline-flex;align-items:center;gap:3px;color:var(--gold)"><span style="font-size:11px">$</span>
-             <input class="fi fi-mono" id="pr-oneoff-retail-${idx}" type="number" min="0" step="1" value="${item.retail||''}" placeholder="Retail"
-                    oninput="prCartRetail(${idx},this.value)" title="Retail value — drives the pull's total, a % fee, and any card hold"
-                    style="width:74px;min-height:auto;padding:4px 6px;font-size:11px;text-align:right"></span>`
+      ${(item.oneOff && !prItemStyle(item)) || !(Number(item.retail) > 0)
+        ? `<span style="display:inline-flex;align-items:center;gap:3px;color:${Number(item.retail) > 0 ? 'var(--gold)' : 'var(--amber)'}"><span style="font-size:11px">$</span>
+             <input class="fi fi-mono" id="pr-oneoff-retail-${idx}" type="number" min="0" step="1" value="${item.retail||''}" placeholder="${Number(item.retail) > 0 ? 'Retail' : 'No value'}"
+                    oninput="prCartRetail(${idx},this.value)" title="Retail value — drives the pull's total, a % fee, any card hold, and what a lost piece is invoiced at"
+                    style="width:74px;min-height:auto;padding:4px 6px;font-size:11px;text-align:right${Number(item.retail) > 0 ? '' : ';border-color:var(--amber)'}"></span>`
         : `<span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);min-width:50px;text-align:right">${item.retail?'$'+item.retail:''}</span>`}
       <button onclick="prRemoveFromCart(${idx})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:4px;line-height:1">×</button>
     </div>`).join('');
@@ -22648,8 +22707,15 @@ function prBuildReview() {
   const feeAmt = prCalcFee() || 0;
   const total = PR_CART.reduce((s,i) => s + (i.retail||0), 0);
   const invoiceNo = document.getElementById('pr-invoice-no')?.value || 'Draft';
+  const noValue = prNoValue(PR_CART);
 
   el.innerHTML = `
+    ${noValue.length ? `<div style="border-left:2px solid var(--amber);background:var(--bg-off);padding:10px 14px;margin-bottom:12px;font-size:11px;line-height:1.7">
+      <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);font-weight:700">${noValue.length} piece${noValue.length === 1 ? '' : 's'} with no value</div>
+      <div>${noValue.map(it => escHtml(prItemLabel(it))).join(' · ')}</div>
+      <div style="color:var(--muted)">If one is lost or damaged, this sheet states nothing to invoice for.</div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="prCartTab('styles', document.querySelectorAll('#pr-cart-modal .modal-tab')[1])">Add values on ② Items</button>
+    </div>` : ''}
     <div style="border:1px solid var(--border);padding:20px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:16px;margin-bottom:16px;border-bottom:2px solid var(--ink)">
         <div>
@@ -22695,7 +22761,7 @@ function prBuildReview() {
             <td style="padding:10px 12px;font-size:11px">${item.size||'—'}</td>
             <td style="padding:10px 12px;font-size:11px">${item.color||'—'}</td>
             <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${item.nfcTag||'—'}</td>
-            <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:11px;text-align:right">${item.retail?'$'+item.retail:''}</td>
+            <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:11px;text-align:right">${Number(item.retail) > 0 ? '$'+item.retail : '<span style="color:var(--amber)">No value</span>'}</td>
             <td style="padding:10px 12px;text-align:center;border:none"><div style="width:18px;height:18px;border:1px solid var(--border-mid);margin:auto"></div></td>
             <td style="padding:10px 12px;text-align:center"><div style="width:18px;height:18px;border:1px solid var(--border-mid);margin:auto"></div></td>
           </tr>`).join('')}
@@ -22753,6 +22819,8 @@ function prFinalizePull() {
   const client = document.getElementById('pr-client-name')?.value.trim();
   const email = document.getElementById('pr-contact-email')?.value.trim();
   if (!client) { toast('Client name required'); prCartTab('client', document.querySelectorAll('#pr-cart-modal .modal-tab')[0]); return; }
+  // A piece with no value is asked about here, once, before the sheet exists.
+  if (!prCartValueGate()) return;
 
   const built = prBuildPullObj('active');
   const existingIdx = STATE.prPulls.findIndex(p => p.id === built.id);
@@ -22771,7 +22839,7 @@ function prFinalizePull() {
 
   // Email the pull sheet automatically when a contact email is on file (optional).
   if (email) {
-    setTimeout(() => prSendEmail(pull), 300);
+    setTimeout(() => prSendEmail(pull, undefined, { valuesChecked: true }), 300);
   }
   // Then, while they are still in the room, take the signature.
   setTimeout(() => { try { prSignOpen(pull.id); } catch(e){} }, email ? 900 : 350);
@@ -24238,9 +24306,10 @@ async function gmailProbe(interactive){
 }
 window.gmailProbe = gmailProbe;
 
-async function prSendEmail(pull, opener) {
+async function prSendEmail(pull, opener, opts) {
   if (!pull) { toast('Pull not found', 'warn'); return; }
   if (!pull.email) { toast('No contact email on this pull — add one to send', 'warn'); return; }
+  if (!(opts && opts.valuesChecked) && !prValueGate(pull, 'send')) return;
   const d = prMailBuild(pull, opener);
   const cc = pullCc();
   const done = (from, via) => {
@@ -29141,6 +29210,7 @@ function agRenderCoverage(filter, returnHtml) {
 function prPrintPullSheet(pullId) {
   const pull = (STATE.prPulls || []).find(p => p.id === pullId);
   if (!pull) { toast('Pull not found', 'warn'); return; }
+  if (!prValueGate(pull, 'print')) return;
 
   const items = (pull.items || []).map(item => {
     const st = prItemStyle(item);
@@ -35741,7 +35811,9 @@ function slBuyerStage(b){
   if (!nm) return stored;
   const same = (x) => String(x||'').trim().toLowerCase() === nm;
   const hasOrder = ((typeof STATE !== 'undefined' && STATE.slOrders) || []).some(o => o && o.status !== 'cancelled' && same(o.account));
-  if (hasOrder) return (stored === 'closed') ? 'closed' : 'active';
+  // A live order reads as Ordered. Stockist stays where someone set it, for an
+  // account that already carries the line.
+  if (hasOrder) return (stored === 'active') ? 'active' : 'closed';
   const hasQuote = ((typeof STATE !== 'undefined' && STATE.slQuotes) || []).some(q => q && q.status !== 'declined' && same(q.buyerName));
   if (hasQuote && stored === 'new') return 'quoted';
   return stored;
@@ -40234,11 +40306,116 @@ function slTouchAccount(name, text) {
   const today = new Date().toISOString().slice(0,10);
   b.log.unshift({ d: today, t: text });
   b.lastContact = today;
-  // Booking an order is the event that makes a prospect a stockist. Leaving
-  // the stage where it was is what let the pipeline report zero accounts
-  // doing business against a live order book.
-  if (/order created/i.test(String(text||'')) && b.stage !== 'closed' && b.stage !== 'inactive') b.stage = 'active';
+  // Booking an order moves the account to Ordered. Leaving the stage where it
+  // was is what let the pipeline report zero accounts doing business against
+  // a live order book. (It used to say Stockist, so a buyer with an order read
+  // as an established account; slSyncBuyerToOrder now does the full move.)
+  if (/order created/i.test(String(text||'')) && b.stage !== 'inactive') b.stage = 'closed';
 }
+
+// ── AN ORDER MOVES ITS BUYER ──────────────────────────────────────────────
+// Booking an order never touched the buyer's own card. The stage was nudged
+// (to Stockist, by the line above) but the planned next move stayed whatever
+// it was before the order, so an account that had ordered and owed a deposit
+// still told you to chase the quote, flagged overdue from weeks earlier.
+//
+// Now the order is what the card reads: the stage is Ordered and the next
+// step is the first instalment not yet paid, with its due date where the
+// terms give one. Dormant is a judgement and is never overridden.
+function slBuyerForAccount(name){
+  const k = String(name||'').trim().toLowerCase();
+  if (!k) return null;
+  return (STATE.slBuyers||[]).find(x => x && String(x.name||'').trim().toLowerCase() === k) || null;
+}
+// The move an order asks for next. Read-only: it never writes to the order.
+function slOrderNextStep(o){
+  if (!o) return null;
+  let lines = [];
+  try { lines = slOrderReceivables(o) || []; } catch (e) { lines = []; }
+  // Nothing billed yet: the terms still say what is owed and when.
+  if (!lines.length) {
+    try {
+      lines = slTermsSchedule(o.terms, o.total).map(l => ({ key: l.key, label: l.label,
+        amount: Number(l.amount) || 0, open: Number(l.amount) || 0, status: '',
+        dueDate: slDueDate(o, l, null) || '' }));
+    } catch (e) { lines = []; }
+  }
+  const settled = (st) => st === 'paid' || st === 'void' || st === 'uncollectible';
+  const due = lines.find(l => l && !settled(l.status) && (Number(l.open) > 0 || !l.status));
+  const ref = 'order #' + o.id;
+  if (!due) {
+    const ship = slOrderShipDate(o);
+    return { action: 'Ship ' + ref + ' (paid in full)', date: ship || '' };
+  }
+  const label = (lines.length > 1 && due.label) ? due.label : 'Payment';
+  const amt = Number(due.open) > 0 ? Number(due.open) : Number(due.amount) || 0;
+  return { action: label + ' due on ' + ref + (amt ? ' (' + slMoney(amt, o.currency) + ')' : ''),
+           date: String(due.dueDate || '').slice(0, 10) };
+}
+// Move the buyer named on an order. force: the order is new, so its step wins
+// over whatever was planned. Without force (the boot sweep) a planned move is
+// replaced only when it is clearly older than the order, or when it is still
+// the step this code wrote last time (b.nextAuto) and the order has moved on,
+// so a next step someone typed is never overwritten.
+function slSyncBuyerToOrder(o, opts){
+  opts = opts || {};
+  if (!o || o.status === 'cancelled' || o.status === 'draft') return false;
+  const b = slBuyerForAccount(o.account);
+  if (!b) return false;
+  let changed = false;
+  if (b.stage !== 'closed' && b.stage !== 'inactive' && (opts.force || !o.buyerSyncedAt)) {
+    const was = SL_STAGES[b.stage || 'new'] || b.stage || 'To Reach';
+    b.stage = 'closed';
+    if (!Array.isArray(b.log)) b.log = [];
+    b.log.unshift({ d: new Date().toISOString().slice(0,10), t: 'Stage: ' + was + ' → Ordered (order #' + o.id + ')' });
+    changed = true;
+  }
+  const step = slOrderNextStep(o);
+  if (step && step.action) {
+    const booked = String(o.createdAt || o.updatedAt || '').slice(0, 10);
+    const cur = String(b.nextAction || '').trim();
+    const ours = !!b.nextAuto && cur === b.nextAuto;
+    const stale = !cur || !b.nextDate || (booked && String(b.nextDate) < booked);
+    const mayWrite = opts.force || ours || (!o.buyerSyncedAt && stale);
+    if (mayWrite && (cur !== step.action || String(b.nextDate || '') !== step.date)) {
+      b.nextAction = step.action;
+      b.nextDate = step.date || '';
+      b.nextAuto = step.action;
+      b.nextFromOrder = o.id;
+      changed = true;
+    }
+  }
+  if (changed) b.updatedAt = new Date().toISOString();
+  return changed;
+}
+// Boot sweep: every live order brings its buyer up to date once (an order
+// booked before this build, like one made from a quote, never did), and a
+// step this code wrote follows the order as instalments are paid.
+function slSyncOrderBuyers(){
+  try {
+    let n = 0;
+    (STATE.slOrders||[]).forEach(o => {
+      if (!o || o.status === 'cancelled' || o.status === 'draft') return;
+      if (o.buyerSyncedAt) {
+        // Only buyers whose step still came from this order.
+        const b = slBuyerForAccount(o.account);
+        if (!b || b.nextFromOrder !== o.id) return;
+        if (slSyncBuyerToOrder(o)) n++;
+        return;
+      }
+      if (slSyncBuyerToOrder(o)) n++;
+      if (slBuyerForAccount(o.account)) o.buyerSyncedAt = new Date().toISOString();
+    });
+    if (n) {
+      save();
+      try { logActivity('CRM: ' + n + ' buyer card(s) brought up to date with their orders'); } catch (e) {}
+      try { if (typeof isSalesBuyersVisible === 'function' && isSalesBuyersVisible()) window.slOpenBuyers(); } catch (e) {}
+    }
+    return n;
+  } catch (e) { return 0; }
+}
+setTimeout(function(){ try { slSyncOrderBuyers(); } catch (e) {} }, 3600);
+setTimeout(function(){ try { slSyncOrderBuyers(); } catch (e) {} }, 21500);   // again after the first sync settles
 
 // ══ A QUOTE THAT DID NOT LAND ══════════════════════════════════════════════
 // "How do we handle a quote that gets cancelled?" — until now, by opening Edit,
@@ -40889,6 +41066,8 @@ window.slCreateOrderFromQuote = function(quoteId) {
   delete q.orderCancelled;          // there is a live order again; say so
   dbSet('slOrders', STATE.slOrders);
   slTouchAccount(rec.account, 'Wholesale order created — #' + id + ' · ' + slMoney(rec.total, rec.currency));
+  // The buyer's card follows the order: Ordered, and the deposit as next step.
+  try { if (slSyncBuyerToOrder(rec, { force: true }) || slBuyerForAccount(rec.account)) rec.buyerSyncedAt = new Date().toISOString(); } catch(e){}
   save();
   try { logActivity('Wholesale order ' + id + ' created from quote ' + q.id + ' — ' + rec.account); } catch(e){}
   showToast('Order ' + id + ' created from quote', 'success');
@@ -41996,6 +42175,13 @@ function slSaveOrder() {
     merged.inventoryApplied = true;
     merged.deliveredAt = merged.deliveredAt || new Date().toISOString();
   }
+  // A new order typed in here (or a draft becoming live) moves its buyer the
+  // same way an order from a quote does. Once per order: later edits leave a
+  // next step someone has since changed alone.
+  if (!prev && !merged.createdAt) merged.createdAt = merged.updatedAt;
+  if (!merged.buyerSyncedAt && merged.status !== 'draft' && merged.status !== 'cancelled') {
+    try { if (slSyncBuyerToOrder(merged, { force: true }) || slBuyerForAccount(merged.account)) merged.buyerSyncedAt = new Date().toISOString(); } catch(e){}
+  }
   if (idx>-1) STATE.slOrders[idx]=merged; else STATE.slOrders.unshift(merged);
   dbSet('slOrders', STATE.slOrders);
   save();
@@ -42080,6 +42266,17 @@ window.slCancelOrder = function(id){
   o.status = 'cancelled';
   o.cancelledAt = new Date().toISOString();
   o.updatedAt = o.cancelledAt;
+  // The buyer's next step came from this order (a deposit to collect); it is
+  // not owed any more. A step someone typed since is left alone.
+  try {
+    const bc = slBuyerForAccount(o.account);
+    if (bc && bc.nextFromOrder === id && bc.nextAuto && String(bc.nextAction||'').trim() === bc.nextAuto) {
+      bc.nextAction = 'Follow up: order #' + id + ' was cancelled';
+      bc.nextDate = '';
+      delete bc.nextAuto; delete bc.nextFromOrder;
+      bc.updatedAt = o.cancelledAt;
+    }
+  } catch(e){}
   // THE QUOTE WAS LEFT TIED TO THE DEAD ORDER. slCreateOrderFromQuote stamps
   // q.orderId, the row hides "→ Order" while it is set, and nothing ever
   // cleared it -- so an account that cancelled and then came back could not be
