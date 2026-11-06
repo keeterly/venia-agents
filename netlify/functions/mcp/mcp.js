@@ -21,6 +21,7 @@ import * as oauth from './oauth.js';
 import { listTools, callTool } from './tools.js';
 import { encryptionConfigured } from './store.js';
 import { anonKey } from './supa.js';
+import { isVeniaOrigin } from '../_shared/origins.js';
 
 const SERVER_INFO = { name: 'venia-os', title: 'VENIA OS', version: '1.0.0' };
 const PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -33,10 +34,10 @@ const INSTRUCTIONS = 'VENIA OS is VENIA Collection\'s internal operating app: To
 // Browsers may only reach /mcp from these origins. Claude's servers send no
 // Origin at all, so this blocks nothing real and stops a web page from driving
 // the endpoint with a stolen token (the spec's DNS-rebinding guard).
-const ALLOWED_ORIGINS = new Set([
-  'https://claude.ai', 'https://claude.com',
-  'https://creator.veniacollection.com', 'https://venia-creator.netlify.app',
-]);
+// VENIA's own addresses come from the shared list, which also lets this site's
+// preview deploys through (exact site only) so a PR can be checked end to end.
+const CLAUDE_ORIGINS = new Set(['https://claude.ai', 'https://claude.com']);
+const ALLOWED_ORIGINS = { has: (o) => CLAUDE_ORIGINS.has(o) || isVeniaOrigin(o) };
 
 const cors = {
   'Access-Control-Allow-Origin': '*',

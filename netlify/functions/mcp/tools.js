@@ -96,6 +96,15 @@ const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true,
 const PROPOSE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const PROPOSE_NOTE = ' This only PROPOSES the change: it waits in VENIA OS under "From Claude" until someone with edit access approves it there. Nothing changes before that.';
 
+// The app writes the log newest-first (unshift), and before Build 579 the sync
+// merge appended the other device's copy with no order at all — so neither end
+// of the array is reliably "latest". Sort by the entry's own time, every time.
+export function newestActivity(log, n) {
+  const t = (a) => Date.parse(a && a.ts) || 0;
+  return (Array.isArray(log) ? log : []).filter((a) => a && typeof a === 'object')
+    .slice().sort((a, b) => t(b) - t(a)).slice(0, n);
+}
+
 // ── read tools ──────────────────────────────────────────────────────────────
 const readTools = [
   {
@@ -111,7 +120,7 @@ const readTools = [
       return text({
         open_tasks: tasks,
         assigned: d.todayAssign || {},
-        recent_activity: (d.activityLog || []).slice(-15).map((a) => slim(a)),
+        recent_activity: newestActivity(d.activityLog, 15).map((a) => slim(a)),
         updated_at: mods.home.updated_at,
       });
     },

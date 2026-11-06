@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Secure server-side proxy to the Anthropic API.
 // The key lives in the ANTHROPIC_API_KEY env var (set in Netlify → Site
 // configuration → Environment variables), so it is never exposed in the
@@ -7,11 +8,8 @@
 // Only VENIA's own site may use this relay. A browser always sends an Origin
 // header on these POSTs, so a request whose Origin is present but not ours is a
 // third-party site trying to spend the Anthropic budget — reject it.
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function corsHeaders(req) {
   const o = req.headers.get('origin');
   const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';

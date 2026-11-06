@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Server-side, read-only proxy to NewsAPI for the VENIA press scan.
 //
 // Why: newsapi.org blocks browser-origin requests on deployed sites (CORS /
@@ -5,11 +6,8 @@
 // lives only in the NEWSAPI_KEY Netlify environment variable; the browser
 // asks THIS function for results. Query is fixed server-side — the client
 // cannot search arbitrary things on the account's quota.
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function corsHeaders(req) {
   const o = req.headers.get('origin');
   const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';

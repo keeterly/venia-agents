@@ -2392,6 +2392,17 @@ body{ padding-top:calc(44px + var(--sat)); }
 .cp-global-bar{ padding-top:var(--sat); height:calc(44px + var(--sat)); padding-left:calc(14px + var(--sal)); padding-right:calc(14px + var(--sar)); }
 .toast{ bottom:calc(24px + var(--sab)) !important; }
 #sk-launch{ bottom:calc(26px + var(--sab)); }
+/* ── THE DOCK NEVER SITS ON A BUTTON (desktop) ──
+   The Enigma bar floats 26px up, 46px tall, centred. The Money page's
+   .ag-content had 24px under it and Today's doors 44px, so the last block on a
+   page (the Production block's "POs →", the bottom doors) could not be scrolled
+   out from under the bar. Every page scroller now ends with the bar's own
+   height plus a gap, so the end of any page clears it. Phones keep their own,
+   larger clearance in the max-width:768 block below. */
+:root{ --dock-clear:calc(26px + 46px + 28px + var(--sab, 0px)); }
+@media (min-width:769px){
+  .content, .ag-content, #techpack-content, .cpl{ padding-bottom:var(--dock-clear); }
+}
 /* ── Mobile style cards (the table's phone form) ──
    renderMobileStyleCards() emits these after .tbl-wrap; on phones the card
    list IS the table, so the wrap hides. Desktop never shows the cards. */
@@ -3010,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '578';
+  const BUILD = '579';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7264,6 +7275,28 @@ function skMergeHistory(a, b) {
 }
 window.skMergeHistory = skMergeHistory;
 
+// ── THE ACTIVITY LOG: NEWEST FIRST, NEVER MORE THAN 200 ─────────────────────
+// logActivity() trims to 200 on the device that writes, but the sync merge
+// unioned both sides' entries with no cap and no order — local's then cloud's —
+// so every trim was undone by the other copy and the log grew to 1,804 rows,
+// shuffled. Anything reading "the latest" off either end read the wrong thing.
+// Union (deduped by content, as before), sort by time, newest first, cap.
+const ACTIVITY_CAP = 200;
+function mergeActivityLog(a, b) {
+  const seen = Object.create(null), out = [];
+  [a, b].forEach(function (arr) {
+    (Array.isArray(arr) ? arr : []).forEach(function (r) {
+      if (!r || typeof r !== 'object') return;
+      let k; try { k = JSON.stringify(r); } catch (e) { k = String(r); }
+      if (seen[k]) return; seen[k] = 1; out.push(r);
+    });
+  });
+  const t = function (r) { return Date.parse(r && r.ts) || 0; };
+  out.sort(function (x, y) { return t(y) - t(x); });
+  return out.length > ACTIVITY_CAP ? out.slice(0, ACTIVITY_CAP) : out;
+}
+window.mergeActivityLog = mergeActivityLog;
+
 function mergeSnapshots(base, local, cloud) {
   base = base || {}; local = local || {}; cloud = cloud || {};
   const out = { _who: local._who || cloud._who };
@@ -7301,6 +7334,7 @@ function mergeSnapshots(base, local, cloud) {
     if (l === undefined && c === undefined) return;
     if (l === undefined) { out[k] = c; return; }
     if (c === undefined) { out[k] = l; return; }
+    if (k === 'activityLog') { out[k] = mergeActivityLog(l, c); return; }
     // The board canvas is {cards:[{id,...}], panX, panY, zoom}. As a plain
     // object it merged whole-key: two founders pinning cards concurrently lost
     // one side's cards entirely. Merge cards record-by-record; view state
@@ -16543,7 +16577,7 @@ window.poDelete = function(id){
 function logActivity(msg) {
   if(!STATE.activityLog) STATE.activityLog=[];
   STATE.activityLog.unshift({ts:new Date().toISOString(),msg});
-  if(STATE.activityLog.length>200) STATE.activityLog=STATE.activityLog.slice(0,200);
+  if(STATE.activityLog.length>ACTIVITY_CAP) STATE.activityLog=STATE.activityLog.slice(0,ACTIVITY_CAP);
   save();
 }
 

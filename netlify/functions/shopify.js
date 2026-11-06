@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Server-side, READ-ONLY proxy to the Shopify Admin API.
 // deploy: rebuild to capture SHOPIFY_STORE_DOMAIN / SHOPIFY_ADMIN_TOKEN env vars (2026-07-15).
 //
@@ -19,11 +20,8 @@
 // endpoints. It accepts no arbitrary path, method, or body from the client, so
 // even a compromised page can only READ shop/orders/products — never write,
 // and never see the token.
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function corsHeaders(req) {
   const o = req.headers.get('origin');
   const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';

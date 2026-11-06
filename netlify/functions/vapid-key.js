@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // THE APP SHOULD NOT CARRY ITS OWN COPY OF THE PUBLIC KEY.
 // It used to hardcode one, which had to be kept in step by hand with the pair
 // in Netlify. Nothing enforced that, and the two drifting apart is invisible:
@@ -6,11 +7,8 @@
 // Serving the public half here makes Netlify the single source of truth, so
 // any valid pair set there works with no code change at all.
 // A VAPID public key is public by construction; there is nothing to gate.
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 export default async (req) => {
   const o = req.headers.get('origin');
   const site = (req.headers.get('sec-fetch-site') || '').toLowerCase();

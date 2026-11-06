@@ -1,3 +1,4 @@
+import { VENIA_ORIGINS } from './_shared/origins.js';
 // Server-side proxy to Stripe FINANCIAL CONNECTIONS — the live bank feed.
 // Reuses the same STRIPE_SECRET_KEY as stripe.js; nothing here can move money.
 // Every call is READ or link-plumbing: create the auth session the founder
@@ -19,11 +20,8 @@
 // Bank data is the most sensitive thing this app touches, so unlike the
 // Shopify proxy (which gates only when a hash is configured) every action but
 // 'ping' here FAILS CLOSED: no gate hash configured → refuse.
-const ALLOWED_ORIGINS = new Set([
-  'https://creator.veniacollection.com',
-  'https://venia-creator.netlify.app',
-  'https://main--venia-creator.netlify.app',
-]);
+// Live addresses plus this site's own preview deploys — see _shared/origins.js.
+const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function corsHeaders(req) {
   const o = req.headers.get('origin');
   const allow = (o && ALLOWED_ORIGINS.has(o)) ? o : 'https://creator.veniacollection.com';
