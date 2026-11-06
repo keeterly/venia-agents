@@ -3041,7 +3041,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '591';
+  const BUILD = '592';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -52576,6 +52576,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!quiet) { try { pendingBadge(true); } catch(e){} }
     var wait = RETRY_MS[Math.min(retryStep, RETRY_MS.length - 1)];
     retryStep++;
+    if (retryStep === 3 && document.visibilityState === 'visible' && !_syncErrToasted
+        && typeof showToast === 'function' && window.__syncNetErr && window.__syncNetErr(why)) {
+      _syncErrToasted = true;
+      showToast('Still offline. Your changes are safe on this device and will save when the connection is back.', 'error');
+    }
     clearTimeout(retryTimer);
     retryTimer = setTimeout(function(){ pushNow(); }, wait);
     window.__syncStat.retry = { t: new Date().toISOString(), why: why || '', inMs: wait, attempt: retryStep };
@@ -52632,6 +52637,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (settled) { try { localStorage.removeItem(OWED_KEY); } catch (e) {} }
     pushDirty = !settled; retryStep = 0;
     window.__syncRetryArmed = false;
+    _syncErrToasted = false;
     try { pendingBadge(false); } catch(e){}
     clearTimeout(retryTimer); retryTimer = null;
     // Something was edited while this push was in flight: its own debounce
@@ -53094,12 +53100,27 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (/jwt|expired|401|403|not authenticated/i.test(t)) return 'signed out — sign in again to save this';
     return t.slice(0, 140);
   }
+  // A DROPPED CONNECTION IS NOT AN ALARM (Build 592).
+  //
+  // On an iPhone the app is backgrounded all day, and iOS cuts off a request
+  // that is in the air when it does: Safari reports that as "TypeError: Load
+  // failed". The change is still on the device, owed, and the retry on return
+  // (pushWake) sends it within seconds. The red toast that said so in raw
+  // capitals was the only thing that went wrong. Network failures now stay on
+  // the save status in the top bar, and only speak up if they last.
+  function syncNetErr(msg){
+    return /load failed|failed to fetch|networkerror|network request failed|err_(?:internet|network|connection)|timeout|timed out|aborted/i.test(String(msg == null ? '' : msg));
+  }
+  window.__syncNetErr = syncNetErr;
   function syncFail(kind, msg){
     window.__syncStat[kind] = { t: new Date().toISOString(), ok: false,
       err: syncReason(msg), raw: String(msg || 'unknown').slice(0, 140) };
+    if (syncNetErr(msg)) return;
+    if (document.visibilityState === 'hidden') return;
     if (!_syncErrToasted && typeof showToast === 'function'){
       _syncErrToasted = true;
-      showToast('⇅ Sync ' + kind + ' failed — ' + String(msg || '').slice(0, 80) + (/(jwt|auth|policy|denied|401|403)/i.test(String(msg)) ? ' · try signing in again' : ''), 'error');
+      showToast((kind === 'push' ? 'Not saved to the cloud yet: ' : 'Couldn\'t refresh from the cloud: ')
+        + syncReason(msg) + (/(jwt|auth|policy|denied|401|403)/i.test(String(msg)) ? '. Try signing in again.' : ''), 'error');
     }
   }
   // WHAT WAS EDITED WHILE THE PUSH WAS IN THE AIR.
