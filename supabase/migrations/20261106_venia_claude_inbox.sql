@@ -1,7 +1,7 @@
 -- VENIA OS — the Claude connector's inbox (Build 577)
 --
--- NOT YET APPLIED. Apply to VENIA CC (unxfaeqjskzzmhyrekqx) before merging the
--- connector, or every write tool will fail with "relation does not exist".
+-- Applied to VENIA CC (unxfaeqjskzzmhyrekqx) on 2026-11-06, ahead of merging
+-- the connector, so the write tools have somewhere to file proposals.
 --
 -- The connector at /mcp lets Claude read VENIA OS as the signed-in founder and
 -- PROPOSE changes. A proposal is one venia_action object, the same shape Enigma
@@ -72,7 +72,9 @@ create policy venia_claude_inbox_decide on public.venia_claude_inbox
 -- Column privileges: the decision is the only thing that can change. The
 -- action, the author and the timestamp are fixed the moment the row is filed.
 revoke all on public.venia_claude_inbox from anon, public;
-revoke update on public.venia_claude_inbox from authenticated;
+-- Supabase's default privileges hand new tables to authenticated with ALL,
+-- including DELETE and TRUNCATE, and TRUNCATE ignores RLS. Start from nothing.
+revoke all on public.venia_claude_inbox from authenticated;
 grant select, insert on public.venia_claude_inbox to authenticated;
 grant update (status, decided_at, decided_by) on public.venia_claude_inbox to authenticated;
 -- No delete for anyone through the API: the inbox is also the record of what
