@@ -3010,8 +3010,8 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '577';
-  const BUILD_DATE = '2026.09.08';
+  const BUILD = '578';
+  const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -47282,7 +47282,7 @@ function finBankData(){
   const uncat = live.filter(t => !finTxnCat(t) && t.status !== 'void').length;
   return { connected: all.length > 0, accounts: all, active, cashAccts, debtAccts, otherAccts,
            amtOf, ignored, mirrors, bal, debt, net: bal - debt,
-           in90, out90, in30, out30, cat30, monthlyNet, runwayMo, uncat, lastSync: fb.lastSync || '' };
+           in90, out90, in30, out30, cat30, monthlyNet, runwayMo, uncat, lastSync: fb.lastSync || '', syncIssues: fb.syncIssues || [] };
 }
 
 window.bankConnect = async function(){
@@ -47806,7 +47806,53 @@ window.bankSyncTxns = async function(silent){
     if (t && t.src === 'import') (impByKey[bankDupKey(t)] = impByKey[bankDupKey(t)] || []).push(t);
   });
   let added = 0, absorbed = 0;
+  // ASK FOR TODAY'S DATA BEFORE READING IT.
+  //
+  // This used to read only what Stripe already had cached. A transaction
+  // subscription is meant to refresh daily on its own, but nothing checked
+  // that it did -- the ledger sat at Oct 25 through a dozen "successful"
+  // syncs. So every sync now asks Stripe to refresh each active account
+  // first (transactions and balance; bank.js falls back to balance alone if
+  // Stripe says a transaction refresh is too soon), waits briefly for those
+  // refreshes to settle, and only then reads. Read-only: a refresh fetches
+  // data, it links, unlinks and moves nothing.
+  //
+  // And a failing account is named. One of the six linked accounts had been
+  // refused on every sync, and the silent sync swallowed it with a `break`, so
+  // nothing on screen said which account was behind or why.
+  const issues = [];
+  const acctLabel = (a) => (a && (a.name || a.institution) || 'Account') + (a && a.last4 && String(a.name || '').indexOf(a.last4) < 0 ? ' ••' + a.last4 : '');
+  const noteIssue = (a, step, e) => {
+    issues.push({ id: a.id, name: acctLabel(a), step: step,
+      error: String(e && e.message || e || 'failed').slice(0, 200), at: new Date().toISOString() });
+  };
+  const active = accounts.filter(a => a && a.status === 'active');
+  const refreshed = [];
+  for (const a of active) {
+    try {
+      const r = await bankApi('refresh', { account: a.id });
+      if (r && r.transactionsRefreshed) refreshed.push(a.id);
+    } catch (e) { noteIssue(a, 'refresh', e); }
+  }
+  // Transaction refreshes finish on Stripe's side in seconds to a minute or
+  // two. Wait up to about half a minute for them, re-reading the accounts
+  // (which also brings the fresh balances in), then read whatever has landed.
+  // Anything still pending is picked up by the next open.
+  if (refreshed.length) {
+    for (let i = 0; i < 6; i++) {
+      await new Promise(res => setTimeout(res, 5000));
+      let d = null;
+      try { d = await bankApi('accounts'); } catch (e) { break; }
+      if (d && Array.isArray(d.accounts) && d.accounts.length) {
+        STATE.finBank.accounts = d.accounts;
+        const pending = d.accounts.filter(x => refreshed.indexOf(x.id) >= 0
+          && x.txn_refresh && x.txn_refresh.status === 'pending');
+        if (!pending.length) break;
+      }
+    }
+  }
   for (const a of accounts) {
+    if (a && a.status && a.status !== 'active') continue;   // inactive or disconnected: Stripe refuses these
     let cursor = null;
     // Stripe returns 100 at a time, newest first, and walks backwards through
     // the window with starting_after. Five pages capped the ledger at the 500
@@ -47818,7 +47864,7 @@ window.bankSyncTxns = async function(silent){
     for (let page = 0; page < 25; page++) {
       let d;
       try { d = await bankApi('transactions', Object.assign({ account: a.id }, cursor ? { starting_after: cursor } : {})); }
-      catch(e){ if (!silent) showToast(String(e && e.message || e), 'error'); break; }
+      catch(e){ noteIssue(a, 'transactions', e); break; }
       (d.transactions||[]).forEach(t => {
         const ex = byId[t.id];
         if (ex) { ex.status = t.status; ex.amount = t.amount; if (t.date) ex.date = t.date; }
@@ -47847,8 +47893,18 @@ window.bankSyncTxns = async function(silent){
   STATE.finTxns = bankTrimTxns(STATE.finTxns);
   if (!STATE.finBank) STATE.finBank = {};
   STATE.finBank.lastSync = new Date().toISOString();
+  // One entry per account, the transaction read outranking the refresh: a
+  // refresh that was refused but a read that worked is "behind", not "broken".
+  const byAcct = {};
+  issues.forEach(i => { if (!byAcct[i.id] || i.step === 'transactions') byAcct[i.id] = i; });
+  STATE.finBank.syncIssues = Object.keys(byAcct).map(k => byAcct[k]);
   save();
-  if (!silent) showToast(
+  const failedNames = STATE.finBank.syncIssues.filter(i => i.step === 'transactions').map(i => i.name);
+  if (failedNames.length) {
+    // Said even on the silent daily sync: an account that fails every day is
+    // the one thing this sync must not keep quiet about.
+    showToast('Bank sync could not read ' + failedNames.join(', ') + ' — see Money for why', 'warning');
+  } else if (!silent) showToast(
     (added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date')
     + (absorbed ? ' · ' + absorbed + ' matched to imported rows instead of duplicated' : ''),
     added ? 'success' : 'info');
@@ -48724,6 +48780,20 @@ window.cmdRenderBank = function(){
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
       <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
+      ${(function(){
+        // Accounts the last sync could not read or refresh, by name, with
+        // Stripe's own reason. Gone as soon as a sync gets through.
+        var iss = (bk.syncIssues || []);
+        if (!iss.length) return '';
+        return '<div style="border:1px solid rgba(220,60,60,.35);background:var(--red-dim, rgba(220,60,60,.06));'
+          + 'padding:10px 12px;margin:-6px 0 16px;font-size:10.5px;color:var(--ink);line-height:1.7">'
+          + iss.map(function(i){
+              return '<div><strong>' + slEsc(i.name) + '</strong> — '
+                + (i.step === 'transactions' ? 'transactions could not be read' : 'Stripe would not refresh it, so it may be behind')
+                + ': <span style="color:var(--muted)">' + slEsc(i.error) + '</span></div>';
+            }).join('')
+          + '</div>';
+      })()}
       ${(function(){
         // Duplicates left by syncs that ran before the feed could recognise an
         // imported row. Shown with their value, because "9 duplicates" and
@@ -51323,6 +51393,177 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   // True while this device holds a change the cloud has not accepted.
   window.__syncPending = function(){ return !!pushDirty; };
+
+  // A LAPSED SIGN-IN IS NOT A FLAKY NETWORK.
+  //
+  // The database only accepts writes from a signed-in VENIA account. When the
+  // session on a device lapses (a refresh token that stopped working, a
+  // sign-out in another tab), supabase-js quietly falls back to the public
+  // key, and every push goes up as nobody. RLS refuses each one (401, 42501),
+  // and the retry loop above read that as "try again": one toast, then
+  // hundreds of refused writes an hour with nothing on screen that said why.
+  // Retrying can never fix it; only signing in can.
+  //
+  // So a device with no session stops pushing and says so, in a banner that
+  // stays until the sign-in is back. Nothing is thrown away: STATE keeps
+  // saving to this device on every edit, the merge base is left exactly where
+  // the cloud last agreed with it, and pushDirty stays set, so the first push
+  // after sign-in carries every edit made while paused.
+  var authPaused = false;
+  async function hasAuthSession(){
+    var c = sb(); if (!c || !c.auth) return true;   // no client yet: not an auth problem
+    try { var r = await c.auth.getSession(); return !!(r && r.data && r.data.session); }
+    catch (e) { return true; }                       // unknown: let the push try, it reports its own error
+  }
+  function authErr(msg){
+    return /jwt|expired|not authenticated|401|42501|row-level security|permission denied/i.test(String(msg || ''));
+  }
+  function signinBanner(on){
+    var el = document.getElementById('venia-signin-to-save');
+    if (!on) { if (el) el.remove(); return; }
+    if (el) { if (!el.isConnected) document.body.appendChild(el); return; }
+    el = document.createElement('div');
+    el.id = 'venia-signin-to-save';
+    el.setAttribute('role', 'alert');
+    el.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99998;background:#8a1c1c;'
+      + 'color:#fff;padding:calc(10px + var(--sat,0px)) 16px 10px;font-size:12px;line-height:1.5;'
+      + 'display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap;'
+      + "font-family:'Helvetica Neue',Helvetica,Arial,sans-serif";
+    var t = document.createElement('span');
+    t.textContent = 'You’re signed out, so changes on this device aren’t saving to VENIA. '
+      + 'They’re kept here and will save as soon as you sign in. Don’t clear this browser.';
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Sign in to save';
+    b.style.cssText = 'background:#fff;color:#8a1c1c;border:none;padding:6px 14px;font-size:12px;'
+      + 'font-weight:700;cursor:pointer;font-family:inherit';
+    b.onclick = function(){ try { if (window.veniaEnsureSignIn) window.veniaEnsureSignIn(); } catch (e) {} };
+    el.appendChild(t); el.appendChild(b);
+    document.body.appendChild(el);
+  }
+  // A second copy of exactly what this device is holding, taken the moment
+  // saving pauses and again right before the first push after sign-in. The
+  // merge is meant to keep every edit, but the founder's word was "nothing
+  // lost", and a copy in IndexedDB (not localStorage, which the live
+  // workspace already fills) is what makes that true even if the merge is
+  // ever wrong. The last five are kept; window.veniaUnsavedBackups() lists them.
+  function unsavedBackup(why){
+    try {
+      if (!window.indexedDB) return;
+      var snap = snapshot();
+      var req = indexedDB.open('venia-safety', 1);
+      req.onupgradeneeded = function(){ try { req.result.createObjectStore('unsaved', { keyPath: 't' }); } catch (e) {} };
+      req.onsuccess = function(){
+        try {
+          var db = req.result, tx = db.transaction('unsaved', 'readwrite'), st = tx.objectStore('unsaved');
+          st.put({ t: new Date().toISOString(), why: why, build: window.VENIA_BUILD || '?', data: snap });
+          var keys = st.getAllKeys();
+          keys.onsuccess = function(){
+            var ks = (keys.result || []).sort();
+            ks.slice(0, Math.max(0, ks.length - 5)).forEach(function(k){ try { st.delete(k); } catch (e) {} });
+          };
+          tx.oncomplete = function(){ try { db.close(); } catch (e) {} };
+        } catch (e) {}
+      };
+    } catch (e) {}
+  }
+  window.veniaUnsavedBackups = function(){
+    return new Promise(function(res){
+      try {
+        var req = indexedDB.open('venia-safety', 1);
+        req.onupgradeneeded = function(){ try { req.result.createObjectStore('unsaved', { keyPath: 't' }); } catch (e) {} };
+        req.onsuccess = function(){
+          try {
+            var g = req.result.transaction('unsaved').objectStore('unsaved').getAll();
+            g.onsuccess = function(){ res(g.result || []); };
+            g.onerror = function(){ res([]); };
+          } catch (e) { res([]); }
+        };
+        req.onerror = function(){ res([]); };
+      } catch (e) { res([]); }
+    });
+  };
+  function pauseForSignIn(why){
+    pushDirty = true;
+    window.__syncRetryArmed = false;
+    clearTimeout(retryTimer); retryTimer = null;
+    clearTimeout(pushTimer);
+    try { pendingBadge(false); } catch (e) {}
+    if (!authPaused) { authPaused = true; unsavedBackup('saving paused: ' + (why || 'signed out')); }
+    window.__syncStat.push = { t: new Date().toISOString(), ok: false,
+      err: 'signed out — changes are kept on this device and save after sign-in',
+      raw: String(why || 'no session').slice(0, 140), via: 'paused for sign-in' };
+    signinBanner(true);
+  }
+  // AN OLD COPY IS KEPT, NOT MERGED.
+  //
+  // A device that has not agreed with the cloud for days holds a picture of
+  // the workspace from back then. Merging it in would let that old picture win
+  // fields the other founder has changed since, and a two-week-old copy is far
+  // more likely to undo real work than to add any. Keeter's call: don't copy it
+  // in. So past STALE_MS the device takes the cloud as it is, keeps its own copy
+  // in IndexedDB (veniaUnsavedBackups()), pushes nothing, and says so.
+  var STALE_MS = 48 * 3600 * 1000;
+  function lastAgreedAt(){
+    var a = 0, r = 0;
+    try { a = parseInt(localStorage.getItem('venia-cloud-agreed-at') || '0', 10) || 0; } catch (e) {}
+    try { r = parseInt(localStorage.getItem('venia-sync-rev') || '0', 10) || 0; } catch (e) {}
+    return Math.max(a, r);   // venia-sync-rev: a device from before this build
+  }
+  function localIsStale(){
+    var t = lastAgreedAt();
+    return !t || (Date.now() - t) > STALE_MS;
+  }
+  function setAsideStaleLocal(row, why){
+    var since = lastAgreedAt();
+    unsavedBackup('set aside, not merged: ' + (why || 'stale'));
+    applySnapshot(row.data);
+    // This device's old deletions are part of the old copy: do not replay them.
+    try { STATE._tomb = Object.assign({}, (row.data && row.data._tomb) || {}); } catch (e) {}
+    setBase(row.data);
+    pushLanded();
+    try { rerender(); } catch (e) {}
+    var when = since ? new Date(since).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'a while';
+    window.__syncStat.decision = 'local copy last agreed ' + when + ' — set aside (backup kept), cloud applied';
+    try {
+      showToast('This device hadn\u2019t synced since ' + when + ', so it now shows the latest VENIA data. '
+        + 'Its older unsaved changes were not copied in; a backup is kept on this device.', 'info');
+    } catch (e) {}
+  }
+  async function resumeAfterSignIn(why){
+    if (!authPaused) return;
+    authPaused = false;
+    signinBanner(false);
+    unsavedBackup('before first push after sign-in');
+    if (localIsStale()) {
+      var row = null;
+      try { row = await pullRow(); } catch (e) { row = null; }
+      if (row && row.data) { setAsideStaleLocal(row, why || 'signed back in'); return; }
+    }
+    // pushWake is a no-op unless something is owed, and it resets the backoff.
+    pushWake(why || 'signed back in');
+  }
+  window.__syncAuthPaused = function(){ return authPaused; };
+  // The sign-in can come back by any door: the entry overlay, Settings, the
+  // account menu, another tab of this browser, or supabase-js refreshing the
+  // token on its own. All of them announce it here.
+  // Subscribed from sbLiveStart, the moment the client exists -- which can be
+  // long after parse, behind the access-code gate.
+  var authWatched = false;
+  function watchAuth(){
+    var c = sb();
+    if (authWatched || !c || !c.auth) return;
+    authWatched = true;
+    try {
+      c.auth.onAuthStateChange(function(ev, session){
+        if (session && (ev === 'SIGNED_IN' || ev === 'TOKEN_REFRESHED' || ev === 'INITIAL_SESSION' || ev === 'USER_UPDATED')) {
+          resumeAfterSignIn('signed in (' + ev + ')');
+        } else if (ev === 'SIGNED_OUT' && pushDirty) {
+          pauseForSignIn('signed out');
+        }
+      });
+    } catch (e) {}
+  }
   var adoptToken = 0;                 // only the newest deferred adopt may land
   // The last state we know both devices agreed on — the common ancestor the
   // 3-way merge diffs against to tell additions from deletions.
@@ -51351,7 +51592,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   // agreement point is the bug above; starting null costs at most one
   // resurrected row, and only in the sliver before the boot pull sets the
   // base from the cloud (pushNow refuses to run before that pull anyway).
-  function setBase(snap){ try { sessionStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){} }
+  function setBase(snap){
+    try { sessionStorage.setItem('venia-sync-base', JSON.stringify(snap)); } catch(e){}
+    try { localStorage.setItem('venia-cloud-agreed-at', String(Date.now())); } catch(e){}
+  }
   function getBase(){ try { var s = sessionStorage.getItem('venia-sync-base'); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
   // And clear the shared one, once. A tab still running an older build reads
   // that key every merge; emptied, it reads null and unions instead, so the
@@ -51619,6 +51863,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // workspace before we've even looked at it.
     if (!window.__sbSyncDone) { pushFailed('sync not started', true); return; }
     var c = sb(); if (!c) { pushFailed('no client', true); return; }
+    // No session means RLS will refuse every write. Hold, don't hammer.
+    if (!(await hasAuthSession())) { pauseForSignIn('no session'); return; }
+    if (authPaused) { authPaused = false; signinBanner(false); }
     var rev = Date.now();
     try {
       var localSnap = snapshot();
@@ -51716,6 +51963,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         pushFailed('no writable modules');
         return;
       }
+      if (modErr && ids.length && authErr(modErr) && !(await hasAuthSession())) {
+        pauseForSignIn('module write refused: ' + modErr);
+        return;
+      }
       if (modErr && ids.length) {
         syncFail('push', 'module write failed (' + modErr + ') — your last change is still only on '
           + 'this device. It will be retried; do not clear the app until the next sync succeeds.');
@@ -51761,6 +52012,8 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         pushLanded();
         window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
           via: !writesBlob ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
+      } else if (authErr(res.error.message || res.error.code) && !(await hasAuthSession())) {
+        pauseForSignIn('blob refused: ' + (res.error.message || res.error.code));
       } else {
         syncFail('push', res.error.message || res.error.code);
         window.__syncStat.push = { t: new Date().toISOString(), ok: false,
@@ -51786,6 +52039,9 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // every device at "Not saved" after every pull. Edits made during the
     // PUSH's awaits are the real hazard, and syncReconcileAfterPush owns them.)
     if (applyingRemote) return;
+    // Paused for sign-in: the edit is already saved on this device by save(),
+    // and is owed to the cloud. Mark it and wait for the sign-in to carry it.
+    if (authPaused) { pushDirty = true; return; }
     clearTimeout(pushTimer);
     pushTimer = setTimeout(pushNow, 1500);
   }
@@ -52098,6 +52354,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       (Array.isArray(d0.prPulls) && d0.prPulls.length) ||
       (Array.isArray(d0.materials) && d0.materials.length)
     ));
+    if (cloudOk && !FRESH_BROWSER && localIsStale()){
+      _logDecision('cloudOk=true, local copy older than 48h → set aside (backup kept), cloud applied');
+      setAsideStaleLocal(row, 'boot');
+      return;
+    }
     if (cloudOk){
       var cloudRev = row.rev || 0;
       // Apply the cloud copy when this browser is fresh (no real local data),
@@ -52163,6 +52424,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (window.VENIA_AGENT) { if (typeof window.agentBoot === 'function') window.agentBoot(); return; }
     if (started || !sb()) return;
     started = true;
+    watchAuth();
     startRealtime();
     // Flag when the first cloud snapshot has landed — the ?tag boot path waits
     // for this so a fresh Safari session decides against real data, not seeds.
