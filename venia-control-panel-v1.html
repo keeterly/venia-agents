@@ -3072,11 +3072,60 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   <div class="vag-footer" id="vag-footer">© VENIA Collection</div>
 </div>
 <script>
+// ONE WAY TO WRITE MONEY AND DATES (Build 594, one look stage three).
+//
+// Money was written by about forty local helpers: some rounded, some showed
+// "$1,234.5", negatives came out "$-50", and toLocaleString() without a
+// locale wrote "1.234" on a phone set to European formats. Dates were worse:
+// "2026-11-06" straight from the record in some lists, "11/6/2026" in others,
+// and a date with no time ("2026-11-06") read as midnight UTC, which is the
+// evening before in California, so a drop, a follow-up or a publish date
+// showed one day early.
+//
+// veniaMoney(n, {cur, cents, paren}) -> "$1,234", "-$50", "€1,234",
+//   cents:true "$1,234.50", cents:'auto' only when the amount has cents,
+//   paren:true "($50)" for statements.
+// veniaDate(v, style) -> "Nov 6" this year, "Nov 6, 2027" otherwise;
+//   style 'long' "November 6, 2026", 'year' "Nov 6, 2026", 'day' "Thu, Nov 6".
+//   A bare YYYY-MM-DD is read as that calendar day where you are.
+function veniaMoney(n, opts){
+  opts = opts || {};
+  var v = Number(n); if (!isFinite(v)) v = 0;
+  var cur = String(opts.cur || 'USD').toUpperCase();
+  var d = opts.cents === true ? 2 : (opts.cents === 'auto' && Math.round(v * 100) % 100 !== 0) ? 2 : 0;
+  var out;
+  try {
+    out = new Intl.NumberFormat('en-US', { style: 'currency', currency: cur,
+      minimumFractionDigits: d, maximumFractionDigits: d }).format(Math.abs(v));
+  } catch (e) {
+    out = (cur === 'EUR' ? '€' : cur === 'GBP' ? '£' : '$')
+      + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  if (v < 0 && Math.abs(v) >= (d ? 0.005 : 0.5)) out = opts.paren ? '(' + out + ')' : '-' + out;
+  return out;
+}
+function veniaDate(v, style){
+  if (v == null || v === '') return '';
+  var d;
+  if (v instanceof Date) d = v;
+  else if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) d = new Date(v + 'T12:00:00');
+  else d = new Date(v);
+  if (isNaN(d.getTime())) return String(v);
+  var o;
+  if (style === 'long') o = { month: 'long', day: 'numeric', year: 'numeric' };
+  else if (style === 'year') o = { month: 'short', day: 'numeric', year: 'numeric' };
+  else if (style === 'day') o = { weekday: 'short', month: 'short', day: 'numeric' };
+  else o = d.getFullYear() === new Date().getFullYear()
+    ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' };
+  return d.toLocaleDateString('en-US', o);
+}
+window.veniaMoney = veniaMoney;
+window.veniaDate = veniaDate;
 (function(){
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '593';
+  const BUILD = '594';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7935,7 +7984,7 @@ function renderDashboard() {
     </div>
     <div class="stat-card" style="cursor:pointer" onclick="goTo('costs',document.querySelector('[data-page=costs]'))">
       <div class="stat-label">Catalog Retail Value</div>
-      <div class="stat-val" style="font-size:20px">${totalRetail < 10000 ? '$'+totalRetail.toLocaleString() : '$'+(totalRetail/1000).toFixed(totalRetail < 100000 ? 1 : 0)+'k'}</div>
+      <div class="stat-val" style="font-size:20px">${totalRetail < 10000 ? veniaMoney(totalRetail, { cents: 'auto' }) : '$'+(totalRetail/1000).toFixed(totalRetail < 100000 ? 1 : 0)+'k'}</div>
       <div class="stat-sub">Live styles · full price</div>
     </div>
   `;
@@ -8318,7 +8367,7 @@ function seasonRetroData(season){
 }
 function seasonRetroText(d){
   const pct = (a,b) => b > 0 ? Math.round(a/b*100) + '%' : '—';
-  const money = (n) => '$' + Math.round(n||0).toLocaleString();
+  const money = (n) => veniaMoney(n);
   const L = [];
   L.push(d.season + ' — SEASON RETRO (generated ' + new Date().toISOString().slice(0,10) + ')');
   L.push('');
@@ -13326,7 +13375,7 @@ function openDp(styleId) {
       ${s.category ? `<span class="b-tag">${esc(s.category)}</span>` : ''}
       <span class="b-tag" onclick="dpToggleCarryover('${s.id}')" title="Tap to toggle — carryover styles repeat from a previous season" style="cursor:pointer;${s.carryover?'border-color:var(--ink);color:var(--ink);font-weight:700':''}">${s.carryover?'↺ Carryover':'New'}</span>
       <span style="font-size:10px;color:var(--muted)">${s.season}</span>
-      ${s.drop?`<span style="font-size:10px;color:var(--muted)">Drop ${new Date(s.drop).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>`:''}
+      ${s.drop?`<span style="font-size:10px;color:var(--muted)">Drop ${veniaDate(s.drop)}</span>`:''}
     </div>
     ${dpMargin !== null ? `
     <div class="dp-margin" style="margin-top:8px">
@@ -16424,7 +16473,7 @@ function renderProduction(){
   },0);
   const rows = pos.slice().sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).map(po=>{
     const { dep, bal } = poAmounts(po);
-    const pay = (paidAt, amt, tag) => `<span title="${tag} $${amt.toLocaleString()}" style="font-family:'DM Mono',monospace;font-size:10px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
+    const pay = (paidAt, amt, tag) => `<span title="${tag} ${veniaMoney(amt, { cents: 'auto' })}" style="font-family:'DM Mono',monospace;font-size:10px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
     const msLine = (po.type !== 'fabric' && po.ms && Object.keys(po.ms).some(k => po.ms[k] && po.ms[k].date)) ? (() => {
       const today = new Date().toISOString().slice(0,10);
       return `<div style="font-size:10px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap">${PO_MILESTONES.map(([k,l]) => {
@@ -16446,8 +16495,8 @@ function renderProduction(){
     <div class="stats-row stats-4" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Open POs</div><div class="stat-val">${open.length}</div><div class="stat-sub">${pos.length} all time</div></div>
       <div class="stat-card"><div class="stat-label">Units on order</div><div class="stat-val">${unitsOnOrder.toLocaleString()}</div><div class="stat-sub">not yet received</div></div>
-      <div class="stat-card"><div class="stat-label">Owed to factories</div><div class="stat-val" style="color:${owed>0?'var(--amber)':'var(--ink)'}">$${Math.round(owed).toLocaleString()}</div><div class="stat-sub">unpaid deposits + balances</div></div>
-      <div class="stat-card"><div class="stat-label">Paid YTD</div><div class="stat-val">$${Math.round(paidYtd).toLocaleString()}</div><div class="stat-sub">production cash out</div></div>
+      <div class="stat-card"><div class="stat-label">Owed to factories</div><div class="stat-val" style="color:${owed>0?'var(--amber)':'var(--ink)'}">${veniaMoney(Math.round(owed), { cents: 'auto' })}</div><div class="stat-sub">unpaid deposits + balances</div></div>
+      <div class="stat-card"><div class="stat-label">Paid YTD</div><div class="stat-val">${veniaMoney(Math.round(paidYtd), { cents: 'auto' })}</div><div class="stat-sub">production cash out</div></div>
     </div>
     ${(function(){
       const seasons = (typeof rpSeasons === 'function') ? rpSeasons() : [];
@@ -16872,7 +16921,7 @@ function runSearch(q) {
     html += secHead('Quotes', quoteHits.length);
     html += quoteHits.slice(0,4).map(qu => row(
       `closeModal('search-modal');cpGoto('sl');setTimeout(function(){agNavSl('quotes')},200)`,
-      slEsc(qu.buyerName||'Quote'), slEsc(qu.season||''), '$'+(qu.total||0).toLocaleString())).join('');
+      slEsc(qu.buyerName||'Quote'), slEsc(qu.season||''), veniaMoney((qu.total||0), { cents: 'auto' }))).join('');
   }
   if (dumpHits.length) {
     html += secHead('Brainstorm', dumpHits.length);
@@ -18333,7 +18382,7 @@ function renderTechPackWork(s) {
     ${secBody('cost')}
       ${(()=>{
         const m = csModel(s);
-        const money = (n) => '$' + Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2});
+        const money = (n) => veniaMoney(n, { cents: true });
         const num = (label, key, val, step) => `<div class="tpf"><div class="tpl">${label}</div>
           <input class="tpi" type="number" step="${step||'0.01'}" style="font-family:'DM Mono',monospace" value="${val===0?'':val}" placeholder="0.00"
             onchange="csSetField('${s.id}','${key}',this.value)"></div>`;
@@ -18480,7 +18529,7 @@ function renderTechPackWork(s) {
   </div>
 
   <div style="padding:16px 0;display:flex;justify-content:space-between;align-items:center">
-    <div style="font-size:10px;color:var(--muted);letter-spacing:.5px">Changes save automatically · Last edited ${new Date().toLocaleDateString()}</div>
+    <div style="font-size:10px;color:var(--muted);letter-spacing:.5px">Changes save automatically · Last edited ${veniaDate(new Date())}</div>
     <button class="btn btn-gold" onclick="setTpMode('print')">Generate Print PDF →</button>
   </div>
 
@@ -21262,7 +21311,7 @@ function prOwedBar() {
   return `<div style="background:var(--amber-dim);border:1px solid rgba(230,160,0,.25);padding:11px 16px;margin:4px 0 14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <div style="font-size:14px">⏳</div>
       <div style="flex:1;min-width:180px">
-        <div style="font-size:11px;font-weight:700;color:var(--ink)">$${owed.toLocaleString()} awaiting payment</div>
+        <div style="font-size:11px;font-weight:700;color:var(--ink)">${veniaMoney(owed, { cents: 'auto' })} awaiting payment</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px">${owing.length} pull${owing.length>1?'s':''} · ${
           ago ? 'Stripe checked ' + ago + ', automatically' : 'not yet checked with Stripe'}</div>
       </div>
@@ -21341,7 +21390,7 @@ function prPullCard(p, now) {
       </div>
       <div style="margin-left:auto;display:flex;gap:14px;align-items:center">
         ${itemsReturned > 0 ? `<span style="font-size:10px;color:var(--green)">${itemsReturned}/${totalItems} returned</span>` : ''}
-        <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700">$${(p.totalRetail||0).toLocaleString()}</span>
+        <span style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700">${veniaMoney((p.totalRetail||0), { cents: 'auto' })}</span>
         ${p.feeAmount ? `<span style="font-size:10px;color:var(--gold)">Fee: ${p.feeAmount.toFixed ? '$'+p.feeAmount.toFixed(2) : '$'+p.feeAmount}</span>` : ''}
         ${(()=>{
           const pay = p.payment;
@@ -21561,7 +21610,7 @@ window.prCartRetail = function(idx, v){
   PR_CART[idx].retail = Math.max(0, parseFloat(v) || 0);
   const total = PR_CART.reduce((s,i) => s + (i.retail||0), 0);
   const valEl = document.getElementById('pr-cart-val-inline');
-  if (valEl) valEl.textContent = PR_CART.length ? '$' + total.toLocaleString() + ' retail value' : '';
+  if (valEl) valEl.textContent = PR_CART.length ? veniaMoney(total, { cents: 'auto' }) + ' retail value' : '';
   try { prCalcFee(); } catch(e){}
 };
 window.prCartName = function(idx, v){ if (PR_CART[idx]) PR_CART[idx].styleName = String(v||'').trim(); };
@@ -21926,7 +21975,7 @@ function prTagFinish(pullId) {
         </div>
         <div style="text-align:right;flex-shrink:0">
           <div style="font-family:'DM Mono',monospace;font-size:16px;font-weight:700">${outItems.length}</div>
-          <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">out · $${outValue.toLocaleString()}</div>
+          <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">out · ${veniaMoney(outValue, { cents: 'auto' })}</div>
         </div>
       </div>
       <div style="flex:1;overflow-y:auto;padding:16px">
@@ -22197,12 +22246,12 @@ window.prInvoiceFind = async function(pullId){
 // showing the three things that tell them apart.
 function prInvoicePick(pullId, list){
   const rows = list.map((inv, i) => {
-    const when = inv.created ? new Date(inv.created).toLocaleDateString() : '';
+    const when = inv.created ? veniaDate(new Date(inv.created)) : '';
     // The status is already on the line above — repeating it here read
     // "PAID PAID $257".
     const money = inv.status === 'paid'
-      ? '$' + Number(inv.amount_paid).toLocaleString()
-      : '$' + Number(inv.amount_remaining || inv.amount_due).toLocaleString() + ' outstanding';
+      ? veniaMoney(Number(inv.amount_paid), { cents: 'auto' })
+      : veniaMoney(Number(inv.amount_remaining || inv.amount_due), { cents: 'auto' }) + ' outstanding';
     return `<button class="btn btn-ghost" style="width:100%;text-align:left;margin-bottom:6px;padding:10px 12px;height:auto"
       onclick="prInvoiceAttach('${pullId}', window.__prFindList[${i}]); closeModal('pr-invoice-pick-modal')">
       <div style="font-weight:700">${inv.number || inv.id} · ${inv.status}</div>
@@ -22758,7 +22807,7 @@ function prRenderCart() {
   if (!el) return;
   const total = PR_CART.reduce((s,i) => s + (i.retail||0), 0);
   if (countEl) countEl.textContent = `${PR_CART.length} item${PR_CART.length!==1?'s':''}`;
-  if (valEl) valEl.textContent = PR_CART.length ? `$${total.toLocaleString()} retail value` : '';
+  if (valEl) valEl.textContent = PR_CART.length ? `${veniaMoney(total, { cents: 'auto' })} retail value` : '';
   // Live count on the tab itself so the contents are visible from any tab.
   const tabBtn = document.getElementById('pr-cart-tab-styles');
   if (tabBtn) tabBtn.textContent = `② Items${PR_CART.length ? ` (${PR_CART.length})` : ''}`;
@@ -22816,16 +22865,16 @@ function prCalcFee() {
 
   let feeAmt = 0, feeDesc = '';
   if (type === 'none') {
-    feeDesc = `<div style="color:var(--green);font-size:12px;font-weight:600">✓ Complimentary pull — no charge</div><div style="font-size:10px;color:var(--muted);margin-top:4px">Total retail value: $${total.toLocaleString()}</div>`;
+    feeDesc = `<div style="color:var(--green);font-size:12px;font-weight:600">✓ Complimentary pull — no charge</div><div style="font-size:10px;color:var(--muted);margin-top:4px">Total retail value: ${veniaMoney(total, { cents: 'auto' })}</div>`;
   } else if (type === 'percent') {
     const pct = parseFloat(document.getElementById('pr-fee-pct-val')?.value) || 0;
     feeAmt = total * pct / 100;
-    feeDesc = `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px"><span>Pull retail value</span><span style="font-family:'DM Mono',monospace">$${total.toLocaleString()}</span></div>
+    feeDesc = `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px"><span>Pull retail value</span><span style="font-family:'DM Mono',monospace">${veniaMoney(total, { cents: 'auto' })}</span></div>
     <div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px"><span>${pct}% pull fee</span><span style="font-family:'DM Mono',monospace;color:var(--gold)">$${feeAmt.toFixed(2)}</span></div>`;
   } else if (type === 'flat') {
     feeAmt = parseFloat(document.getElementById('pr-fee-flat-val')?.value) || 0;
     feeDesc = `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px"><span>Flat pull fee</span><span style="font-family:'DM Mono',monospace;font-size:18px;font-weight:700;color:var(--gold)">$${feeAmt.toFixed(2)}</span></div>
-    <div style="font-size:10px;color:var(--muted)">Pull retail value: $${total.toLocaleString()}</div>`;
+    <div style="font-size:10px;color:var(--muted)">Pull retail value: ${veniaMoney(total, { cents: 'auto' })}</div>`;
   } else if (type === 'deposit') {
     feeAmt = parseFloat(document.getElementById('pr-fee-deposit-val')?.value) || 0;
     feeDesc = `<div style="display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px"><span>Refundable deposit</span><span style="font-family:'DM Mono',monospace;font-size:18px;font-weight:700;color:var(--amber)">$${feeAmt.toFixed(2)}</span></div>
@@ -22906,7 +22955,7 @@ function prBuildReview() {
           </tr>`).join('')}
           <tr style="border-top:2px solid var(--ink)">
             <td colspan="6" style="padding:10px 12px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);text-align:right;font-weight:700">Total Retail Value</td>
-            <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;text-align:right">$${total.toLocaleString()}</td>
+            <td style="padding:10px 12px;font-family:'DM Mono',monospace;font-size:14px;font-weight:700;text-align:right">${veniaMoney(total, { cents: 'auto' })}</td>
             <td colspan="2"></td>
           </tr>
           ${type !== 'none' ? `<tr style="background:var(--bg-off)">
@@ -23061,7 +23110,7 @@ function prOpenDetail(pullId) {
         <div style="text-align:right">
           <div style="font-family:'DM Mono',monospace;font-size:13px;font-weight:700">${pull.invoiceNo}</div>
           <div style="font-size:10px;color:var(--muted);margin-top:2px">Return by: <strong style="color:${isOverdue?'var(--red)':'var(--ink)'}">${pull.returnDate||'—'}</strong></div>
-          <div style="font-size:10px;color:var(--muted)">$${(pull.totalRetail||0).toLocaleString()} retail · ${pull.feeType!=='none'?'Fee: $'+(pull.feeAmount||0).toFixed(2):'Complimentary'}</div>
+          <div style="font-size:10px;color:var(--muted)">${veniaMoney((pull.totalRetail||0), { cents: 'auto' })} retail · ${pull.feeType!=='none'?'Fee: $'+(pull.feeAmount||0).toFixed(2):'Complimentary'}</div>
         </div>
       </div>
 
@@ -23079,9 +23128,9 @@ function prOpenDetail(pullId) {
           const rq = pull.signRequest;
           const dead = rq && rq.expiresAt && Date.parse(rq.expiresAt) < Date.now();
           const waiting = rq && !dead
-            ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✍ Signing link ${rq.sentAt ? 'emailed' : 'created'} ${new Date(rq.at).toLocaleString()} — expires ${new Date(rq.expiresAt).toLocaleDateString()}${rq.hold ? ' · the card hold is on the same page' : ''}</div>`
+            ? `<div style="font-size:10px;color:var(--muted);margin-bottom:10px">✍ Signing link ${rq.sentAt ? 'emailed' : 'created'} ${new Date(rq.at).toLocaleString()} — expires ${veniaDate(rq.expiresAt)}${rq.hold ? ' · the card hold is on the same page' : ''}</div>`
             : rq && dead
-            ? `<div style="font-size:10px;color:var(--amber);margin-bottom:10px">✍ The signing link expired ${new Date(rq.expiresAt).toLocaleDateString()} without being signed — send a new one.</div>`
+            ? `<div style="font-size:10px;color:var(--amber);margin-bottom:10px">✍ The signing link expired ${veniaDate(rq.expiresAt)} without being signed — send a new one.</div>`
             : '';
           return emailedLine + waiting + `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-bottom:18px">
           <span style="flex:1 1 100%;font-size:11px;color:var(--amber)">Not signed — nothing records that ${escHtml(pull.contact||'the borrower')} accepted the terms.</span>
@@ -23127,7 +23176,7 @@ function prOpenDetail(pullId) {
               <div style="flex:1;min-width:0">
             <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px">
               <div style="font-size:13px;font-weight:${item.returned?'400':'600'};color:${item.returned?'var(--muted)':'var(--ink)'};${item.returned?'text-decoration:line-through;':''}min-width:0">${item.styleName}</div>
-              <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--gold);flex-shrink:0">${item.retail?'$'+item.retail.toLocaleString():''}</div>
+              <div style="font-family:'DM Mono',monospace;font-size:12px;color:var(--gold);flex-shrink:0">${item.retail?veniaMoney(item.retail, { cents: 'auto' }):''}</div>
             </div>
             <div style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:5px;line-height:1.6">
               ${[item.styleCode, item.size, item.color, item.nfcTag?('NFC '+item.nfcTag):''].filter(Boolean).join(' · ')}
@@ -23135,7 +23184,7 @@ function prOpenDetail(pullId) {
               </div>
             </div>
             ${item.returned
-              ? `<div style="font-size:10px;color:var(--green);margin-top:8px">✓ Returned ${item.returnedAt?new Date(item.returnedAt).toLocaleDateString():''}${item.returnCondition?' · '+item.returnCondition:''}</div>`
+              ? `<div style="font-size:10px;color:var(--green);margin-top:8px">✓ Returned ${item.returnedAt?veniaDate(item.returnedAt):''}${item.returnCondition?' · '+item.returnCondition:''}</div>`
               : (pull.status !== 'returned' ? `
               <div style="display:flex;gap:8px;margin-top:12px">
                 <select id="cond-${idx}" class="fs" style="flex:1;min-height:auto;padding:8px 10px;font-size:11px">
@@ -23161,7 +23210,7 @@ function prOpenDetail(pullId) {
           </div>`;
         const list = linked.length ? `<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:14px 0 8px">Placements from this pull (${linked.length})</div>`
           + linked.map(c => `<div style="border:1px solid var(--border);padding:11px 14px;margin-bottom:8px">
-              <div style="display:flex;justify-content:space-between;gap:10px"><div style="font-size:12px;font-weight:700">${c.outlet}</div>${c.publishDate?`<div style="font-size:10px;color:var(--muted)">${new Date(c.publishDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>`:''}</div>
+              <div style="display:flex;justify-content:space-between;gap:10px"><div style="font-size:12px;font-weight:700">${c.outlet}</div>${c.publishDate?`<div style="font-size:10px;color:var(--muted)">${veniaDate(c.publishDate)}</div>`:''}</div>
               <div style="font-size:11px;margin-top:2px">${c.headline||''}</div>
               <div style="font-size:10px;color:var(--muted);margin-top:3px">${[c.celebRef?('★ '+c.celebRef):'', (c.stylesFeature||[]).join(', ')].filter(Boolean).join(' · ')}</div>
               ${c.url?`<a href="${c.url}" target="_blank" style="font-size:10px;color:var(--muted);text-decoration:underline">View →</a>`:''}
@@ -23357,7 +23406,7 @@ function prPaySummary(pullId){
         <div style="font-size:20px;font-family:'DM Mono',monospace;font-weight:700;color:${fee>0?'var(--ink)':'var(--muted)'}">${fee>0?'$'+fee.toFixed(2):'$0'}</div>
       </div>
       <div><div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Retail Value</div>
-        <div style="font-size:13px;font-family:'DM Mono',monospace">$${(pull.totalRetail||0).toLocaleString()}</div>
+        <div style="font-size:13px;font-family:'DM Mono',monospace">${veniaMoney((pull.totalRetail||0), { cents: 'auto' })}</div>
         <div style="font-size:10px;color:var(--muted)">${(pull.items||[]).length} pieces</div>
       </div>
     </div>
@@ -23801,7 +23850,7 @@ window.prSignOpen = function(pullId){
     '<b style="color:var(--ink)">' + escHtml(pull.client||'') + '</b> · '
     + (pull.items||[]).length + ' piece' + ((pull.items||[]).length===1?'':'s') + ' · $'
     + Number(pull.totalRetail||0).toLocaleString() + ' retail value'
-    + (pull.returnDate ? '<br>Due back <b style="color:var(--ink)">' + escHtml(pull.returnDate) + '</b>' : '');
+    + (pull.returnDate ? '<br>Due back <b style="color:var(--ink)">' + escHtml(veniaDate(pull.returnDate)) + '</b>' : '');
   document.getElementById('pr-sign-terms').innerHTML = lines.length
     ? '<ul style="margin:0;padding-left:16px">' + lines.map(l => '<li>' + escHtml(l) + '</li>').join('') + '</ul>'
     : '<span style="color:var(--muted)">No terms were set on this pull — the signature will record that.</span>';
@@ -23908,7 +23957,7 @@ function prMailBuild(pull, opener) {
     (pull.returnDate ? `RETURN BY: ${pull.returnDate}\n` : '') +
     (pull.shootDate ? `Shoot: ${pull.shootDate}\n` : '') +
     `\nSAMPLES (${(pull.items||[]).length})\n${itemLines || '—'}\n` +
-    `Total retail value on loan: $${Number(pull.totalRetail||0).toLocaleString()}\n` +
+    `Total retail value on loan: ${veniaMoney(Number(pull.totalRetail||0), { cents: 'auto' })}\n` +
     (pull.feeType && pull.feeType !== 'none' && pull.feeAmount
       ? `${pull.feeType === 'deposit' ? 'Refundable damage deposit' : 'Pull fee'}: $${Number(pull.feeAmount).toFixed(2)}\n` : '') +
     (terms.length ? `\nTERMS\n${terms.map(t => '• ' + t).join('\n')}\n` : '') +
@@ -23927,7 +23976,7 @@ function prMailBuild(pull, opener) {
 // broken box in the one place we cannot see it. The print sheet keeps them.
 function prMailHtml(pull, opener, terms, sig){
   const e = (x) => escHtml(String(x == null ? '' : x));
-  const money = (x) => '$' + Number(x||0).toLocaleString();
+  const money = (x) => veniaMoney(x, { cents: 'auto' });
   const rows = (pull.items||[]).map(i => `<tr>
       <td style="padding:8px 10px;border-bottom:1px solid #e6e6e6;font-size:13px">${e(i.styleName||i.styleCode||'Item')}${
         i.styleCode ? '<div style="font-size:11px;color:#777;font-family:monospace">'+e(i.styleCode)+'</div>' : ''}</td>
@@ -23943,8 +23992,8 @@ function prMailHtml(pull, opener, terms, sig){
     <table style="width:100%;border-collapse:collapse;margin:18px 0">
       <tr><td style="padding:4px 0;font-size:12px;color:#777;width:130px">Pull</td><td style="padding:4px 0;font-size:13px;font-family:monospace"><b>${e(pull.invoiceNo)}</b></td></tr>
       ${pull.publication ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Publication</td><td style="padding:4px 0;font-size:13px">'+e(pull.publication)+'</td></tr>' : ''}
-      ${pull.pullDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Out</td><td style="padding:4px 0;font-size:13px">'+e(pull.pullDate)+'</td></tr>' : ''}
-      ${pull.returnDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Return by</td><td style="padding:4px 0;font-size:13px"><b>'+e(pull.returnDate)+'</b></td></tr>' : ''}
+      ${pull.pullDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Out</td><td style="padding:4px 0;font-size:13px">'+e(veniaDate(pull.pullDate, 'long'))+'</td></tr>' : ''}
+      ${pull.returnDate ? '<tr><td style="padding:4px 0;font-size:12px;color:#777">Return by</td><td style="padding:4px 0;font-size:13px"><b>'+e(veniaDate(pull.returnDate, 'long'))+'</b></td></tr>' : ''}
     </table>
     <table style="width:100%;border-collapse:collapse;margin-bottom:6px">
       <thead><tr style="background:#111;color:#fff">
@@ -25278,7 +25327,7 @@ function plmContext() {
   // averaging 54 prices by hand is exactly where an agent invents a number.
   let wsLine = '';
   try {
-    const usd = (n) => '$' + Math.round(n).toLocaleString('en-US');
+    const usd = (n) => veniaMoney(n);
     wsLine = seasonsRanked.map(sn => {
       const rows = bySeason[sn] || [];
       const ws = rows.map(st => Number(st.wholesale||0)).filter(n => n > 0).sort((a,b) => a - b);
@@ -25300,7 +25349,7 @@ function plmContext() {
   try {
     planLine = Object.entries(s.rangePlan||{}).map(([season,p]) => {
       const a = rpActuals(season);
-      return `${season}: ${a.styles}/${p.total||'?'} styles, margin ${a.avgMargin!=null?a.avgMargin.toFixed(0)+'%':'n/a'} vs ${p.targetMargin||'?'}% target, sell-in $${Math.round(a.booked).toLocaleString()} vs $${Math.round(p.sellIn||0).toLocaleString()} goal`;
+      return `${season}: ${a.styles}/${p.total||'?'} styles, margin ${a.avgMargin!=null?a.avgMargin.toFixed(0)+'%':'n/a'} vs ${p.targetMargin||'?'}% target, sell-in ${veniaMoney(Math.round(a.booked), { cents: 'auto' })} vs ${veniaMoney(Math.round(p.sellIn||0), { cents: 'auto' })} goal`;
     }).join('\n');
   } catch(e){}
   // Season calendar, so the agents answer against the real deadlines.
@@ -25682,13 +25731,13 @@ function buildTodayFocus() {
     const act = "cpGoto('plm');setTimeout(function(){goTo('production',document.querySelector('[data-page=production]'))},150)";
     if (po.depositDue && !po.depositPaidAt) {
       const dd = payDays(po.depositDue);
-      if (dd < 0) items.push({key:'po|'+po.id+'|dep', pri:'high', text:`Factory deposit ${-dd}d overdue — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
-      else if (dd <= 7) items.push({key:'po|'+po.id+'|dep', pri:'med', text:`Factory deposit due in ${dd}d — ${po.id} (${po.vendor}) $${dep.toLocaleString()}`, act});
+      if (dd < 0) items.push({key:'po|'+po.id+'|dep', pri:'high', text:`Factory deposit ${-dd}d overdue — ${po.id} (${po.vendor}) ${veniaMoney(dep, { cents: 'auto' })}`, act});
+      else if (dd <= 7) items.push({key:'po|'+po.id+'|dep', pri:'med', text:`Factory deposit due in ${dd}d — ${po.id} (${po.vendor}) ${veniaMoney(dep, { cents: 'auto' })}`, act});
     }
     if (po.balanceDue && !po.balancePaidAt) {
       const bd = payDays(po.balanceDue);
-      if (bd < 0) items.push({key:'po|'+po.id+'|bal', pri:'high', text:`Factory balance ${-bd}d overdue — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
-      else if (bd <= 7) items.push({key:'po|'+po.id+'|bal', pri:'med', text:`Factory balance due in ${bd}d — ${po.id} (${po.vendor}) $${bal.toLocaleString()}`, act});
+      if (bd < 0) items.push({key:'po|'+po.id+'|bal', pri:'high', text:`Factory balance ${-bd}d overdue — ${po.id} (${po.vendor}) ${veniaMoney(bal, { cents: 'auto' })}`, act});
+      else if (bd <= 7) items.push({key:'po|'+po.id+'|bal', pri:'med', text:`Factory balance due in ${bd}d — ${po.id} (${po.vendor}) ${veniaMoney(bal, { cents: 'auto' })}`, act});
     }
     if (po.exFactory && ['placed','production'].includes(po.status)) {
       const xd = payDays(po.exFactory);
@@ -26451,7 +26500,7 @@ async function plmSalesRefresh() {
 // numbers WITH a baseline (vs prior 30 days, vs same period last year).
 function cpRenderPulse() {
   const p = STATE.bizPulse; if (!p) return;
-  const money = x => '$' + Math.round(x).toLocaleString('en-US');
+  const money = x => veniaMoney(x);
   const delta = (cur, prev) => {
     if (!prev) return '';
     const pct = Math.round(((cur - prev) / prev) * 100);
@@ -26548,7 +26597,7 @@ function cmdRenderOrders(orders) {
     <thead><tr style="border-bottom:2px solid var(--ink)">${['Order','Date','Customer','Status','Financial','Total'].map(h=>`<th style="text-align:left;padding:8px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">${h}</th>`).join('')}</tr></thead>
     <tbody>${orders.map(o=>`<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px;font-weight:700">${o.name}</td>
-      <td style="padding:8px;color:var(--muted)">${new Date(o.created_at).toLocaleDateString()}</td>
+      <td style="padding:8px;color:var(--muted)">${veniaDate(o.created_at)}</td>
       <td style="padding:8px">${o.customer?o.customer.first_name+' '+o.customer.last_name:'Guest'}</td>
       <td style="padding:8px"><span style="background:var(--bg-off);padding:2px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase">${o.fulfillment_status||'unfulfilled'}</span></td>
       <td style="padding:8px"><span style="background:var(--bg-off);padding:2px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase">${o.financial_status}</span></td>
@@ -26603,7 +26652,7 @@ function cmdRenderPipeline() {
       <td style="padding:8px;font-weight:700">${slEsc(b.name)}${b.contactName?`<div style="font-weight:400;color:var(--muted);font-size:10px">${slEsc(b.contactName)}</div>`:''}</td>
       <td style="padding:8px;color:var(--muted)">${slEsc(b.type||'—')}</td>
       <td style="padding:8px"><span style="color:${SL_STAGE_COLORS[slBuyerStage(b)]||'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">${SL_STAGES[slBuyerStage(b)]||'To Reach'}</span></td>
-      <td style="padding:8px;font-family:'DM Mono',monospace;font-size:10px;color:${isOverdue(b)?'var(--red)':'var(--muted)'}">${b.nextDate?(isOverdue(b)?'⚑ ':'')+slEsc(b.nextDate)+(b.nextAction?' · '+slEsc(String(b.nextAction).slice(0,24)):''):('last '+slEsc(b.lastContact||'—'))}</td>
+      <td style="padding:8px;font-family:'DM Mono',monospace;font-size:10px;color:${isOverdue(b)?'var(--red)':'var(--muted)'}">${b.nextDate?(isOverdue(b)?'⚑ ':'')+slEsc(veniaDate(b.nextDate))+(b.nextAction?' · '+slEsc(String(b.nextAction).slice(0,24)):''):('last '+slEsc(b.lastContact||'—'))}</td>
     </tr>`).join('')}</tbody></table>`;
 }
 async function cmdEventLeads() {
@@ -28593,7 +28642,7 @@ function prKitFacts(){
   if (cats.length) f.push({ k: 'Categories', v: cats.slice(0, 8).join(', ') });
   if (seasons.length) f.push({ k: 'Seasons', v: seasons.sort().join(', ') });
   if (priced.length) f.push({ k: 'Retail range',
-    v: '$' + Math.min.apply(null, priced).toLocaleString() + '–$' + Math.max.apply(null, priced).toLocaleString() });
+    v: veniaMoney(Math.min.apply(null, priced)) + '–' + veniaMoney(Math.max.apply(null, priced)) });
   if (coos.length) f.push({ k: 'Made in', v: coos.join(', ') });
   // Stockists only once there are some. "Available at 0 retailers" is worse
   // than silence, and announcing prospects is how you lose them.
@@ -28665,7 +28714,7 @@ function prPressKitDoc(){
     ? '<ul class="cov">' + kit.coverage.map(c => `<li>${
         c.url ? '<a href="' + e(c.url) + '">' + e(c.outlet || c.headline) + '</a>' : e(c.outlet || c.headline)
       }${c.headline && c.outlet ? ' — ' + e(c.headline) : ''}${
-        c.publishDate ? ' <span class="c">' + e(c.publishDate) + '</span>' : ''}</li>`).join('') + '</ul>'
+        c.publishDate ? ' <span class="c">' + e(veniaDate(c.publishDate)) + '</span>' : ''}</li>`).join('') + '</ul>'
     // Said, not silently dropped. An empty section is a fact about the brand.
     : '<p class="none">No coverage archive yet.</p>';
   return '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
@@ -28820,7 +28869,7 @@ function prMoments(){
         push({ id: 'M-late-' + pull.id, kind: 'pull-overdue', desk: 'newsroom',
           at: pull.returnDate,
           headline: pub + ' is ' + due + ' day' + (due === 1 ? '' : 's') + ' past return',
-          why: out.length + ' sample' + (out.length === 1 ? '' : 's') + ' still out, ' + (outRetail ? '$' + outRetail.toLocaleString() + ' ' : '')
+          why: out.length + ' sample' + (out.length === 1 ? '' : 's') + ' still out, ' + (outRetail ? veniaMoney(outRetail, { cents: 'auto' }) + ' ' : '')
              + 'on loan. Chasing them is also the natural moment to ask where the story is.',
           evidence: [prEv((pull.invoiceNo || pull.id) + ' — return by ' + pull.returnDate, pull.id)],
           suggest: 'Chase the return and the tearsheet together' });
@@ -29109,7 +29158,7 @@ function agRenderPitches(filter, returnHtml) {
         ${p.contact ? `<span>${p.contact}</span>` : ''}
         ${p.celebRef ? `<span style="color:var(--ink)">★ ${p.celebRef}</span>` : ''}
         ${p.sentAt ? `<span>Sent ${new Date(p.sentAt).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>` : ''}
-        ${p.followUpDate ? `<span style="color:${isOverdue?'var(--amber)':'var(--muted)'}">Follow-up ${new Date(p.followUpDate).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</span>` : ''}
+        ${p.followUpDate ? `<span style="color:${isOverdue?'var(--amber)':'var(--muted)'}">Follow-up ${veniaDate(p.followUpDate)}</span>` : ''}
         ${reach ? `<span>${reach}</span>` : ''}
         ${p.publishUrl ? `<a href="${p.publishUrl}" target="_blank" onclick="event.stopPropagation()" style="color:var(--ink);text-decoration:underline">View coverage →</a>` : ''}
       </div>
@@ -29485,7 +29534,7 @@ function agRenderCoverage(filter, returnHtml) {
         </div>
       </div>
       <div class="ag-cov-meta">
-        ${c.publishDate ? `<span>${new Date(c.publishDate).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</span>` : ''}
+        ${c.publishDate ? `<span>${veniaDate(c.publishDate, 'year')}</span>` : ''}
         ${reach ? `<span>${reach} reach</span>` : ''}
         ${c.aveValue ? `<span style="color:var(--gold)">$${(c.aveValue/1000).toFixed(1)}k AVE</span>` : ''}
         ${c.celebRef ? `<span style="color:var(--ink)">★ ${c.celebRef}</span>` : ''}
@@ -30411,7 +30460,7 @@ function veniaOpsContext(){
   const S = window.STATE; if (!S) return '';
   const parts = [];
   const more = (arr, n) => arr.length > n ? '\n…+' + (arr.length - n) + ' more' : '';
-  const money = (cur, n) => (typeof slMoneyC === 'function') ? slMoneyC(cur, n) : '$' + Math.round(n||0).toLocaleString();
+  const money = (cur, n) => (typeof slMoneyC === 'function') ? slMoneyC(cur, n) : veniaMoney(Math.round(n||0), { cents: 'auto' });
   try {
     const vs = S.vendors || [];
     if (vs.length) parts.push('Vendors (' + vs.length + '):\n' + vs.slice(0,20).map(v =>
@@ -30442,8 +30491,8 @@ function veniaOpsContext(){
         ? (['paid','void','uncollectible'].indexOf(p.status) >= 0
            ? p.status + (p.paidAt ? ' ' + String(p.paidAt).slice(0,10) : '')
            : [how, p.dueDate ? 'due ' + p.dueDate : '',
-              p.amountPaid ? '$' + Math.round(p.amountPaid).toLocaleString() + ' received' : '',
-              p.amountRemaining != null ? '$' + Math.round(p.amountRemaining).toLocaleString() + ' outstanding' : '',
+              p.amountPaid ? veniaMoney(Math.round(p.amountPaid), { cents: 'auto' }) + ' received' : '',
+              p.amountRemaining != null ? veniaMoney(Math.round(p.amountRemaining), { cents: 'auto' }) + ' outstanding' : '',
              ].filter(Boolean).join(', '))
         : 'nothing recorded against it';
       return '• #' + o.id + ' ' + (o.account||'?') + ' | $' + Math.round(o.total||0).toLocaleString()
@@ -32103,7 +32152,7 @@ window.brOpenDoc = function(id){
   const html = '<div class="modal" style="width:640px;max-width:94vw">'
     + '<div class="modal-head"><div class="modal-title">' + escHtml(d.title) + '</div><button class="modal-close" aria-label="Close" onclick="closeModal(\'br-doc-modal\')">✕</button></div>'
     + '<div class="modal-body" style="padding:20px;max-height:70vh;overflow-y:auto">'
-    + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px">' + escHtml(d.kind) + ' · saved ' + new Date(d.createdAt).toLocaleDateString() + '</div>'
+    + '<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:12px">' + escHtml(d.kind) + ' · saved ' + veniaDate(d.createdAt) + '</div>'
     + '<div style="font-size:12px;line-height:1.7;white-space:pre-wrap">' + escHtml(d.body) + '</div>'
     + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;border-top:1px solid var(--border);padding-top:12px">'
     + '<button class="btn btn-ghost btn-sm" onclick="if(confirm(\'Delete this document?\')){agentUndoBrandDoc(\'' + d.id + '\');closeModal(\'br-doc-modal\');try{agNavGo(\'br\',\'overview\')}catch(e){}}">Delete</button>'
@@ -33486,7 +33535,7 @@ function prRefreshOverview() {
         let what = '', tone = 'var(--muted)', rank = 9;
         if (pullIsOverdue(p)) { what = (-left) + 'd late back'; tone = 'var(--red)'; rank = 0; }
         else if (left !== null && left <= 3 && out.length) { what = left === 0 ? 'due back today' : left === 1 ? 'due back tomorrow' : 'due back in ' + left + 'd'; tone = 'var(--amber)'; rank = 1; }
-        else if (feeOwed) { what = '$' + Number(p.feeAmount).toLocaleString() + ' fee not paid yet'; tone = 'var(--amber)'; rank = 2; }
+        else if (feeOwed) { what = veniaMoney(Number(p.feeAmount), { cents: 'auto' }) + ' fee not paid yet'; tone = 'var(--amber)'; rank = 2; }
         else if (out.length) { what = out.length + ' piece' + (out.length > 1 ? 's' : '') + ' out' + (left !== null ? ' · back in ' + left + 'd' : ''); rank = 3; }
         else return;
         rows.push({ rank, html: `<div class="focus-row" style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer;min-height:40px" onclick="prOpenDetail('${esc(p.id)}')">
@@ -36144,7 +36193,7 @@ function agSectionData(key, section) {
       stats:[{l:'Stockists',v:buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length+'',s:'doing business'},{l:'Gone quiet',v:buyers.filter(b=>['approached','warm','quoted','active','closed'].includes(slBuyerStage(b))&&(_daysAgo(b.lastContact)==null||_daysAgo(b.lastContact)>=30)).length+'',s:'no touch in 30d+'},{l:'Follow-ups due',v:buyers.filter(b=>slBuyerStage(b)!=='inactive'&&b.nextDate&&b.nextDate<_today).length+'',s:'overdue'},{l:'Dormant',v:buyers.filter(b=>slBuyerStage(b)==='inactive').length+'',s:'parked accounts'}],
       prompts:[{t:'Which accounts are at risk of churning?',tag:'ANALYZE',d:'No orders, no engagement, or declining spend.'},{t:'How do I re-engage an account that went quiet?',tag:'DRAFT',d:'Outreach strategy + 2-touch sequence.'}] },
     sellthrough: {
-      stats:(function(){ const ss = (STATE.styleSales&&STATE.styleSales.map)||{}; const rows = Object.entries(ss).map(([t,x])=>({t, u:(x&&x.u)||0, r:(x&&x.r)||0})).filter(x=>x.u>0); if(!rows.length) return [{l:'Sales data',v:'—',s:'connect Shopify for per-style numbers'}]; const top = rows.slice().sort((a,b)=>b.r-a.r)[0]; return [{l:'Styles selling',v:rows.length+'',s:'with recorded sales'},{l:'Top style',v:String(top.t||'—').slice(0,14).toUpperCase(),s:'$'+Math.round(top.r).toLocaleString()+' · '+top.u+' units'}]; })(),
+      stats:(function(){ const ss = (STATE.styleSales&&STATE.styleSales.map)||{}; const rows = Object.entries(ss).map(([t,x])=>({t, u:(x&&x.u)||0, r:(x&&x.r)||0})).filter(x=>x.u>0); if(!rows.length) return [{l:'Sales data',v:'—',s:'connect Shopify for per-style numbers'}]; const top = rows.slice().sort((a,b)=>b.r-a.r)[0]; return [{l:'Styles selling',v:rows.length+'',s:'with recorded sales'},{l:'Top style',v:String(top.t||'—').slice(0,14).toUpperCase(),s:veniaMoney(Math.round(top.r), { cents: 'auto' })+' · '+top.u+' units'}]; })(),
       prompts:[{t:'Which styles are underperforming and why?',tag:'ANALYZE',d:'Sell-through by style using our real Shopify sales.'},{t:'Which style deserves a reorder?',tag:'ANALYZE',d:'Current sales pace, lead time, buyer demand signals.'}] },
     'sl-prefs':  { prompts:[{t:'Help me configure my sales preferences',tag:'BUILD',d:'Targets, territory, workflow.'}] },
   };
@@ -36338,7 +36387,7 @@ function loadCampaignRows(){
   if (real.length !== rows.length) { try { localStorage.setItem('venia_campaigns', JSON.stringify(real)); } catch (e) {} }
   var statusClass = { Live:'b-active', Planned:'b-concept', Ended:'b-archived', Paused:'b-development' };
   tbody.innerHTML = real.map(function(r){
-    return '<tr><td><span class="t-name">' + esc(r.name) + '</span></td><td>' + esc(r.channel||'—') + '</td><td class="t-mono">' + esc(r.date||'—') + '</td><td><span class="badge ' + (statusClass[r.status]||'b-archived') + '">' + esc(r.status||'—') + '</span></td><td class="t-mono">' + esc(r.impressions||'—') + '</td><td class="t-mono">' + esc(r.clicks||'—') + '</td><td><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="this.closest(\'tr\').remove();saveCampaigns();showToast(\'Row removed\')">✕</button></td></tr>';
+    return '<tr><td><span class="t-name">' + esc(r.name) + '</span></td><td>' + esc(r.channel||'—') + '</td><td class="t-mono">' + esc(r.date ? veniaDate(r.date) : '—') + '</td><td><span class="badge ' + (statusClass[r.status]||'b-archived') + '">' + esc(r.status||'—') + '</span></td><td class="t-mono">' + esc(r.impressions||'—') + '</td><td class="t-mono">' + esc(r.clicks||'—') + '</td><td><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="this.closest(\'tr\').remove();saveCampaigns();showToast(\'Row removed\')">✕</button></td></tr>';
   }).join('');
 }
 
@@ -36424,7 +36473,7 @@ function agBuildSalesOverview() {
   const stDoing = buyers.filter(b => ['active','closed'].includes(slBuyerStage(b))).length;
   const overdue = buyers.filter(b => slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today);
   const pending = quotes.filter(q => ['draft','sent'].includes(q.status || 'draft'));
-  const money = (n) => '$' + Math.round(n||0).toLocaleString();
+  const money = (n) => veniaMoney(n);
   // Totals in dollars: each quote is in its own currency (Build 587).
   const pendingVal = pending.reduce((s,q) => s + slToUsd(q.total||0, q.currency, q.fxRate), 0);
   const bookedVal = quotes.filter(q => q.status === 'accepted').reduce((s,q) => s + slToUsd(q.total||0, q.currency, q.fxRate), 0);
@@ -36434,7 +36483,7 @@ function agBuildSalesOverview() {
     <div class="ag-list-row" style="cursor:pointer" onclick="slOpenBuyerDetail('${b.id}')">
       <div><div class="ag-lr-name">${slEsc(b.name)}</div><div class="ag-lr-sub">${slEsc(b.nextAction||'Follow up')}</div></div>
       <div></div>
-      <div><span style="font-size:10px;font-weight:700;color:var(--red);letter-spacing:1px;text-transform:uppercase">⚑ ${slEsc(b.nextDate)}</span></div>
+      <div><span style="font-size:10px;font-weight:700;color:var(--red);letter-spacing:1px;text-transform:uppercase">⚑ ${slEsc(veniaDate(b.nextDate))}</span></div>
       <div class="ag-lr-mono" style="font-size:10px">${SL_STAGES[slBuyerStage(b)]||'To Reach'}</div>
     </div>`).join('');
 
@@ -37618,7 +37667,7 @@ const SL_COLS = [
       const today = new Date().toISOString().slice(0, 10);
       const od = slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today;
       return '<td style="white-space:nowrap;color:' + (od ? 'var(--red)' : 'var(--muted)') + ';font-weight:'
-        + (od ? '700' : '400') + '">' + (od ? '\u2691 ' : '') + (slEsc(b.nextDate) || '') + '</td>'; } },
+        + (od ? '700' : '400') + '">' + (od ? '\u2691 ' : '') + (slEsc(veniaDate(b.nextDate)) || '') + '</td>'; } },
   { key:'last',    label:'Last',     sort:'last',     cell:function(b){
       return '<td style="white-space:nowrap;color:var(--muted)">' + (slEsc(b.lastContact) || '') + '</td>'; } },
 ];
@@ -37731,7 +37780,7 @@ function slBuyersListHTML() {
     // The last cell answers "what's next with this store" at a glance: the
     // planned follow-up (flagged red when overdue), else the last touch.
     const next = b.nextDate
-      ? `<span style="color:${od?'var(--red)':'var(--muted)'};font-weight:${od?'700':'400'}">${od?'⚑ ':''}${slEsc(b.nextDate)}${b.nextAction?' · '+slEsc(String(b.nextAction).slice(0,28)):''}</span>`
+      ? `<span style="color:${od?'var(--red)':'var(--muted)'};font-weight:${od?'700':'400'}">${od?'⚑ ':''}${slEsc(veniaDate(b.nextDate))}${b.nextAction?' · '+slEsc(String(b.nextAction).slice(0,28)):''}</span>`
       : `<span style="color:var(--muted)">last ${slEsc(b.lastContact||'—')}</span>`;
     // Type lives in the sub-line under the name (type · location) — no separate
     // TYPE column, which only duplicated it.
@@ -38187,12 +38236,12 @@ function slOpenBuyerDetail(id) {
   const quotes = (STATE.slQuotes||[]).filter(q => norm(q.buyerName) === norm(b.name));
   const quotesHtml = quotes.length
     ? `<div><div style="${lbl}">Quotes</div>${quotes.map(q =>
-        `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${slEsc(q.season||'')}${(q.items||q.styles||[]).length?' · '+(q.items||q.styles||[]).length+' styles':''}</span><span style="font-family:'DM Mono',monospace">$${(q.total||0).toLocaleString()} · ${slEsc(q.status||'draft')}</span></div>`).join('')}</div>`
+        `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px"><span>${slEsc(q.season||'')}${(q.items||q.styles||[]).length?' · '+(q.items||q.styles||[]).length+' styles':''}</span><span style="font-family:'DM Mono',monospace">${slMoneyC(q.currency || 'USD', q.total||0)} · ${slStatusChip('quote', q.status)}</span></div>`).join('')}</div>`
     : '';
   const acctOrders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => norm(o.account) === norm(b.name));
   const ordersHtml = acctOrders.length
     ? `<div><div style="${lbl}">Wholesale orders</div>${acctOrders.map(o =>
-        `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px;cursor:pointer" onclick="closeModal('sl-acct-modal');slOpenOrderDetail('${o.id}')"><span>#${slEsc(o.id)}${o.deliveryDate?' · del '+slEsc(o.deliveryDate):''}</span><span style="font-family:'DM Mono',monospace">$${(o.total||0).toLocaleString()} · ${slEsc(o.status||'')}</span></div>`).join('')}</div>`
+        `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px;cursor:pointer" onclick="closeModal('sl-acct-modal');slOpenOrderDetail('${o.id}')"><span>#${slEsc(o.id)}${o.deliveryDate?' · delivery '+slEsc(veniaDate(o.deliveryDate)):''}</span><span style="font-family:'DM Mono',monospace">${slMoneyC(o.currency || 'USD', o.total||0)} · ${slStatusChip('order', o.status)}</span></div>`).join('')}</div>`
     : '';
   const logHtml = b.log.length
     ? slLogRows(b.log).slice(0,30).map(e => {
@@ -40205,7 +40254,7 @@ function agBuildQuotesSection() {
 const SL_CURRENCIES = { USD:'$', EUR:'€', GBP:'£', JPY:'¥', CAD:'C$', AUD:'A$' };
 const SL_TERMS = ['Proforma (pay before ship)', '30% deposit / 70% before ship', '50% deposit / 50% before ship', 'Net 30', 'Net 60', 'Net 90', '2/10 Net 30 (2% off if paid in 10 days)', 'Credit card on file'];
 function slCur(code){ return SL_CURRENCIES[code] || '$'; }
-function slMoneyC(code, n){ return slCur(code) + Math.round(Number(n)||0).toLocaleString(); }
+function slMoneyC(code, n){ var v = Math.round(Number(n)||0); return (v < 0 ? '-' : '') + slCur(code) + Math.abs(v).toLocaleString('en-US'); }
 // The size run for a line comes from the style's own PLM sizes; fall back to a
 // standard apparel run if the style has none.
 function slQuoteSizesFor(style){
@@ -40935,12 +40984,7 @@ function slLostSummary(quotes){
 // garments at different moments: a quote prints PRO FORMA and says the prices
 // hold until it is accepted; an order prints ORDER CONFIRMATION and says what
 // has been booked. Nothing is retyped and nothing can drift between them.
-function slMoney(v, cur){
-  var n = Number(v) || 0, c = String(cur || 'USD').toUpperCase();
-  try { return new Intl.NumberFormat('en-US', { style: 'currency', currency: c,
-    maximumFractionDigits: 0 }).format(n); }
-  catch (e) { return (c === 'EUR' ? '€' : c === 'GBP' ? '£' : '$') + Math.round(n).toLocaleString(); }
-}
+function slMoney(v, cur){ return veniaMoney(v, { cur: cur }); }
 // The size run as a buyer reads it: only the sizes actually taken, in run order,
 // each with its count. A bare total of 12 units tells a warehouse nothing.
 function slSizeRun(it){
@@ -41515,7 +41559,7 @@ function slOpenQuoteDetail(id) {
     : `<div style="font-size:11px;color:var(--muted)">No styles on this quote yet — Edit to add them.</div>`;
   const bits = [];
   if (q.terms) bits.push('Terms: ' + slEsc(q.terms));
-  if (q.shipStart || q.cancelDate) bits.push('Delivery: ' + slEsc(q.shipStart || 'TBD') + (q.cancelDate ? ' → cancel ' + slEsc(q.cancelDate) : ''));
+  if (q.shipStart || q.cancelDate) bits.push('Delivery: ' + slEsc(q.shipStart ? veniaDate(q.shipStart) : 'TBD') + (q.cancelDate ? ' → cancel ' + slEsc(veniaDate(q.cancelDate)) : ''));
   if (q.discountPct) bits.push(q.discountPct + '% discount applied');
   if (String(cur).toUpperCase() !== 'USD' && Number(q.fxRate) > 0) bits.push('Rate ' + q.fxRate + ' ' + String(cur).toUpperCase() + ' to 1 USD, frozen on this quote');
   const termsHtml = bits.length ? `<div><div style="${lbl}">Terms &amp; delivery</div><div style="font-size:11px;line-height:1.7">${bits.join('<br>')}</div></div>` : '';
@@ -42400,7 +42444,7 @@ function agBuildOrdersSection() {
     </div>
   </div>
   <div class="ag-stats">
-    <div class="ag-stat"><div class="ag-stat-l">Booked · all time</div><div class="ag-stat-v">$${Math.round(totalBooked).toLocaleString()}</div><div class="ag-stat-s">every order not cancelled${mixedCur ? ' · in USD at each order’s rate' : ''}</div></div>
+    <div class="ag-stat"><div class="ag-stat-l">Booked · all time</div><div class="ag-stat-v">${veniaMoney(Math.round(totalBooked), { cents: 'auto' })}</div><div class="ag-stat-s">every order not cancelled${mixedCur ? ' · in USD at each order’s rate' : ''}</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Open Orders</div><div class="ag-stat-v">${open}</div><div class="ag-stat-s">in progress</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Shipped</div><div class="ag-stat-v">${shipped}</div><div class="ag-stat-s">awaiting receipt</div></div>
     <div class="ag-stat"><div class="ag-stat-l">Delivered</div><div class="ag-stat-v">${delivered}</div><div class="ag-stat-s">completed</div></div>
@@ -42855,7 +42899,7 @@ function slOpenOrderDetail(id) {
     : '';
   const termsBits = [];
   if (o.terms) termsBits.push('Terms: ' + slEsc(o.terms));
-  if (o.shipStart || o.cancelDate) termsBits.push('Delivery: ' + slEsc(o.shipStart||'TBD') + (o.cancelDate?' → cancel '+slEsc(o.cancelDate):''));
+  if (o.shipStart || o.cancelDate) termsBits.push('Delivery: ' + slEsc(o.shipStart ? veniaDate(o.shipStart) : 'TBD') + (o.cancelDate?' → cancel '+slEsc(veniaDate(o.cancelDate)):''));
   if (o.discountPct) termsBits.push(o.discountPct + '% discount applied');
   const termsHtml = termsBits.length ? `<div><div style="${lbl}">Terms &amp; delivery</div><div style="font-size:11px;color:var(--ink);line-height:1.7">${termsBits.join('<br>')}</div></div>` : '';
   // WHAT THE TERMS SAY YOU ARE OWED, AND WHERE EACH PART IS.
@@ -42909,7 +42953,7 @@ function slOpenOrderDetail(id) {
         const amounts = (p.amountPaid || p.amountRemaining)
           ? ` · ${slMoneyC(cur, p.amountPaid||0)} paid${p.amountRemaining?` / ${slMoneyC(cur, p.amountRemaining)} open`:''}` : '';
         const ded = p.deduction ? `<div style="font-size:10px;color:var(--red);margin-top:2px">− ${slMoneyC(cur, p.deduction)} deduction${p.deductionNote?' · '+slEsc(p.deductionNote):''}</div>` : '';
-        return `<div style="font-size:11px"><span style="color:${col};font-weight:700">${paid?'✓ paid':slEsc(p.status)}</span>${p.dueDate&&!paid?' · due '+slEsc(p.dueDate):(p.at?' · '+slEsc(String(p.at).slice(0,10)):'')}${amounts}${p.url?' · <a href="'+slEsc(p.url)+'" target="_blank" rel="noopener" style="color:var(--ink)">view invoice</a>':''}
+        return `<div style="font-size:11px"><span style="color:${col};font-weight:700">${paid?'✓ paid':slEsc(p.status)}</span>${p.dueDate&&!paid?' · due '+slEsc(veniaDate(p.dueDate)):(p.at?' · '+slEsc(String(p.at).slice(0,10)):'')}${amounts}${p.url?' · <a href="'+slEsc(p.url)+'" target="_blank" rel="noopener" style="color:var(--ink)">view invoice</a>':''}
           ${!bad?` · <a onclick="slSetOrderDeduction('${o.id}')" style="color:var(--muted);cursor:pointer;text-decoration:underline">${p.deduction?'edit':'log'} deduction</a>`:''}</div>${ded}`;
       })()
     : '';
@@ -42944,7 +42988,7 @@ function slOpenOrderDetail(id) {
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">
         <strong style="color:var(--ink)">${slEsc(o.account||'Account')}</strong>
-        · ${slStatusChip('order', o.status)} · ${slMoneyC(cur, o.total||0)}${o.deliveryDate?' · delivery '+slEsc(o.deliveryDate):''}
+        · ${slStatusChip('order', o.status)} · ${slMoneyC(cur, o.total||0)}${o.deliveryDate?' · delivery '+slEsc(veniaDate(o.deliveryDate)):''}
         ${o.quoteId?'<br>From quote '+slEsc(o.quoteId):''}
         ${o.notes?'<br>'+slEsc(o.notes):''}
       </div>
@@ -44231,7 +44275,7 @@ function finCashFlowNotes(bank, netTransfers, tIn, tOut, uncatOut, uncatIn, earl
       + 'before that date is absent from every figure below, and from the derived opening balance.');
   }
   if (tIn > 0 || tOut > 0) {
-    n.push('$' + Math.round(tOut).toLocaleString() + ' out and $' + Math.round(tIn).toLocaleString()
+    n.push(veniaMoney(tOut) + ' out and ' + veniaMoney(tIn)
       + ' in are transfers between the company\'s own accounts, shown separately and NOT counted as '
       + 'operating cash. They net to $' + Math.round(Math.abs(netTransfers)).toLocaleString()
       + (Math.abs(netTransfers) > 1
@@ -44240,7 +44284,7 @@ function finCashFlowNotes(bank, netTransfers, tIn, tOut, uncatOut, uncatIn, earl
         : ', as they should.'));
   }
   if (uncatOut > 0 || uncatIn > 0) {
-    n.push('$' + Math.round(uncatOut).toLocaleString() + ' of payments and $'
+    n.push(veniaMoney(Math.round(uncatOut), { cents: 'auto' }) + ' of payments and $'
       + Math.round(uncatIn).toLocaleString() + ' of receipts have not been assigned a category. They '
       + 'are INCLUDED in the totals — money that moved is cash flow whether or not it has been '
       + 'labelled — so classifying them changes the breakdown, never the net movement.');
@@ -44382,7 +44426,7 @@ window.finBalanceSheet = finBalanceSheet;
 // document until they have.
 window.finReconcileFlags = function(){
   const out = [];
-  const money = function(n){ return '$' + Math.round(Math.abs(n || 0)).toLocaleString(); };
+  const money = function(n){ return veniaMoney(Math.abs(n || 0)); };
   const d = cmdMoneyData();
   const live = (STATE.finTxns || []).filter(function(t){ return t && t.status !== 'void'; });
   const yr = new Date().getFullYear();
@@ -45129,8 +45173,7 @@ function finBalanceSheetNotes(d, bank, inv, cash, ar, stock, liab){
     // the inputs that produce the figure stay so it can be reproduced, and the
     // twelve-month split folds in here instead of standing alone three notes
     // later.
-    const money = function(v){ return '$' + Number(v).toLocaleString('en-US',
-      { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+    const money = function(v){ return veniaMoney(v, { cents: true }); };
     const longDate = function(iso){
       const d = new Date(String(iso) + 'T12:00:00');
       return isNaN(d.getTime()) ? '' : d.toLocaleDateString('en-US',
@@ -45419,7 +45462,7 @@ function finPLStatement(opts){
        + 'receipts.');
   }
   if (d.bankOpex && uncat > 0) {
-    notes.push('$' + Math.round(uncat).toLocaleString() + ' of bank outflows have not yet been '
+    notes.push(veniaMoney(Math.round(uncat), { cents: 'auto' }) + ' of bank outflows have not yet been '
       + 'assigned to a category. They are INCLUDED in total operating expenses above, as '
       + '"Unclassified", so this statement does not overstate profit. Classifying them changes '
       + 'how the total is distributed, not the total or the operating result.');
@@ -45516,11 +45559,11 @@ function finPLStatement(opts){
     notes.push('WHERE MANUFACTURING MONEY IS COUNTED. A payment to a factory or a mill reaches this '
       + 'statement one of two ways, and must only take one: through cost of goods sold as the units it '
       + 'produced are sold, or through operating expenses as money that left the bank. '
-      + '$' + mfgCogs.toLocaleString() + ' is categorised fabric or production and is therefore '
+      + veniaMoney(mfgCogs, { cents: 'auto' }) + ' is categorised fabric or production and is therefore '
       + 'EXCLUDED from operating expenses above, on the basis that its cost arrives through cost of '
       + 'goods sold instead. '
       + (mfgOpex
-        ? '$' + mfgOpex.toLocaleString() + ' sits in ' + named.join(' and ') + ' and IS counted as an '
+        ? veniaMoney(mfgOpex, { cents: 'auto' }) + ' sits in ' + named.join(' and ') + ' and IS counted as an '
           + 'operating expense. If any of that was manufacturing, it will be counted a second time as '
           + 'soon as a cost sheet exists for the styles it made. Recategorise those to fabric or '
           + 'production, or leave them and do not cost those styles — either is defensible, both is not.'
@@ -45530,10 +45573,10 @@ function finPLStatement(opts){
   const fin = (d.ownerDraw || 0) + (d.ownerInvest || 0) + (d.loanIn || 0) + (d.loanOut || 0);
   if (fin > 0) {
     const bits = [];
-    if (d.ownerDraw > 0) bits.push('$' + Math.round(d.ownerDraw).toLocaleString() + ' of owner draws');
-    if (d.ownerInvest > 0) bits.push('$' + Math.round(d.ownerInvest).toLocaleString() + ' of owner investment');
-    if (d.loanIn > 0) bits.push('$' + Math.round(d.loanIn).toLocaleString() + ' of loan principal received');
-    if (d.loanOut > 0) bits.push('$' + Math.round(d.loanOut).toLocaleString() + ' of loan principal repaid');
+    if (d.ownerDraw > 0) bits.push(veniaMoney(Math.round(d.ownerDraw), { cents: 'auto' }) + ' of owner draws');
+    if (d.ownerInvest > 0) bits.push(veniaMoney(Math.round(d.ownerInvest), { cents: 'auto' }) + ' of owner investment');
+    if (d.loanIn > 0) bits.push(veniaMoney(Math.round(d.loanIn), { cents: 'auto' }) + ' of loan principal received');
+    if (d.loanOut > 0) bits.push(veniaMoney(Math.round(d.loanOut), { cents: 'auto' }) + ' of loan principal repaid');
     notes.push('FINANCING IS NOT TRADING, AND IS NOT IN THE FIGURES ABOVE. ' + bits.join(', ')
       + ' moved in this period. None of it is revenue and none of it is an operating expense: it '
       + 'changes who owns what, not what the business earned. A draw counted as an expense would '
@@ -45599,13 +45642,13 @@ function finPLStatement(opts){
     + 'not to the date the factory was paid. That is why cost of goods sold above is the landed cost of '
     + 'units actually sold rather than what left the bank, and why manufacturing payments are kept out '
     + 'of operating expenses. '
-    + '$' + mfgCash.toLocaleString() + ' of manufacturing cash left the bank in this period and $'
+    + veniaMoney(mfgCash, { cents: 'auto' }) + ' of manufacturing cash left the bank in this period and $'
     + Math.round(cogs).toLocaleString() + ' of cost reached this statement through cost of goods sold. '
     + 'THE TWO ARE NOT EXPECTED TO MATCH: the difference is stock moving on or off the shelf, which is '
     + 'an asset, not a profit or a loss.');
   if (inv && (inv.value > 0 || inv.uncostedUnits > 0)) {
     notes.push('INVENTORY ON HAND. ' + (inv.value > 0
-        ? '$' + Math.round(inv.value).toLocaleString() + ' of stock at landed cost — '
+        ? veniaMoney(Math.round(inv.value), { cents: 'auto' }) + ' of stock at landed cost — '
           + inv.units.toLocaleString() + ' unit' + (inv.units === 1 ? '' : 's')
           + ' across ' + inv.styles + ' style' + (inv.styles === 1 ? '' : 's') + '. '
           + 'This is where manufacturing money paid but not yet sold has gone. It is an asset and '
@@ -45961,8 +46004,7 @@ window.finPrintCF = function(opts){
   if (_o.lender) return finPrintCFLender(cf);
   const esc = (t) => String(t == null ? '' : t)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const money = (n) => n == null ? '—'
-    : (n < 0 ? '(' : '') + '$' + Math.abs(Math.round(n)).toLocaleString() + (n < 0 ? ')' : '');
+  const money = (n) => n == null ? '—' : veniaMoney(n, { paren: true });
   const row = (label, amount, o) => '<tr class="' + ((o && o.cls) || '') + '">'
     + '<td>' + esc(label) + '</td><td class="n">' + money(amount) + '</td></tr>';
   const section = (t) => '<tr><td colspan="2" class="sec">' + esc(t) + '</td></tr>';
@@ -46050,8 +46092,7 @@ window.finPrintBS = function(opts){
   const bs = finBalanceSheet();
   const esc = (t) => String(t == null ? '' : t)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  const money = (n) => (n < 0 ? '(' : '') + '$'
-    + Math.abs(Math.round(n)).toLocaleString() + (n < 0 ? ')' : '');
+  const money = (n) => veniaMoney(n, { paren: true });
   const row = (label, amount, o) => '<tr class="' + ((o && o.cls) || '') + '">'
     + '<td>' + esc(label) + '</td><td class="n">' + money(amount) + '</td></tr>';
   const sub = (label, note) => '<tr><td colspan="2" class="sub">' + esc(label)
@@ -46895,7 +46936,7 @@ window.cmdRenderMoney = function() {
   const el = document.getElementById('cmd-money-body');
   if (!el) return;
   const d = cmdMoneyData();
-  const money = (n) => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n)).toLocaleString();
+  const money = (n) => veniaMoney(n);
   const line = (label, val, sub, strong) => `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:9px 0;border-bottom:1px solid var(--border)">
       <span style="font-size:11px;${strong?'font-weight:700;':''}color:var(--ink)">${label}${sub?` <span style="color:var(--muted);font-weight:400;font-size:10px">· ${sub}</span>`:''}</span>
       <span style="font-family:'DM Mono',monospace;font-size:${strong?'16px':'13px'};${strong?'font-weight:600;':''}color:${val<0?'var(--red)':'var(--ink)'}">${money(val)}</span>
@@ -46958,7 +46999,7 @@ window.cmdRenderMoney = function() {
     <div class="money-block">
       ${d.arOpen.map(a => `<div style="display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11.5px;cursor:pointer" onclick="slOpenOrderDetail('${a.id}')">
         <span>#${slEsc(a.id)}${a.label ? ' · ' + slEsc(a.label.toLowerCase()) : ''} <span style="color:var(--muted)">· ${slEsc(a.account)}</span></span>
-        <span style="font-family:'DM Mono',monospace;white-space:nowrap"><span style="color:${a.days>30?'var(--red)':a.days>0?'var(--amber)':'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-right:8px">${a.bucket}${a.days>0?' · '+a.days+'d over':''}</span>${String(a.currency||'USD').toUpperCase() !== 'USD' ? slMoney(a.openNative, a.currency) + ' <span style="color:var(--muted);font-size:10px">≈ $' + Math.round(a.open).toLocaleString() + '</span>' : '$' + Math.round(a.open).toLocaleString()}</span>
+        <span style="font-family:'DM Mono',monospace;white-space:nowrap"><span style="color:${a.days>30?'var(--red)':a.days>0?'var(--amber)':'var(--muted)'};font-size:10px;letter-spacing:1px;text-transform:uppercase;margin-right:8px">${a.bucket}${a.days>0?' · '+a.days+'d over':''}</span>${String(a.currency||'USD').toUpperCase() !== 'USD' ? slMoney(a.openNative, a.currency) + ' <span style="color:var(--muted);font-size:10px">≈ $' + Math.round(a.open).toLocaleString() + '</span>' : veniaMoney(Math.round(a.open), { cents: 'auto' })}</span>
       </div>`).join('')}
     </div></section>` : ''}
     <section>
@@ -46997,7 +47038,7 @@ window.cmdRenderMoney = function() {
 function veniaFinanceContext(){
   try {
     const d = cmdMoneyData();
-    const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
+    const money = n => veniaMoney(n);
     const parts = [];
     const p = d.p || {};
     parts.push('P&L this year: revenue ' + money(d.revYtd)
@@ -47316,7 +47357,7 @@ window.cmdRenderCfo = function(){
   if (!el) return;
   try { plmSalesRefresh(); } catch(e){}
   const d = cmdMoneyData();
-  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
+  const money = n => veniaMoney(n);
   const arOut = d.arOpen.reduce((s,a) => s + (a.open||0), 0);
   const overdue = d.arOpen.filter(a => a.days > 0).length;
   // CASH LEADS. A page headed "what needs you now" that opened on YTD revenue
@@ -47398,7 +47439,7 @@ window.cmdRenderCfo = function(){
 window.cmdRenderPlan = function(){
   const el = document.getElementById('cmd-plan-body');
   if (!el) return;
-  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
+  const money = n => veniaMoney(n);
   el.innerHTML = cfoPlanPanelHtml(money) + cfoWatchPanelHtml(money);
   try { if (STATE.finPlanJob && STATE.finPlanJob.status === 'running') cfoPlanPoll(); } catch(e){}
 };
@@ -47413,7 +47454,7 @@ window.cmdRenderPlan = function(){
 // calendar, no brand docs — none of it moves money.
 function veniaFinOpsContext(){
   const S = window.STATE; if (!S) return '';
-  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n||0)).toLocaleString();
+  const money = n => veniaMoney(n);
   const parts = [];
   const more = (arr, n) => arr.length > n ? '\n…+' + (arr.length - n) + ' more' : '';
   try {
@@ -48078,7 +48119,7 @@ function finWatchAlerts(){
   const cfg = finWatchCfg();
   const out = [];
   if (!cfg.on) return out;
-  const money = n => '$' + Math.round(Math.abs(n)).toLocaleString();
+  const money = n => veniaMoney(Math.abs(n));
   const goMoney = "cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-cfo',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-cfo]'))},140)";
   const goBank  = "cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-bank',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-bank]'))},140)";
   let bk = null;
@@ -48802,7 +48843,7 @@ window.bankImportPreview = async function(){
   }
   const rec = bankImportReconcile(plan.rows);
   window.__bankImport = rec;
-  const money = n => '$' + Math.round(n).toLocaleString();
+  const money = n => veniaMoney(n);
   const line = (n, label, colour) => '<div style="display:flex;gap:10px;align-items:baseline;padding:4px 0">'
     + '<span style="font-family:\'DM Mono\',monospace;font-size:15px;font-weight:700;color:' + colour
     + ';min-width:56px">' + n + '</span>'
@@ -49431,7 +49472,7 @@ function finTagAudit(){
   const untaggedIn = sum(unfiled.filter(t => (t.amount||0) > 0), t => (t.amount||0));
   if (unfiled.length) issues.push({ key: 'unfiled', level: 'block',
     label: unfiled.length.toLocaleString() + ' transactions have no category',
-    detail: '$' + Math.round(untaggedOut).toLocaleString() + ' of payments and $'
+    detail: veniaMoney(Math.round(untaggedOut), { cents: 'auto' }) + ' of payments and $'
       + Math.round(untaggedIn).toLocaleString() + ' of receipts. The payments are counted in '
       + 'operating expenses as "Unclassified", so the total is right and the breakdown is not — '
       + 'which is the first thing a lender asks about.' });
@@ -49576,7 +49617,7 @@ window.finReviewRender = function(){
   if (!el) return;
   const a = finTagAudit();
   const groups = finUnfiledByMerchant();
-  const money = n => '$' + Math.round(n).toLocaleString();
+  const money = n => veniaMoney(n);
   const cats = finAllCats();
   const opts = (id) => '<option value="">Choose…</option>'
     + cats.map(c => '<option value="' + c + '">' + slEsc(finCatLabel(c)) + '</option>').join('');
@@ -49780,7 +49821,7 @@ function finSpendData(period){
 // The block itself. Each row is clickable — the question "what IS the $3,260 of
 // software?" is one tap from the answer instead of a search you have to invent.
 function finSpendBlock(){
-  const money = (n) => '$' + Math.round(n||0).toLocaleString('en-US');
+  const money = (n) => veniaMoney(n);
   const P = [['30d','30 days'],['90d','90 days'],['ytd','This year'],['all','All time']];
   const d = finSpendData(FIN_SPEND_PERIOD);
   const label = (P.find(p => p[0] === FIN_SPEND_PERIOD)||P[1])[1];
@@ -49865,7 +49906,7 @@ window.cmdRenderBank = function(){
   const el = document.getElementById('cmd-bank-body');
   if (!el) return;
   const bk = finBankData();
-  const money = n => (n<0?'-$':'$') + Math.abs(Math.round(n)).toLocaleString();
+  const money = n => veniaMoney(n);
   if (!bk.connected) {
     el.innerHTML = `
       <div style="max-width:560px">
@@ -50015,7 +50056,7 @@ window.cmdRenderBank = function(){
       <span style="grid-row:1;overflow-wrap:anywhere;line-height:1.35">${slEsc(t.desc||'')}${t.status==='pending' ? ' <span style="color:var(--muted);font-size:9px">(pending)</span>' : ''}</span>
       <span style="grid-row:1;align-self:start;font-family:'DM Mono',monospace;text-align:right;white-space:nowrap;color:${(t.amount||0) < 0 ? 'var(--ink)' : 'var(--green)'}">${money(t.amount||0)}</span>
       <div style="grid-column:2/4;display:flex;gap:8px;align-items:center">
-        <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(t.date||'')}</span>
+        <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(veniaDate(t.date))}</span>
         ${FIN_TX_FILTER.mode === 'uncat' && FIN_TX_KEEP[t.id] && t.category ? '<span style="color:var(--green);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">Filed \u2713</span>' : ''}
         <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value, this)">${catOpts(finTxnCat(t) || '')}</select>
       </div>
@@ -50061,7 +50102,7 @@ window.cmdRenderBank = function(){
         if (!dp.length) return '';
         var val = dp.reduce(function(t, x){ return t + Math.abs(x.feed.amount || 0); }, 0);
         return `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:10px 12px;margin:-8px 0 16px;font-size:10.5px;color:var(--ink);line-height:1.7">
-          <strong>${dp.length} transaction${dp.length===1?'':'s'} counted twice</strong> — $${Math.round(val).toLocaleString()} that the bank feed and an imported statement both supplied. The feed used to match on its own id only, so it could not tell an imported row was the same payment. Merging keeps the feed row and any category you filed.
+          <strong>${dp.length} transaction${dp.length===1?'':'s'} counted twice</strong> — ${veniaMoney(Math.round(val), { cents: 'auto' })} that the bank feed and an imported statement both supplied. The feed used to match on its own id only, so it could not tell an imported row was the same payment. Merging keeps the feed row and any category you filed.
           <div style="margin-top:8px"><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankMergeDupes()">Merge ${dp.length} duplicate${dp.length===1?'':'s'}</button></div></div>`;
       })()}
       ${STATE.finTrim && STATE.finTrim.total > 0 ? `<div style="border:1px solid rgba(230,160,0,.35);background:var(--amber-dim);padding:9px 12px;margin:-8px 0 16px;font-size:10px;color:var(--ink);line-height:1.7">
@@ -50199,10 +50240,10 @@ function revRender() {
         <div style="position:absolute;left:0;top:0;height:100%;width:${pct}%;background:${status};transition:width .5s ease"></div>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
-        <div style="font-family:'DM Mono',monospace;font-size:20px;color:var(--ink);font-weight:300">$${Math.round(current||0).toLocaleString()}</div>
+        <div style="font-family:'DM Mono',monospace;font-size:20px;color:var(--ink);font-weight:300">${veniaMoney(Math.round(current||0), { cents: 'auto' })}</div>
         <div style="font-size:10px;color:${status};font-weight:700;font-family:'DM Mono',monospace">${pct}%</div>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:14px">of $${(g.target||0).toLocaleString()} target · $${remaining>0?Math.round(remaining).toLocaleString():'0'} to go${g.source?` · ${REV_SOURCE_LABELS[g.source]||''}`:''}</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:14px">of ${veniaMoney((g.target||0), { cents: 'auto' })} target · $${remaining>0?Math.round(remaining).toLocaleString():'0'} to go${g.source?` · ${REV_SOURCE_LABELS[g.source]||''}`:''}</div>
       ${g.source ? `<div style="font-size:10px;color:var(--muted)">Tracks live data — nothing to update by hand.</div>` : `<div style="display:flex;gap:8px">
         <input type="number" placeholder="Update current ($)" id="rev-update-${g.id}"
           style="flex:1;padding:6px 8px;border:1px solid var(--border);font-size:10px;font-family:inherit;min-width:0"
@@ -50258,7 +50299,7 @@ async function revGetNextMoves() {
   if (bodyEl) bodyEl.textContent = 'Analyzing revenue goals…';
   const goalSummary = goals.map(g => {
     const pct = Math.round((g.current/g.target)*100);
-    return `• ${g.name}: $${g.current.toLocaleString()} / $${g.target.toLocaleString()} (${pct}%)`;
+    return `• ${g.name}: ${veniaMoney(g.current, { cents: 'auto' })} / ${veniaMoney(g.target, { cents: 'auto' })} (${pct}%)`;
   }).join('\n');
   try {
     const r = await callClaude(
@@ -50333,7 +50374,7 @@ window.cmdRenderOrders = function(orders) {
   },0);
   const aov = live.length ? total / live.length : 0;
   const fulfilled  = orders.filter(o=>(o.fulfillment_status||'unfulfilled')==='fulfilled').length;
-  const money = x => '$' + x.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const money = x => veniaMoney(x, { cents: true });
   const summaryBar = `<div class="micro-label" style="margin-bottom:8px">${label}</div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--border);margin-bottom:16px">
     <div style="background:var(--bg);padding:14px 16px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Revenue</div><div style="font-size:22px;font-weight:700;font-family:'DM Mono',monospace;color:var(--ink)">${money(total)}</div></div>
@@ -50449,7 +50490,7 @@ window.cmdExportOrdersCSV = function() {
   const rows = orders.map(o => {
     const cust = ordCust(o);
     const items = (o.line_items||[]).map(i=>i.title||'').join(' | ');
-    const date  = o.created_at ? new Date(o.created_at).toLocaleDateString() : '';
+    const date  = o.created_at ? veniaDate(o.created_at) : '';
     return [o.name, date, cust, items, '$'+o.total_price, o.fulfillment_status||'unfulfilled', o.financial_status||''].map(v => `"${String(v).replace(/"/g,'""')}"`).join(',');
   });
   const csv  = [headers.join(','), ...rows].join('\n');
@@ -50772,7 +50813,7 @@ function updateBudgetRow(input) {
   var remCell = tr.querySelector('.remaining-cell');
   var fillEl = tr.querySelector('.mfill');
   var pctEl = tr.querySelector('.mbar .t-mono');
-  if (remCell) { remCell.textContent = '$'+remaining.toLocaleString(); remCell.style.color = remaining < 0 ? '#c0392b' : ''; }
+  if (remCell) { remCell.textContent = veniaMoney(remaining, { cents: 'auto' }); remCell.style.color = remaining < 0 ? '#c0392b' : ''; }
   if (fillEl) { fillEl.style.width = pct+'%'; fillEl.style.background = pct >= 100 ? '#c0392b' : '#000'; }
   if (pctEl) { pctEl.textContent = pct+'%'; pctEl.style.color = pct >= 100 ? '#c0392b' : ''; }
   updateBudgetTotal();
@@ -50789,7 +50830,7 @@ function updateBudgetTotal() {
     totalSpent += parseFloat(s ? s.value : 0) || 0;
   });
   var el = document.getElementById('budget-total');
-  if (el) el.textContent = '$'+totalBudget.toLocaleString()+' / $'+totalSpent.toLocaleString()+' spent';
+  if (el) el.textContent = veniaMoney(totalBudget, { cents: 'auto' })+' / $'+totalSpent.toLocaleString()+' spent';
 }
 function saveBudgetData() {
   var tbody = document.getElementById('budget-tbody');
@@ -51414,7 +51455,7 @@ function csRenderHistory(){
   const d = sid ? csRead(sid) : {};
   const revs = csRevisions(d).slice().reverse();
   if (!revs.length){ host.innerHTML = ''; return; }
-  const money = n => '$' + Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const money = n => veniaMoney(n, { cents: true });
   const when = iso => { try { return new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'}); } catch(e){ return ''; } };
   const dl = csRevDelta(d);
   host.innerHTML = `
@@ -52852,7 +52893,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     setBase(row.data);
     pushLanded();
     try { rerender(); } catch (e) {}
-    var when = since ? new Date(since).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'a while';
+    var when = since ? veniaDate(since) : 'a while';
     window.__syncStat.decision = 'local copy last agreed ' + when + ' — set aside (backup kept), cloud applied';
     try {
       showToast('This device hadn\u2019t synced since ' + when + ', so it now shows the latest VENIA data. '
@@ -54015,7 +54056,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
             + '<span>' + esc(i.name || '') + (i.size ? ' <span style="color:#999">· ' + esc(i.size) + '</span>' : '')
             + (i.color ? ' <span style="color:#999">· ' + esc(i.color) + '</span>' : '') + '</span>'
             + '<span style="font-family:\'DM Mono\',monospace;color:#666;white-space:nowrap">'
-            + (i.retail ? '$' + Number(i.retail).toLocaleString() : '') + '</span></div>';
+            + (i.retail ? veniaMoney(Number(i.retail), { cents: 'auto' }) : '') + '</span></div>';
         }).join('')
       : '<div style="font-size:12px;color:#888;font-style:italic;padding:6px 0">No pieces listed.</div>';
 
@@ -54025,7 +54066,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       + '<div style="font-size:19px;font-weight:600;margin:4px 0 2px">' + esc(p.client || '') + '</div>'
       + '<div style="font-size:12px;color:#666">' + items.length + ' piece' + (items.length === 1 ? '' : 's')
       +   ' · $' + Number(p.totalRetail || 0).toLocaleString() + ' retail value</div>'
-      + (p.returnDate ? '<div style="font-size:12px;color:#666;margin-top:3px">Due back <b style="color:#111">' + esc(p.returnDate) + '</b></div>' : '')
+      + (p.returnDate ? '<div style="font-size:12px;color:#666;margin-top:3px">Due back <b style="color:#111">' + esc(veniaDate(p.returnDate)) + '</b></div>' : '')
       + '<div style="margin-top:16px">' + itemRows + '</div>'
       + '</div>'
 
