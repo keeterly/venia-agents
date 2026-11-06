@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '586';
+  const BUILD = '587';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -8066,8 +8066,9 @@ function rpActuals(season){
   const avgMargin = margins.length ? margins.reduce((a,b)=>a+b,0)/margins.length : null;
   // Sell-in booked = accepted quotes for this season (orders are created FROM
   // accepted quotes, so counting the quote once covers both without doubling).
+  // In dollars: a euro quote's total is euros (Build 587).
   const booked = (STATE.slQuotes||[]).filter(q => q.status==='accepted' && String(q.season||'').trim()===season)
-    .reduce((s,q)=>s+(q.total||0),0);
+    .reduce((s,q)=>s+slToUsd(q.total||0, q.currency, q.fxRate),0);
   return { styles: styles.length, cats, avgMargin, booked };
 }
 function renderRangePlan(){
@@ -8258,7 +8259,7 @@ function seasonRetroData(season){
     return { s, f, sold, moved, movedShared, margin, roundsN, cat: s.category || 'Other' };
   });
   const booked = (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
-    .reduce((a,q) => a + (q.total||0), 0);
+    .reduce((a,q) => a + slToUsd(q.total||0, q.currency, q.fxRate), 0);
   const names = styles.map(s => String(s.name||'').toLowerCase()).filter(Boolean);
   const covN = (STATE.prCoverage||[]).filter(c =>
     (c.stylesFeature||[]).some(n => names.includes(String(n||'').toLowerCase()))).length;
@@ -25501,7 +25502,7 @@ function buildTodayFocus() {
   (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
     const at = new Date(q.createdAt || 0);
     const days = Math.floor((now - at) / 86400000);
-    if (days >= 7) items.push({key:'quote|'+q.id, pri:'med', text:`Quote to ${q.buyerName} is quiet — $${Math.round(q.total||0).toLocaleString()}, sent ${days}d ago`,
+    if (days >= 7) items.push({key:'quote|'+q.id, pri:'med', text:`Quote to ${q.buyerName} is quiet — ${slMoney(q.total||0, q.currency)}, sent ${days}d ago`,
                                act:"cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)"});
   });
   // 6. Wholesale deliveries due or past due. Calendar-day distance (vs midnight),
@@ -31360,7 +31361,7 @@ function agentRunRecordPayment(action, chatBody){
     let o = it.order ? orders.find(x => x.id === it.order) : null;
     if (!o && it.account) {
       const cands = orders.filter(x => x.status !== 'cancelled' && norm(x.account) === norm(it.account)
-        && !(x.payment && x.payment.status === 'paid'));
+        && slOrderPaidTotal(x) < (Number(x.total) || 0));
       if (cands.length > 1) {
         const exact = cands.filter(x => Math.round(x.total||0) === amt);
         o = exact.length === 1 ? exact[0] : null;
@@ -31368,26 +31369,16 @@ function agentRunRecordPayment(action, chatBody){
       } else o = cands[0];
     }
     if (!o) { missed.push('no open order matched ' + (it.order || it.account || '(nothing given)')); return; }
-    if (!(o.id in prev)) prev[o.id] = o.payment ? JSON.parse(JSON.stringify(o.payment)) : null;
-    const pay = o.payment || (o.payment = {});
-    const paidBefore = pay.amountPaid || 0;
-    const paid = paidBefore + amt;
-    const total = o.total || 0;
+    // Its own record in o.wires (Build 587) — see slOrderWires.
+    if (!(o.id in prev)) prev[o.id] = Array.isArray(o.wires) ? JSON.parse(JSON.stringify(o.wires)) : null;
+    const total = Number(o.total) || 0;
     const when = /^\d{4}-\d{2}-\d{2}/.test(String(it.date||'')) ? new Date(it.date + 'T12:00:00').toISOString() : new Date().toISOString();
-    pay.amountPaid = paid;
-    pay.amountRemaining = Math.max(0, total - paid);
-    pay.method = it.method || pay.method || 'manual';
-    pay.at = pay.at || o.createdAt || when;
-    // Terms set the due date when no invoice supplied one — without it every
-    // open row ages as "current" however old it is.
-    if (!pay.dueDate) {
-      const net = /net\s*(\d+)/i.exec(String(o.terms||''));
-      if (net) pay.dueDate = new Date(new Date(pay.at).getTime() + parseInt(net[1],10)*86400000).toISOString().slice(0,10);
-    }
-    if (pay.amountRemaining <= 0) { pay.status = 'paid'; pay.paidAt = when; }
-    else { pay.status = 'open'; pay.paidAt = pay.paidAt || null; }
-    if (it.note) pay.note = String(it.note).slice(0, 200);
-    filed.push({ id: o.id, account: o.account || '', amt, left: pay.amountRemaining, status: pay.status });
+    if (!Array.isArray(o.wires)) o.wires = [];
+    o.wires.push({ id: 'W' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      amount: amt, at: when, method: it.method || 'wire',
+      note: it.note ? String(it.note).slice(0, 200) : '', recordedAt: new Date().toISOString() });
+    const left = Math.max(0, Math.round((total - slOrderPaidTotal(o)) * 100) / 100);
+    filed.push({ id: o.id, account: o.account || '', amt, left, status: left <= 0 ? 'paid' : 'open' });
   });
   if (!filed.length) {
     appendAgentNote(chatBody, 'Nothing was recorded — ' + (missed.length ? missed.slice(0,4).join('; ') : 'no order matched') + '.');
@@ -31409,7 +31400,7 @@ window.agentUndoPayments = function(){
   const prev = window.__agPrevPayments; if (!prev) return;
   (STATE.slOrders||[]).forEach(o => {
     if (!(o.id in prev)) return;
-    if (prev[o.id] === null) delete o.payment; else o.payment = prev[o.id];
+    if (prev[o.id] === null) delete o.wires; else o.wires = prev[o.id];
   });
   window.__agPrevPayments = null;
   save();
@@ -31614,9 +31605,11 @@ const ACTION_LIST = {
                       const ks = Object.keys(x.set || {}).filter(function(k){ return String(x.set[k] || '').trim(); });
                       return (x.name || 'unnamed') + (ks.length ? ' \u2014 ' + ks.slice(0, 4).join(', ') : ''); } },
   add_styles:     { field: 'styles',  verb: 'Add', always: true, label: function(x){ return x.name || x.styleId || 'unnamed'; } },
-  update_styles:  { field: 'updates', verb: 'Update', label: function(x){
-                      const ks = Object.keys(x.set || {}).filter(function(k){ return String(x.set[k] || '').trim(); });
-                      return (x.name || x.styleId || 'unnamed') + (ks.length ? ' \u2014 ' + ks.slice(0, 4).join(', ') : ''); } },
+  // update_styles carries { names | match, set } — one change, many styles —
+  // not a list of per-style updates. Reading `updates` found nothing and threw
+  // on approve (Build 587). The rows are the named styles; a match-based
+  // change has no names and runs as asked (the runner refuses an empty match).
+  update_styles:  { field: 'names', verb: 'Update', label: function(x){ return String(x || 'unnamed'); } },
 };
 window.__agHold = {};
 // Render the rows and wait. Returns a marker when it took over, nothing when
@@ -31634,7 +31627,7 @@ function agentReviewList(key, action, chatBody){
   // added to the CRM without anyone agreeing to it -- so the creating verbs
   // are always reviewed, however few they name. A correction the founder
   // asked for still applies straight away.
-  if (!items.length) return null;
+  if (!items || !items.length) return null;
   if (!spec.always && items.length < 2) return null;
   const id = 'rv' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   window.__agHold[id] = { key: key, action: action, spec: spec, body: chatBody };
@@ -35938,7 +35931,7 @@ function agSectionData(key, section) {
   const SL_DATA = {
     linesheets: { stats:[{l:'Line sheets',v:(STATE.slLinesheets||[]).length+'',s:'built'},{l:'Active styles',v:(STATE.styles||[]).filter(st=>st.status!=='archived').length+'',s:'in the line plan'}], prompts:[{t:'Generate a line sheet for the season — all styles, wholesale pricing, MOQ, delivery windows',tag:'BUILD',d:'Complete wholesale line sheet from PLM data.'},{t:'Which styles should lead the line sheet for a new European concept store?',tag:'ANALYZE',d:'Based on sell-through, aesthetic fit, and price point.'}] },
     buyers:     { stats:[{l:'Accounts',v:buyers.length+'',s:'in CRM'},{l:'In conversation',v:buyers.filter(b=>['warm','quoted'].includes(slBuyerStage(b))).length+'',s:'talking · quote out'},{l:'Doing business',v:buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length+'',s:'stockists'},{l:'To reach',v:buyers.filter(b=>slBuyerStage(b)==='new').length+'',s:'not yet contacted'}], prompts:[{t:'Who are our top 5 buyers to close this season?',tag:'ANALYZE',d:'By order value, likelihood, and relationship stage.'},{t:'Write a wholesale outreach email to a new European concept store',tag:'DRAFT',d:'Short, VENIA voice, lead with the collection.'}] },
-    quotes:     { stats:[{l:'Open quotes',v:(STATE.slQuotes||[]).filter(q=>q.status==='sent').length+'',s:'awaiting response'},{l:'Drafts',v:(STATE.slQuotes||[]).filter(q=>q.status==='draft').length+'',s:'in progress'},{l:'Accepted',v:(STATE.slQuotes||[]).filter(q=>q.status==='accepted').length+'',s:'won'},{l:'Total value',v:'$'+(((STATE.slQuotes||[]).reduce((t,q)=>t+(q.total||0),0))/1000).toFixed(1)+'k',s:'all quotes'}], prompts:[{t:'Write a follow-up for a quote sent 7 days ago with no reply',tag:'DRAFT',d:'Short, not pushy. Reference their specific interest.'},{t:'Should we offer net-30 terms to close a hesitant buyer?',tag:'ANALYZE',d:'Risk/reward of extending payment terms at VENIA scale.'}] },
+    quotes:     { stats:[{l:'Open quotes',v:(STATE.slQuotes||[]).filter(q=>q.status==='sent').length+'',s:'awaiting response'},{l:'Drafts',v:(STATE.slQuotes||[]).filter(q=>q.status==='draft').length+'',s:'in progress'},{l:'Accepted',v:(STATE.slQuotes||[]).filter(q=>q.status==='accepted').length+'',s:'won'},{l:'Total value',v:'$'+(((STATE.slQuotes||[]).reduce((t,q)=>t+slToUsd(q.total||0, q.currency, q.fxRate),0))/1000).toFixed(1)+'k',s:'all quotes'}], prompts:[{t:'Write a follow-up for a quote sent 7 days ago with no reply',tag:'DRAFT',d:'Short, not pushy. Reference their specific interest.'},{t:'Should we offer net-30 terms to close a hesitant buyer?',tag:'ANALYZE',d:'Risk/reward of extending payment terms at VENIA scale.'}] },
     orders:     { prompts:[{t:'Draft an order confirmation email',tag:'DRAFT',d:'Professional, VENIA voice, delivery expectations.'},{t:'What is our current season performance vs target?',tag:'REVIEW',d:'Booked, invoiced, shipped, outstanding.'}] },
     health:     {
       stats:[{l:'Stockists',v:buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length+'',s:'doing business'},{l:'Gone quiet',v:buyers.filter(b=>['approached','warm','quoted','active','closed'].includes(slBuyerStage(b))&&(_daysAgo(b.lastContact)==null||_daysAgo(b.lastContact)>=30)).length+'',s:'no touch in 30d+'},{l:'Follow-ups due',v:buyers.filter(b=>slBuyerStage(b)!=='inactive'&&b.nextDate&&b.nextDate<_today).length+'',s:'overdue'},{l:'Dormant',v:buyers.filter(b=>slBuyerStage(b)==='inactive').length+'',s:'parked accounts'}],
@@ -36225,8 +36218,9 @@ function agBuildSalesOverview() {
   const overdue = buyers.filter(b => slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today);
   const pending = quotes.filter(q => ['draft','sent'].includes(q.status || 'draft'));
   const money = (n) => '$' + Math.round(n||0).toLocaleString();
-  const pendingVal = pending.reduce((s,q) => s + (q.total||0), 0);
-  const bookedVal = quotes.filter(q => q.status === 'accepted').reduce((s,q) => s + (q.total||0), 0);
+  // Totals in dollars: each quote is in its own currency (Build 587).
+  const pendingVal = pending.reduce((s,q) => s + slToUsd(q.total||0, q.currency, q.fxRate), 0);
+  const bookedVal = quotes.filter(q => q.status === 'accepted').reduce((s,q) => s + slToUsd(q.total||0, q.currency, q.fxRate), 0);
   const stat = (l, v, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${l}</div><div class="ag-stat-v"${color ? ` style="color:${color}"` : ''}>${v}</div><div class="ag-stat-s">${sub}</div></div>`;
 
   const attention = overdue.slice(0,5).map(b => `
@@ -36240,7 +36234,7 @@ function agBuildSalesOverview() {
   const quoteRows = quotes.slice(0,5).map(q => `
     <div class="ag-list-row">
       <div><div class="ag-lr-name">${slEsc(q.buyerName||'Account')}</div><div class="ag-lr-sub">${slEsc(q.season||'')}${(q.styles||[]).length?' · '+(q.styles||[]).length+' styles':''}</div></div>
-      <div class="ag-lr-mono">${money(q.total)}</div>
+      <div class="ag-lr-mono">${slMoney(q.total||0, q.currency)}</div>
       <div><span class="ag-badge ag-b-${q.status==='accepted'?'active':q.status==='sent'?'sent':'draft'}">${slEsc(q.status||'draft')}</span></div>
       <div style="display:flex;justify-content:flex-end"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slOpenQuoteModal('${q.id}')">Edit</button></div>
     </div>`).join('');
@@ -42290,6 +42284,13 @@ function slOpenOrderModal(id) {
   const set = (eid,v) => { const el=document.getElementById(eid); if(el) el.value=v||''; };
   set('slom-account',  o?.account||'');
   set('slom-id',       o?.id||'');
+  // A status this list does not offer (an order marked "paid" by builds
+  // before 587) is shown as it is, so saving the form keeps it instead of
+  // writing an empty status.
+  try {
+    const st = o?.status || 'confirmed', sel = document.getElementById('slom-status');
+    if (sel && !SL_ORDER_STATUS[st]) { const op = document.createElement('option'); op.value = st; op.textContent = st.charAt(0).toUpperCase() + st.slice(1); sel.appendChild(op); }
+  } catch (e) {}
   set('slom-status',   o?.status||'confirmed');
   set('slom-total',    o?.total||'');
   set('slom-delivery', o?.deliveryDate||'');
@@ -42807,14 +42808,45 @@ function slOrderPayments(o){
     if (o.payment && o.payment.status) {
       const sched = slTermsSchedule(o.terms, o.total);
       o.payments.push(Object.assign({ key: sched[0].key, label: sched[0].label, pct: sched[0].pct }, o.payment));
+      // Marked, so the money readers know this record now lives in
+      // o.payments and never count it a second time (Build 587).
+      o.payment.folded = true;
     }
   }
   return o.payments;
 }
 function slOrderPayFor(o, key){ return slOrderPayments(o).find(p => p.key === key) || null; }
+// What has come in on an order, in its own currency: paid instalments,
+// part-payments and recorded wires, from the one reader that knows all three.
+// It used to sum only instalments marked paid, so a wire Claude recorded (and
+// any part-payment) never showed on the order screen.
 function slOrderPaidTotal(o){
-  return slOrderPayments(o).filter(p => p.status === 'paid')
-    .reduce((s,p) => s + (Number(p.amountPaid) || Number(p.amount) || 0), 0);
+  slOrderPayments(o);
+  return Math.round(slOrderReceivables(o).reduce((s,l) => s + (Number(l.paid) || 0), 0) * 100) / 100;
+}
+// WIRES ARE THEIR OWN RECORDS (Build 587).
+//
+// record_payment used to add a wire onto the single o.payment. Two things went
+// wrong there: opening the order folded o.payment into the deposit instalment
+// and kept it, so the same wire was then counted twice; and on an order whose
+// o.payment was a Stripe invoice, the wire was ignored as a copy of that
+// invoice, then erased by the next Stripe check, which rewrites the invoice's
+// own amountPaid. Now each wire is an entry in o.wires, which Stripe never
+// touches, credited to the open instalments deposit first.
+function slOrderWires(o){
+  const ws = Array.isArray(o && o.wires) ? o.wires.filter(w => w && Number(w.amount) > 0) : [];
+  const total = Math.round(ws.reduce((s,w) => s + Number(w.amount), 0) * 100) / 100;
+  const at = ws.map(w => w.at || '').filter(Boolean).sort().pop() || null;
+  return { list: ws, total, at };
+}
+// Is the old single o.payment just a copy of one of the instalment records?
+function slLegacyIsMirror(legacy, recs){
+  if (!legacy) return false;
+  if (legacy.folded) return true;
+  if (legacy.invoiceId && recs.some(r => r.invoiceId === legacy.invoiceId)) return true;
+  return recs.some(r => String(r.status) === String(legacy.status)
+    && (Number(r.amountPaid) || 0) === (Number(legacy.amountPaid) || 0)
+    && String(r.at || '') === String(legacy.at || ''));
 }
 // AN ORDER'S MONEY IN DOLLARS, FOR TOTALS ONLY.
 //
@@ -42870,20 +42902,27 @@ function slOrderReceivables(o){
   const plus = (iso, d) => { const t = new Date(iso); return isNaN(t) ? '' : new Date(t.getTime() + d*86400000).toISOString().slice(0,10); };
   const legacy = o.payment && o.payment.status ? o.payment : null;
   const recs = Array.isArray(o.payments) ? o.payments.filter(p => p && typeof p === 'object' && p.status) : [];
-  if (!recs.length) {
-    if (!legacy) return [];
+  const wires = slOrderWires(o);
+  if (!recs.length && legacy) {
     const st = legacy.status;
-    return [{ key: 'order', label: '', amount: num(o.total), status: st, billed: true, legacy: true,
+    const line = { key: 'order', label: '', amount: num(o.total), status: st, billed: true, legacy: true,
       paid: st === 'paid' ? (legacy.amountPaid != null ? num(legacy.amountPaid) : num(o.total)) : num(legacy.amountPaid),
       open: st === 'paid' ? 0 : (legacy.amountRemaining != null ? num(legacy.amountRemaining) : num(o.total)),
       dueDate: legacy.dueDate || (legacy.at ? plus(legacy.at, 14) : ''),
       paidAt: legacy.paidAt || null, at: legacy.at || '', invoiceId: legacy.invoiceId || '',
-      deduction: num(legacy.deduction) }];
+      deduction: num(legacy.deduction) };
+    if (wires.total > 0 && line.open > 0 && ['void','uncollectible'].indexOf(st) < 0) {
+      const take = Math.min(wires.total, line.open);
+      line.paid = Math.round((line.paid + take) * 100) / 100;
+      line.open = Math.round((line.open - take) * 100) / 100;
+      if (line.open <= 0) { line.status = 'paid'; line.paidAt = line.paidAt || wires.at; }
+    }
+    return [line];
   }
-  const ids = recs.map(p => p.invoiceId).filter(Boolean);
-  const mirror = !!(legacy && legacy.invoiceId && ids.indexOf(legacy.invoiceId) >= 0);
-  let wire = legacy && !mirror ? num(legacy.amountPaid) : 0;
-  const wireAt = legacy && !mirror ? (legacy.paidAt || null) : null;
+  if (!recs.length && !(wires.total > 0)) return [];
+  const mirror = slLegacyIsMirror(legacy, recs);
+  let wire = (legacy && !mirror ? num(legacy.amountPaid) : 0) + wires.total;
+  const wireAt = wires.at || (legacy && !mirror ? (legacy.paidAt || null) : null);
   let deduction = legacy ? num(legacy.deduction) : 0;
   const lines = slTermsSchedule(o.terms, o.total).map(line => {
     const p = recs.find(r => r.key === line.key) || null;
@@ -42905,7 +42944,7 @@ function slOrderReceivables(o){
     const take = Math.min(wire, l.open);
     wire -= take; l.paid = Math.round((l.paid + take) * 100) / 100; l.open = Math.round((l.open - take) * 100) / 100;
     l.billed = true;
-    if (!l.at) l.at = (legacy && legacy.at) || '';
+    if (!l.at) l.at = wires.at || (legacy && legacy.at) || '';
     if (l.open <= 0) { l.status = 'paid'; l.paidAt = l.paidAt || wireAt; }
     else if (!l.status) l.status = 'open';
   });
@@ -43052,10 +43091,13 @@ window.slOrderPayCheck = async function(orderId, quiet){
     p.checkedAt = new Date().toISOString();
   }
   if (changed) {
-    // The order's own status follows the money: everything paid → paid.
-    const sched = slTermsSchedule(o.terms, o.total);
-    const allPaid = sched.length && sched.every(l => { const p = slOrderPayFor(o, l.key); return p && p.status === 'paid'; });
-    if (allPaid && o.status !== 'cancelled') o.status = 'paid';
+    // THE MONEY NEVER REWRITES THE ORDER'S STATUS (Build 587).
+    //
+    // This used to set o.status = 'paid' once every instalment was paid. "Paid"
+    // is not one of the order statuses (draft → delivered): it overwrote a
+    // Delivered order, so Today flagged a delivered, paid order as a delivery
+    // past due, Sales counted it as open, and Edit showed a blank status that
+    // saved as nothing. Whether an order is paid is read from its payments.
     dbSet('slOrders', STATE.slOrders); save();
     try { logActivity('Order ' + o.id + ' payment status updated from Stripe'); } catch(e){}
     if (!quiet) showToast('✓ Payment status updated', 'success');
@@ -47177,15 +47219,19 @@ function finCashCalendar(days){
         return;
       }
       const pay = o.payment;
+      // The legacy line carries any wire already credited (Build 587), so an
+      // order paid upfront is not expected to pay again after delivery.
+      const leg = lines.length ? lines[0] : null;
+      if (leg && !(leg.open > 0)) return;
       if (pay && pay.invoiceId && ['paid','void','uncollectible'].indexOf(pay.status) < 0) {
-        const amt = slToUsd(pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0), o.currency, o.fxRate);
+        const amt = slToUsd(leg ? leg.open : (pay.amountRemaining != null ? pay.amountRemaining : (o.total || 0)), o.currency, o.fxRate);
         const due = pay.dueDate || (pay.at ? iso(new Date(new Date(pay.at).getTime() + 14*864e5)) : '');
         // Already-overdue invoices land today: they are collectible now.
         if (due && new Date(due + 'T00:00:00') < today) push(iso(today), 'in', amt, 'Overdue invoice #' + o.id + ' — ' + (o.account||''), 'ar', 'expected');
         else push(due, 'in', amt, 'Invoice #' + o.id + ' due — ' + (o.account||''), 'ar', 'committed');
       } else if (!pay || !pay.invoiceId) {
         // Not invoiced yet: expect the invoice around delivery, paid on net-14.
-        if (o.deliveryDate) push(iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)), 'in', slToUsd(o.total||0, o.currency, o.fxRate),
+        if (o.deliveryDate) push(iso(new Date(new Date(o.deliveryDate + 'T00:00:00').getTime() + 14*864e5)), 'in', slToUsd(leg ? leg.open : (o.total||0), o.currency, o.fxRate),
           'Order #' + o.id + ' — invoice after delivery — ' + (o.account||''), 'ws', 'expected');
       }
     });
@@ -49798,7 +49844,8 @@ function revSourceValue(src) {
   if (src === 'dtc-ytd') return p.ytd || 0;
   if (src === 'wholesale-ytd' || src === 'total-ytd') {
     const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
-    const ws = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + (o.total||0), 0);
+    // In dollars: a euro order's total is euros (Build 587).
+    const ws = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + slToUsd(o.total||0, o.currency, o.fxRate), 0);
     return src === 'wholesale-ytd' ? ws : ws + (p.ytd || 0);
   }
   return null;
@@ -52274,14 +52321,37 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try { if (typeof bankDailySync === 'function') bankDailySync(); } catch(e){}
   });
   window.addEventListener('online', function(){ pushWake('network came back'); });
-  function pushLanded(){
-    pushDirty = false; retryStep = 0;
+  // AN EDIT IS OWED TO THE CLOUD FROM THE MOMENT IT IS MADE (Build 587).
+  //
+  // pushDirty lived only in memory and was only set after a push FAILED. An
+  // edit made in the 1.5 seconds before the app was closed, or one whose push
+  // was still retrying when the page reloaded (the Build 581 self-repair
+  // reloads on purpose), was never pushed: on the next boot the cloud looked
+  // newer, the edit was merged onto the screen, and nothing carried it up.
+  // Sync status said everything was published. Now the owed time is written to
+  // this device at every edit and cleared only by a push that started after
+  // it, and boot pushes whatever is still owed.
+  var OWED_KEY = 'venia-push-owed-at';
+  function owedAt(){ try { return parseInt(localStorage.getItem(OWED_KEY) || '0', 10) || 0; } catch (e) { return 0; } }
+  function markOwed(){ try { localStorage.setItem(OWED_KEY, String(Date.now())); } catch (e) {} }
+  window.__syncOwedAt = owedAt;
+  function pushLanded(startedAt){
+    // A push only settles what it carried: an edit made after it took its
+    // snapshot is still owed. No startedAt means a deliberate reset (the
+    // stale-copy set-aside), which settles everything.
+    var owed = owedAt();
+    var settled = !startedAt || !owed || owed <= startedAt;
+    if (settled) { try { localStorage.removeItem(OWED_KEY); } catch (e) {} }
+    pushDirty = !settled; retryStep = 0;
     window.__syncRetryArmed = false;
     try { pendingBadge(false); } catch(e){}
     clearTimeout(retryTimer); retryTimer = null;
+    // Something was edited while this push was in flight: its own debounce
+    // may already have fired into the in-flight guard, so make sure it goes.
+    if (!settled) { clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 300); }
   }
   // True while this device holds a change the cloud has not accepted.
-  window.__syncPending = function(){ return !!pushDirty; };
+  window.__syncPending = function(){ return !!pushDirty || !!owedAt(); };
 
   // A LAPSED SIGN-IN IS NOT A FLAKY NETWORK.
   //
@@ -52766,7 +52836,25 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch (e) { return published; }
   }
   window.syncReconcileAfterPush = syncReconcileAfterPush;
+  // ONE PUSH AT A TIME (Build 587).
+  //
+  // The debounce, the retry timer, a wake and "Push now" could each start a
+  // push while another was still awaiting the cloud. Two in flight race: if
+  // the older upsert lands last, the cloud loses the newer edit, and nothing
+  // retries it because the newer push already reported success. Now a push
+  // asked for mid-flight is remembered and run once the current one finishes,
+  // from a fresh snapshot.
+  var pushInFlight = false, pushAgain = false, pushStartedAt = 0;
   async function pushNow(){
+    if (pushInFlight) { pushAgain = true; return; }
+    pushInFlight = true; pushAgain = false;
+    try { await pushNowOnce(); }
+    finally {
+      pushInFlight = false;
+      if (pushAgain) { pushAgain = false; clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 50); }
+    }
+  }
+  async function pushNowOnce(){
     if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;   // share/agent/signing views are strictly read-only — never write the workspace
     // Never push before the first pull decision: a fresh browser seeds demo
     // data and save()s during init — pushing that would clobber the real
@@ -52777,6 +52865,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!(await hasAuthSession())) { pauseForSignIn('no session'); return; }
     if (authPaused) { authPaused = false; signinBanner(false); }
     var rev = Date.now();
+    pushStartedAt = rev;
     try {
       var localSnap = snapshot();
       // WHAT THIS DEVICE DELETED, read once, here, against the snapshot it last
@@ -52898,6 +52987,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
         // Adopt what we just published.
         var adopted = false;
         try { adopted = (toPush !== localSnap) && (_mStr(toPush) !== _mStr(localSnap)); } catch (e) { adopted = false; }
+        // Build 587: EVERY landed push supersedes a deferred adopt still
+        // waiting on an open modal. Only adopting pushes used to bump the
+        // token, so an older adopt could land after a newer plain push and
+        // move the merge base backwards.
+        var token = ++adoptToken;
         if (adopted) {
           // Deferred, never dropped, while someone is mid-edit. The push itself
           // has already landed, so nothing is at risk in waiting: all that is
@@ -52909,17 +53003,25 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
           // land oldest last — a push's result overwritten by its
           // predecessor's. A later adopt supersedes an earlier one: it was
           // built from a newer local snapshot and a newer cloud read.
-          var token = ++adoptToken;
           var adopt = function(){
             if (token !== adoptToken) return;                 // superseded
             if (veniaMidEdit()) { setTimeout(adopt, 1200); return; }
             applySnapshot(syncReconcileAfterPush(localSnap, snapshot(), toPush));
-            setBase(snapshot());
+            // THE BASE IS WHAT THE CLOUD HOLDS, NOT WHAT THE SCREEN HOLDS.
+            //
+            // This was setBase(snapshot()). The screen at this moment can carry
+            // an edit made while the push was in flight (or while a modal held
+            // the adopt back) that has not been published yet. Folding it into
+            // the base made the next push read it as "unchanged here, so the
+            // cloud's older value wins" — and the edit snapped back, on screen
+            // and in the cloud. toPush is exactly what just landed, so anything
+            // newer stays a local change and goes up with the next push.
+            setBase(toPush);
           };
           adopt();
         }
         else { setBase(localSnap); }
-        pushLanded();
+        pushLanded(pushStartedAt);
         window.__syncStat.push = { t: new Date().toISOString(), ok: true, items: (toPush.dump || []).length,
           via: !writesBlob ? 'modules only (scoped member)' : (adopted ? 'adopted cloud records' : 'local only') };
       } else if (authErr(res.error.message || res.error.code) && !(await hasAuthSession())) {
@@ -52951,10 +53053,24 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (applyingRemote) return;
     // Paused for sign-in: the edit is already saved on this device by save(),
     // and is owed to the cloud. Mark it and wait for the sign-in to carry it.
+    markOwed();
     if (authPaused) { pushDirty = true; return; }
     clearTimeout(pushTimer);
     pushTimer = setTimeout(pushNow, 1500);
   }
+  // LEAVING THE APP PUBLISHES WHAT IS WAITING (Build 587).
+  //
+  // Switching away on a phone freezes the 1.5-second debounce, and closing
+  // the tab drops it. Push straight away instead; if the page really is going,
+  // the owed marker above makes the next boot finish the job.
+  function flushOnLeave(){
+    if (!window.__sbSyncDone || applyingRemote) return;
+    if (!pushTimer && !pushDirty && !owedAt()) return;
+    clearTimeout(pushTimer); pushTimer = null;
+    try { pushNow(); } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') flushOnLeave(); });
+  window.addEventListener('pagehide', flushOnLeave);
   window.sbFlushNow = pushNow;                  // share links flush before handing out a URL
 
   // Read the per-module rows and hand back something shaped exactly like the
@@ -53340,6 +53456,10 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // for this so a fresh Safari session decides against real data, not seeds.
     initialSync().finally(function(){
       window.__sbSyncDone = true;
+      // Whatever this device still owes the cloud from before the reload goes
+      // up now. pushNow merges with the cloud first, so this publishes the
+      // edit without flattening anything the other device wrote meanwhile.
+      try { if (owedAt()) setTimeout(pushNow, 400); } catch(e){}
       // After the workspace has landed, so a pull cannot race the merge.
       try { if (typeof bankDailySync === 'function') setTimeout(bankDailySync, 2500); } catch(e){}
     });
@@ -61711,13 +61831,22 @@ document.addEventListener('keydown', function(e){
     });
   }
 
+  // A proposal is decided ONCE (Build 587): only a row still pending can be
+  // decided, so a second device holding an old copy of the list cannot mark
+  // it again, and is told it was already handled.
   async function decide(id, status, el){
     var c = sbc(); if (!c) return;
     var em = await myEmail();
     try {
       var r = await c.from('venia_claude_inbox').update({ status: status, decided_at: new Date().toISOString(), decided_by: em })
-        .eq('id', id);
+        .eq('id', id).eq('status', 'pending').select('id');
       if (r && r.error) throw r.error;
+      if (r && Array.isArray(r.data) && !r.data.length) {
+        rows = rows.filter(function(x){ return x.id !== id; });
+        paintPill();
+        note('That proposal was already handled on another device', 'info');
+        return false;
+      }
     } catch(e){ note('Could not update that proposal — ' + (e && e.message || 'try again'), 'error'); return false; }
     rows = rows.filter(function(r){ return r.id !== id; });
     if (el && status === 'dismissed') el.remove();
@@ -61725,6 +61854,25 @@ document.addEventListener('keydown', function(e){
     return true;
   }
 
+  // Is this proposal still waiting? The list on screen can be minutes old,
+  // and the other device may have applied it since.
+  async function stillPending(id){
+    var c = sbc(); if (!c) return false;
+    try {
+      var r = await c.from('venia_claude_inbox').select('status').eq('id', id).limit(1);
+      if (r && r.error) return true;           // cannot tell — let decide() guard it
+      return !!(r && Array.isArray(r.data) && r.data[0] && r.data[0].status === 'pending');
+    } catch(e){ return true; }
+  }
+  // What the workspace holds, so an apply that changed nothing is not
+  // reported as applied (the activity log is left out: it is not the change).
+  function workspacePrint(){
+    try {
+      var keys = (window.SYNC_KEYS || []).filter(function(k){ return k !== 'activityLog'; });
+      var o = {}; keys.forEach(function(k){ o[k] = STATE[k]; });
+      return JSON.stringify(o);
+    } catch(e){ return null; }
+  }
   async function apply(id, el){
     if (busy) return;
     var row = rows.find(function(r){ return r.id === id; });
@@ -61733,8 +61881,17 @@ document.addEventListener('keydown', function(e){
     // on top of it. Until the first pull has landed, wait.
     if (!window.__sbSyncDone) { note('Still syncing with the cloud — try again in a moment', 'info'); return; }
     busy = true;
+    if (!(await stillPending(id))) {
+      busy = false;
+      rows = rows.filter(function(x){ return x.id !== id; });
+      paintPill();
+      var o0 = el.querySelector('.vci-out'); if (o0) o0.textContent = 'Already handled on another device — nothing was applied here.';
+      var b0 = el.querySelector('.vci-btns'); if (b0) b0.remove();
+      return;
+    }
     var out = el.querySelector('.vci-out');
     var a = row.action, res = null, ok = true;
+    var before = workspacePrint();
     try {
       if (a.type === 'today_task_add') ok = !!(window.todayTaskAdd && todayTaskAdd(a.text));
       else if (a.type === 'today_task_done') ok = !!(window.todayTaskDone && todayTaskDone(a.id));
@@ -61768,7 +61925,17 @@ document.addEventListener('keydown', function(e){
       }, 400);
       return;
     }
-    await decide(id, 'applied', el);
+    // NOTHING CHANGED IS NOT "APPLIED" (Build 587). A handler that matched no
+    // order, no style or no transaction leaves a note and returns; this used
+    // to mark the proposal applied anyway, so Claude was told a change had
+    // landed that never did. It stays waiting, with the note saying why.
+    var after = workspacePrint();
+    var viaAgent = a.type !== 'today_task_add' && a.type !== 'today_task_done';
+    if ((res && res.ok === false) || (viaAgent && before !== null && after !== null && before === after)) {
+      if (!out.innerHTML) out.textContent = 'Nothing changed, so this was not applied. Dismiss it if it is no longer needed.';
+      return;
+    }
+    if (!(await decide(id, 'applied', el))) return;
     if (btns) btns.remove();
     if (!out.innerHTML) out.textContent = 'Applied.';
     try { logActivity('Applied from Claude: ' + String(row.summary || a.type).slice(0, 80)); } catch(e){}
@@ -61786,7 +61953,15 @@ document.addEventListener('keydown', function(e){
     sh.addEventListener('click', function(e){ if (e.target === sh) sh.remove(); });
     sh.querySelector('#vci-close').onclick = function(){ sh.remove(); };
     document.body.appendChild(sh);
-    render(sh.querySelector('#vci-list'));
+    var list = sh.querySelector('#vci-list');
+    render(list);
+    // The list on screen may be up to five minutes old. Read it again, and
+    // redraw only if it changed, so a proposal applied on the other device
+    // is not offered here a second time.
+    var was = rows.map(function(r){ return r.id; }).join(',');
+    check().then(function(){
+      if (document.body.contains(list) && rows.map(function(r){ return r.id; }).join(',') !== was) render(list);
+    });
   }
 
   window.veniaClaudeInbox = { check: check, open: open };

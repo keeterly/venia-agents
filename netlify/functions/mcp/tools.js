@@ -179,6 +179,27 @@ export function orderPayments(o) {
     if (rec && Number(rec.deduction) > 0) out.deduction = Number(rec.deduction);
     return out;
   });
+  // Wires recorded in the app (record_payment) live in o.wires since Build 587;
+  // older ones sat on o.payment beside the instalments. Either is credited to
+  // the unpaid instalments, deposit first, the way the app's Money reads them.
+  // An o.payment that is only the folded copy of an instalment is not a wire.
+  let wire = (Array.isArray(o.wires) ? o.wires : []).reduce((s, w) => s + (Number(w && w.amount) || 0), 0);
+  const legacy = Array.isArray(o.payments) && o.payment && o.payment.status ? o.payment : null;
+  if (legacy && !legacy.folded
+    && !(legacy.invoiceId && recs.some((r) => r.invoiceId === legacy.invoiceId))
+    && !recs.some((r) => String(r.status) === String(legacy.status) && (Number(r.amountPaid) || 0) === (Number(legacy.amountPaid) || 0) && String(r.at || '') === String(legacy.at || ''))) {
+    wire += Number(legacy.amountPaid) || 0;
+  }
+  lines.forEach((l) => {
+    if (!(wire > 0) || ['paid', 'void', 'uncollectible'].includes(l.status)) return;
+    const open = Math.max(0, (Number(l.amount) || 0) - (Number(l.paid) || 0));
+    const take = Math.min(wire, open);
+    if (!(take > 0)) return;
+    wire -= take;
+    l.paid = Math.round(((Number(l.paid) || 0) + take) * 100) / 100;
+    if (l.paid >= (Number(l.amount) || 0)) { l.status = 'paid'; l.statusText = 'paid (recorded payment)'; }
+    else l.statusText = (l.statusText || l.status) + ', part paid by recorded payment';
+  });
   const paid = lines.reduce((s, l) => s + (Number(l.paid) || 0), 0);
   const tot = Number(o.total) || 0;
   return { lines, paid, balance: Math.round((tot - paid) * 100) / 100,
