@@ -3041,7 +3041,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '589';
+  const BUILD = '590';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10892,7 +10892,47 @@ function restoreStyle(s) {
   delete s.archivedAt;
 }
 
-function archiveSeason() {
+// ONE WAY TO ASK (Build 590, first stage of "one look everywhere").
+//
+// The app asks with the browser's confirm() box about 80 times. On a phone
+// it is a grey system dialog with OK and Cancel, and in several places Cancel
+// quietly did something (printed a preview, archived without a retro, merged
+// a lead). veniaChoose shows the question in the app, with each choice named
+// for what it does, and resolves to the chosen value, or null when dismissed.
+// Dismissing never acts. confirm() calls move over to it in stages.
+function veniaChoose(opts){
+  opts = opts || {};
+  return new Promise(function(resolve){
+    const old = document.getElementById('venia-choose'); if (old) old.remove();
+    const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, ch => '&#' + ch.charCodeAt(0) + ';');
+    const ov = document.createElement('div');
+    ov.className = 'overlay open'; ov.id = 'venia-choose';
+    ov.style.zIndex = '10050';
+    const choices = (opts.choices || []).filter(Boolean);
+    ov.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="venia-choose-t" style="width:420px;max-width:94vw">
+      <div class="modal-head"><div class="modal-title" id="venia-choose-t">${esc(opts.title || 'Are you sure?')}</div>
+        <button class="modal-close" aria-label="Close" data-v="__none">&#x2715;</button></div>
+      ${opts.body ? `<div class="modal-body" style="padding:16px 20px;font-size:12px;line-height:1.6;color:var(--ink)">${esc(opts.body).replace(/\n/g, '<br>')}</div>` : ''}
+      <div class="modal-foot" style="display:flex;flex-direction:column;gap:8px;padding:12px 20px 16px">
+        ${choices.map((c, i) => `<button class="btn ${c.style === 'primary' ? 'btn-primary' : c.style === 'danger' ? 'btn-danger' : 'btn-ghost'} btn-sm" style="min-height:40px;width:100%" data-i="${i}">${esc(c.label)}</button>`).join('')}
+        <button class="btn btn-ghost btn-sm" style="min-height:40px;width:100%;border-color:transparent" data-v="__none">${esc(opts.cancel || 'Cancel')}</button>
+      </div></div>`;
+    const done = (v) => { ov.remove(); document.removeEventListener('keydown', key); resolve(v); };
+    const key = (e) => { if (e.key === 'Escape') done(null); };
+    ov.addEventListener('click', (e) => {
+      if (e.target === ov) return done(null);
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.getAttribute('data-v') === '__none') return done(null);
+      const i = Number(b.getAttribute('data-i'));
+      if (choices[i]) done(choices[i].value);
+    });
+    document.addEventListener('keydown', key);
+    document.body.appendChild(ov);
+    try { const first = ov.querySelector('[data-i="0"]'); if (first) first.focus(); } catch (e) {}
+  });
+}
+window.veniaChoose = veniaChoose;
+async function archiveSeason() {
   const season = STATE.seasonFilter;
   if (!season) { toast('Pick a season first'); return; }
   const targets = STATE.styles.filter(s => s.season === season && s.status !== 'archived');
@@ -10900,12 +10940,20 @@ function archiveSeason() {
   // Archiving mutes the season's live actuals everywhere — capture the retro
   // first so the numbers survive as a saved doc. Skipped if one already exists.
   const hasRetro = (STATE.brandDocs||[]).some(d => d.title === season + ' Retro');
-  if (!hasRetro && typeof seasonRetroOpen === 'function'
-      && confirm(`Run the ${season} retro first? (Recommended — the season's numbers go quiet once its styles are archived. Cancel to archive without it.)`)) {
-    seasonRetroOpen(season);
-    return;   // archive again after saving the retro
-  }
-  if (!confirm(`Archive ${season} — ${targets.length} style${targets.length>1?'s':''}?\n\nThey leave the lists, timeline, selectors and SKUs, but stay in the Archived view and can be restored any time.`)) return;
+  // One sheet, three plain answers. Cancel used to MEAN "archive without the
+  // retro", so closing the first dialog went on to archive (Build 590).
+  const canRetro = !hasRetro && typeof seasonRetroOpen === 'function';
+  const pick = await veniaChoose({
+    title: `Archive ${season}?`,
+    body: `${targets.length} style${targets.length>1?'s':''} leave the lists, timeline, selectors and SKUs. They stay in the Archived view and can be restored any time.`
+      + (canRetro ? `\n\nThe season's numbers go quiet once its styles are archived, so running its retro first is recommended.` : ''),
+    choices: [
+      canRetro ? { label: 'Run the retro first', value: 'retro', style: 'primary' } : null,
+      { label: canRetro ? 'Archive without a retro' : `Archive ${targets.length} style${targets.length>1?'s':''}`, value: 'archive', style: canRetro ? '' : 'primary' },
+    ],
+  });
+  if (pick === 'retro') { seasonRetroOpen(season); return; }   // archive again after saving the retro
+  if (pick !== 'archive') return;
   targets.forEach(archiveStyle);
   buildSkus(); save(); populateStyleSelects();
   renderStyles();
@@ -18829,7 +18877,7 @@ function tpUpdatePieceMat(styleId, idx, sel) {
   renderTechPack(styleId);
 }
 
-function generatePO(vendorId) {
+async function generatePO(vendorId) {
   const vendor = STATE.vendors.find(v=>v.id===vendorId);
   if (!vendor) return;
 
@@ -18881,7 +18929,14 @@ function generatePO(vendorId) {
   // creates a real Production PO draft first (opt-out preserved for a
   // no-strings preview) and the PRINTED number IS the tracked record's id.
   let poRec = null;
-  if (confirm('Create this as a tracked PO in Production (payments, receiving, Today reminders), then print?\n\nCancel = print a preview only, nothing saved.')) {
+  // Cancel used to mean "print a preview" (Build 590): now each is named.
+  const poPick = await veniaChoose({
+    title: 'Print this purchase order',
+    body: 'A tracked PO goes into Production with payments, receiving and Today reminders. A preview prints and saves nothing.',
+    choices: [ { label: 'Create the PO and print', value: 'po', style: 'primary' }, { label: 'Print a preview only', value: 'preview' } ],
+  });
+  if (!poPick) return;
+  if (poPick === 'po') {
     poRec = {
       id: 'PO-' + Date.now().toString(36).toUpperCase(),
       vendor: vendor.name, vendorId: vendor.id,
@@ -36338,7 +36393,7 @@ function agBuildSalesOverview() {
     <div class="ag-list-row">
       <div><div class="ag-lr-name">${slEsc(q.buyerName||'Account')}</div><div class="ag-lr-sub">${slEsc(q.season||'')}${(q.styles||[]).length?' · '+(q.styles||[]).length+' styles':''}</div></div>
       <div class="ag-lr-mono">${slMoney(q.total||0, q.currency)}</div>
-      <div><span class="ag-badge ag-b-${q.status==='accepted'?'active':q.status==='sent'?'sent':'draft'}">${slEsc(q.status||'draft')}</span></div>
+      <div>${slStatusChip('quote', q.status)}</div>
       <div style="display:flex;justify-content:flex-end"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slOpenQuoteModal('${q.id}')">Edit</button></div>
     </div>`).join('');
 
@@ -40064,7 +40119,7 @@ function agBuildQuotesSection() {
           : q.orderCancelled ? ' · <span style="color:var(--red)">order ' + slEsc(q.orderCancelled) + ' cancelled</span>'
           : ''}</div>${q.status === 'declined' ? `<div class="ag-lr-sub" style="margin-top:2px;color:var(--red)">not taken — ${slEsc(q.declinedReason || 'no reason recorded')}${q.declinedNote ? ' · ' + slEsc(q.declinedNote) : ''}</div>` : ''}</div>
         <div class="ag-lr-mono" style="font-size:11px;font-weight:600">${slMoney(q.total||0, q.currency)}</div>
-        <div><span style="font-size:10px;font-weight:600;color:${statusColor[q.status]||'var(--muted)'};text-transform:uppercase;letter-spacing:1px">${q.status||'draft'}</span></div>
+        <div>${slStatusChip('quote', q.status)}</div>
         <div style="display:flex;gap:6px;align-items:center">
           <div class="ag-lr-mono" style="font-size:10px">${(q.createdAt||'').slice(0,10)}</div>
           ${slQuoteNeedsFx(q) ? `<button class="ag-btn ag-btn-sm" title="Marked ${slEsc(q.currency)} but holding US dollar figures" style="color:var(--amber);border-color:var(--amber)" onclick="event.stopPropagation();slQuoteFixFx('${q.id}')">⚠ ${slEsc(q.currency)}?</button>` : ''}
@@ -41431,7 +41486,7 @@ function slOpenQuoteDetail(id) {
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.7">
         <strong style="color:var(--ink)">${slMoneyC(cur, q.total || 0)}</strong>
-        · ${slEsc(String(q.status || 'draft').toUpperCase())} · ${slEsc(q.season || 'no season')}
+        · ${slStatusChip('quote', q.status)} · ${slEsc(q.season || 'no season')}
         ${q.createdAt ? ' · quoted ' + slEsc(String(q.createdAt).slice(0,10)) : ''}
         ${q.orderId ? '<br>Booked as order ' + slEsc(q.orderId)
           : q.orderCancelled ? '<br><span style="color:var(--red)">Order ' + slEsc(q.orderCancelled) + ' was cancelled</span>' : ''}
@@ -42318,7 +42373,7 @@ function agBuildOrdersSection() {
         </div>
         <div class="ag-lr-mono">${o.items ? o.items.length+' style'+(o.items.length!==1?'s':'') : '—'}</div>
         <div class="ag-lr-mono">${slCur(o.currency)}${((o.total||0)/1000).toFixed(1)}k</div>
-        <div><span class="ag-badge" style="background:${STATUS_COLORS[o.status]||'var(--muted)'};color:#fff">${STATUS_LABELS[o.status]||o.status}</span></div>
+        <div>${slStatusChip('order', o.status)}</div>
         <div class="ag-lr-mono">
           <span>${o.deliveryDate||'—'}</span>
           <button class="ag-btn ag-btn-sm" title="Order confirmation with photos, to send to the buyer" onclick="event.stopPropagation();slConfirmDoc('order','${o.id}')">▤ For buyer</button>
@@ -42338,6 +42393,21 @@ function agBuildOrdersSection() {
 }
 // The order statuses, in one place. They were defined inside the orders view,
 // which is part of why the editor could not live anywhere else.
+// ONE STATUS CHIP (Build 590). Order and quote status was shown five ways:
+// a filled badge with white text, a raw lowercase word, coloured capitals,
+// .toUpperCase() and a generic badge. Same words, same colours, everywhere.
+const SL_CHIP = {
+  order: { draft:['Draft','draft'], confirmed:['Confirmed','sent'], production:['In production','scheduled'],
+           shipped:['Shipped','sent'], delivered:['Delivered','active'], cancelled:['Cancelled','done'], paid:['Paid','active'] },
+  quote: { draft:['Draft','draft'], sent:['Sent','sent'], accepted:['Accepted','active'],
+           declined:['Not taken','done'], expired:['Expired','done'] },
+};
+function slStatusChip(kind, status){
+  const st = String(status || 'draft');
+  const m = (SL_CHIP[kind] || {})[st] || [st.charAt(0).toUpperCase() + st.slice(1), 'done'];
+  return '<span class="ag-badge ag-b-' + m[1] + '">' + slEsc(m[0]) + '</span>';
+}
+window.slStatusChip = slStatusChip;
 const SL_ORDER_STATUS = { draft:'Draft', confirmed:'Confirmed', production:'In Production',
                           shipped:'Shipped', delivered:'Delivered', cancelled:'Cancelled' };
 function slOpenOrderModal(id) {
@@ -42823,7 +42893,7 @@ function slOpenOrderDetail(id) {
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow-y:auto">
       <div style="font-size:11px;color:var(--muted);line-height:1.6">
         <strong style="color:var(--ink)">${slEsc(o.account||'Account')}</strong>
-        · ${slEsc(o.status||'')} · ${slMoneyC(cur, o.total||0)}${o.deliveryDate?' · delivery '+slEsc(o.deliveryDate):''}
+        · ${slStatusChip('order', o.status)} · ${slMoneyC(cur, o.total||0)}${o.deliveryDate?' · delivery '+slEsc(o.deliveryDate):''}
         ${o.quoteId?'<br>From quote '+slEsc(o.quoteId):''}
         ${o.notes?'<br>'+slEsc(o.notes):''}
       </div>
@@ -54695,8 +54765,15 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // Last-moment overlap re-check: the CRM may have changed since the
       // inbox opened (or the other founder just added the same store).
       const m = agLeadCrmMatch(lead);
-      if (m && m.score >= 95 && !confirm(`"${m.buyer.name}" already looks like this account.\n\nAdd a SEPARATE record anyway? (Cancel to merge instead.)`)) {
-        status = 'merged'; buyerId = m.buyer.id;
+      if (m && m.score >= 95) {
+        // Cancel used to merge (Build 590): three named answers now.
+        const pick = await veniaChoose({
+          title: 'This store may already be in Buyers',
+          body: `"${m.buyer.name}" already looks like this account.`,
+          choices: [ { label: 'Merge into ' + m.buyer.name, value: 'merge', style: 'primary' }, { label: 'Add a separate record', value: 'add' } ],
+        });
+        if (!pick) return;
+        if (pick === 'merge') { status = 'merged'; buyerId = m.buyer.id; }
       }
     }
     if (status === 'approved'){
