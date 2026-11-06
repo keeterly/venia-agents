@@ -1,7 +1,15 @@
 /* VENIA OS — service worker
    Offline app-shell caching. Never touches API writes or cross-origin calls
    (Anthropic / Supabase / Shopify / fonts pass straight through). */
-const CACHE = 'venia-shell-v580';
+const CACHE = 'venia-shell-v581';
+// The last build that fixed SAVING. Bump this (to that build's number) only in
+// a build that fixes how changes reach the cloud. An open page on an older
+// build asks the waiting worker for it, and a page whose saves are failing
+// loads a newer save fix by itself instead of waiting for someone to tap
+// Update (see "SAVE FIXES LOAD THEMSELVES" in the app). Every other build
+// leaves it alone and keeps waiting for the tap, as before.
+const BUILD = '581';
+const SAVES_FIXED_IN = '578';
 const SHELL = ['/', '/venia-control-panel-v1.html', '/manifest.webmanifest', '/brainstorm.html', '/brainstorm.webmanifest'];
 
 self.addEventListener('install', (e) => {
@@ -27,8 +35,13 @@ self.addEventListener('install', (e) => {
 });
 
 // The page tells us to activate the waiting worker once the user taps "Update".
+// It also answers "which build are you, and which build last fixed saving?"
+// while it is still waiting, so the page can decide whether to load it.
 self.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+  if (e.data && e.data.type === 'BUILD_INFO' && e.ports && e.ports[0]) {
+    e.ports[0].postMessage({ build: BUILD, savesFixedIn: SAVES_FIXED_IN });
+  }
 });
 
 // Web Push from the agent worker — shows even when the app is closed.
