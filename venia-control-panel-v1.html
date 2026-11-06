@@ -3041,7 +3041,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '590';
+  const BUILD = '591';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10932,6 +10932,19 @@ function veniaChoose(opts){
   });
 }
 window.veniaChoose = veniaChoose;
+// A yes-or-no question in the app: the first line of the message is the
+// title, the rest the body, and the yes button says what it does (Build 591).
+function veniaConfirm(message, opts){
+  opts = opts || {};
+  const m = String(message || '');
+  const cut = m.indexOf('\n');
+  const title = opts.title || (cut > 0 ? m.slice(0, cut) : m);
+  const body = opts.title ? m : (cut > 0 ? m.slice(cut).trim() : '');
+  return veniaChoose({ title: title, body: body,
+    choices: [ { label: opts.ok || 'OK', value: true, style: opts.danger ? 'danger' : 'primary' } ],
+    cancel: opts.cancel || 'Keep it' }).then(function(v){ return v === true; });
+}
+window.veniaConfirm = veniaConfirm;
 async function archiveSeason() {
   const season = STATE.seasonFilter;
   if (!season) { toast('Pick a season first'); return; }
@@ -13660,11 +13673,11 @@ function dpArchive() {
 }
 // Permanent delete — removes the style and its BOM, POM and derived SKUs. Unlike
 // Archive (which just hides + is restorable), this cannot be undone.
-function dpDelete() {
+async function dpDelete() {
   if (!STATE.currentStyleId) return;
   const s = STATE.styles.find(x=>x.id===STATE.currentStyleId);
   if (!s) return;
-  if (!confirm('Permanently delete "'+(s.name||'this style')+'"?\n\nThis also removes its BOM, measurements (POM) and SKUs, and cannot be undone. To keep it recoverable, use Archive instead.')) return;
+  if (!(await veniaConfirm('Permanently delete "'+(s.name||'this style')+'"?\n\nThis also removes its BOM, measurements (POM) and SKUs, and cannot be undone. To keep it recoverable, use Archive instead.', { ok: 'Delete permanently', danger: true }))) return;
   STATE.styles = STATE.styles.filter(x => x.id !== s.id);
   if (STATE.bom) delete STATE.bom[s.id];
   if (STATE.pom) delete STATE.pom[s.id];
@@ -16674,8 +16687,8 @@ window.poReceive = function(id){
   renderProduction();
   showToast(receivedNow + ' units received' + (left ? ' — ' + left + ' still open' : ' — PO complete'), 'success');
 };
-window.poDelete = function(id){
-  if (!confirm('Delete ' + id + '?')) return;
+window.poDelete = async function(id){
+  if (!(await veniaConfirm('Delete ' + id + '?', { ok: 'Delete the PO', danger: true }))) return;
   STATE.pos = poList().filter(p=>p.id!==id);
   save(); closeModal('po-modal'); renderProduction();
 };
@@ -29281,10 +29294,10 @@ function prSaveCoverage() {
   toast(`Coverage logged — ${outlet}`);
 }
 
-function prDeleteCoverage(covId) {
+async function prDeleteCoverage(covId) {
   // Press proof is one-of-a-kind data — every sibling delete confirms, this
   // one fired on a single mis-tap of an 8px ✕.
-  if (!confirm('Delete this coverage entry? This can\'t be undone.')) return;
+  if (!(await veniaConfirm('Delete this coverage entry? This can\'t be undone.', { ok: 'Delete', danger: true }))) return;
   prInitCoverage();
   STATE.prCoverage = STATE.prCoverage.filter(c => c.id !== covId);
   save();
@@ -38111,8 +38124,8 @@ function slSaveBuyer(existingId) {
   showToast(existingId ? 'Account updated' : 'Buyer added');
 }
 
-function slDeleteBuyer(id) {
-  if (!confirm('Remove this account?')) return;
+async function slDeleteBuyer(id) {
+  if (!(await veniaConfirm('Remove this account?', { ok: 'Remove the account', danger: true }))) return;
   STATE.slBuyers = (STATE.slBuyers||[]).filter(b => b.id !== id);
   save();
   closeModal('sl-buyer-modal');
@@ -41418,8 +41431,8 @@ window.slCreateOrderFromQuote = function(quoteId) {
   setTimeout(function(){ try { slOpenOrderDetail(id); } catch(e){} }, 350);
 };
 
-function slDeleteQuote(id) {
-  if (!confirm('Delete this quote?')) return;
+async function slDeleteQuote(id) {
+  if (!(await veniaConfirm('Delete this quote?', { ok: 'Delete the quote', danger: true }))) return;
   STATE.slQuotes = (STATE.slQuotes||[]).filter(q => q.id !== id);
   save();
   closeModal('sl-quote-modal');
@@ -42614,15 +42627,15 @@ window.slSetOrderDeduction = function(orderId){
 // duplicate. It is the only destructive verb in Sales, so it names the account
 // and the amount before it runs and it is undoable for as long as the toast is
 // on screen.
-window.slCancelOrder = function(id){
+window.slCancelOrder = async function(id){
   const o = (STATE.slOrders||[]).find(x => x.id === id); if (!o) return;
   if (o.status === 'cancelled') { toast('That order is already cancelled'); return; }
   const paid = o.payment && o.payment.status === 'paid';
-  if (!confirm('Cancel order #' + id + ' — ' + (o.account || 'no account') + ', '
+  if (!(await veniaConfirm('Cancel order #' + id + ' — ' + (o.account || 'no account') + ', '
       + slMoney(o.total, o.currency) + '?\n\n'
       + 'It stays on the record but stops counting: booked, open orders, AR, the season '
       + 'roll-up and the P&L all skip a cancelled order.'
-      + (paid ? '\n\nNOTE: this order is marked PAID. Cancelling does not refund anything.' : ''))) return;
+      + (paid ? '\n\nNOTE: this order is marked PAID. Cancelling does not refund anything.' : ''), { ok: 'Cancel the order', danger: true, cancel: 'Keep the order' }))) return;
   o.status = 'cancelled';
   o.cancelledAt = new Date().toISOString();
   o.updatedAt = o.cancelledAt;
@@ -42671,18 +42684,20 @@ window.slCancelOrder = function(id){
   slAfterOrderChange(id);
 };
 
-window.slDeleteOrder = function(id){
+window.slDeleteOrder = async function(id){
   const list = STATE.slOrders || [];
   const idx = list.findIndex(x => x.id === id); if (idx < 0) return;
   const o = list[idx];
-  const paid = o.payment && (o.payment.status === 'paid' || o.payment.amountPaid);
-  if (!confirm('DELETE order #' + id + ' — ' + (o.account || 'no account') + ', '
+  // Any money in: a paid instalment, a part-payment or a recorded wire
+  // (Build 591; it looked only at the old single o.payment).
+  let paid = false; try { paid = slOrderPaidTotal(o) > 0; } catch (e) { paid = !!(o.payment && (o.payment.status === 'paid' || o.payment.amountPaid)); }
+  if (!(await veniaConfirm('DELETE order #' + id + ' — ' + (o.account || 'no account') + ', '
       + slMoney(o.total, o.currency) + '?\n\n'
       + 'This removes the record entirely, on both devices. For an order that was real and fell '
       + 'through, Cancel is the right move — it keeps the history and still stops it counting.'
       + (paid
           ? '\n\n⚠ THIS ORDER HAS A PAYMENT AGAINST IT. Deleting it does not touch Stripe, and the '
-            + 'money will no longer be explained by anything in the app.' : ''))) return;
+            + 'money will no longer be explained by anything in the app.' : ''), { ok: 'Delete the order', danger: true, cancel: 'Keep the order' }))) return;
   // Undoable while the toast is up. Deleting the wrong row is the one mistake
   // here that cannot be typed back in — items, payment, terms and all.
   // The quote pointed at this order and would have gone on pointing at it
@@ -44661,12 +44676,12 @@ function finAddManualLiability(){
 }
 window.finAddManualLiability = finAddManualLiability;
 
-function finRemoveManualLiability(id){
+async function finRemoveManualLiability(id){
   if (!id) return;
   const list = STATE.finManualLiabs || [];
   const row = list.find(function(x){ return x && x.id === id; });
   if (!row) return;
-  if (!confirm('Remove "' + (row.creditor || 'this creditor') + '" from the balance sheet?')) return;
+  if (!(await veniaConfirm('Remove "' + (row.creditor || 'this creditor') + '" from the balance sheet?', { ok: 'Remove', danger: true }))) return;
   STATE.finManualLiabs = list.filter(function(x){ return x && x.id !== id; });
   save();
   try { renderPage(STATE.currentPage); } catch(e){}
@@ -48285,12 +48300,12 @@ window.finCatAdd = function(){
   showToast('Category \u201C' + c + '\u201D added', 'success');
   try { cmdRenderBank(); } catch(e){}
 };
-window.finCatRemove = function(c){
+window.finCatRemove = async function(c){
   if (FIN_CATEGORIES.indexOf(c) >= 0) return;                    // built-ins are not removable
   const used = (STATE.finTxns || []).filter(t => t && t.category === c);
-  if (!confirm('Remove the category \u201C' + c + '\u201D?'
+  if (!(await veniaConfirm('Remove the category \u201C' + c + '\u201D?'
     + (used.length ? '\n\n' + used.length + ' transaction' + (used.length > 1 ? 's go' : ' goes')
-        + ' back to uncategorized. Nothing else changes.' : ''))) return;
+        + ' back to uncategorized. Nothing else changes.' : ''), { ok: 'Remove the category', danger: true }))) return;
   used.forEach(t => { t.category = ''; });
   STATE.finCats = (STATE.finCats || []).filter(x => x !== c);
   save();
@@ -49800,7 +49815,7 @@ window.bankDisconnect = async function(id){
   const fb = STATE.finBank || {};
   const a = (fb.accounts||[]).find(x => x.id === id);
   if (!a) return;
-  if (!confirm('Disconnect ' + (a.institution || a.name) + ' …' + (a.last4||'') + '? Stripe stops all data access to it. Synced transactions stay in VENIA.')) return;
+  if (!(await veniaConfirm('Disconnect ' + (a.institution || a.name) + ' …' + (a.last4||'') + '? Stripe stops all data access to it. Synced transactions stay in VENIA.', { ok: 'Disconnect', danger: true }))) return;
   try {
     await bankApi('disconnect', { account: id });
     fb.accounts = (fb.accounts||[]).filter(x => x.id !== id);
@@ -51386,15 +51401,15 @@ function csRenderHistory(){
 // Deleting a cost sheet has to deal with the COGS it wrote. Leaving a COGS
 // behind with no sheet under it is exactly the number-with-no-source this whole
 // page exists to stop, so it is asked about rather than assumed either way.
-window.deleteCostSheet = function(){
+window.deleteCostSheet = async function(){
   const sid = document.getElementById('cs-style-sel')?.value;
   if (!sid) return;
   const st = (STATE.styles||[]).find(x=>x.id===sid);
   const d = csRead(sid);
   const total = csTotalOf(d);
   if (!Object.keys(d).length){ showToast('There is no saved sheet for this style','warning'); return; }
-  if (!confirm('Delete the cost sheet for ' + ((st&&st.name)||'this style') + '?\n\n'
-    + csRevisions(d).length + ' revision' + (csRevisions(d).length===1?'':'s') + ' of history will go with it.')) return;
+  if (!(await veniaConfirm('Delete the cost sheet for ' + ((st&&st.name)||'this style') + '?\n\n'
+    + csRevisions(d).length + ' revision' + (csRevisions(d).length===1?'':'s') + ' of history will go with it.', { ok: 'Delete the cost sheet', danger: true }))) return;
   let all = {};
   try { all = JSON.parse(localStorage.getItem('venia-cost-sheets')||'{}') || {}; } catch(e){}
   delete all[sid];
