@@ -403,11 +403,12 @@ const readTools = [
       const cov = arr(mods, 'growth', 'prCoverage');
       const pit = arr(mods, 'growth', 'prPitches');
       if (!cov && !pit) return noAccess('Growth');
-      const dateOf = (r) => String(r.date || r.publishedAt || r.at || '');
+      // Coverage stores the date it ran as publishDate; the filter read every name but that one.
+      const dateOf = (r) => String(r.publishDate || r.date || r.publishedAt || r.at || '');
       const lim = clampLimit(a.limit, 30);
       return text({
         coverage: (cov || []).filter((c) => has(c, a.text) && (!a.from || dateOf(c) >= a.from)).slice(-lim)
-          .map((c) => compact(c, ['id', 'outlet', 'headline', 'date', 'covType', 'celebRef', 'styles', 'reach', 'aveValue', 'url'])),
+          .map((c) => compact(c, ['id', 'outlet', 'headline', 'publishDate', 'type', 'celebRef', 'stylesFeature', 'reachEstimate', 'aveValue', 'url'])),
         pitches: (pit || []).filter((p) => has(p, a.text)).slice(-lim)
           .map((p) => compact(p, ['id', 'outlet', 'editor', 'angle', 'status', 'date', 'nextAction'])),
       });
@@ -601,11 +602,11 @@ const writeTools = [
   {
     name: 'log_coverage',
     title: 'Propose logging press coverage',
-    description: 'Propose recording press that ran.' + PROPOSE_NOTE,
+    description: 'Propose recording press that ran. If the same link (or, with no link, the same outlet and headline) is already logged, applying it updates that entry instead of adding a second one, so check list_coverage first and pass the link whenever there is one.' + PROPOSE_NOTE,
     inputSchema: {
       type: 'object', required: ['outlet', 'headline'],
       properties: {
-        outlet: S.str('Publication or platform'), headline: S.str('What ran'), url: S.str('Link'),
+        outlet: S.str('Publication or platform'), headline: S.str('What ran'), url: S.str('Link'), date: S.date('The date it ran, if known'),
         covType: S.str('e.g. editorial, celebrity, social'), celebRef: S.str('Artist or person, if any'),
         styles: { type: 'array', items: { type: 'string' }, description: 'Exact style names featured' },
         reach: S.num('Estimated reach'), aveValue: S.num('Advertising value equivalent'), pullId: S.str('Pull id, if it came from one'), notes: S.str('Notes'),
