@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '585';
+  const BUILD = '586';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26702,6 +26702,18 @@ function cmdHitToCoverage(hitId) {
     reachEstimate: 0, aveValue: 0, notes: 'From press scan', createdAt: new Date().toISOString(),
     pullId: pull ? pull.id : '', fromPull: !!pull, fromNews: true,
   };
+  const dup = prCovFindDup(cov, STATE.prCoverage);
+  if (dup) {
+    prCovMergeInto(dup, cov, false);
+    save();
+    dbDelete('hits', hitId);
+    try { logActivity('PR: press mention matched existing coverage — ' + (dup.outlet || '')); } catch(e){}
+    cmdRenderHits();
+    try { if (document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+    try { if (document.getElementById('ag-mentions-strip')) agRenderMentions(); } catch(e){}
+    toast('Already in coverage — updated the ' + (dup.outlet || 'existing') + ' entry', 'success');
+    return;
+  }
   STATE.prCoverage.unshift(cov);
   save();
   dbDelete('hits', hitId);   // moves it out of the mentions inbox into coverage
@@ -28970,6 +28982,121 @@ function agRenderPitches(filter, returnHtml) {
 let PR_COV_CURRENT_ID = null;
 let PR_COV_FILTER = 'all';
 
+// ── ONE ENTRY PER PIECE OF PRESS (Build 586) ─────────────────────────────────
+// Logging never looked at what was already there, so the same Vanilla Issue
+// piece landed twice, 40 seconds apart, from two proposals of the same link.
+// Every door that adds coverage (the modal, a promoted press hit, Enigma and
+// the Claude connector, which apply through agentRunLogCoverage) now asks
+// prCovFindDup first and updates the entry it finds instead of adding one.
+//
+// Same piece = same link, once tracking junk, the scheme, "www." and a
+// trailing slash are set aside. With no link on either side, it is the same
+// outlet and headline, read without case, accents or punctuation. Two
+// different links are two pieces, even under one headline (syndication).
+//
+// Coverage is one array inside the Growth module's jsonb row, so the database
+// cannot hold a unique index on it; the guard lives here, on the one write path.
+function prCovNormUrl(u){
+  let s = String(u || '').trim();
+  if (!s) return '';
+  s = s.replace(/#.*$/, '');
+  const q = s.indexOf('?');
+  if (q >= 0) {
+    const keep = s.slice(q + 1).split('&').filter(function(p){
+      return p && !/^(utm_[a-z]+|fbclid|gclid|igshid|mc_cid|mc_eid|ref|ref_src|si)=/i.test(p);
+    });
+    s = s.slice(0, q) + (keep.length ? '?' + keep.join('&') : '');
+  }
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').replace(/^www\./i, '');
+  const slash = s.indexOf('/');
+  const host = (slash < 0 ? s : s.slice(0, slash)).toLowerCase();
+  const path = slash < 0 ? '' : s.slice(slash);
+  return (host + path).replace(/\/+(\?|$)/, '$1');
+}
+function prCovNormText(t){
+  return String(t || '').normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function prCovSame(a, b){
+  if (!a || !b) return false;
+  const ua = prCovNormUrl(a.url), ub = prCovNormUrl(b.url);
+  if (ua && ub) return ua === ub;
+  const oa = prCovNormText(a.outlet), ob = prCovNormText(b.outlet);
+  const ha = prCovNormText(a.headline), hb = prCovNormText(b.headline);
+  return !!(oa && ha) && oa === ob && ha === hb;
+}
+function prCovFindDup(cov, list, excludeId){
+  return (list || []).find(function(c){ return c && c.id !== excludeId && prCovSame(c, cov); }) || null;
+}
+// Fold `from` into `into`. The entry that was there first keeps its id, its
+// createdAt and every field it already has; `from` fills what is empty, adds
+// its styles, a newer reach or AVE estimate, and a note that says something new.
+// `prefer` lets a person's own edit in the modal win over what was stored.
+function prCovMergeInto(into, from, prefer){
+  if (!into || !from) return into;
+  const blank = function(v){ return v == null || v === '' || v === '—' || (Array.isArray(v) && !v.length); };
+  Object.keys(from).forEach(function(k){
+    if (k === 'id' || k === 'createdAt' || k === 'notes' || k === 'stylesFeature' || k === 'reachEstimate' || k === 'aveValue') return;
+    if (blank(from[k])) return;
+    if (prefer || blank(into[k])) into[k] = from[k];
+  });
+  const styles = [];
+  (into.stylesFeature || []).concat(from.stylesFeature || []).forEach(function(s){
+    const t = String(s || '').trim();
+    if (t && !styles.some(function(x){ return x.toLowerCase() === t.toLowerCase(); })) styles.push(t);
+  });
+  into.stylesFeature = styles;
+  ['reachEstimate', 'aveValue'].forEach(function(k){
+    const n = parseInt(from[k]) || 0;
+    if (n > 0 && (prefer || n > (parseInt(into[k]) || 0))) into[k] = n;
+  });
+  const a = String(into.notes || '').trim(), b = String(from.notes || '').trim();
+  if (prefer && b) into.notes = b;
+  else if (b && a.toLowerCase().indexOf(b.toLowerCase()) < 0) into.notes = a ? a + '\n' + b : b;
+  if (from.pullId && !into.pullId) { into.pullId = from.pullId; into.fromPull = true; }
+  if (String(from.createdAt || '') && String(from.createdAt) < String(into.createdAt || '9')) into.createdAt = from.createdAt;
+  into.updatedAt = new Date().toISOString();
+  return into;
+}
+// Entries already doubled before this build: groups of two or more that are
+// the same piece, oldest first. The oldest stays; the rest fold into it.
+function prCovDuplicateGroups(list){
+  const rows = (list || []).filter(Boolean).slice()
+    .sort(function(x, y){ return String(x.createdAt || x.id || '').localeCompare(String(y.createdAt || y.id || '')); });
+  const groups = [], used = {};
+  rows.forEach(function(c, i){
+    if (used[c.id]) return;
+    const g = [c];
+    for (let j = i + 1; j < rows.length; j++) {
+      if (!used[rows[j].id] && prCovSame(c, rows[j])) { g.push(rows[j]); used[rows[j].id] = 1; }
+    }
+    if (g.length > 1) { used[c.id] = 1; groups.push(g); }
+  });
+  return groups;
+}
+function prCovMergeAllDuplicates(list){
+  const groups = prCovDuplicateGroups(list);
+  const drop = {};
+  groups.forEach(function(g){ g.slice(1).forEach(function(c){ prCovMergeInto(g[0], c, false); drop[c.id] = 1; }); });
+  return { list: (list || []).filter(function(c){ return !(c && drop[c.id]); }), merged: Object.keys(drop).length, groups: groups };
+}
+window.prCovMergeDuplicates = function(){
+  prInitCoverage();
+  const groups = prCovDuplicateGroups(STATE.prCoverage);
+  if (!groups.length) { toast('No doubled coverage to merge'); return; }
+  const lines = groups.map(function(g){
+    return '• ' + (g[0].outlet || '—') + ': "' + String(g[0].headline || '').slice(0, 70) + '" (' + g.length + ' entries → 1)';
+  });
+  if (!confirm('Merge doubled coverage?\n\n' + lines.join('\n')
+    + '\n\nThe first-logged entry of each stays and takes the others\' styles and notes. The extra entries are removed.')) return;
+  const r = prCovMergeAllDuplicates(STATE.prCoverage);
+  STATE.prCoverage = r.list;
+  save();
+  try { logActivity('PR: merged ' + r.merged + ' doubled coverage entr' + (r.merged === 1 ? 'y' : 'ies')); } catch(e){}
+  try { agNav('pr', 'hits', document.querySelector('#cp-screen-pr .ag-nav-item[onclick*="\'hits\'"]')); } catch(e){}
+  toast('Merged ' + r.merged + ' doubled entr' + (r.merged === 1 ? 'y' : 'ies'), 'success');
+};
+
 function prInitCoverage() { if (!STATE.prCoverage) STATE.prCoverage = []; }
 
 function openCoverageModal(covId) {
@@ -29025,6 +29152,21 @@ function prSaveCoverage() {
     createdAt:     PR_COV_CURRENT_ID ? (STATE.prCoverage.find(c=>c.id===PR_COV_CURRENT_ID)?.createdAt || new Date().toISOString()) : new Date().toISOString(),
   };
 
+  // A NEW entry for a piece that is already logged updates that entry.
+  // Editing an entry keeps it as it is — the person is looking at it.
+  const dup = PR_COV_CURRENT_ID ? null : prCovFindDup(cov, STATE.prCoverage);
+  if (dup) {
+    if (!confirm('This piece is already logged:\n\n' + (dup.outlet || '—') + ' — "' + String(dup.headline || '').slice(0, 80) + '"'
+      + '\n\nUpdate that entry with what you entered here, instead of adding a second one?')) return;
+    prCovMergeInto(dup, cov, true);
+    save();
+    logActivity(`Coverage updated: ${dup.outlet} — "${String(dup.headline || '').slice(0,50)}"`);
+    closeModal('pr-coverage-modal');
+    agRenderCoverage();
+    toast(`Already logged — updated the ${dup.outlet} entry`);
+    return;
+  }
+
   const idx = STATE.prCoverage.findIndex(c => c.id === cov.id);
   if (idx >= 0) STATE.prCoverage[idx] = cov;
   else STATE.prCoverage.unshift(cov);
@@ -29076,7 +29218,14 @@ function agBuildCoverageSection() {
   </div>`;
 
   const listHtml = agRenderCoverage(PR_COV_FILTER, true);
-  return statsHtml + filters
+  // Pieces logged twice before Build 586 stopped it: offer the merge, never do it unasked.
+  const dupGroups = prCovDuplicateGroups(all);
+  const dupN = dupGroups.reduce((s,g) => s + g.length - 1, 0);
+  const dupHtml = dupN ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 14px;border:1px solid var(--amber);margin-top:8px;font-size:11.5px;line-height:1.5">
+      <span>${dupGroups.length === 1 ? `<b>${escHtml(dupGroups[0][0].outlet || '—')}</b> is logged ${dupGroups[0].length} times` : `${dupGroups.length} pieces are logged more than once`} — the totals above count ${dupGroups.length === 1 ? 'it' : 'them'} more than once.</span>
+      <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="prCovMergeDuplicates()">Merge duplicates</button>
+    </div>` : '';
+  return statsHtml + filters + dupHtml
     + `<div id="ag-mentions-strip">${agRenderMentions(true)}</div>`
     + `<div id="ag-coverage-list" style="margin-top:4px">${listHtml}</div>`;
 }
@@ -31841,13 +31990,39 @@ function agentRunLogCoverage(action, chatBody) {
   var cov = {
     id: 'COV' + Date.now(), outlet: outlet || '—', journalist: '',
     headline: headline || outlet, url: String(action.url || '').trim(),
-    publishDate: new Date().toISOString().slice(0, 10), type: t,
+    // The date it RAN, when the proposal knows it; today only as a fallback.
+    publishDate: (/^\d{4}-\d{2}-\d{2}$/.test(String(action.date || action.publishDate || '')) ? String(action.date || action.publishDate) : new Date().toISOString().slice(0, 10)), type: t,
     celebRef: String(action.celebRef || '').trim(),
     stylesFeature: Array.isArray(action.styles) ? action.styles.map(function(s){ return String(s || '').trim(); }).filter(Boolean) : [],
     reachEstimate: parseInt(action.reach) || 0, aveValue: parseInt(action.aveValue) || 0,
     notes: String(action.notes || '').trim(), createdAt: new Date().toISOString(),
     pullId: pull ? pull.id : '', fromPull: !!pull, addedByAgent: true,
   };
+  // Already logged (same link, or same outlet and headline): update that entry.
+  var dup = prCovFindDup(cov, STATE.prCoverage);
+  if (dup) {
+    if (!window.__covUndo) window.__covUndo = {};
+    window.__covUndo[dup.id] = JSON.parse(JSON.stringify(dup));
+    prCovMergeInto(dup, cov, false);
+    save();
+    try { logActivity('PR: coverage already logged, entry updated by agent — ' + (dup.outlet || outlet || headline)); } catch(e){}
+    try { if (typeof agRenderCoverage === 'function' && document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+    var dcard = document.createElement('div');
+    dcard.className = 'ag-msg from-agent';
+    dcard.innerHTML = '<div class="ag-msg-meta">Action</div>'
+      + '<div class="ag-msg-bubble" style="border-color:var(--ink)">'
+      + '<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--live,#3f7d55);font-weight:700;margin-bottom:3px">✓ Already logged — entry updated</div>'
+      + '<div style="font-size:12px;font-weight:700;margin-top:2px">' + escHtml(dup.outlet || '') + '</div>'
+      + '<div style="font-size:11px;margin-top:1px">' + escHtml(dup.headline || '') + '</div>'
+      + '<div style="font-size:10px;color:var(--muted);margin-top:2px">No second entry was added.</div>'
+      + '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">'
+      + '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="skToggle(false);cpGoto(\'pr\')">Open PR</button>'
+      + '<button class="ag-btn ag-btn-sm ag-btn-ghost" onclick="agentUndoCoverageUpdate(\'' + dup.id + '\', this)">Undo</button>'
+      + '</div></div>';
+    chatBody.appendChild(dcard);
+    chatBody.scrollTop = chatBody.scrollHeight;
+    return;
+  }
   STATE.prCoverage.unshift(cov);
   save();
   try { logActivity('PR: coverage logged by agent — ' + (outlet || headline) + (pull ? (' (from pull ' + (pull.invoiceNo || pull.id) + ')') : '')); } catch(e){}
@@ -31874,6 +32049,15 @@ window.agentUndoCoverage = function(id, btn){
   save();
   try { if (typeof agRenderCoverage === 'function' && document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
   if (btn){ var b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">Coverage entry removed.</div>'; }
+};
+
+// Undo an update to an entry that was already logged: put back what it held.
+window.agentUndoCoverageUpdate = function(id, btn){
+  var prev = window.__covUndo && window.__covUndo[id];
+  var i = prev && STATE.prCoverage ? STATE.prCoverage.findIndex(function(c){ return c.id === id; }) : -1;
+  if (i >= 0) { STATE.prCoverage[i] = prev; delete window.__covUndo[id]; save(); }
+  try { if (typeof agRenderCoverage === 'function' && document.getElementById('ag-coverage-list')) agRenderCoverage(); } catch(e){}
+  if (btn){ var b = btn.closest('.ag-msg-bubble'); if (b) b.innerHTML = '<div style="font-size:11px;color:var(--muted)">' + (i >= 0 ? 'Coverage entry put back as it was.' : 'Nothing to undo — the entry changed since.') + '</div>'; }
 };
 
 // Capture a note/goal/task into Brainstorm from the chat (bridges to dumpCapture).
@@ -46790,15 +46974,21 @@ window.cmdRenderCfo = function(){
   const wf = (tag, title, desc) => '<div class="ag-wf" style="cursor:pointer" data-agp="' + agRegister('fin', (WORKFLOWS.fin||{})[title] || title) + '"><div class="ag-wf-tag">' + tag + '</div><div class="ag-wf-title">' + title + '</div><div class="ag-wf-desc">' + desc + '</div></div>';
   // The weekly brief, when the CFO has written one this week.
   const wb = STATE.finWatchBrief;
-  const briefHtml = (wb && wb.body) ? `<div style="border:1px solid var(--ink);padding:16px;margin:16px 0">
+  // Out of date when the orders or the bank pull it was written from have moved.
+  let wbStale = null;
+  try { wbStale = finBriefStale(wb); } catch(e){}
+  let wbBusy = false; try { wbBusy = !!__finBriefBusy; } catch(e){}
+  const wbWhen = (() => { try { return wb && wb.at ? new Date(wb.at).toLocaleString(undefined, { weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' }) : ''; } catch(e){ return ''; } })();
+  const briefHtml = (wb && wb.body) ? `<div style="border:1px solid ${wbStale ? 'var(--amber)' : 'var(--ink)'};padding:16px;margin:16px 0">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-        <div class="micro-label">Money brief · week of ${slEsc(String(wb.week||''))}</div>
+        <div class="micro-label">Money brief · week of ${slEsc(String(wb.week||''))}${wbWhen ? ' · written ' + slEsc(wbWhen) : ''}</div>
         <div style="display:flex;gap:6px">
-          <button class="ag-btn ag-btn-ghost ag-btn-sm" ${agAttr('fin','Rewrite this week\'s money brief from the current FINANCE SNAPSHOT — same shape: where cash stands, what is owed both ways, the one number that matters this week, and one specific action.')}>Rewrite</button>
+          <button class="ag-btn ${wbStale ? 'ag-btn-primary' : 'ag-btn-ghost'} ag-btn-sm" onclick="finBriefRerun()"${wbBusy ? ' disabled' : ''} title="Write this week's brief again from today's figures">${wbBusy ? 'Re-running…' : 'Re-run'}</button>
           ${wb.seen ? '' : '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="finBriefMarkSeen();cmdRenderCfo()">Mark read</button>'}
         </div>
       </div>
-      <div style="font-size:12px;line-height:1.75;white-space:pre-wrap;color:var(--ink)">${slEsc(String(wb.body))}</div>
+      ${wbStale ? `<div style="font-size:11px;line-height:1.6;color:var(--amber);margin-bottom:10px">Out of date: ${slEsc(wbStale.join(' and '))} since this was written. Its figures may no longer be right — re-run it before acting on them.</div>` : ''}
+      <div style="font-size:12px;line-height:1.75;white-space:pre-wrap;color:var(--ink)${wbStale ? ';opacity:.6' : ''}">${slEsc(String(wb.body))}</div>
     </div>` : '';
   // Live alerts, same rules that ride the morning push.
   let alerts = [];
@@ -47576,7 +47766,10 @@ function finWatchAlerts(){
   // 6. Weekly money brief waiting to be read.
   try {
     if (cfg.weekly && STATE.finWatchBrief && STATE.finWatchBrief.week === finWeekKey() && !STATE.finWatchBrief.seen) {
-      out.push({ key:'fin|brief', pri:'med', act: goMoney, text:'Your weekly money brief is ready' });
+      // Never send someone to read figures that have since moved as if they were news.
+      out.push({ key:'fin|brief', pri:'med', act: goMoney, text: finBriefStale(STATE.finWatchBrief)
+        ? 'Your weekly money brief is out of date — re-run it in Money'
+        : 'Your weekly money brief is ready' });
     }
   } catch(e){}
   return out;
@@ -47595,39 +47788,108 @@ function finWeekKey(d){
 // synced), never on a first boot before data has loaded, and never twice
 // concurrently.
 let __finBriefBusy = false;
-async function finWeeklyBriefMaybe(){
+
+// WHAT THE BRIEF WAS WRITTEN FROM (Build 586). A brief written on Wednesday
+// went on quoting $4,433 booked, nothing owed to us and a September balance
+// after that order was deleted and the morning bank pull had moved the
+// figures, and it still sat in Today as unread. Every brief now carries a
+// fingerprint of the two things it reads that change under it — the wholesale
+// orders and the bank pull (balances and transactions). When either no longer
+// matches, the brief says it is out of date and offers a re-run.
+//
+// A pull that brings nothing new changes nothing, so the daily 3:15 AM sync
+// does not make every brief stale by itself. Filing a category does not count
+// either: the brief's job is the money picture, not the bookkeeping.
+function finHash(str){
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+function finBriefBasis(){
+  const orders = (STATE.slOrders || []).filter(Boolean).map(o => [
+    o.id, o.status || '', Math.round((parseFloat(o.total) || 0) * 100), o.currency || '', o.fxRate || '',
+    o.discountPct || '', (o.payments || []).map(p => p && (Math.round((parseFloat(p.amount) || 0) * 100) + '@' + (p.date || ''))).join(',')
+  ].join('|')).sort();
+  const fb = STATE.finBank || {};
+  const accts = (fb.accounts || []).filter(Boolean).map(a => {
+    const b = a.balance || {};
+    return [a.id, a.status || '', b.current, b.available, b.used, b.as_of || a.balanceAsOf || ''].join('|');
+  }).sort();
+  const txns = (STATE.finTxns || []).filter(t => t && t.status !== 'void')
+    .map(t => (t.id || '') + '|' + (t.date || '') + '|' + Math.round((parseFloat(t.amount) || 0) * 100)).sort();
+  return { orders: finHash(orders.join('\n')), ordersN: orders.length,
+           bank: finHash(accts.join('\n') + '\n#\n' + txns.join('\n')), txnsN: txns.length };
+}
+// null when the brief still stands; otherwise what moved, in plain words.
+function finBriefStale(wb){
+  wb = wb || STATE.finWatchBrief;
+  if (!wb || !wb.body) return null;
+  const why = [];
+  if (wb.basis) {
+    const now = finBriefBasis();
+    if (now.orders !== wb.basis.orders) why.push('wholesale orders changed');
+    if (now.bank !== wb.basis.bank) why.push('the bank pull changed balances or transactions');
+  } else {
+    // Written before briefs carried a fingerprint: all that is known is
+    // whether the bank has been pulled since.
+    const ls = STATE.finBank && STATE.finBank.lastSync;
+    if (ls && wb.at && String(ls) > String(wb.at)) why.push('the bank has been pulled since');
+  }
+  return why.length ? why : null;
+}
+window.finBriefStale = finBriefStale;
+
+async function finWeeklyBriefMaybe(){ return finWriteWeeklyBrief(false); }
+// force: the founder asked for a re-run, so write it now, this week, over the
+// one that is there, and say how it went.
+async function finWriteWeeklyBrief(force){
   try {
     const cfg = finWatchCfg();
-    if (!cfg.weekly || __finBriefBusy) return;
-    if (!window.__sbSyncDone) return;                    // wait for the cloud pull
+    if ((!cfg.weekly && !force) || __finBriefBusy) return;
+    if (!window.__sbSyncDone) { if (force) showToast('Still syncing with the cloud — try again in a moment', 'info'); return; }
     const wk = finWeekKey();
-    if (STATE.finWatchBrief && STATE.finWatchBrief.week === wk) return;
+    if (!force && STATE.finWatchBrief && STATE.finWatchBrief.week === wk) return;
     if (!(STATE.styles||[]).length && !(STATE.finTxns||[]).length) return;   // nothing to report on
     __finBriefBusy = true;
+    if (force) { try { cmdRenderCfo(); } catch(e){} }
     const sys = [
       AGENTS.fin.system,
       plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''),
     ];
     const q = 'Write this week\'s money brief for the two founders, from the FINANCE SNAPSHOT only. Under 250 words, plain language, no headers longer than three words. Cover: (1) where cash stands and what changed; (2) what is owed to us and what we owe; (3) the single most important number this week and why; (4) one specific action to take. If the bank is not connected or figures are missing, say so plainly instead of estimating. Do not emit any action block.';
+    const basis = finBriefBasis();                       // what this brief is read from, taken before the call
     const text = await callClaude(sys, q, []);
     const clean = (typeof agentExtractAction === 'function' ? agentExtractAction(text).clean : text) || text;
-    STATE.finWatchBrief = { week: wk, at: new Date().toISOString(), body: String(clean).slice(0, 12000), seen: false };
+    STATE.finWatchBrief = { week: wk, at: new Date().toISOString(), body: String(clean).slice(0, 12000), seen: false, basis: basis };
     if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
-    STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: 'Money brief — week of ' + wk, kind: 'note',
+    // A re-run replaces this week's copy in the Brand Library rather than filing a second one.
+    const docTitle = 'Money brief — week of ' + wk;
+    const prevDoc = force ? STATE.brandDocs.find(d => d && d.title === docTitle) : null;
+    if (prevDoc) { prevDoc.body = String(clean).slice(0, 40000); prevDoc.updatedAt = new Date().toISOString(); }
+    else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: docTitle, kind: 'note',
       body: String(clean).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     save();
-    try { logActivity('CFO wrote the weekly money brief (week of ' + wk + ')'); } catch(e){}
+    try { logActivity('CFO ' + (force ? 're-ran' : 'wrote') + ' the weekly money brief (week of ' + wk + ')'); } catch(e){}
+    if (force) { try { showToast('Money brief re-run from today’s figures', 'success'); } catch(e){} }
     try { buildTodayFocus(); } catch(e){}
     try { cmdRenderCfo(); } catch(e){}
     try {
-      if (window.Notification && Notification.permission === 'granted' && navigator.serviceWorker && navigator.serviceWorker.ready) {
+      // A re-run is asked for on this screen; only the automatic brief pushes.
+      if (!force && window.Notification && Notification.permission === 'granted' && navigator.serviceWorker && navigator.serviceWorker.ready) {
         navigator.serviceWorker.ready.then(reg => reg.showNotification('Weekly money brief ready', {
           body: String(clean).replace(/\s+/g,' ').slice(0, 140), icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'venia-cfo-brief' }));
       }
     } catch(e){}
-  } catch(e){ /* a failed brief retries next open — never blocks the app */ }
-  finally { __finBriefBusy = false; }
+  } catch(e){
+    /* a failed brief retries next open — never blocks the app */
+    if (force) { try { showToast('The re-run did not finish — ' + ((e && e.message) || 'try again'), 'error'); } catch(_){} }
+  }
+  finally {
+    __finBriefBusy = false;
+    if (force) { try { cmdRenderCfo(); } catch(e){} }
+  }
 }
+window.finBriefRerun = function(){ return finWriteWeeklyBrief(true); };
 window.finBriefMarkSeen = function(){
   if (STATE.finWatchBrief) { STATE.finWatchBrief.seen = true; save(); try { buildTodayFocus(); } catch(e){} }
 };
