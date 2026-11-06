@@ -1,4 +1,5 @@
 import { VENIA_ORIGINS } from './_shared/origins.js';
+import { healKey, SK_RE, stripeCaller, slimAccount, slimTxn, readFeed } from './_shared/bank-feed.js';
 // Server-side proxy to Stripe FINANCIAL CONNECTIONS — the live bank feed.
 // Reuses the same STRIPE_SECRET_KEY as stripe.js; nothing here can move money.
 // Every call is READ or link-plumbing: create the auth session the founder
@@ -48,31 +49,11 @@ export default async (req) => {
   if (req.method !== 'POST') return json({ error: 'Method Not Allowed — expected POST' }, 405, cors);
   if (!originAllowed(req)) return json({ error: 'Forbidden' }, 403, cors);
 
-  // Heal keys entered on a phone: strip ALL whitespace (a paste from a wrapped
-  // display smuggles in line breaks mid-key) and map common look-alike
-  // characters (e.g. Cyrillic З for 3, О for O) back to ASCII — real Stripe
-  // keys are strictly alphanumeric, so any such character is a transcription
-  // artifact. A key with a non-ASCII char crashes fetch with a cryptic
-  // "ByteString" error the moment it hits an Authorization header. Healing is
-  // conservative: if the underlying character was genuinely different, the
-  // live Stripe check on ping still reports the key invalid.
-  const HOMOGLYPHS = {
-    'З':'3','з':'3','б':'6','Ч':'4','ч':'4','О':'O','о':'o','А':'A','а':'a',
-    'В':'B','в':'B','Е':'E','е':'e','С':'C','с':'c','Р':'P','р':'p','Х':'X',
-    'х':'x','У':'Y','у':'y','К':'K','к':'k','М':'M','м':'m','Н':'H','н':'H',
-    'Т':'T','т':'t','І':'I','і':'i','Ѕ':'S','ѕ':'s','Ј':'J','ј':'j','Ь':'b',
-    'ь':'b','Ѡ':'w','Ԛ':'Q','ԛ':'q','Ԝ':'W','ԝ':'w','ѵ':'v','Ѵ':'V','ԁ':'d',
-    'ԍ':'g','ѡ':'w','Ғ':'F','ғ':'f',
-    // Seen in the wild in this workspace's key: a dagger where an f belongs
-    // (stylized-text artifact), and the common smart-punct swaps.
-    '†':'f','‘':"'",'’':"'",'—':'-','–':'-',
-  };
-  const healKey = (v) => String(v || '')
-    .replace(/\s+/g, '')
-    .replace(/[^\x00-\x7F]/g, (ch) => HOMOGLYPHS[ch] != null ? HOMOGLYPHS[ch] : ch);
+  // Keys entered on a phone are healed (whitespace, look-alike characters)
+  // before use — see _shared/bank-feed.js.
   const key = healKey(process.env.STRIPE_SECRET_KEY);
   const pk  = healKey(process.env.STRIPE_PUBLISHABLE_KEY);
-  const skFormatOk = /^[sr]k_(live|test)_[A-Za-z0-9]+$/.test(key);
+  const skFormatOk = SK_RE.test(key);
   const pkFormatOk = /^pk_(live|test)_[A-Za-z0-9]+$/.test(pk);
 
   let body;
@@ -114,20 +95,7 @@ export default async (req) => {
   const sent = req.headers.get('x-venia-code') || '';
   if (!sent || (await sha256Hex(sent)) !== gateHash) return json({ error: 'Not authorized — VENIA access code required.' }, 401, cors);
 
-  // Stripe takes repeated keys for list parameters (features[]=a&features[]=b),
-  // which an object literal cannot express — so an array value expands into one
-  // pair per element rather than being stringified into "a,b" and rejected.
-  const form = (o) => Object.entries(o)
-    .flatMap(([k, v]) => (Array.isArray(v) ? v : [v])
-      .map((x) => encodeURIComponent(k) + '=' + encodeURIComponent(x))).join('&');
-  const call = async (path, data, method = 'POST') => {
-    const r = await fetch('https://api.stripe.com/v1/' + path, {
-      method,
-      headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: method === 'GET' ? undefined : form(data || {}),
-    });
-    return r.json();
-  };
+  const call = stripeCaller(key);
 
   // One Stripe Customer stands in for VENIA itself as the account holder —
   // linking accounts to a customer is what lets us list them again later.
@@ -140,30 +108,25 @@ export default async (req) => {
     return c.id;
   };
 
-  const slimAccount = (a) => ({
-    id: a.id,
-    name: a.display_name || a.institution_name || 'Account',
-    institution: a.institution_name || '',
-    last4: a.last4 || '',
-    status: a.status || '',
-    // category: cash | credit | investment | other. Only 'cash' is money you
-    // HAVE — a credit card or loan balance is money you OWE, and summing the
-    // two together is how a dashboard reports catastrophic fake numbers.
-    category: a.category || 'other',
-    subcategory: a.subcategory || 'other',
-    subscriptions: a.subscriptions || [],
-    // Balance arrives in cents keyed by currency; surface USD in dollars.
-    balance: a.balance ? {
-      as_of: a.balance.as_of ? new Date(a.balance.as_of * 1000).toISOString().slice(0, 10) : '',
-      current: a.balance.current && a.balance.current.usd != null ? a.balance.current.usd / 100 : null,
-      available: a.balance.cash && a.balance.cash.available && a.balance.cash.available.usd != null ? a.balance.cash.available.usd / 100 : null,
-      used: a.balance.credit && a.balance.credit.used && a.balance.credit.used.usd != null ? a.balance.credit.used.usd / 100 : null,
-      type: a.balance.type || '',
-    } : null,
-    txn_refresh: a.transaction_refresh ? { status: a.transaction_refresh.status || '' } : null,
-  });
-
   try {
+    // What the morning pull (bank-sync.js) read from Stripe today, so the app
+    // can fold it into the ledger on open without waiting on a refresh of its
+    // own. Behind the same access code as every other bank action. Read-only:
+    // this touches neither Stripe nor the workspace.
+    if (action === 'cached') {
+      const feed = await readFeed().catch(() => null);
+      if (!feed || !feed.at) return json({ feed: null }, 200, cors);
+      return json({ feed: {
+        day: feed.day || '', at: feed.at || '', since: feed.since || '', complete: feed.complete !== false,
+        // Between the morning's two steps the stored rows are yesterday's;
+        // 'fresh' tells the app whether this is today's read.
+        fresh: feed.phase === 'done',
+        accounts: Array.isArray(feed.accounts) ? feed.accounts : [],
+        transactions: Array.isArray(feed.transactions) ? feed.transactions : [],
+        issues: Array.isArray(feed.issues) ? feed.issues : [],
+      } }, 200, cors);
+    }
+
     // Start a bank-auth session: the browser opens Stripe's own modal with the
     // returned client_secret; credentials never touch VENIA code.
     if (action === 'link') {
@@ -228,15 +191,7 @@ export default async (req) => {
       if (CURSOR_RE.test(String(body.starting_after || ''))) qs += '&starting_after=' + encodeURIComponent(body.starting_after);
       const list = await call('financial_connections/transactions?' + qs, {}, 'GET');
       if (list.error) return json({ error: list.error.message }, 400, cors);
-      const txns = (list.data || []).map(t => ({
-        id: t.id,
-        account: t.account,
-        amount: (t.amount || 0) / 100,
-        currency: t.currency || 'usd',
-        description: String(t.description || '').slice(0, 200),
-        status: t.status || '',
-        date: t.transacted_at ? new Date(t.transacted_at * 1000).toISOString().slice(0, 10) : '',
-      }));
+      const txns = (list.data || []).map(slimTxn);
       const next = list.has_more && txns.length ? txns[txns.length - 1].id : null;
       return json({ transactions: txns, has_more: !!list.has_more, next }, 200, cors);
     }

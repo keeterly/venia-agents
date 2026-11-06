@@ -3021,7 +3021,7 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '584';
+  const BUILD = '585';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -48330,42 +48330,146 @@ window.bankMergeDupes = function(){
 // The feed only moved when somebody pressed Refresh, so the Money tab was as
 // current as the last time anyone thought about it — and a P&L is only as good
 // as the day its ledger stops. This runs on boot and whenever the app is
-// returned to: if the last sync was yesterday or older, pull.
+// returned to.
+//
+// THE SERVER PULLS FIRST (Build 585). A scheduled function (bank-sync.js) asks
+// Stripe for fresh data every morning and keeps what it reads, so the first
+// thing an open does is take that: one quick call, no 30-second wait on
+// Stripe, and Money is today's the moment it is looked at. The device sync
+// below is now the fallback, for a morning the server pull did not finish.
+//
+// ONE DAY MEANS ONE PACIFIC DAY. The gate used the UTC date, which turns over
+// at 4 or 5 PM in Los Angeles: a sync at 7:58 PM counted as tomorrow and
+// blocked the next morning's until the afternoon. Both doors now key by the
+// Los Angeles date.
 //
 // Deliberately not a timer. A phone suspends timers in a backgrounded tab (see
 // Build 470), so "every 24 hours" on a device that is opened twice a day means
 // whenever the OS feels like it. Opening the app is the reliable event, and it
 // is also the moment the numbers are about to be looked at.
 //
-// Quiet by construction: silent sync, once per calendar day, never in a share
-// or portal view, and a failure leaves lastSync alone so the next open tries
-// again rather than pretending it succeeded.
+// Quiet by construction: silent, once per Pacific day per session, never in a
+// share or portal view, and a failure leaves lastSync alone so the next open
+// tries again rather than pretending it succeeded.
+function bankPacificDay(when){
+  const d = when == null ? new Date() : new Date(when);
+  if (isNaN(d)) return '';
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles',
+      year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+  } catch(e){ return d.toISOString().slice(0, 10); }
+}
+window.bankPacificDay = bankPacificDay;
 window.bankDailySync = async function(){
   if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;
   const fb = STATE.finBank || {};
   if (!(fb.accounts || []).some(function(a){ return a && a.status === 'active'; })) return;
-  const today = new Date().toISOString().slice(0, 10);
-  if (window.__bankDailyRan === today) return;          // once per day per session
-  const last = String(fb.lastSync || '');
-  if (last.slice(0, 10) === today) { window.__bankDailyRan = today; return; }
+  const today = bankPacificDay();
+  if (window.__bankDailyRan === today) return;          // once per Pacific day per session
   window.__bankDailyRan = today;
+  const last = String(fb.lastSync || '');
+  const lastDay = last ? bankPacificDay(last) : '';
+  // 1. This morning's server pull, taken when it is newer than the ledger.
+  let feed = null, gap = false;
+  try { feed = (await bankApi('cached')).feed || null; } catch(e){ feed = null; }
+  if (feed && feed.fresh && feed.day === today) {
+    let took = true;
+    if (!last || String(feed.at || '') > last) {
+      try { bankApplyServerFeed(feed); } catch(e){ took = false; }
+    }
+    // The pull reads the last 60 days. A ledger that stopped before that needs
+    // the device's full read to close the gap; otherwise today is done.
+    gap = took && !!(lastDay && feed.since && lastDay < feed.since);
+    if (took && !gap) return;
+  }
+  // 2. Fallback: the device asks Stripe itself, once per Pacific day.
+  if (!gap && lastDay === today) return;
   try { await bankSyncTxns(true); } catch (e) {
     // Leave lastSync as it was: an open that failed is not a day that synced.
     window.__bankDailyRan = 0;
   }
 };
-window.bankSyncTxns = async function(silent){
-  const fb = STATE.finBank || {}; const accounts = fb.accounts || [];
-  if (!accounts.length) return;
+// FEED ROWS GO INTO THE LEDGER ONE WAY, WHICHEVER DOOR THEY CAME THROUGH.
+//
+// The device sync and the morning server pull both hand over Stripe's rows, and
+// both land here: matched by Stripe's transaction id (a status or amount that
+// moved is updated in place), a statement-imported twin upgraded rather than
+// doubled, and anything new auto-categorized. A row that arrives from both on
+// the same day is still one row.
+function bankFeedMerger(){
   if (!STATE.finTxns) STATE.finTxns = [];
-  const byId = {}; STATE.finTxns.forEach(t => { byId[t.id] = t; });
+  const byId = {}; STATE.finTxns.forEach(t => { if (t) byId[t.id] = t; });
   // Imported rows indexed by date+amount, so an arriving feed transaction can
   // recognise the one the statement already supplied instead of adding a twin.
   const impByKey = {};
   STATE.finTxns.forEach(t => {
     if (t && t.src === 'import') (impByKey[bankDupKey(t)] = impByKey[bankDupKey(t)] || []).push(t);
   });
-  let added = 0, absorbed = 0;
+  const m = { added: 0, absorbed: 0 };
+  m.add = function(rows){
+    (rows || []).forEach(t => {
+      if (!t || !t.id) return;
+      const ex = byId[t.id];
+      if (ex) { ex.status = t.status; ex.amount = t.amount; if (t.date) ex.date = t.date; }
+      else if ((impByKey[bankDupKey(t)] || []).length) {
+        // The statement already had this one. Upgrade it in place to the feed
+        // row — a real id, and a status that keeps updating — while KEEPING
+        // any category somebody filed by hand.
+        const prior = impByKey[bankDupKey(t)].shift();
+        prior.id = t.id; prior.acct = t.account; prior.status = t.status;
+        prior.desc = t.description || prior.desc;
+        prior.src = 'feed'; prior.wasImported = true;
+        byId[t.id] = prior; m.absorbed++;
+      }
+      else {
+        const rec = { id: t.id, acct: t.account, date: t.date, amount: t.amount, desc: t.description, status: t.status, category: bankAutoCategory(t.description, t.amount) };
+        byId[t.id] = rec; STATE.finTxns.push(rec); m.added++;
+      }
+    });
+  };
+  return m;
+}
+// The end of every sync, from either door: backfill, order, cap, stamp, save,
+// and say which account could not be read.
+function bankFinishSync(m, issues, at, src, silent){
+  // Backfill categories on rows that synced before a rule existed.
+  STATE.finTxns.forEach(t => { if (!t.category) { const c = bankAutoCategory(t.desc, t.amount); if (c) t.category = c; } });
+  STATE.finTxns.sort((x,y) => String(y.date||'').localeCompare(String(x.date||'')));
+  STATE.finTxns = bankTrimTxns(STATE.finTxns);
+  if (!STATE.finBank) STATE.finBank = {};
+  STATE.finBank.lastSync = at;
+  STATE.finBank.lastSyncSrc = src;
+  // One entry per account, the transaction read outranking the refresh: a
+  // refresh that was refused but a read that worked is "behind", not "broken".
+  const byAcct = {};
+  (issues || []).forEach(i => { if (i && i.id && (!byAcct[i.id] || i.step === 'transactions')) byAcct[i.id] = i; });
+  STATE.finBank.syncIssues = Object.keys(byAcct).map(k => byAcct[k]);
+  save();
+  const failedNames = STATE.finBank.syncIssues.filter(i => i.step === 'transactions').map(i => i.name);
+  if (failedNames.length) {
+    // Said even on the silent daily sync: an account that fails every day is
+    // the one thing this sync must not keep quiet about.
+    showToast('Bank sync could not read ' + failedNames.join(', ') + ' — see Money for why', 'warning');
+  } else if (!silent) showToast(
+    (m.added ? m.added + ' new transaction' + (m.added>1?'s':'') + ' synced' : 'Transactions up to date')
+    + (m.absorbed ? ' · ' + m.absorbed + ' matched to imported rows instead of duplicated' : ''),
+    m.added ? 'success' : 'info');
+  try { cmdRenderBank(); } catch(e){}
+}
+// Take this morning's server pull: fresh balances, and the last 60 days of
+// transactions through the same merge as the device sync. lastSync becomes the
+// time the server read Stripe, not the time this device opened.
+window.bankApplyServerFeed = function(feed){
+  if (!feed) return;
+  if (!STATE.finBank) STATE.finBank = {};
+  if (Array.isArray(feed.accounts) && feed.accounts.length) STATE.finBank.accounts = feed.accounts;
+  const m = bankFeedMerger();
+  m.add(feed.transactions || []);
+  bankFinishSync(m, feed.issues || [], String(feed.at || new Date().toISOString()), 'server', true);
+};
+window.bankSyncTxns = async function(silent){
+  const fb = STATE.finBank || {}; const accounts = fb.accounts || [];
+  if (!accounts.length) return;
   // ASK FOR TODAY'S DATA BEFORE READING IT.
   //
   // This used to read only what Stripe already had cached. A transaction
@@ -48411,6 +48515,7 @@ window.bankSyncTxns = async function(silent){
       }
     }
   }
+  const m = bankFeedMerger();
   for (const a of accounts) {
     if (a && a.status && a.status !== 'active') continue;   // inactive or disconnected: Stripe refuses these
     let cursor = null;
@@ -48425,50 +48530,12 @@ window.bankSyncTxns = async function(silent){
       let d;
       try { d = await bankApi('transactions', Object.assign({ account: a.id }, cursor ? { starting_after: cursor } : {})); }
       catch(e){ noteIssue(a, 'transactions', e); break; }
-      (d.transactions||[]).forEach(t => {
-        const ex = byId[t.id];
-        if (ex) { ex.status = t.status; ex.amount = t.amount; if (t.date) ex.date = t.date; }
-        else if ((impByKey[bankDupKey(t)] || []).length) {
-          // The statement already had this one. Upgrade it in place to the feed
-          // row — a real id, and a status that keeps updating — while KEEPING
-          // any category somebody filed by hand.
-          const prior = impByKey[bankDupKey(t)].shift();
-          prior.id = t.id; prior.acct = t.account; prior.status = t.status;
-          prior.desc = t.description || prior.desc;
-          prior.src = 'feed'; prior.wasImported = true;
-          byId[t.id] = prior; absorbed++;
-        }
-        else {
-          const rec = { id: t.id, acct: t.account, date: t.date, amount: t.amount, desc: t.description, status: t.status, category: bankAutoCategory(t.description, t.amount) };
-          byId[t.id] = rec; STATE.finTxns.push(rec); added++;
-        }
-      });
+      m.add(d.transactions || []);
       if (!d.has_more || !d.next) break;
       cursor = d.next;
     }
   }
-  // Backfill categories on rows that synced before a rule existed.
-  STATE.finTxns.forEach(t => { if (!t.category) { const c = bankAutoCategory(t.desc, t.amount); if (c) t.category = c; } });
-  STATE.finTxns.sort((x,y) => String(y.date||'').localeCompare(String(x.date||'')));
-  STATE.finTxns = bankTrimTxns(STATE.finTxns);
-  if (!STATE.finBank) STATE.finBank = {};
-  STATE.finBank.lastSync = new Date().toISOString();
-  // One entry per account, the transaction read outranking the refresh: a
-  // refresh that was refused but a read that worked is "behind", not "broken".
-  const byAcct = {};
-  issues.forEach(i => { if (!byAcct[i.id] || i.step === 'transactions') byAcct[i.id] = i; });
-  STATE.finBank.syncIssues = Object.keys(byAcct).map(k => byAcct[k]);
-  save();
-  const failedNames = STATE.finBank.syncIssues.filter(i => i.step === 'transactions').map(i => i.name);
-  if (failedNames.length) {
-    // Said even on the silent daily sync: an account that fails every day is
-    // the one thing this sync must not keep quiet about.
-    showToast('Bank sync could not read ' + failedNames.join(', ') + ' — see Money for why', 'warning');
-  } else if (!silent) showToast(
-    (added ? added + ' new transaction' + (added>1?'s':'') + ' synced' : 'Transactions up to date')
-    + (absorbed ? ' · ' + absorbed + ' matched to imported rows instead of duplicated' : ''),
-    added ? 'success' : 'info');
-  try { cmdRenderBank(); } catch(e){}
+  bankFinishSync(m, issues, new Date().toISOString(), 'device', silent);
 };
 // Ledger view state (per device — a filter is not workspace data).
 const FIN_TX_FILTER = { q: '', mode: 'all', limit: 40 };
@@ -49339,7 +49406,7 @@ window.cmdRenderBank = function(){
         })()}
         ${bk.uncat ? '<button class="ag-btn ag-btn-primary ag-btn-sm" ' + agAttr('fin', 'Categorize the uncategorized bank transactions listed in the FINANCE SNAPSHOT with set_txn_category. Use your judgement from each description and amount; anything genuinely ambiguous, leave uncategorized and ask me about it.') + '>Ask CFO to categorize →</button>' : ''}
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) : 'never'} · Stripe refreshes subscribed accounts daily · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:16px">Last sync: ${bk.lastSync ? slEsc(String(bk.lastSync).replace('T',' ').slice(0,16)) + ((STATE.finBank||{}).lastSyncSrc === 'server' ? ' (morning pull)' : '') : 'never'} · VENIA pulls the feed every morning and again on open if the morning pull missed · the feed reaches back about 180 days, the ledger keeps everything it has ever been given · read-only — nothing here can move money</div>
       ${(function(){
         // Accounts the last sync could not read or refresh, by name, with
         // Stripe's own reason. Gone as soon as a sync gets through.
