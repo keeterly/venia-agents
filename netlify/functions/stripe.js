@@ -69,7 +69,7 @@ export default async (req) => {
 //  expires on its own, so it is gated like the other money actions rather
 //  than left on the Origin check the 24-hour 'create' session relies on.
   const GATED = ['capture', 'cancel', 'invoice', 'invoice_status', 'invoice_find',
-                 'paylink', 'paylink_status'];
+                 'paylink', 'paylink_status', 'paylink_deactivate'];
   if (GATED.includes(body.action)) {
     const gateHash = process.env.STRIPE_GATE_HASH;
     // Fail CLOSED: if the gate hash isn't configured, refuse the money action
@@ -247,6 +247,19 @@ export default async (req) => {
       return json({ paid: !!won, payment_status: won ? 'paid' : 'unpaid',
                     sessions: rows.length,
                     payment_intent: won ? won.payment_intent : null }, 200, cors);
+    }
+    // SWITCH AN OLD LINK OFF (Build 597). A payment link never expires, which
+    // is why it replaced the 24-hour session -- and it is also why replacing
+    // one used to leave two live ways to pay the same instalment: the new link
+    // went into the confirmation and the old one still worked for whoever had
+    // the earlier PDF. Deactivated, the old URL shows Stripe's "no longer
+    // available" page and cannot take money.
+    if (body.action === 'paylink_deactivate') {
+      const id = String(body.id || '');
+      if (!/^plink_[A-Za-z0-9]{6,80}$/.test(id)) return json({ error: 'Bad payment link id' }, 400, cors);
+      const l = await call('payment_links/' + id, { active: 'false' });
+      if (l.error) return json({ error: l.error.message }, 400, cors);
+      return json({ id: l.id, active: !!l.active }, 200, cors);
     }
     if (body.action === 'status') {
       const s = await call('checkout/sessions/' + encodeURIComponent(body.id), {}, 'GET');

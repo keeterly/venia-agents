@@ -74,7 +74,11 @@ export const slimAccount = (a) => ({
     used: a.balance.credit && a.balance.credit.used && a.balance.credit.used.usd != null ? a.balance.credit.used.usd / 100 : null,
     type: a.balance.type || '',
   } : null,
-  txn_refresh: a.transaction_refresh ? { status: a.transaction_refresh.status || '' } : null,
+  txn_refresh: a.transaction_refresh ? { status: a.transaction_refresh.status || '',
+    // When Stripe will take the next transaction refresh, so a refusal can say
+    // "try after 4:10 PM" rather than only "refused".
+    next: a.transaction_refresh.next_refresh_available_at
+      ? new Date(a.transaction_refresh.next_refresh_available_at * 1000).toISOString() : '' } : null,
 });
 
 export const slimTxn = (t) => ({
