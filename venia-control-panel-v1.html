@@ -3197,7 +3197,7 @@ window.veniaDate = veniaDate;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '596';
+  const BUILD = '597';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -43586,6 +43586,10 @@ window.slOrderInvoice = async function(orderId, key, opts){
   if (!opts.confirmed) { slBillSheet(orderId, key); return; }
   let email = String(opts.email || '').trim();
   if (!email) { showToast('An email is needed to invoice', 'info'); return; }
+  if (had && had.linkId) {
+    const gone = await slRetirePayLink(had);
+    if (slRetireStopped(o, had, gone, 'invoice')) { slOpenOrderDetail(orderId); return; }
+  }
   showToast('Creating ' + line.label.toLowerCase() + ' invoice…', 'info');
   // kind:'wholesale' — the server labels the Stripe customer and line item from
   // it, and every wholesale invoice sent before this build went out labelled as
@@ -43605,6 +43609,7 @@ window.slOrderInvoice = async function(orderId, key, opts){
   const irec = { key: line.key, label: line.label, pct: line.pct, amount: line.amount,
     method: 'invoice', status: 'invoiced', invoiceId: inv.id, url: inv.hosted_invoice_url || '',
     at: new Date().toISOString() };
+  if (had && Array.isArray(had.retiredLinks)) irec.retiredLinks = had.retiredLinks;
   if (had) { Object.assign(had, irec); delete had.linkId; delete had.sessionId; }
   else slOrderPayments(o).push(irec);
   if (!o.payment) o.payment = { status:'invoiced', method:'stripe', invoiceId: inv.id, url: inv.hosted_invoice_url||'', at:new Date().toISOString() };
@@ -43627,6 +43632,46 @@ window.slOrderInvoice = async function(orderId, key, opts){
 // instalment that has an unpaid one REPLACES it rather than refusing. Settled
 // and invoiced instalments are still left alone — a second link against an
 // open Stripe invoice is how an account pays twice.
+// SWITCH THE OLD LINK OFF BEFORE ANOTHER WAY TO PAY EXISTS (Build 597).
+// A payment link never expires, so replacing one, or invoicing an instalment
+// that had one, left the old URL live in every PDF already sent: the buyer
+// could pay it and the new one. First ask Stripe whether the old link was
+// already paid (then nothing new is made and the instalment is marked paid),
+// then deactivate it. Only once Stripe says it is off does the new link or
+// invoice get made. If it cannot be switched off, nothing new is made.
+// Returns 'none' (no link), 'off', 'paid', or { error }.
+async function slRetirePayLink(p){
+  if (!p || !p.linkId) return 'none';
+  try {
+    const st = await prStripe('paylink_status', { id: p.linkId });
+    if (st && !st.error && st.paid) return 'paid';
+    if (!st || st.error) return { error: (st && st.error) || 'Stripe did not answer' };
+  } catch (e) { return { error: String(e && e.message || e) }; }
+  try {
+    const r = await prStripe('paylink_deactivate', { id: p.linkId });
+    if (r && !r.error && r.active === false) {
+      if (!Array.isArray(p.retiredLinks)) p.retiredLinks = [];
+      p.retiredLinks.push({ id: p.linkId, off: new Date().toISOString() });
+      return 'off';
+    }
+    return { error: (r && r.error) || 'Stripe did not switch it off' };
+  } catch (e) { return { error: String(e && e.message || e) }; }
+}
+window.slRetirePayLink = slRetirePayLink;
+function slRetireStopped(o, had, res, what){
+  if (res === 'paid') {
+    had.status = 'paid'; had.paidAt = had.paidAt || new Date().toISOString();
+    dbSet('slOrders', STATE.slOrders); save();
+    showToast('The existing payment link for this instalment was already paid, so nothing new was made. Marked paid.', 'success', 7000);
+    return true;
+  }
+  if (res && res.error) {
+    showToast('Could not switch the old payment link off, so no ' + what + ' was made (two live ways to pay could charge the buyer twice). Stripe said: '
+      + slStripeSays(res.error), 'error', 9000);
+    return true;
+  }
+  return false;
+}
 window.slOrderCardLink = async function(orderId, key, opts){
   opts = opts || {};
   const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return;
@@ -43641,6 +43686,10 @@ window.slOrderCardLink = async function(orderId, key, opts){
   const buyer = (STATE.slBuyers||[]).find(x => String(x.name||'').trim().toLowerCase() === String(o.account||'').trim().toLowerCase());
   const email = (buyer && buyer.email) || '';
   showToast(had ? 'Replacing payment link…' : 'Creating payment link…', 'info');
+  if (had && had.linkId) {
+    const gone = await slRetirePayLink(had);
+    if (slRetireStopped(o, had, gone, 'new link')) { slOpenOrderDetail(orderId); return; }
+  }
   const s = await prStripe('paylink', {
     currency: o.currency || 'USD', amount: line.amount, email,
     ref: o.id + ':' + line.key,
@@ -43648,7 +43697,9 @@ window.slOrderCardLink = async function(orderId, key, opts){
   });
   if (!s || s.error || !s.url) { showToast(slStripeSays(s && s.error), 'error', 6000); return; }
   const rec = { key: line.key, label: line.label, pct: line.pct, amount: line.amount,
-    method: 'card', status: 'link', linkId: s.id, url: s.url, at: new Date().toISOString() };
+    method: 'card', status: 'link', linkId: s.id, url: s.url, at: new Date().toISOString(),
+    retiredLinks: had && Array.isArray(had.retiredLinks) ? had.retiredLinks : undefined };
+  if (!rec.retiredLinks) delete rec.retiredLinks;
   if (had) { Object.assign(had, rec); delete had.sessionId; }
   else slOrderPayments(o).push(rec);
   dbSet('slOrders', STATE.slOrders); save();
@@ -48785,14 +48836,59 @@ window.bankPullAccounts = async function(){
 };
 // Kick a balance refresh on every active account (async on Stripe's side —
 // the as-of date on each tile is the truth of freshness), then re-pull.
+// IT SAID "BALANCES REFRESHED" WHATEVER HAPPENED (Build 597). Every refusal
+// was swallowed, so an account Stripe would not refresh -- rate limits are
+// the usual reason -- looked current while its balance sat on an old as-of
+// date. Now each account's answer is kept: the toast says how many went
+// through, and the red note under the buttons names each account Stripe
+// refused and gives Stripe's reason, the same note the sync already uses.
+function bankAcctLabel(a){ return (a && (a.name || a.institution) || 'Account') + (a && a.last4 ? ' \u2022\u2022' + a.last4 : ''); }
+function bankWhenNext(iso){
+  if (!iso) return '';
+  const d = new Date(iso); if (isNaN(d)) return '';
+  const same = d.toDateString() === new Date().toDateString();
+  return ' Stripe takes the next one after ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+    + (same ? '' : ' on ' + veniaDate(d, 'day')) + '.';
+}
 window.bankRefreshBalances = async function(){
   const fb = STATE.finBank || {};
-  showToast('Refreshing balances…', 'info');
-  try {
-    for (const a of (fb.accounts||[])) { if (a.status === 'active') { try { await bankApi('refresh', { account: a.id }); } catch(e){} } }
-    await bankPullAccounts();
-    showToast('Balances refreshed', 'success');
-  } catch(e){ showToast(String(e && e.message || e), 'error'); }
+  const active = (fb.accounts||[]).filter(a => a && a.status === 'active');
+  if (!active.length) { showToast('No linked accounts to refresh', 'warning'); return; }
+  showToast('Refreshing ' + active.length + ' account' + (active.length === 1 ? '' : 's') + '\u2026', 'info');
+  const res = [];
+  for (const a of active) {
+    try {
+      const d = await bankApi('refresh', { account: a.id });
+      res.push({ a: a, ok: true, txns: d.transactionsRefreshed !== false, why: String(d.transactionsError || ''),
+                 next: d.account && d.account.txn_refresh ? d.account.txn_refresh.next : '' });
+    } catch (e) { res.push({ a: a, ok: false, why: String(e && e.message || e) }); }
+  }
+  try { await bankPullAccounts(); } catch (e) {}
+  // Refresh results replace this account's earlier refresh note; a failed
+  // transaction READ from the last sync is a different problem and stays.
+  if (!STATE.finBank) STATE.finBank = {};
+  const at = new Date().toISOString();
+  const tried = {}; res.forEach(r => { tried[r.a.id] = 1; });
+  const keep = (STATE.finBank.syncIssues || []).filter(i => !(tried[i.id] && i.step === 'refresh'));
+  const hasRead = {}; keep.forEach(i => { if (i.step === 'transactions') hasRead[i.id] = 1; });
+  res.forEach(r => {
+    if (hasRead[r.a.id]) return;
+    if (!r.ok) keep.push({ id: r.a.id, name: bankAcctLabel(r.a), step: 'refresh', error: r.why.slice(0, 200), at: at });
+    else if (!r.txns) keep.push({ id: r.a.id, name: bankAcctLabel(r.a), step: 'refresh',
+      error: ('Balance refreshed, transactions not: ' + (r.why || 'refused') + bankWhenNext(r.next)).slice(0, 240), at: at });
+  });
+  STATE.finBank.syncIssues = keep;
+  save();
+  const full = res.filter(r => r.ok && r.txns), part = res.filter(r => r.ok && !r.txns), bad = res.filter(r => !r.ok);
+  if (!bad.length && !part.length) {
+    showToast('Refreshed ' + (full.length === 1 ? bankAcctLabel(full[0].a) : 'all ' + full.length + ' accounts') + ': balances and transactions', 'success');
+  } else {
+    const bits = [];
+    if (bad.length) bits.push('Stripe refused ' + bad.map(r => bankAcctLabel(r.a)).join(', '));
+    if (part.length) bits.push('only the balance refreshed for ' + part.map(r => bankAcctLabel(r.a)).join(', '));
+    showToast((full.length ? full.length + ' of ' + res.length + ' refreshed. ' : '')
+      + bits.join('; ') + '. The reason is under the buttons in Money.', bad.length === res.length ? 'error' : 'warning', 8000);
+  }
   try { cmdRenderBank(); } catch(e){}
 };
 // ══════════════════════════════════════════════════════════════════════════
@@ -50328,7 +50424,9 @@ window.cmdRenderBank = function(){
           + 'padding:10px 12px;margin:-6px 0 16px;font-size:10.5px;color:var(--ink);line-height:1.7">'
           + iss.map(function(i){
               return '<div><strong>' + slEsc(i.name) + '</strong> — '
-                + (i.step === 'transactions' ? 'transactions could not be read' : 'Stripe would not refresh it, so it may be behind')
+                + (i.step === 'transactions' ? 'transactions could not be read'
+                   : /^Balance refreshed/.test(String(i.error || '')) ? 'partly refreshed'
+                   : 'Stripe would not refresh it, so it may be behind')
                 + ': <span style="color:var(--muted)">' + slEsc(i.error) + '</span></div>';
             }).join('')
           + '</div>';
@@ -62342,7 +62440,18 @@ document.addEventListener('keydown', function(e){
     });
   }
 
+  // WHICH BUILD THIS WINDOW IS (Build 597). The worker can reload a window
+  // that is too old to save, but it cannot read a page's code; a page that
+  // says its build is one the worker knows to leave alone.
+  function sayBuild() {
+    try {
+      var c = navigator.serviceWorker.controller;
+      if (c) c.postMessage({ type: 'HELLO', build: parseInt(window.VENIA_BUILD || '0', 10) || 0 });
+    } catch (e) {}
+  }
+  try { navigator.serviceWorker.addEventListener('controllerchange', sayBuild); } catch (e) {}
   window.addEventListener('load', function () {
+    sayBuild();
     navigator.serviceWorker.register('/sw.js').then(function (reg) {
       swReg = reg;
       // An update was downloaded on a previous visit and is already waiting.

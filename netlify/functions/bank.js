@@ -177,10 +177,14 @@ export default async (req) => {
       const path = 'financial_connections/accounts/' + body.account + '/refresh';
       let a = await call(path, { 'features[]': ['balance', 'transactions'] });
       let txnRefresh = !a.error;
+      const txnWhy = a.error ? String(a.error.message || 'refused') : '';
       if (a.error) a = await call(path, { 'features[]': 'balance' });
-      if (a.error) return json({ error: a.error.message }, 400, cors);
+      // Stripe's own words for both refusals, so the screen can name the
+      // account and the reason instead of saying "Balances refreshed".
+      if (a.error) return json({ error: a.error.message, transactionsError: txnWhy }, 400, cors);
       // Said out loud so the screen can explain a ledger that did not move.
-      return json({ account: slimAccount(a), transactionsRefreshed: txnRefresh }, 200, cors);
+      return json({ account: slimAccount(a), transactionsRefreshed: txnRefresh,
+                    transactionsError: txnWhy }, 200, cors);
     }
 
     // Transactions, newest-capable pagination via starting_after. Amounts in
