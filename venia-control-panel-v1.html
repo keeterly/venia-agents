@@ -3191,13 +3191,21 @@ function veniaDate(v, style){
     ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' };
   return d.toLocaleDateString('en-US', o);
 }
+// TODAY AS A CALENDAR DAY HERE, NOT IN LONDON (Build 598). toISOString() is
+// UTC, so from 4 PM in California it already says tomorrow: a pull started at
+// 5 PM was dated the next day, and its return date with it.
+function veniaYmd(d){
+  d = d instanceof Date ? d : new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 window.veniaMoney = veniaMoney;
 window.veniaDate = veniaDate;
+window.veniaYmd = veniaYmd;
 (function(){
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '597';
+  const BUILD = '598';
   const BUILD_DATE = '2026.11.06';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -21553,14 +21561,14 @@ function openPrCart(pullId=null) {
       if (el) el.value = '';
     });
     // Default pull date to today
-    const today = new Date().toISOString().split('T')[0];
+    const today = veniaYmd();
     const pullDateEl = document.getElementById('pr-pull-date');
     if (pullDateEl) pullDateEl.value = today;
     // Default return to 7 days
     const returnEl = document.getElementById('pr-return-date');
     if (returnEl) {
       const ret = new Date(); ret.setDate(ret.getDate() + 7);
-      returnEl.value = ret.toISOString().split('T')[0];
+      returnEl.value = veniaYmd(ret);
     }
     // Auto invoice number
     const invEl = document.getElementById('pr-invoice-no');
@@ -21887,7 +21895,7 @@ function prTagCheck(tagVal) {
   if (outIdx >= 0) {
     const out = items[outIdx];
     out.returned = true;
-    out.returnedAt = new Date().toISOString().split('T')[0];
+    out.returnedAt = veniaYmd();
     // Complete drafts too — the old code only closed 'active' pulls, so a draft
     // (e.g. one built entirely by tapping) stayed open after every item was back.
     if ((pull.status === 'active' || pull.status === 'draft') && items.length && items.every(i => i.returned)) {
@@ -27182,7 +27190,7 @@ function cmdLogPull() {
     client: stylist, contact: stylist, email: '', phone: '',
     pullType: 'editorial',
     publication: entry.context || '',
-    pullDate: new Date().toISOString().slice(0,10),
+    pullDate: veniaYmd(),
     returnDate: '', shootDate: '', photographer: '', address: '',
     notes: ['Quick-logged from Press Tools.',
             entry.pieces    ? 'Pieces: ' + entry.pieces       : '',
@@ -29044,8 +29052,18 @@ const PR_DESKS = {
 // in days; a stockist signed last month does not.
 const PR_RANK = { 'pull-returned': 90, 'coverage-landed': 80, 'pull-overdue': 70,
                   'stockist-new': 60, 'pull-out': 50, 'season-delivery': 40 };
+// A RETURN DATE IS A DAY, NOT AN INSTANT (Build 598). "2026-11-12" read by
+// Date.parse is midnight in London, which is 4 PM on the 11th in California,
+// so from that afternoon a pull due back on the 12th already counted a day
+// past return, and "out 5 November" read "4 November". Date-only values are
+// now whole local days; timestamps are measured as before.
 function prDaysSince(v){
-  const t = Date.parse(v || ''); if (isNaN(t)) return null;
+  const str = String(v || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    const d = new Date(str + 'T00:00:00'), t = new Date(); t.setHours(0, 0, 0, 0);
+    return isNaN(d) ? null : Math.round((t - d) / 86400000);
+  }
+  const t = Date.parse(str); if (isNaN(t)) return null;
   return Math.floor((Date.now() - t) / 86400000);
 }
 // One evidence entry = one real row. `ref` is the record's own id, so anything
@@ -29172,7 +29190,9 @@ function prMoments(){
 }
 window.prMoments = prMoments;
 function prVerbalDate(v){
-  const t = Date.parse(v || ''); if (isNaN(t)) return String(v || '');
+  const str = String(v || '');
+  const t = /^\d{4}-\d{2}-\d{2}$/.test(str) ? new Date(str + 'T12:00:00').getTime() : Date.parse(str);
+  if (isNaN(t)) return str;
   return new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
 }
 
