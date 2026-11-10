@@ -2,14 +2,14 @@
    Offline app-shell caching. API calls pass straight through; the one thing
    it reads on the way is whether a workspace save was refused (see THE WINDOW
    THAT CANNOT SAVE, below). It never caches, changes or holds back a write. */
-const CACHE = 'venia-shell-v597';
+const CACHE = 'venia-shell-v598';
 // The last build that fixed SAVING. Bump this (to that build's number) only in
 // a build that fixes how changes reach the cloud. An open page on an older
 // build asks the waiting worker for it, and a page whose saves are failing
 // loads a newer save fix by itself instead of waiting for someone to tap
 // Update (see "SAVE FIXES LOAD THEMSELVES" in the app). Every other build
 // leaves it alone and keeps waiting for the tap, as before.
-const BUILD = '597';
+const BUILD = '598';
 const SAVES_FIXED_IN = '593';
 // A window older than this cannot be trusted to save: before Build 593 a
 // signed-out window kept sending every change and having every one refused,
