@@ -3223,7 +3223,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '599';
+  const BUILD = '600';
   const BUILD_DATE = '2026.11.10';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11797,7 +11797,9 @@ function pomGradeReadiness(styleId, baseK){
   const stale = points.filter(p => {
     if (p.gradedFrom == null) return false;
     const now = measParse(p[baseK]);
-    return !isNaN(now) && Math.abs(now - measParse(p.gradedFrom)) > 1e-9;
+    if (!isNaN(now) && Math.abs(now - measParse(p.gradedFrom)) > 1e-9) return true;
+    // Build 600: the step is part of the grade too.
+    return p.gradedInc != null && pomHasStep(p) && Math.abs(measParse(p.grade) - measParse(p.gradedInc)) > 1e-9;
   });
   let n = 0, ok = 0;
   if (rounds.length){
@@ -11819,8 +11821,8 @@ function pomGradeBanner(styleId, baseK, baseSz){
       </div>${btn||''}</div>`;
   // Graded from a base that has since moved: the run is wrong and silent.
   if (r.stale.length) return bar('rgba(230,160,0,.35)','var(--amber-dim)',
-    r.stale.length + ' point' + (r.stale.length>1?'s were':' was') + ' graded from an older base spec',
-    'The ' + baseSz + ' spec has been revised since this run was graded, so these sizes are derived from a number that is no longer the spec.',
+    r.stale.length + ' point' + (r.stale.length>1?'s were':' was') + ' graded from an older spec or step',
+    'The ' + baseSz + ' spec or the grade step changed after this run was graded (' + r.stale.slice(0,4).map(p => p.point).join(', ') + (r.stale.length>4?'…':'') + '), so those sizes no longer follow from what the sheet says.',
     `<button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')">⊞ Regrade from ${baseSz}</button>`);
   if (!r.fitted) return bar('var(--border-mid)','var(--bg-off)',
     'The base size has not been fitted yet',
@@ -11968,6 +11970,7 @@ function pomSelectStyle(styleId) {
           <th style="min-width:160px">Measurement Point</th>
           ${sizes.map(sz=>`<th${sz===baseSz?' class="pom-base"':''}>${sz}${sz===baseSz?'<span class="pom-base-tag">Base</span>':''}</th>`).join('')}
           <th>Tol (+/-)</th>
+          <th title="How much this point grows per size up. Blank shows the standard step in grey.">Step / size</th>
           <th title="Measured value on the ${baseSz} sample">Meas (${baseSz})</th>
           <th title="Measured minus ${baseSz} spec; flags red if beyond tolerance">Dev</th>
           <th>Comment</th>
@@ -11979,6 +11982,7 @@ function pomSelectStyle(styleId) {
               <td style="color:var(--ink);font-weight:500">${p.point}</td>
               ${sizes.map(sz=>`<td${sz===baseSz?' class="pom-base"':''}><input class="pom-input" value="${measFmt(p[sz.toLowerCase()])}" onchange="updatePom('${styleId}',${idx},'${sz.toLowerCase()}',this.value)"></td>`).join('')}
               <td><input class="pom-input" style="width:48px" value="${measFmt(p.tol)}" onchange="updatePom('${styleId}',${idx},'tol',this.value)"></td>
+              <td><input class="pom-input" style="width:54px" value="${pomHasStep(p) ? measFmt(p.grade) : ''}" placeholder="${pomStdStep(p.point)!=null ? 'std '+measFmt(pomStdStep(p.point)) : '—'}" onchange="updatePom('${styleId}',${idx},'grade',this.value)"></td>
               <td><input class="pom-input" style="width:54px" value="${measFmt(p.measured)}" placeholder="—" onchange="updatePom('${styleId}',${idx},'measured',this.value)"></td>
               <td style="text-align:center" id="pom-dev-${idx}">${devCell(p)}</td>
               <td><input class="fi" style="font-size:10px;padding:4px 0;min-height:auto" value="${p.comment||''}" onchange="updatePom('${styleId}',${idx},'comment',this.value)"></td>
@@ -11988,6 +11992,7 @@ function pomSelectStyle(styleId) {
             <td><input class="fi" id="pom-new-point" placeholder="e.g. Chest" style="font-size:11px;min-height:auto;padding:4px 0"></td>
             ${sizes.map(sz=>`<td${sz===baseSz?' class="pom-base"':''}><input class="pom-input" id="pom-new-${sz.toLowerCase()}" placeholder="0"></td>`).join('')}
             <td><input class="pom-input" id="pom-new-tol" placeholder="0.5" style="width:48px"></td>
+            <td><input class="pom-input" id="pom-new-grade" placeholder="std" style="width:54px"></td>
             <td></td><td></td>
             <td><input class="fi" id="pom-new-comment" placeholder="Note" style="font-size:10px;padding:4px 0;min-height:auto"></td>
             <td style="text-align:center;white-space:nowrap">
@@ -11998,10 +12003,12 @@ function pomSelectStyle(styleId) {
         </tbody>
       </table>
     </div>
-    <div style="margin-top:8px;font-size:10px;color:var(--muted)">Dev = measured (${baseSz} sample) − spec; <span style="color:var(--red)">red ⚠</span> = beyond tolerance, <span style="color:var(--green)">green ✓</span> = in spec.</div>
+    <div style="margin-top:8px;font-size:10px;color:var(--muted)">Step = how much a point grows per size up. Standard steps (grey) are a common women's letter grade on the flat — check them against your own block before they go to a factory.</div>
+    <div style="margin-top:4px;font-size:10px;color:var(--muted)">Dev = measured (${baseSz} sample) − spec; <span style="color:var(--red)">red ⚠</span> = beyond tolerance, <span style="color:var(--green)">green ✓</span> = in spec.</div>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button class="btn btn-ghost btn-sm" onclick="showPomAdd()">+ Add Measurement Point</button>
-      <button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')" title="Fill the size run from the base-size column using a grade increment">⊞ Grade from base size</button>
+      <button class="btn btn-ghost btn-sm" onclick="pomGrade('${styleId}')" title="Fill the size run from the base-size column, each point by its own step">⊞ Grade from base size</button>
+      <button class="btn btn-ghost btn-sm" onclick="pomFillStdSteps('${styleId}')" title="Fill blank steps with a standard women's letter grade for measurements on the flat. Typed steps are kept.">Use standard steps</button>
       <span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-left:6px">Seed standard sheet:</span>
       ${Object.keys(POM_TEMPLATES).map(k=>`<button class="btn btn-ghost btn-sm" onclick="pomSeedTemplate('${styleId}','${k}')" title="Adds the house-standard points (with default tolerances) that aren't already on this sheet">${k} (${POM_TEMPLATES[k].length})</button>`).join('')}
     </div>
@@ -12023,6 +12030,8 @@ function savePomPoint(styleId) {
   const tolIn = measParse(document.getElementById('pom-new-tol').value);
   const entry = { id: 'pp'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), point,
     tol: isNaN(tolIn) ? 0.25 : tolIn, comment: document.getElementById('pom-new-comment').value };
+  const stepIn = measParse((document.getElementById('pom-new-grade')||{}).value);
+  if (!isNaN(stepIn)) entry.grade = stepIn;
   // A blank size stays blank. It used to become 0, which reads as "this
   // measurement is zero inches" rather than "nobody has specced it yet" —
   // and 0 is a number the deviation check will happily judge against.
@@ -12035,66 +12044,123 @@ function savePomPoint(styleId) {
 }
 
 // Grade the whole size run from the base-size column using a uniform grade increment.
+// ── GRADE RULES, ONE PER POINT (Build 600) ───────────────────────────────────
+// Grading used ONE increment for every point. At 1/2" a size, the demo shirt's
+// chest graded sensibly and its collar went from 1 1/4" to 3 1/4" across
+// XS–XL, its cuff from 2" to 4". A collar does not grow with the body, and a
+// factory cutting from that run would get every small detail wrong.
+//
+// So every point carries its own step: how much it grows per size up. Blank
+// steps can be filled from a STANDARD set below — a common women's letter
+// grade for measurements taken on the flat (half chest, half waist). It is a
+// starting point, not VENIA's rule: the steps are shown on the sheet so they
+// can be checked against the house block, and anything typed wins.
+const POM_STD_STEPS = [
+  [/pocket/i, 1/8],
+  [/height/i, 0],                                  // collar, cuff, waistband, hem height
+  [/hps to waist/i, 1/4],
+  [/hps to|body length|front length|back length|cb length|cf length/i, 1/2],
+  [/side seam/i, 1/4],
+  [/neck drop/i, 1/8],
+  [/neck/i, 1/4],
+  [/across shoulder|across back|across front/i, 1/2],
+  [/shoulder/i, 1/8],
+  [/armhole.*curve/i, 1/2],
+  [/armhole/i, 1/4],
+  [/bicep/i, 3/8],
+  [/sleeve length/i, 1/4],
+  [/sleeve opening|cuff opening/i, 1/4],
+  [/hem opening|leg opening/i, 1/4],
+  [/inseam/i, 0],
+  [/outseam/i, 1/4],
+  [/back rise/i, 3/8],
+  [/rise|crotch/i, 1/4],
+  [/thigh|knee/i, 1/2],
+  [/chest|bust|underbust|waist|hip|sweep|seat/i, 1],
+];
+function pomStdStep(point){
+  const t = String(point||'');
+  for (const [re, step] of POM_STD_STEPS) if (re.test(t)) return step;
+  return null;
+}
+function pomHasStep(p){ return p && p.grade !== undefined && p.grade !== null && p.grade !== '' && !isNaN(measParse(p.grade)); }
+window.pomStdStep = pomStdStep;
+// Fill every blank step from the standard set. Typed steps are never touched.
+window.pomFillStdSteps = function(styleId){
+  const pts = (STATE.pom||{})[styleId] || [];
+  let n = 0; const none = [];
+  pts.forEach(p => {
+    if (pomHasStep(p)) return;
+    const std = pomStdStep(p.point);
+    if (std == null) { none.push(p.point); return; }
+    p.grade = std; n++;
+  });
+  save(); pomSelectStyle(styleId);
+  toast(n ? ('Standard steps set on ' + n + ' point' + (n===1?'':'s') + (none.length ? ' · no standard for ' + none.join(', ') : '') + ' — check them against your block')
+          : (none.length ? 'No standard step for ' + none.join(', ') + ' — type one in the Step column' : 'Every point already has a step'), n ? 'success' : 'info');
+};
 function pomGrade(styleId) {
   const style = STATE.styles.find(s=>s.id===styleId);
   if (!style) return;
   let sizes = expandSizes(style.sizes);
   if (!sizes.length) sizes = ['XS','S','M','L','XL'];
   if (sizes.length < 2) { toast('Need at least two sizes to grade','warn'); return; }
-  // Locate the base size (from the style's Sample Base Size), else the middle size.
-  let bi = -1;
-  if (style.baseSize) {
-    const bs = style.baseSize.toUpperCase();
-    bi = sizes.findIndex(sz => new RegExp('\\b'+sz+'\\b').test(bs));
+  const { baseSz, baseK } = pomBaseInfo(style);
+  const bi = sizes.findIndex(z => z.toLowerCase() === baseK);
+  const pts = STATE.pom[styleId] || [];
+  const specced = pts.filter(p => !isNaN(measParse(p[baseK])));
+  if (!specced.length) { toast('Nothing to grade — enter a value in the ' + baseSz + ' column first', 'warn'); return; }
+  // Points with no step: offer the standard one, visibly, or stop.
+  const noStep = specced.filter(p => !pomHasStep(p));
+  if (noStep.length) {
+    const std = noStep.filter(p => pomStdStep(p.point) != null);
+    const none = noStep.filter(p => pomStdStep(p.point) == null);
+    const msg = noStep.length + ' point' + (noStep.length===1?' has':'s have') + ' no grade step yet.\n\n'
+      + (std.length ? 'OK — use the standard step for ' + std.length + ' of them (shown in the Step column, change any you like):\n'
+          + std.slice(0, 10).map(p => '   ' + p.point + '  +' + measFmt(pomStdStep(p.point)) + '" a size').join('\n')
+          + (std.length > 10 ? '\n   …and ' + (std.length-10) + ' more' : '') + '\n\n' : '')
+      + (none.length ? 'No standard step for: ' + none.map(p => p.point).join(', ') + ' — left ungraded until you type one.\n\n' : '')
+      + 'Cancel — stop, and set the steps by hand first';
+    if (!confirm(msg)) return;
+    std.forEach(p => { p.grade = pomStdStep(p.point); });
   }
-  if (bi < 0) bi = Math.floor((sizes.length-1)/2);
-  const baseSize = sizes[bi];
-  // Inches, and written the way a grade rule is actually written — "1/2",
-  // "1 1/4". It said cm, which is not a unit that appears anywhere in VENIA's
-  // spec book.
-  const incStr = prompt('Grade increment per size up (inches, e.g. 1/2 or 1 1/4) — graded from base size '+baseSize+':',
-    style.gradeInc!=null ? measFmt(style.gradeInc) : '1/2');
-  if (incStr === null) return;
-  const inc = measParse(incStr);
-  if (isNaN(inc)) { toast('Enter a measurement like 1/2 or 1 1/4','warn'); return; }
   // Overwriting a grade someone tuned by hand is not something to do silently,
   // so it is asked rather than assumed — and asked only when there is something
   // to overwrite.
-  const pts0 = STATE.pom[styleId] || [];
-  const bk0 = baseSize.toLowerCase();
-  const hasGrades = pts0.some(p => sizes.some(sz => { const k = sz.toLowerCase();
-    return k !== bk0 && p[k] !== undefined && p[k] !== null && p[k] !== '' && !isNaN(measParse(p[k])); }));
+  const hasGrades = pts.some(p => sizes.some(sz => { const k = sz.toLowerCase();
+    return k !== baseK && p[k] !== undefined && p[k] !== null && p[k] !== '' && !isNaN(measParse(p[k])); }));
   let regrade = false;
   if (hasGrades) {
     regrade = confirm('Some sizes are already graded.\n\n' +
-      'OK — REGRADE every size from ' + baseSize + ' (replaces what is there)\n' +
+      'OK — REGRADE every size from ' + baseSz + ' (replaces what is there)\n' +
       'Cancel — fill only the blanks and keep existing grades');
   }
-  const pts = STATE.pom[styleId] || [];
-  const bk = baseSize.toLowerCase();
-  let filled = 0, cells = 0;
-  pts.forEach(p => {
-    const bv = measParse(p[bk]);
-    if (isNaN(bv)) return;
+  let filled = 0, cells = 0; const skipped = [];
+  specced.forEach(p => {
+    const bv = measParse(p[baseK]);
+    if (!pomHasStep(p)) { skipped.push(p.point); return; }
+    const step = measParse(p.grade);
     let pf = 0;
     sizes.forEach((sz,i) => {
       const k = sz.toLowerCase();
-      if (k === bk) return;                       // never touch the base column
+      if (k === baseK) return;                    // never touch the base column
       const cur = p[k];
       const isEmpty = cur===undefined || cur===null || cur==='' || isNaN(measParse(cur));
-      if (isEmpty || regrade) { p[k] = Math.round((bv + (i-bi)*inc)*64)/64; pf++; }
+      if (isEmpty || regrade) { p[k] = Math.round((bv + (i-bi)*step)*64)/64; pf++; }
     });
-    // Remember what this run was graded FROM, so a later spec revision can say
-    // the run is stale instead of leaving a number nobody notices is wrong.
-    p.gradedFrom = bv; p.gradedInc = inc;
+    // Remember what this run was graded FROM — the base AND the step — so a
+    // later change to either can say the run is stale.
+    p.gradedFrom = bv; p.gradedInc = step;
     if (pf) { filled++; cells += pf; }
   });
-  style.gradeInc = inc;
+  delete style.gradeInc;
+  if (!String(style.gradeRule||'').trim()) style.gradeRule = 'Custom grade — see POM';
   if (typeof save === 'function') save();
   pomSelectStyle(styleId);
-  toast(filled
-    ? ((regrade?'Regraded ':'Filled ')+cells+' cell'+(cells>1?'s':'')+' across '+filled+' point'+(filled>1?'s':'')+' from '+baseSize+' (±'+measFmt(inc)+'"/size)'+(regrade?'.':'. Existing grades kept.'))
-    : 'Nothing to fill — enter a value in the '+baseSize+' column first', filled ? 'success' : 'warn');
+  toast((filled
+    ? ((regrade?'Regraded ':'Filled ')+cells+' cell'+(cells>1?'s':'')+' across '+filled+' point'+(filled>1?'s':'')+' from '+baseSz+', each by its own step')
+    : 'Nothing new to fill — existing grades kept')
+    + (skipped.length ? ' · ' + skipped.length + ' left ungraded (no step): ' + skipped.join(', ') : ''), filled ? 'success' : 'info');
 }
 
 function updatePom(styleId, idx, field, val) {
@@ -17493,7 +17559,7 @@ function tpFamilyDiff(lead, s){
   const ops = (x) => JSON.stringify((x.sewOps||[]).map(o => [o.loc||'', o.ins||'', o.stitch||'']));
   if (ops(lead) !== ops(s)) out.push('Sewing operations');
   const pomSig = (x) => JSON.stringify(((STATE.pom||{})[x.id]||[]).map(p => {
-    const o = { point: String(p.point||'').toLowerCase().trim(), tol: p.tol };
+    const o = { point: String(p.point||'').toLowerCase().trim(), tol: p.tol, grade: p.grade };
     expandSizes(x.sizes||'').forEach(z => { const k = z.toLowerCase(); if (!tpBlank(p[k])) o[k] = p[k]; });
     return o; }).sort((a,b) => a.point.localeCompare(b.point)));
   if (pomSig(lead) !== pomSig(s)) out.push('Measurements');
@@ -17533,7 +17599,7 @@ function tpFamilyCopy(from, to, replace){
       const key = String(p.point||'').toLowerCase().replace(/\s+/g,' ').trim();
       let row = dst.find(x => String(x.point||'').toLowerCase().replace(/\s+/g,' ').trim() === key);
       if (!row) { row = { id: 'pp' + Date.now().toString(36) + Math.random().toString(36).slice(2,6), point: p.point, comment: p.comment||'' }; dst.push(row); points++; }
-      ['tol','how','gradedFrom','gradedInc'].forEach(k => { if (p[k] != null && (replace || row[k] == null || row[k] === '')) row[k] = p[k]; });
+      ['tol','grade','how','gradedFrom','gradedInc'].forEach(k => { if (p[k] != null && (replace || row[k] == null || row[k] === '')) row[k] = p[k]; });
       if (p.specs && (replace || !row.specs)) row.specs = JSON.parse(JSON.stringify(p.specs));
       sizeKeys.forEach(k => {
         if (tpBlank(p[k])) return;
@@ -18500,12 +18566,14 @@ function renderTechPackWork(s) {
             <th class="tpph">How to Measure</th>
             ${tpSizes.map(sz=>`<th class="tpph${sz===tpBaseSz?' pom-base':''}">${sz}${sz===tpBaseSz?'<span class="pom-base-tag">Base</span>':''}</th>`).join('')}
             <th class="tpph">Tol</th>
+            <th class="tpph" title="How much this point grows per size up">Step</th>
           </tr></thead>
           <tbody>${pom.map((p,idx)=>`<tr>
             <td class="tppd">${p.point}</td>
             <td class="tppd"><input class="tpi" style="font-size:10px;width:110px" value="${p.comment||''}" placeholder="How to…" onchange="tpUpdatePom('${s.id}',${idx},'comment',this.value)"></td>
             ${tpSizes.map(sz=>{const k=sz.toLowerCase();return `<td class="tppd${sz===tpBaseSz?' pom-base':''}"><input class="tppi" value="${measFmt(p[k])}" onchange="tpUpdatePom('${s.id}',${idx},'${k}',this.value)"></td>`;}).join('')}
             <td class="tppd"><input class="tppi" style="width:38px" value="${measFmt(p.tol)}" onchange="tpUpdatePom('${s.id}',${idx},'tol',this.value)"></td>
+            <td class="tppd"><input class="tppi" style="width:42px" value="${pomHasStep(p) ? measFmt(p.grade) : ''}" placeholder="${pomStdStep(p.point)!=null ? measFmt(pomStdStep(p.point)) : '—'}" onchange="tpUpdatePom('${s.id}',${idx},'grade',this.value)"></td>
           </tr>`).join('')}</tbody>
         </table>
       </div>
@@ -21603,6 +21671,7 @@ function renderTechPackPrint(s) {
             <th style="text-align:left;padding:8px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">How to Measure</th>
             ${tpSizes.map(sz=>`<th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">${sz}</th>`).join('')}
             <th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700">TOL</th>
+            <th style="text-align:center;padding:8px 6px;font-size:10px;letter-spacing:1px;text-transform:uppercase;font-weight:700" title="Grade per size">GRADE</th>
           </tr>
         </thead>
         <tbody>
@@ -21611,6 +21680,7 @@ function renderTechPackPrint(s) {
             <td style="padding:9px 10px;font-size:10px;color:#666;max-width:150px">${p.comment||''}</td>
             ${tpSizes.map(sz=>`<td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:11px;font-weight:600">${measFmt(p[sz.toLowerCase()])||'—'}</td>`).join('')}
             <td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${measFmt(p.tol)||'—'}</td>
+            <td style="padding:9px 6px;text-align:center;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)">${pomHasStep(p) ? measFmt(p.grade) : '—'}</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -21619,7 +21689,7 @@ function renderTechPackPrint(s) {
            about 5 1/4", so the sheet was instructing a factory to cut a child's
            pattern. Their own template says ALL MEASUREMENTS ARE ON THE FLAT;
            that belongs here too. -->
-      <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in INCHES and taken ON THE FLAT unless otherwise noted. Tolerance applies to all sizes.</div>
+      <div style="margin-top:8px;font-size:10px;color:var(--muted);font-style:italic">All measurements in INCHES and taken ON THE FLAT unless otherwise noted. Tolerance applies to all sizes. GRADE is the change per size up.</div>
       <!-- The development history belongs on the pack the factory reads: it is
            the answer to "why is this number what it is", and a factory that can
            see the spec moved 1/8 after the proto asks better questions than one
