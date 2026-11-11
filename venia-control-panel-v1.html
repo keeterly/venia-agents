@@ -3223,8 +3223,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '600';
-  const BUILD_DATE = '2026.11.10';
+  const BUILD = '601';
+  const BUILD_DATE = '2026.11.11';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -17266,6 +17266,7 @@ let TP_STYLE_ID = null;
 
 function setTpMode(mode) {
   TP_MODE = mode;
+  if (mode !== 'print') window.__tpIssuedView = null;
   const wb = document.getElementById('tp-mode-work');
   const pb = document.getElementById('tp-mode-print');
   if (wb) { wb.className = `pill${mode==='work'?' active':''}`; }
@@ -17341,7 +17342,11 @@ function renderTechPack(styleId) {
   try { localStorage.setItem('venia-tp-last', styleId); } catch(e){}
   const s = STATE.styles.find(x => x.id === styleId);
   if (!s) return;
-  if (TP_MODE === 'print') renderTechPackPrint(s);
+  if (TP_MODE === 'print') {
+    const iv = window.__tpIssuedView;
+    const entry = (iv && iv.styleId === s.id) ? (s.issued||[]).find(e => e.rev === iv.rev) : null;
+    if (entry) tpRenderIssuedPrint(s, entry); else renderTechPackPrint(s);
+  }
   else renderTechPackWork(s);
   if (same && sc) sc.scrollTop = keep;
 }
@@ -17684,6 +17689,171 @@ function tpFamilyPrint(s){
     <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#666;margin-bottom:6px;font-weight:700">Same pattern — other fabrications</div>
     ${others.map(x => `<div style="font-size:11px;padding:2px 0"><span style="font-family:'DM Mono',monospace">${tpEsc(x.styleId||'—')}</span> · ${tpEsc(x.fabric||'—')}${x.colors?' · '+tpEsc(x.colors):''}</div>`).join('')}
   </div>`;
+}
+
+// ── ISSUED REVISIONS (Build 601) ────────────────────────────────────────────
+// A revision used to be a number and a note. The factory link always showed
+// the latest SAVE, so a spec could change under a factory mid-cut and nobody
+// could say afterwards what Rev 2 actually said.
+//
+// Now "Send to factory" ISSUES the pack: it freezes a dated copy of the style,
+// its BOM and its measurements, lists what changed since the last issue, and
+// from then on the factory's link shows that issued copy — never a draft.
+// Earlier issues stay viewable, read-only, so "what did we send them in
+// October" has an answer. Nothing is sent from here: the founder still hands
+// over the PDF or the link themselves.
+const TP_ISSUE_KEEP = 12;
+const TP_ISSUE_FIELDS = (typeof TP_PATTERN_FIELDS !== 'undefined' ? TP_PATTERN_FIELDS : []).concat([
+  ['fabric','Primary fabric'], ['fabric2','Secondary / lining'], ['colors','Colorways'], ['vendor','Factory'],
+  ['fiberContent','Fiber content'], ['coo','Country of origin'], ['careInstructions','Care instructions'],
+  ['desc','Design notes'], ['shrinkSelfL','Shrinkage self length'], ['shrinkSelfW','Shrinkage self width'],
+  ['shrinkLinL','Shrinkage lining length'], ['shrinkLinW','Shrinkage lining width'],
+]);
+function tpIssueSnapshot(s){
+  const style = JSON.parse(JSON.stringify(s));
+  // The snapshot is what the factory reads; the history of issues, comments
+  // and fit photos are the house's own.
+  ['issued','comments','notes','fitPhotos','shareToken','checklist'].forEach(k => { delete style[k]; });
+  return { style,
+    bom: JSON.parse(JSON.stringify(((STATE.bom||{})[s.id]) || [])),
+    pom: JSON.parse(JSON.stringify(((STATE.pom||{})[s.id]) || [])) };
+}
+function tpIssueDiff(prev, cur){
+  if (!prev) return ['First issue to the factory'];
+  const out = [];
+  const v = (x) => (x === undefined || x === null) ? '' : String(x).trim();
+  const show = (x) => { const t = v(x); return t ? (t.length > 40 ? t.slice(0, 40) + '…' : t) : '(blank)'; };
+  TP_ISSUE_FIELDS.forEach(([k,l]) => { if (v(prev.style[k]) !== v(cur.style[k])) out.push(l + ': ' + show(prev.style[k]) + ' → ' + show(cur.style[k])); });
+  ['front','back'].forEach(w => {
+    const a = ((prev.style.sketchUrls||{})[w]) || '', b = ((cur.style.sketchUrls||{})[w]) || '';
+    if (a !== b) out.push((w === 'front' ? 'Front' : 'Back') + ' flat ' + (!a ? 'added' : !b ? 'removed' : 'replaced'));
+  });
+  const co = (x) => JSON.stringify((x.style.callouts||[]).map(c => [c.num, c.text||'', c.type||'', Math.round(c.x||0), Math.round(c.y||0)]));
+  if (co(prev) !== co(cur)) out.push('Callouts changed (' + (prev.style.callouts||[]).length + ' → ' + (cur.style.callouts||[]).length + ')');
+  const ops = (x) => JSON.stringify((x.style.sewOps||[]).map(o => [o.loc||'', o.ins||'', o.stitch||'']));
+  if (ops(prev) !== ops(cur)) out.push('Sewing operations changed');
+  // BOM, by material
+  const bk = (b) => String(b.matName||'').toLowerCase().trim();
+  const pb = new Map(prev.bom.map(b => [bk(b), b])), cb = new Map(cur.bom.map(b => [bk(b), b]));
+  cb.forEach((b, k) => {
+    const a = pb.get(k);
+    if (!a) { out.push('BOM: added ' + b.matName + (b.qty ? ' (' + b.qty + ' ' + (b.unit||'') + ')' : '')); return; }
+    if (v(a.qty) !== v(b.qty) || v(a.unit) !== v(b.unit)) out.push('BOM: ' + b.matName + ' ' + v(a.qty) + ' → ' + v(b.qty) + ' ' + (b.unit||''));
+    if (v(a.placement) !== v(b.placement)) out.push('BOM: ' + b.matName + ' placement ' + show(a.placement) + ' → ' + show(b.placement));
+  });
+  pb.forEach((a, k) => { if (!cb.has(k)) out.push('BOM: removed ' + a.matName); });
+  // Measurements, by point and size
+  const pk = (p) => String(p.point||'').toLowerCase().replace(/\s+/g,' ').trim();
+  const sizes = [...new Set(expandSizes(prev.style.sizes||'').concat(expandSizes(cur.style.sizes||'')).map(z => z.toLowerCase()))];
+  const pp = new Map(prev.pom.map(p => [pk(p), p])), cp = new Map(cur.pom.map(p => [pk(p), p]));
+  const m = (x) => { const n = measParse(x); return isNaN(n) ? '' : n; };
+  cp.forEach((p, k) => {
+    const a = pp.get(k);
+    if (!a) { out.push('Measurements: added ' + p.point); return; }
+    sizes.forEach(z => { if (m(a[z]) !== m(p[z])) out.push(p.point + ' ' + z.toUpperCase() + ': ' + (m(a[z]) === '' ? '—' : measFmt(a[z])) + ' → ' + (m(p[z]) === '' ? '—' : measFmt(p[z]))); });
+    if (m(a.tol) !== m(p.tol)) out.push(p.point + ' tolerance: ' + (m(a.tol)===''?'—':measFmt(a.tol)) + ' → ' + (m(p.tol)===''?'—':measFmt(p.tol)));
+    if (m(a.grade) !== m(p.grade)) out.push(p.point + ' grade: ' + (m(a.grade)===''?'—':measFmt(a.grade)) + ' → ' + (m(p.grade)===''?'—':measFmt(p.grade)));
+  });
+  pp.forEach((a, k) => { if (!cp.has(k)) out.push('Measurements: removed ' + a.point); });
+  return out;
+}
+function tpIssueLast(s){ const a = s && s.issued; return (a && a.length) ? a[a.length-1] : null; }
+// What has changed since the pack was last issued (empty = the factory has
+// exactly what you have).
+function tpIssuePending(s){
+  const last = tpIssueLast(s);
+  if (!last) return null;
+  return tpIssueDiff(last, tpIssueSnapshot(s));
+}
+// The issued copy as a style the print view can render.
+function tpIssuedStyle(live, entry){
+  return Object.assign({}, entry.style, { id: live.id,
+    _issued: { rev: entry.rev, at: entry.at, note: entry.note || '', changes: entry.changes || [] } });
+}
+window.tpIssue = function(styleId){
+  const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
+  const last = tpIssueLast(s);
+  const snap = tpIssueSnapshot(s);
+  const changes = tpIssueDiff(last, snap);
+  if (last && !changes.length) { showToast('Nothing has changed since Rev ' + last.rev + ' was issued', 'info'); return; }
+  const r = tpReadiness(s);
+  const nextRev = last ? (Math.max(last.rev, s.rev||1) + 1) : (s.rev||1);
+  const note = prompt('Issue Rev ' + nextRev + ' to the factory.\n\n'
+    + (last ? changes.length + ' change' + (changes.length===1?'':'s') + ' since Rev ' + last.rev + ':\n' + changes.slice(0, 12).map(c => '  • ' + c).join('\n') + (changes.length > 12 ? '\n  …and ' + (changes.length-12) + ' more' : '') + '\n\n' : 'This is the first issue — the factory link will show this copy from now on.\n\n')
+    + (r.missing ? '⚠ ' + r.missing + ' thing' + (r.missing===1?' is':'s are') + ' still missing: ' + r.items.filter(i => !i.ok).map(i => i.label).join(', ') + '\n\n' : '')
+    + 'A note for the factory (optional). Nothing is sent — you hand over the PDF or link yourself.', '');
+  if (note === null) return;
+  const at = new Date().toISOString().slice(0,10);
+  s.rev = nextRev; s.revDate = at;
+  snap.style.rev = nextRev; snap.style.revDate = at;
+  if (!s.issued) s.issued = [];
+  s.issued.push({ rev: nextRev, at, note: String(note||'').trim(), changes,
+    by: (window.VENIA_ME && window.VENIA_ME.name) || '', style: snap.style, bom: snap.bom, pom: snap.pom });
+  if (s.issued.length > TP_ISSUE_KEEP) s.issued = s.issued.slice(-TP_ISSUE_KEEP);
+  try { styleThreadAdd(styleId, 'Issued Rev ' + nextRev + ' to the factory' + (note ? ': ' + note : '') + ' — ' + changes.length + ' change' + (changes.length===1?'':'s'), { kind:'rev' }); } catch(e){}
+  save();
+  logActivity('Tech pack Rev ' + nextRev + ' issued — ' + s.name);
+  window.__tpIssuedView = null;
+  TP_STYLE_ID = styleId; setTpMode('print');
+  showToast('Rev ' + nextRev + ' issued — save the PDF or share the link. The factory link now shows this copy.', 'success');
+};
+// Read-only look at an earlier issue, in the print layout.
+window.tpIssueView = function(styleId, rev){
+  window.__tpIssuedView = rev == null ? null : { styleId, rev: Number(rev) };
+  TP_STYLE_ID = styleId; setTpMode('print');
+};
+// Render an issued copy without touching the live data. The swap is
+// synchronous and restored in finally, so a save can never catch it.
+function tpRenderIssuedPrint(live, entry){
+  const sid = live.id;
+  const b0 = (STATE.bom||{})[sid], p0 = (STATE.pom||{})[sid];
+  try {
+    STATE.bom[sid] = entry.bom || []; STATE.pom[sid] = entry.pom || [];
+    renderTechPackPrint(tpIssuedStyle(live, entry));
+  } finally {
+    if (b0 === undefined) delete STATE.bom[sid]; else STATE.bom[sid] = b0;
+    if (p0 === undefined) delete STATE.pom[sid]; else STATE.pom[sid] = p0;
+  }
+  const el = document.getElementById('techpack-content');
+  if (el) {
+    const bar = document.createElement('div');
+    bar.style.cssText = 'max-width:900px;margin:0 auto 10px;padding:10px 14px;border:1px solid var(--amber);background:var(--amber-dim);font-size:11px;display:flex;gap:10px;align-items:center;flex-wrap:wrap';
+    bar.innerHTML = '<strong>Issued Rev ' + entry.rev + ' · ' + tpEsc(entry.at) + '</strong><span style="color:var(--muted)">Read-only — this is exactly what the factory was given.</span>'
+      + '<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="tpIssueView(\'' + sid + '\', null)">Back to the working copy</button>';
+    el.prepend(bar);
+  }
+}
+// The box on the factory copy: what this revision changed.
+function tpIssuePrintBox(s){
+  const iss = s._issued;
+  if (iss) {
+    return `<div style="padding:12px 28px;border-top:1px solid #e0e0e0;background:#fffdf5">
+      <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:#000;margin-bottom:6px;font-weight:700">Rev ${iss.rev} · issued ${tpEsc(iss.at)}${iss.changes.length && !/^First issue/.test(iss.changes[0]) ? ' · changes since the last issue' : ''}</div>
+      ${iss.note ? `<div style="font-size:11px;color:#000;margin-bottom:6px">${tpEsc(iss.note)}</div>` : ''}
+      ${iss.changes.slice(0, 30).map(c => `<div style="font-size:10px;color:#333;padding:1px 0">• ${tpEsc(c)}</div>`).join('')}
+      ${iss.changes.length > 30 ? `<div style="font-size:10px;color:#666">…and ${iss.changes.length-30} more</div>` : ''}
+    </div>`;
+  }
+  const pend = tpIssuePending(s);
+  const last = tpIssueLast(s);
+  if (!last) return `<div style="padding:8px 28px;border-top:1px solid #e0e0e0;font-size:10px;color:#a05a00">Working copy — not issued yet. Use Send to factory to issue it.</div>`;
+  if (pend && pend.length) return `<div style="padding:8px 28px;border-top:1px solid #e0e0e0;font-size:10px;color:#a05a00">Working copy — ${pend.length} change${pend.length===1?'':'s'} since Rev ${last.rev} was issued ${tpEsc(last.at)}. The factory link still shows Rev ${last.rev}.</div>`;
+  return tpIssuePrintBox(tpIssuedStyle(s, last));
+}
+// The list in ⑧: every issue, newest first.
+function tpIssueList(s){
+  const iss = (s.issued||[]).slice().reverse();
+  const pend = tpIssuePending(s);
+  return `<div class="tp-subhead">Issued to the factory</div>
+    ${iss.length ? `<div style="border:1px solid var(--border);margin-bottom:8px">${iss.map(e => `
+      <div style="display:flex;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border);font-size:11px">
+        <span style="font-family:'DM Mono',monospace;font-weight:700">Rev ${e.rev}</span>
+        <span style="color:var(--muted)">${tpEsc(e.at)}</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${tpEsc((e.changes||[]).join(' · '))}">${tpEsc(e.note || ((e.changes||[]).length + ' change' + ((e.changes||[]).length===1?'':'s')))}</span>
+        <button class="btn btn-ghost btn-sm" onclick="tpIssueView('${s.id}', ${e.rev})">View</button>
+      </div>`).join('')}</div>` : '<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Not issued yet. Until it is, the factory link shows the working copy.</div>'}
+    ${pend && pend.length ? `<div style="font-size:11px;color:var(--amber);margin-bottom:8px">${pend.length} change${pend.length===1?'':'s'} since Rev ${tpIssueLast(s).rev} — the factory hasn't been given them yet.</div>` : ''}
+    <button class="btn btn-gold btn-sm" style="margin-bottom:14px" onclick="tpIssue('${s.id}')">Send to factory</button>`;
 }
 
 // Row-local tap-to-edit for read-view rows. NEVER calls renderTechPack —
@@ -18261,8 +18431,8 @@ function renderTechPackWork(s) {
     <span style="font-family:'DM Mono',monospace;font-size:10px;color:#888">${s.styleId}</span>
     <span style="padding:3px 9px;border:1px solid rgba(255,255,255,.3);border-radius:var(--r-pill);font-size:10px;letter-spacing:1.5px;text-transform:uppercase">${s.season}</span>
     <span style="padding:3px 9px;border:1px solid ${sampleColors[s.sample]||'rgba(255,255,255,.3)'};border-radius:var(--r-pill);font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${sampleColors[s.sample]||'#fff'}">${s.sample||'Proto'}</span>
-    <span style="padding:3px 9px;border:1px solid rgba(255,255,255,.3);border-radius:var(--r-pill);font-size:10px;letter-spacing:1.5px;font-family:'DM Mono',monospace" title="${s.revDate?'Last revision '+s.revDate:'Revision'}">REV ${s.rev||1}</span>
-    <button onclick="tpBumpRev('${s.id}')" title="Mark a new revision — stamps the print copy & share link, logs to the dev log" style="background:rgba(255,255,255,.14);border:none;border-radius:var(--r-pill);color:#fff;font-size:12px;line-height:1;width:26px;height:26px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center">＋</button>
+    <span style="padding:3px 9px;border:1px solid rgba(255,255,255,.3);border-radius:var(--r-pill);font-size:10px;letter-spacing:1.5px;font-family:'DM Mono',monospace" title="${tpIssueLast(s)?'Issued '+tpIssueLast(s).at:'Not issued to a factory yet'}">REV ${s.rev||1}${tpIssueLast(s)?((tpIssuePending(s)||[]).length?' · DRAFT':' · ISSUED'):' · NOT ISSUED'}</span>
+    <button onclick="tpIssue('${s.id}')" title="Issue this pack: freeze a dated copy, list what changed, and make the factory link show it" style="background:rgba(255,255,255,.14);border:none;border-radius:var(--r-pill);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;line-height:1;padding:7px 11px;cursor:pointer">Send to factory</button>
     <button onclick="tpReadyJump()" title="${tpR.missing?('Missing: '+tpR.items.filter(i=>!i.ok).map(i=>i.label).join(' · ')+' — tap to jump'):'Everything a factory needs is set'}" style="margin-left:auto;background:${tpR.missing?'rgba(255,180,60,.16)':'rgba(60,200,120,.16)'};border:1px solid ${tpR.missing?'var(--amber)':'var(--green)'};border-radius:var(--r-pill);color:${tpR.missing?'var(--amber)':'var(--green)'};font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;padding:4px 11px;cursor:pointer">${tpR.missing?('⚠ '+tpR.missing+' to go'):'✓ Factory-ready'}</button>
     <div style="font-size:10px">Vendor: <strong>${s.vendor||'TBD'}</strong></div>
   </div>
@@ -18969,6 +19139,7 @@ function renderTechPackWork(s) {
           <button class="btn btn-ghost btn-sm" style="margin-left:6px" onclick="goTo('vendors',document.querySelector('[data-page=vendors]'))">Add one →</button></div>`}
         `;
       })()}
+      ${tpIssueList(s)}
       <div class="tp-subhead" style="margin-top:24px">Sign-offs &amp; Development Log</div>
       ${(()=>{
         // The 4-role × 4-checkbox matrix was one of the tallest blocks on an
@@ -21597,6 +21768,7 @@ function renderTechPackPrint(s) {
     </div>` : ''}
 
     ${tpFamilyPrint(s)}
+    ${tpIssuePrintBox(s)}
 
     <!-- Stage Progress -->
     <div style="padding:12px 28px;display:flex;align-items:center;gap:0">
@@ -55180,6 +55352,17 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       }
 
       if (!s){ shareFail('Style not found', 'This style may have been removed.'); return; }
+      // Build 601: once a pack has been issued, the factory sees the issued
+      // copy — never whatever was last saved. Before the first issue it still
+      // sees the working copy, and the banner says so.
+      var issuedEntry = (s.issued && s.issued.length) ? s.issued[s.issued.length-1] : null;
+      if (issuedEntry && issuedEntry.style) {
+        var liveId = s.id;
+        s = tpIssuedStyle(s, issuedEntry);
+        STATE.styles = [s];
+        STATE.bom = {}; STATE.bom[liveId] = issuedEntry.bom || [];
+        STATE.pom = {}; STATE.pom[liveId] = issuedEntry.pom || [];
+      }
       goTo('techpack');
       TP_STYLE_ID = s.id; TP_MODE = 'print';
       renderTechPackPrint(s);
@@ -55189,7 +55372,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       bar.innerHTML =
         brandMark(74, 'display:inline-block;vertical-align:-2px;') +
         '<span style="color:#c9a96e">' + (s.name||'') + ' · ' + (s.styleId||'') + ' · REV ' + (s.rev||1) + '</span>' +
-        '<span style="color:#777">Live tech pack — always current' + (upd ? ' · updated ' + upd : '') + '</span>';
+        '<span style="color:#777">' + (s._issued ? ('Issued ' + s._issued.at + ' · this is the current issued pack') : ('Working copy — not issued yet' + (upd ? ' · updated ' + upd : ''))) + '</span>';
       var tc = document.getElementById('techpack-content');
       if (tc) tc.prepend(bar);
       // Two-way thread: the factory asks/flags right under the document and
