@@ -12,12 +12,49 @@
 // One write path, already tested, instead of a second one on the server that
 // could disagree with it.
 import { readModules, queueAction, listInbox } from './supa.js';
+import { readFeed, pacificDay } from '../_shared/bank-feed.js';
 
 const MAX_TEXT = 60000;
 const SECRETISH = /(token|secret|password|passwd|api_?key|client_?secret|refresh|bearer|vapid|private)/i;
 // Settings holds Google client ids, API keys and mail config. Legacy is the
 // founders-only pre-module store. Neither is any tool's business.
 const NEVER_READ = new Set(['settings', 'legacy']);
+
+// HOW OLD IS THE BANK DATA, AND DID THE SERVER'S PULL EVER LAND (Build 604).
+// The saved ledger only moves when a signed-in VENIA window takes in the
+// server's morning pull and saves. From Nov 8 to Nov 12 the pull ran every
+// day and none of it landed, and a read of Money could not tell. This puts
+// the two side by side: what the workspace holds, and what the server read.
+// Read-only; the feed carries no credentials, only dates and counts here.
+export async function bankSyncSummary(d, { feed, now = Date.now() } = {}) {
+  const fb = (d && d.finBank && !Array.isArray(d.finBank)) ? d.finBank : {};
+  const txns = Array.isArray(d && d.finTxns) ? d.finTxns : [];
+  const newest = (rows) => rows.reduce((m, t) => {
+    const x = String((t && (t.date || '')) || '').slice(0, 10);
+    return x > m ? x : m;
+  }, '');
+  const today = pacificDay(now);
+  const lastSync = fb.lastSync || '';
+  const lastDay = lastSync ? pacificDay(lastSync) : '';
+  const daysOld = lastDay ? Math.round((Date.parse(today + 'T12:00:00Z') - Date.parse(lastDay + 'T12:00:00Z')) / 864e5) : null;
+  const out = {
+    saved: { last_sync: lastSync || null, last_sync_from: fb.lastSyncSrc || null, days_old: daysOld,
+             newest_transaction: newest(txns) || null, transactions: txns.length,
+             issues: (fb.syncIssues || []).map((i) => ({ account: i.name, step: i.step, error: String(i.error || '').slice(0, 160) })) },
+  };
+  let f = feed;
+  if (f === undefined) { try { f = await readFeed(); } catch (_) { f = null; } }
+  if (f && f.at) {
+    const ft = Array.isArray(f.transactions) ? f.transactions : [];
+    out.server_pull = { day: f.day || null, at: f.at, finished: f.phase === 'done', complete: f.complete !== false,
+      transactions: ft.length, newest_transaction: newest(ft) || null,
+      issues: (f.issues || []).map((i) => ({ account: i.name, step: i.step, error: String(i.error || '').slice(0, 160) })) };
+    out.landed = !!(lastSync && String(f.at) <= String(lastSync));
+  } else {
+    out.server_pull = null;
+  }
+  return out;
+}
 
 // ── trimming ────────────────────────────────────────────────────────────────
 function slim(v, depth = 0) {
@@ -438,9 +475,9 @@ const readTools = [
   {
     name: 'money_snapshot',
     title: 'Money snapshot',
-    description: 'The headline money picture from VENIA OS (Money): business snapshot, bank balances, budgets and the money watch. Founders and Money members only.',
+    description: 'The headline money picture from VENIA OS (Money): business snapshot, bank balances, budgets and the money watch, plus bank_sync: how old the saved bank data is and what the server\'s morning bank pull read. Founders and Money members only.',
     inputSchema: { type: 'object', properties: {} },
-    run(mods) {
+    async run(mods) {
       const d = moduleData(mods, 'money');
       if (!d) return noAccess('Money');
       const banks = Array.isArray(d.finBank) ? d.finBank
@@ -450,6 +487,7 @@ const readTools = [
         accounts: banks.map((b) => compact(b, ['name', 'institution', 'type', 'balance', 'available', 'currency', 'asOf', 'mask'])),
         watch: slim(d.finWatchBrief || d.finWatch || null),
         plan: slim(d.finPlan || null),
+        bank_sync: await bankSyncSummary(d),
         updated_at: mods.money.updated_at,
       });
     },
