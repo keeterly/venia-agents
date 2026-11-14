@@ -3237,8 +3237,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '602';
-  const BUILD_DATE = '2026.11.11';
+  const BUILD = '605';
+  const BUILD_DATE = '2026.11.14';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -50134,7 +50134,112 @@ function bankPacificDay(when){
   } catch(e){ return d.toISOString().slice(0, 10); }
 }
 window.bankPacificDay = bankPacificDay;
+// WHOLE PACIFIC DAYS BETWEEN TWO YYYY-MM-DD DATES (b minus a).
+function bankDayDiff(a, b){
+  var re = /^(\d{4})-(\d{2})-(\d{2})$/, x = re.exec(String(a || '')), y = re.exec(String(b || ''));
+  if (!x || !y) return null;
+  return Math.round((Date.UTC(+y[1], +y[2] - 1, +y[3]) - Date.UTC(+x[1], +x[2] - 1, +x[3])) / 864e5);
+}
+window.bankDayDiff = bankDayDiff;
+
+// A SYNC THAT DID NOT LAND IS SAID ON MONEY, IN RED (Build 604).
+//
+// From Nov 8 to Nov 12 the morning pull ran every day on the server and
+// "succeeded", and Money still stopped at Nov 8. The only window anyone opened
+// in those days had lost its sign-in: it took the pull in on its own screen,
+// could not save it, and nothing said so. Everyone else, the weekly brief and
+// Claude's reads all saw Nov 8. Now Money says how old its bank data is the
+// moment a sync has not landed, why, and offers the one thing that fixes it.
+//
+// Pure, so it can be tested without a browser. ctx:
+//   today      Pacific YYYY-MM-DD
+//   lastSync   ISO time of the last sync this copy holds (finBank.lastSync)
+//   newestTxn  YYYY-MM-DD of the newest transaction in the ledger
+//   signedOut  this window has no VENIA sign-in, so nothing it does saves
+//   unsaved    this window's last save was refused (not a dropped connection)
+//   feed       the server's pull as last read: { day, at, fresh } or null
+//   feedErr    why the server's pull could not be read or taken in
+//   fmtDay(ymd), fmtTime(iso)  formatters
+// Returns null when there is nothing to say, else
+//   { tone: 'red'|'amber', title, body, action: 'signin'|'sync'|null }.
+function bankLandingState(ctx){
+  ctx = ctx || {};
+  var fmtDay = ctx.fmtDay || function(s){ return s; };
+  var fmtTime = ctx.fmtTime || function(s){ return s; };
+  var today = ctx.today || '';
+  var lastDay = ctx.lastSync ? bankPacificDay(ctx.lastSync) : '';
+  var feed = ctx.feed || null;
+  if (ctx.signedOut) {
+    return { tone: 'red', action: 'signin',
+      title: 'Bank data isn’t saving — this window is signed out',
+      body: 'Nothing done here reaches VENIA, the morning bank pull included. Everyone else, and Claude, '
+        + 'still see the bank as it was the last time a signed-in window saved'
+        + (lastDay ? ' (this window last synced ' + fmtDay(lastDay) + ')' : '')
+        + '. Sign in and it saves for everyone.' };
+  }
+  if (ctx.unsaved) {
+    return { tone: 'red', action: null,
+      title: 'Bank data on this device hasn’t saved to VENIA yet',
+      body: 'The last save from this device was refused, so the sync it took in is only here. '
+        + 'It retries on its own; the save status at the top says why.' };
+  }
+  if (!lastDay || !today) return null;
+  var days = bankDayDiff(lastDay, today);
+  if (days == null || days < 0) return null;
+  var pulledToday = !!(feed && feed.fresh && feed.day === today);
+  if (days >= 2 || (days >= 1 && pulledToday)) {
+    var why;
+    if (ctx.feedErr) why = 'Today’s pull could not be taken in: ' + String(ctx.feedErr).slice(0, 160) + '.';
+    else if (pulledToday) why = 'The server read the bank at ' + fmtTime(feed.at) + ' today, but it hasn’t reached Money. Sync now takes it in.';
+    else if (feed && feed.day) why = 'The server’s morning pull hasn’t finished today; the last one it finished was ' + fmtDay(feed.day) + '.';
+    else why = 'The server’s morning pull could not be read from here.';
+    return { tone: 'red', action: 'sync',
+      title: 'Bank data is ' + days + ' day' + (days === 1 ? '' : 's') + ' old',
+      body: 'Last sync that saved: ' + fmtTime(ctx.lastSync) + '.'
+        + (ctx.newestTxn ? ' Newest transaction: ' + fmtDay(ctx.newestTxn) + '.' : '')
+        + ' ' + why };
+  }
+  // Synced, but the bank itself has sent nothing new for days: Stripe can lag
+  // an account without refusing it, and that is not the same as being current.
+  var lag = ctx.newestTxn ? bankDayDiff(ctx.newestTxn, today) : null;
+  if (lag != null && lag >= 5) {
+    return { tone: 'amber', action: 'sync',
+      title: 'Synced, but the newest transaction is ' + lag + ' days old',
+      body: 'The bank hasn’t sent anything newer than ' + fmtDay(ctx.newestTxn)
+        + '. Stripe may be behind on an account; Sync now asks it again.' };
+  }
+  return null;
+}
+window.bankLandingState = bankLandingState;
+// The same, read from this window as it stands.
+window.bankLandingNow = function(){
+  var fb = STATE.finBank || {};
+  var newest = '';
+  (STATE.finTxns || []).forEach(function(t){ if (t && t.date && String(t.date) > newest) newest = String(t.date).slice(0, 10); });
+  var unsaved = false;
+  try { unsaved = !!(window.__syncFailing && window.__syncFailing()); } catch (e) {}
+  return bankLandingState({
+    today: bankPacificDay(), lastSync: fb.lastSync || '', newestTxn: newest,
+    signedOut: !!window.__syncNoSession || !!(window.__syncAuthPaused && window.__syncAuthPaused()),
+    unsaved: unsaved, feed: window.__bankServerFeed || null, feedErr: window.__bankFeedErr || '',
+    fmtDay: function(s){ return veniaDate(s, 'day'); },
+    fmtTime: function(s){
+      try { return veniaDate(s, 'day') + ', ' + new Date(s).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); }
+      catch (e) { return String(s); }
+    },
+  });
+};
+window.bankLandingAct = function(kind){
+  if (kind === 'signin') { try { window.veniaEnsureSignIn && window.veniaEnsureSignIn(); } catch (e) {} return; }
+  if (kind === 'sync') { window.__bankFeedErr = ''; try { bankSyncTxns(false); } catch (e) {} }
+};
+// The banner reads what the daily sync found, so Money is redrawn when it ends,
+// whichever of its many exits it took.
 window.bankDailySync = async function(){
+  try { await bankDailySyncRun(); }
+  finally { try { if (typeof cmdRenderBank === 'function') cmdRenderBank(); } catch (e) {} }
+};
+async function bankDailySyncRun(){
   if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;
   const fb = STATE.finBank || {};
   if (!(fb.accounts || []).some(function(a){ return a && a.status === 'active'; })) return;
@@ -50145,11 +50250,17 @@ window.bankDailySync = async function(){
   const lastDay = last ? bankPacificDay(last) : '';
   // 1. This morning's server pull, taken when it is newer than the ledger.
   let feed = null, gap = false;
-  try { feed = (await bankApi('cached')).feed || null; } catch(e){ feed = null; }
+  // What the server's pull said, kept for Money's banner (Build 604): a pull
+  // that ran but never landed is only visible if somebody remembers it ran.
+  window.__bankFeedErr = '';
+  try { feed = (await bankApi('cached')).feed || null; }
+  catch(e){ feed = null; window.__bankFeedErr = 'the server’s pull could not be read (' + ((e && e.message) || 'error') + ')'; }
+  window.__bankServerFeed = feed ? { day: feed.day || '', at: feed.at || '', fresh: !!feed.fresh } : null;
   if (feed && feed.fresh && feed.day === today) {
     let took = true;
     if (!last || String(feed.at || '') > last) {
-      try { bankApplyServerFeed(feed); } catch(e){ took = false; }
+      try { bankApplyServerFeed(feed); }
+      catch(e){ took = false; window.__bankFeedErr = (e && e.message) || 'it would not merge'; }
     }
     // The pull reads the last 60 days. A ledger that stopped before that needs
     // the device's full read to close the gap; otherwise today is done.
@@ -50161,6 +50272,7 @@ window.bankDailySync = async function(){
   try { await bankSyncTxns(true); } catch (e) {
     // Leave lastSync as it was: an open that failed is not a day that synced.
     window.__bankDailyRan = 0;
+    if (!window.__bankFeedErr) window.__bankFeedErr = 'this device\u2019s own bank sync failed (' + ((e && e.message) || 'error') + ')';
   }
 };
 // FEED ROWS GO INTO THE LEDGER ONE WAY, WHICHEVER DOOR THEY CAME THROUGH.
@@ -51162,7 +51274,21 @@ window.cmdRenderBank = function(){
         <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value, this)">${catOpts(finTxnCat(t) || '')}</select>
       </div>
     </div>`).join('');
-  el.innerHTML = stats
+  // Build 604: how old the bank data is, said first, whenever a sync has not landed.
+  const landing = (function(){
+    var st = null;
+    try { st = window.bankLandingNow ? window.bankLandingNow() : null; } catch(e){ st = null; }
+    if (!st) return '';
+    var red = st.tone === 'red';
+    var btn = st.action === 'signin' ? '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankLandingAct(\'signin\')">Sign in to save</button>'
+      : st.action === 'sync' ? '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="bankLandingAct(\'sync\')">Sync now</button>' : '';
+    return '<div id="bank-landing" role="alert" style="border:1px solid ' + (red ? 'rgba(200,40,40,.55)' : 'rgba(230,160,0,.45)')
+      + ';background:' + (red ? 'var(--red-dim, rgba(220,60,60,.10))' : 'var(--amber-dim)')
+      + ';padding:12px 14px;margin:0 0 16px;font-size:11.5px;color:var(--ink);line-height:1.6;display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
+      + '<div style="flex:1;min-width:220px"><strong style="color:' + (red ? 'var(--red, #b42318)' : 'var(--amber)') + '">' + slEsc(st.title) + '</strong>'
+      + '<div style="margin-top:2px">' + slEsc(st.body) + '</div></div>' + btn + '</div>';
+  })();
+  el.innerHTML = landing + stats
     + `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:16px 0">
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankRefreshBalances()">↻ Refresh balances</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="bankSyncTxns()">⟳ Sync transactions</button>
@@ -53798,8 +53924,28 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     window.__syncStat.wake = { t: new Date().toISOString(), why: why };
     pushNow();
   }
+  // A WINDOW THAT HAS LOST ITS SIGN-IN SAYS SO WHEN IT IS LOOKED AT (Build 604).
+  //
+  // The red "signed out" banner only went up when a save was attempted, and a
+  // window that is only read never attempts one. From Nov 8 to Nov 12 the one
+  // window open on VENIA had no sign-in: it read the workspace as nobody (an
+  // empty answer), took the morning bank pull in on its own screen, and saved
+  // none of it, so Money everywhere else stopped at Nov 8 with nothing said.
+  // Now opening the app or coming back to it checks the sign-in itself, puts
+  // the sign-in screen up when there is none, and Money says why it is stale.
+  function checkSignedIn(){
+    if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN || window.VENIA_PAY) return;
+    hasAuthSession().then(function(ok){
+      var was = !!window.__syncNoSession;
+      window.__syncNoSession = !ok;
+      if (!ok) { try { if (window.veniaEnsureSignIn) window.veniaEnsureSignIn(); } catch (e) {} }
+      if (was !== !ok) { try { if (typeof cmdRenderBank === 'function') cmdRenderBank(); } catch (e) {} }
+    });
+  }
+  window.__syncCheckSignedIn = checkSignedIn;
   document.addEventListener('visibilitychange', function(){
     if (document.visibilityState !== 'visible') return;
+    checkSignedIn();
     pushWake('returned to the app');
     // Opening the app is the reliable moment to refresh the ledger: a phone
     // suspends timers in the background, and this is when the numbers are
@@ -54030,7 +54176,18 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       c.auth.onAuthStateChange(function(ev, session){
         if (session && (ev === 'SIGNED_IN' || ev === 'TOKEN_REFRESHED' || ev === 'INITIAL_SESSION' || ev === 'USER_UPDATED')) {
+          // Back from signed out (Build 604): whatever this window took in
+          // while nobody was signed in may be set aside against the cloud's
+          // copy, so take the morning bank pull again once that settles.
+          var wasOut = authPaused || !!window.__syncNoSession;
+          window.__syncNoSession = false;
           resumeAfterSignIn('signed in (' + ev + ')');
+          if (wasOut) {
+            setTimeout(function(){
+              window.__bankDailyRan = 0;
+              try { if (typeof bankDailySync === 'function') bankDailySync(); } catch (e) {}
+            }, 3000);
+          }
         } else if (ev === 'SIGNED_OUT' && pushDirty) {
           pauseForSignIn('signed out');
         }
@@ -54978,6 +55135,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       try { if (owedAt()) setTimeout(pushNow, 400); } catch(e){}
       // After the workspace has landed, so a pull cannot race the merge.
       try { if (typeof bankDailySync === 'function') setTimeout(bankDailySync, 2500); } catch(e){}
+      try { checkSignedIn(); } catch(e){}
     });
   };
 
