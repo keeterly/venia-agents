@@ -34,6 +34,36 @@ const SETTLE_MS = 20 * 60e3;     // refresh → read
 const MAX_WAITS = 3;             // extra runs to wait on a pending refresh
 const PAGE_CAP = 25;             // 100 rows a page, per account
 const BUDGET_MS = 22000;         // stay well inside the 30s limit
+const MAX_RETRIES = 2;           // extra refreshes a day for accounts that failed or went quiet
+const QUIET_DAYS = 3;            // an account whose newest row is older than this is "quiet"
+
+// WHICH ACCOUNTS TO ASK AGAIN (Build 607).
+//
+// Stripe refreshes an account on request and, now and then, fails it
+// (transaction_refresh.status 'failed') or answers with nothing new. The pull
+// read what it had and stopped for the day, so one failed morning meant a day
+// of old data, and from Nov 10 to Nov 13 Chase checking said "failed" every
+// time. An account is asked again, later the same morning, when its refresh
+// was refused, failed, or brought nothing newer than QUIET_DAYS ago, once
+// Stripe says it will take a refresh again. Pure, for tests.
+export function retryTargets(accounts, transactions, refreshIssues, now) {
+  const quietCut = pacificDay(now - QUIET_DAYS * 864e5);
+  const newest = {};
+  (transactions || []).forEach((t) => { if (t && t.account && String(t.date || '') > (newest[t.account] || '')) newest[t.account] = String(t.date); });
+  const refused = {};
+  (refreshIssues || []).forEach((i) => { if (i && i.id) refused[i.id] = 1; });
+  const out = [];
+  (accounts || []).forEach((a) => {
+    if (!a || a.status !== 'active') return;
+    const tr = a.transaction_refresh || {};
+    const nextAt = tr.next_refresh_available_at ? tr.next_refresh_available_at * 1000 : 0;
+    const failed = tr.status === 'failed';
+    const quiet = !newest[a.id] || newest[a.id] < quietCut;
+    if (!(refused[a.id] || failed || quiet)) return;
+    out.push({ id: a.id, why: refused[a.id] ? 'refused' : failed ? 'failed' : 'quiet', after: nextAt });
+  });
+  return out;
+}
 
 export default async (req) => {
   // Netlify invokes a scheduled function with { next_run } and gives it no
@@ -69,7 +99,27 @@ export async function runMorningPull({ key, now = Date.now(), call } = {}) {
   const today = pacificDay(now);
   const prev = await readFeed();
   const st = (prev && prev.day === today) ? prev : null;
-  if (st && st.phase === 'done') return 'already pulled for ' + today;
+  if (st && st.phase === 'done') {
+    // Today's read is kept and the app can already take it. Accounts that
+    // failed or went quiet are asked again; a later run re-reads them.
+    const retry = st.retry || { n: 0, ids: [] };
+    const due = (retry.ids || []).filter((r) => !r.after || r.after <= now);
+    if (!due.length || (retry.n || 0) >= MAX_RETRIES) return 'already pulled for ' + today;
+    const asked = [], issues = [];
+    for (const r of due) {
+      const path = 'financial_connections/accounts/' + r.id + '/refresh';
+      const x = await call(path, { 'features[]': ['balance', 'transactions'] });
+      if (x.error) issues.push({ id: r.id, step: 'refresh', error: String(x.error.message || 'failed').slice(0, 200), at: iso(now) });
+      else asked.push(r.id);
+    }
+    if (!asked.length) {
+      await writeFeed({ ...st, retry: { ...retry, n: (retry.n || 0) + 1 } });
+      return 'retry refused for ' + due.length + ' account(s)';
+    }
+    await writeFeed({ ...st, phase: 'retrying', refreshedAt: iso(now), refreshed: asked, waits: 0,
+      retry: { ...retry, n: (retry.n || 0) + 1 } });
+    return 'asked again for ' + asked.length + ' account(s)';
+  }
 
   // ── step 1: ask Stripe for fresh data ─────────────────────────────────────
   if (!st) {
@@ -140,11 +190,13 @@ export async function runMorningPull({ key, now = Date.now(), call } = {}) {
   const byAcct = {};
   (st.refreshIssues || []).concat(issues).forEach((i) => { if (!byAcct[i.id] || i.step === 'transactions') byAcct[i.id] = i; });
   const transactions = Object.values(byId).sort((x, y) => String(y.date || '').localeCompare(String(x.date || '')));
+  const prevRetry = st.retry || { n: 0 };
   await writeFeed({
     day: today, phase: 'done', at: iso(now), since, complete,
     accounts: accounts.map(slimAccount),
     transactions,
     issues: Object.values(byAcct),
+    retry: { n: prevRetry.n || 0, ids: retryTargets(accounts, transactions, st.refreshIssues, now) },
   });
   return 'pulled ' + transactions.length + ' transaction(s) since ' + since + (complete ? '' : ' (partial)');
 }

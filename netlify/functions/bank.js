@@ -120,7 +120,9 @@ export default async (req) => {
         day: feed.day || '', at: feed.at || '', since: feed.since || '', complete: feed.complete !== false,
         // Between the morning's two steps the stored rows are yesterday's;
         // 'fresh' tells the app whether this is today's read.
-        fresh: feed.phase === 'done',
+        // A morning re-ask (Build 607) keeps the read it already made, so
+        // 'retrying' is today's data too.
+        fresh: feed.phase === 'done' || feed.phase === 'retrying',
         accounts: Array.isArray(feed.accounts) ? feed.accounts : [],
         transactions: Array.isArray(feed.transactions) ? feed.transactions : [],
         issues: Array.isArray(feed.issues) ? feed.issues : [],

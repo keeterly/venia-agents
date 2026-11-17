@@ -3237,8 +3237,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '606';
-  const BUILD_DATE = '2026.11.14';
+  const BUILD = '607';
+  const BUILD_DATE = '2026.11.17';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -7236,6 +7236,12 @@ function tombDiff(base, local){
     }
     for (var n = 0; n < b.length; n++) {
       var o = b[n];
+      // A recent bank feed row is never "deleted here" (Build 607): Stripe
+      // hands it back on the next sync anyway, and a device that reloaded an
+      // older copy of the ledger is not a person deleting transactions. Rows
+      // past 120 days still go the ordinary way, so the ledger's trim holds.
+      if (k === 'finTxns' && o && /^fctxn_/.test(String(o.id))
+          && String(o.date || '') >= new Date(now - 120 * 864e5).toISOString().slice(0, 10)) continue;
       if (o && o.id != null && !have[String(o.id)]) tombMark(o.id, now);
     }
   }
@@ -7710,6 +7716,40 @@ function mergeSnapshots(base, local, cloud) {
       merged.forEach(function (t) {
         if (t && t.id != null && !t.category && lCat[t.id]) t.category = lCat[t.id];
       });
+      // A BANK SYNC IS NEVER MERGED AWAY (Build 607).
+      //
+      // On Nov 17 the iPhone took in the morning bank pull (28 new rows, Nov 10
+      // to Nov 17), wrote the weekly brief from it, then reloaded an older
+      // copy of its own ledger. The next merge read the new rows as "deleted on
+      // this device" and pushed the deletion, so Money went back to Nov 10
+      // while the brief kept the Nov 17 figures. Feed rows from the last 120
+      // days that either side holds are kept; older ones stay subject to the
+      // ledger's own trim.
+      const feedCut = new Date(Date.now() - 120 * 864e5).toISOString().slice(0, 10);
+      const haveId = Object.create(null);
+      merged.forEach(function (t) { if (t && t.id != null) haveId[String(t.id)] = 1; });
+      [l, c].forEach(function (side) {
+        (Array.isArray(side) ? side : []).forEach(function (t) {
+          if (!t || t.id == null || haveId[String(t.id)]) return;
+          if (!/^fctxn_/.test(String(t.id)) || String(t.date || '') < feedCut) return;
+          merged.push(t); haveId[String(t.id)] = 1;
+        });
+      });
+      out[k] = merged;
+      return;
+    }
+    // ...and the bank's own record of that sync goes with it: the side that
+    // synced later brings its time, accounts, balances and issues, whatever
+    // the merge base says. A three-way merge on lastSync alone let the older
+    // copy "win" as the only side that changed.
+    if (k === 'finBank' && l && c && typeof l === 'object' && typeof c === 'object' && !Array.isArray(l) && !Array.isArray(c)) {
+      const merged = _mObject(b || {}, l, c);
+      const newer = String(l.lastSync || '') >= String(c.lastSync || '') ? l : c;
+      if (String(newer.lastSync || '') > String(merged.lastSync || '')) {
+        ['lastSync', 'lastSyncSrc', 'syncIssues', 'accounts'].forEach(function (f) {
+          if (newer[f] !== undefined) merged[f] = newer[f];
+        });
+      }
       out[k] = merged;
       return;
     }
@@ -27174,6 +27214,9 @@ function veniaFinDigestBlob(){
     const R = n => Math.round(n || 0);
     return {
       connected: !!bk.connected,
+      // The day the bank figures are from (Build 607), so the Monday push
+      // says "as of" instead of presenting a week-old balance as today's.
+      bankAsOf: (function(){ try { return bankDataDay(STATE.finBank || {}, STATE.finTxns || []) || null; } catch(e){ return null; } })(),
       cash: R(bk.bal), debt: R(bk.debt), net: R(bk.net), floor: R(finWatchCfg().cashFloor),
       burn: R(bk.monthlyNet), runway: bk.runwayMo != null ? Number(bk.runwayMo.toFixed(1)) : null,
       in30: R(bk.in30), out30: R(bk.out30), uncat: bk.uncat,
@@ -48163,7 +48206,13 @@ function veniaFinanceContext(){
       if (bk && bk.connected) {
         const rw = bk.runwayMo != null ? (bk.runwayMo >= 24 ? '24+ months' : bk.runwayMo.toFixed(1) + ' months')
                  : (bk.monthlyNet <= 0 ? 'not burning — net positive over the last 90d' : 'n/a');
-        parts.push('BANK (live read-only feed; last sync ' + (bk.lastSync ? String(bk.lastSync).slice(0,10) : 'never') + '):\n'
+        // THE DATE OF THE DATA, NOT THE WORD "LIVE" (Build 607). The Nov 17
+        // brief said "bank feed is live" and gave cash "as of 17 Nov" while the
+        // copy everyone else saw stopped at Nov 10. The model only had "live"
+        // and a sync date to go on, so it repeated them. It now gets the day
+        // the newest bank data is from, how old that is, and an instruction.
+        const bankAsOf = (function(){ try { return bankBriefAsOf(STATE.finBank || {}, STATE.finTxns || []); } catch(e){ return null; } })();
+        parts.push('BANK (read-only feed via Stripe; ' + (bankAsOf ? bankAsOf.header : 'last sync ' + (bk.lastSync ? String(bk.lastSync).slice(0,10) : 'never')) + '):\n'
           + '• Cash accounts: ' + (bk.cashAccts.length ? bk.cashAccts.map(a => {
               const b = a.balance || {};
               return (a.institution || a.name) + ' …' + (a.last4||'') + ' ' + money(bk.amtOf(a)) + (b.as_of ? ' (as of ' + b.as_of + ')' : '');
@@ -49242,6 +49291,15 @@ function finWatchAlerts(){
         : 'Your weekly money brief is ready' });
     }
   } catch(e){}
+  // 7. Bank data that is old (Build 607): the same words Money opens with, so
+  // nobody reads a balance on Today without knowing what day it is from.
+  try {
+    const st = window.bankLandingNow ? window.bankLandingNow() : null;
+    if (st) out.push({ key:'fin|bankdata', pri: st.tone === 'red' ? 'high' : 'med', act: goMoney,
+      text: st.dataDay && !/^Bank data from/.test(st.title)
+        ? st.title + ' \u2014 bank data from ' + veniaDate(st.dataDay, 'day')
+        : st.title });
+  } catch(e){}
   return out;
 }
 // ISO-ish week key (Mon-anchored) — one brief per calendar week.
@@ -49326,7 +49384,7 @@ async function finWriteWeeklyBrief(force){
       AGENTS.fin.system,
       plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : ''),
     ];
-    const q = 'Write this week\'s money brief for the two founders, from the FINANCE SNAPSHOT only. Under 250 words, plain language, no headers longer than three words. Cover: (1) where cash stands and what changed; (2) what is owed to us and what we owe; (3) the single most important number this week and why; (4) one specific action to take. If the bank is not connected or figures are missing, say so plainly instead of estimating. Do not emit any action block.';
+    const q = 'Write this week\'s money brief for the two founders, from the FINANCE SNAPSHOT only. Under 250 words, plain language, no headers longer than three words. Cover: (1) where cash stands and what changed; (2) what is owed to us and what we owe; (3) the single most important number this week and why; (4) one specific action to take. If the bank is not connected or figures are missing, say so plainly instead of estimating. Give the bank figures with the date the BANK line says they are from, and if it says NOT CURRENT, say how old they are in the Cash section and never call the feed live. Do not emit any action block.';
     const basis = finBriefBasis();                       // what this brief is read from, taken before the call
     const text = await callClaude(sys, q, []);
     const clean = (typeof agentExtractAction === 'function' ? agentExtractAction(text).clean : text) || text;
@@ -50162,10 +50220,54 @@ window.bankDayDiff = bankDayDiff;
 //   unsaved    this window's last save was refused (not a dropped connection)
 //   feed       the server's pull as last read: { day, at, fresh } or null
 //   feedErr    why the server's pull could not be read or taken in
+//   dataDay    YYYY-MM-DD of the newest bank data held: newest transaction
+//              or cash balance, whichever is later (Build 607)
 //   fmtDay(ymd), fmtTime(iso)  formatters
 // Returns null when there is nothing to say, else
-//   { tone: 'red'|'amber', title, body, action: 'signin'|'sync'|null }.
+//   { tone: 'red'|'amber', title, body, action: 'signin'|'sync'|null,
+//     dataDay, dataAge }.
 function bankLandingState(ctx){
+  var st = bankLandingStateRaw(ctx);
+  if (st && ctx && ctx.dataDay) {
+    st.dataDay = ctx.dataDay;
+    st.dataAge = ctx.today ? bankDayDiff(ctx.dataDay, ctx.today) : null;
+  }
+  return st;
+}
+// WHAT DAY IS THE BANK DATA FROM (Build 607). The newest transaction, or the
+// date Stripe gave a cash balance, whichever is later. "Last synced today"
+// says nothing if what the sync brought is a week old.
+function bankDataDay(fb, txns){
+  var d = '';
+  (txns || []).forEach(function(t){ var x = t && t.date ? String(t.date).slice(0, 10) : ''; if (x > d) d = x; });
+  ((fb && fb.accounts) || []).forEach(function(a){
+    if (!a || a.status === 'disconnected' || (a.category || '') !== 'cash') return;
+    var x = a.balance && a.balance.as_of ? String(a.balance.as_of).slice(0, 10) : '';
+    if (x > d) d = x;
+  });
+  return d;
+}
+window.bankDataDay = bankDataDay;
+// What the money brief and the Monday push are told about the bank's date.
+// Pure: fb = finBank, txns = finTxns, now = Date or ms (default now).
+function bankBriefAsOf(fb, txns, now){
+  var day = bankDataDay(fb, txns);
+  var today = bankPacificDay(now == null ? Date.now() : now);
+  var age = day ? bankDayDiff(day, today) : null;
+  var lastDay = fb && fb.lastSync ? bankPacificDay(fb.lastSync) : '';
+  var syncedToday = !!(lastDay && lastDay === today);
+  // Current means synced today with data from the last three days (a weekend).
+  var current = !!(syncedToday && age != null && age <= 3);
+  var header;
+  if (!day) header = 'no bank data yet';
+  else header = 'newest bank data is from ' + day + ' (' + (age === 0 ? 'today' : age + ' day' + (age === 1 ? '' : 's') + ' old') + ')'
+    + '; last sync ' + (lastDay || 'never')
+    + (current ? ''
+      : '. NOT CURRENT: never call the feed live or up to date, give every bank figure as "as of ' + day + '", and say in the first lines that the bank data is ' + (age == null ? 'old' : age + ' days old'));
+  return { day: day, age: age, lastDay: lastDay, current: current, header: header };
+}
+window.bankBriefAsOf = bankBriefAsOf;
+function bankLandingStateRaw(ctx){
   ctx = ctx || {};
   var fmtDay = ctx.fmtDay || function(s){ return s; };
   var fmtTime = ctx.fmtTime || function(s){ return s; };
@@ -50196,20 +50298,25 @@ function bankLandingState(ctx){
     else if (pulledToday) why = 'The server read the bank at ' + fmtTime(feed.at) + ' today, but it hasn’t reached Money. Sync now takes it in.';
     else if (feed && feed.day) why = 'The server’s morning pull hasn’t finished today; the last one it finished was ' + fmtDay(feed.day) + '.';
     else why = 'The server’s morning pull could not be read from here.';
+    var dAge = ctx.dataDay ? bankDayDiff(ctx.dataDay, today) : null;
     return { tone: 'red', action: 'sync',
-      title: 'Bank data is ' + days + ' day' + (days === 1 ? '' : 's') + ' old',
+      title: ctx.dataDay
+        ? 'Bank data from ' + fmtDay(ctx.dataDay) + (dAge > 0 ? ' \u2014 ' + dAge + ' day' + (dAge === 1 ? '' : 's') + ' old' : '')
+        : 'Bank data is ' + days + ' day' + (days === 1 ? '' : 's') + ' old',
       body: 'Last sync that saved: ' + fmtTime(ctx.lastSync) + '.'
         + (ctx.newestTxn ? ' Newest transaction: ' + fmtDay(ctx.newestTxn) + '.' : '')
         + ' ' + why };
   }
   // Synced, but the bank itself has sent nothing new for days: Stripe can lag
   // an account without refusing it, and that is not the same as being current.
-  var lag = ctx.newestTxn ? bankDayDiff(ctx.newestTxn, today) : null;
-  if (lag != null && lag >= 5) {
+  // Four days, so an ordinary weekend never raises it on a Monday.
+  var asOf = ctx.dataDay || ctx.newestTxn || '';
+  var lag = asOf ? bankDayDiff(asOf, today) : null;
+  if (lag != null && lag >= 4) {
     return { tone: 'amber', action: 'sync',
-      title: 'Synced, but the newest transaction is ' + lag + ' days old',
-      body: 'The bank hasn’t sent anything newer than ' + fmtDay(ctx.newestTxn)
-        + '. Stripe may be behind on an account; Sync now asks it again.' };
+      title: 'Bank data from ' + fmtDay(asOf) + ' \u2014 ' + lag + ' days old',
+      body: 'Synced ' + fmtTime(ctx.lastSync) + ', but the bank hasn\u2019t sent anything newer than ' + fmtDay(asOf)
+        + '. Stripe may be behind on an account; the morning pull asks it again, and Sync now asks it right away.' };
   }
   return null;
 }
@@ -50223,6 +50330,7 @@ window.bankLandingNow = function(){
   try { unsaved = !!(window.__syncFailing && window.__syncFailing()); } catch (e) {}
   return bankLandingState({
     today: bankPacificDay(), lastSync: fb.lastSync || '', newestTxn: newest,
+    dataDay: bankDataDay(fb, STATE.finTxns || []),
     signedOut: !!window.__syncNoSession || !!(window.__syncAuthPaused && window.__syncAuthPaused()),
     unsaved: unsaved, feed: window.__bankServerFeed || null, feedErr: window.__bankFeedErr || '',
     fmtDay: function(s){ return veniaDate(s, 'day'); },

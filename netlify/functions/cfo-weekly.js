@@ -17,6 +17,18 @@ const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsIn
 
 const money = (n) => (n < 0 ? '-$' : '$') + Math.abs(Math.round(n || 0)).toLocaleString('en-US');
 
+// One line for the model about how old the bank figures are. Exported for tests.
+export function bankAsOfLine(fin, now) {
+  if (!fin || !fin.connected) return '';
+  if (!fin.bankAsOf) return 'Bank data date unknown: give bank figures as approximate and never call the feed live.';
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
+  const age = Math.round((Date.parse(today + 'T12:00:00Z') - Date.parse(String(fin.bankAsOf).slice(0, 10) + 'T12:00:00Z')) / 864e5);
+  if (!(age >= 0)) return 'Bank figures are as of ' + fin.bankAsOf + '.';
+  return age <= 3
+    ? 'Bank figures are as of ' + fin.bankAsOf + '.'
+    : 'Bank figures are as of ' + fin.bankAsOf + ', ' + age + ' days old. Say that plainly, quote cash as of that date, and never call the feed live or current.';
+}
+
 export default async () => {
   const secret = process.env.VENIA_DIGEST_SECRET;
   const vapidPub = process.env.VAPID_PUBLIC_KEY;
@@ -44,8 +56,12 @@ export default async () => {
     return new Response('finance snapshot stale — skipped', { status: 200 });
   }
 
+  // THE DAY THE BANK FIGURES ARE FROM (Build 607). A balance from a week ago
+  // read out as today's is the one mistake a money brief cannot make.
+  const asOf = bankAsOfLine(fin, Date.now());
   const facts = [
-    fin.connected ? `Cash on hand ${money(fin.cash)} (floor ${money(fin.floor)}). Owed on cards/loans ${money(fin.debt)}. Net position ${money(fin.net)}.`
+    asOf,
+    fin.connected ? `Cash on hand ${money(fin.cash)}${fin.bankAsOf ? ' as of ' + fin.bankAsOf : ''} (floor ${money(fin.floor)}). Owed on cards/loans ${money(fin.debt)}. Net position ${money(fin.net)}.`
                   : 'Bank not connected — no cash, burn or runway figures exist.',
     fin.connected ? `Last 30 days: in ${money(fin.in30)}, out ${money(fin.out30)}. Monthly ${fin.burn > 0 ? 'net burn ' + money(fin.burn) : 'net surplus ' + money(-fin.burn)}. Runway ${fin.runway == null ? 'n/a' : fin.runway + ' months'}.` : '',
     `Revenue YTD ${money(fin.revYtd)} (DTC ${money(fin.dtcYtd)}, wholesale booked ${money(fin.wsBooked)}, collected ${money(fin.wsCollected)}). Operating ${money(fin.operating)}${fin.opexYtd != null ? `, after ${money(fin.opexYtd)} of operating expense from the bank feed` : ''}.`,
@@ -72,7 +88,7 @@ export default async () => {
 
 Under 55 words. No greeting, no sign-off, no headings. Lead with the single most important truth about their position — the number first. Then at most one more fact that changes a decision, then ONE specific action for this week.
 
-Use only the figures given. Never invent one. If the bank is not connected or figures are flagged as estimates, say so in as few words as possible rather than implying precision. Say a hard thing plainly — a thin runway named early is the most useful thing you can give them. Do not repeat an alert they have already been shown unless it is now the most important fact.`,
+Use only the figures given. Never invent one. Give the bank's date exactly as the figures state it; never say "live" or "today" about bank figures that are dated earlier. If the bank is not connected or figures are flagged as estimates, say so in as few words as possible rather than implying precision. Say a hard thing plainly — a thin runway named early is the most useful thing you can give them. Do not repeat an alert they have already been shown unless it is now the most important fact.`,
         messages: [{ role: 'user', content: 'This week\'s figures:\n' + facts }],
       }),
     });
