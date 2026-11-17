@@ -46,7 +46,7 @@ export async function bankSyncSummary(d, { feed, now = Date.now() } = {}) {
   if (f === undefined) { try { f = await readFeed(); } catch (_) { f = null; } }
   if (f && f.at) {
     const ft = Array.isArray(f.transactions) ? f.transactions : [];
-    out.server_pull = { day: f.day || null, at: f.at, finished: f.phase === 'done', complete: f.complete !== false,
+    out.server_pull = { day: f.day || null, at: f.at, finished: f.phase === 'done' || f.phase === 'retrying', complete: f.complete !== false,
       transactions: ft.length, newest_transaction: newest(ft) || null,
       issues: (f.issues || []).map((i) => ({ account: i.name, step: i.step, error: String(i.error || '').slice(0, 160) })) };
     out.landed = !!(lastSync && String(f.at) <= String(lastSync));
