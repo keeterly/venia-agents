@@ -3237,7 +3237,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '610';
+  const BUILD = '611';
   const BUILD_DATE = '2026.11.18';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -3880,6 +3880,7 @@ window.veniaYmd = veniaYmd;
           <div class="ag-nav-lbl">System</div>
           <div class="ag-nav-item" onclick="setShowSection('set-security',this);setRenderFaceId();window.veniaAuthRefresh&&veniaAuthRefresh();window.setPwResetRefresh&&setPwResetRefresh()">Security</div>
           <div class="ag-nav-item" onclick="setShowSection('set-team',this);teamRender()">Team & Access</div>
+          <div class="ag-nav-item" onclick="setShowSection('set-modules',this);veniaModulesRender()">Modules</div>
           <div class="ag-nav-item" onclick="setShowSection('set-data',this)">Data & Backup</div>
           <div class="ag-nav-item" onclick="setShowSection('set-about',this)">About</div>
         </div>
@@ -4272,6 +4273,20 @@ window.veniaYmd = veniaYmd;
 
       <!-- DATA & BACKUP -->
       <!-- TEAM & ACCESS -->
+      <div id="set-modules" class="set-section" style="display:none">
+        <div class="ag-content">
+          <div style="max-width:760px">
+            <div class="micro-label" style="margin-bottom:6px">Modules</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:18px">
+              VENIA OS is a core plus modules. The core comes with every brand; each add-on
+              can be switched on or off per brand. VENIA has every module on. Switching one
+              off keeps its data and hides its screens; that switch is for subscriber brands
+              and is not offered here.
+            </div>
+            <div id="modules-list"><div style="font-size:11px;color:var(--muted)">Loading…</div></div>
+          </div>
+        </div>
+      </div>
       <div id="set-team" class="set-section" style="display:none">
         <div class="ag-content">
           <div style="max-width:720px">
@@ -7132,6 +7147,23 @@ const VENIA_OFFERS = {
   // brainstorm
   'brainstorm.dump':   { key: 'dump',          list: true },
 };
+// WHICH BRAND THIS IS, AND WHICH MODULES IT HAS (Build 611).
+// VENIA is brand 'main' — the workspace id the cloud rows already carry.
+// window.VENIA_ENTITLED is {module: true|false} from venia_entitlements, read
+// at sign-in; null until then, and null on any failure. A module is off ONLY
+// when its row says so: unknown, missing or failed always means on, so a slow
+// or broken read can never hide VENIA's own data.
+window.VENIA_TENANT = 'main';
+window.VENIA_ENTITLED = null;
+function veniaModuleEntitled(id){
+  if (!id || !MODULES[id]) return true;
+  if (MODULES[id].projection) return true;
+  const man = MODULE_MANIFEST[id];
+  if (man && man.tier === 'core') return true;
+  const e = window.VENIA_ENTITLED;
+  return !(e && e[id] === false);
+}
+window.veniaModuleEntitled = veniaModuleEntitled;
 const VeniaOS = (function(){
   const listeners = Object.create(null);
   const slots = Object.create(null);
@@ -7144,8 +7176,7 @@ const VeniaOS = (function(){
     if (!id) return true;
     const man = (typeof MODULE_MANIFEST !== 'undefined') && MODULE_MANIFEST[id];
     if (man && man.tier === 'core') return true;
-    const ent = window.VENIA_ENTITLED;
-    if (ent && ent[id] === false) return false;
+    if (!veniaModuleEntitled(id)) return false;
     // VENIA_MY_MODULES is {module: role} for a scoped member, null for a
     // founder or anyone holding everything.
     const mine = window.VENIA_MY_MODULES;
@@ -53922,18 +53953,39 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   function apply(){
     var mine = window.VENIA_MY_MODULES;
     var html = document.documentElement;
-    if (!mine) {                            // unknown or founder: nothing hidden
-      Object.keys(SPACE_OF).forEach(function(m){ html.classList.remove('no-' + SPACE_OF[m]); });
+    // A module the brand does not have is hidden for everyone in it, founders
+    // included (Build 611). Unknown always means on — see veniaModuleEntitled.
+    var on = function(m){ return typeof veniaModuleEntitled !== 'function' || veniaModuleEntitled(m); };
+    if (!mine) {                            // unknown or founder: nothing hidden by grants
+      Object.keys(SPACE_OF).forEach(function(m){ html.classList.toggle('no-' + SPACE_OF[m], !on(m)); });
       return;
     }
     Object.keys(SPACE_OF).forEach(function(m){
-      html.classList.toggle('no-' + SPACE_OF[m], !mine[m]);
+      html.classList.toggle('no-' + SPACE_OF[m], !mine[m] || !on(m));
     });
   }
+  // The brand's subscriptions. Fails open: an error, no table yet (before the
+  // migration), or no rows all leave VENIA_ENTITLED null, which hides nothing.
+  window.veniaLoadEntitlements = async function(){
+    try {
+      var c = window.__sbClient;
+      if (!c || !window.veniaAuthUser) { window.VENIA_ENTITLED = null; return; }
+      var r = await c.from('venia_entitlements').select('module, status, until').eq('tenant_id', window.VENIA_TENANT || 'main');
+      if (r.error || !r.data || !r.data.length) { window.VENIA_ENTITLED = null; return; }
+      var today = (typeof veniaYmd === 'function') ? veniaYmd(new Date()) : new Date().toISOString().slice(0, 10);
+      var ent = {};
+      r.data.forEach(function(row){
+        var st = String(row.status || 'on');
+        ent[String(row.module)] = (st === 'on' || st === 'trial') && (!row.until || String(row.until) >= today);
+      });
+      window.VENIA_ENTITLED = ent;
+    } catch(e){ window.VENIA_ENTITLED = null; }
+  };
   window.veniaApplyAccess = apply;
   window.veniaLoadAccess = async function(){
     try {
       if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;      // other doors entirely
+      await window.veniaLoadEntitlements();
       var u = window.veniaAuthUser;
       var c = window.__sbClient;
       if (!u || !u.email || !c) { window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); return; }
@@ -53963,6 +54015,43 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){ window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); }
   };
 })();
+
+// ── SETTINGS → MODULES (Build 611) ────────────────────────────────────────
+// What this brand is made of: the core, each add-on and whether it is on.
+// Read-only on purpose. For VENIA every module is on, and switching one off
+// is a subscriber-brand action that arrives with billing, not a button here.
+window.veniaModulesRender = async function(){
+  var box = document.getElementById('modules-list'); if (!box) return;
+  try { if (window.veniaLoadEntitlements) await window.veniaLoadEntitlements(); } catch(e){}
+  function esc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+  var TIER = { core: 'Core', base: 'Base', addon: 'Add-on' };
+  var ids = Object.keys(MODULE_MANIFEST).filter(function(id){ return id !== 'legacy'; });
+  var order = { core: 0, base: 1, addon: 2 };
+  ids.sort(function(a, b){ return (order[MODULE_MANIFEST[a].tier] - order[MODULE_MANIFEST[b].tier]) || 0; });
+  var known = !!window.VENIA_ENTITLED;
+  var rows = ids.map(function(id){
+    var m = MODULES[id], man = MODULE_MANIFEST[id];
+    var on = veniaModuleEntitled(id);
+    var state = man.tier === 'core' ? 'Always on' : (on ? 'On' : 'Off');
+    var extras = (man.tables || []).length + (man.server || []).length + (man.edge || []).length;
+    return '<tr>'
+      + '<td style="padding:10px 12px 10px 0;font-size:12px;font-weight:600;white-space:nowrap">' + esc(m.label) + '</td>'
+      + '<td style="padding:10px 12px 10px 0;font-size:11px;color:var(--muted);white-space:nowrap">' + esc(TIER[man.tier] || man.tier) + '</td>'
+      + '<td style="padding:10px 12px 10px 0;font-size:11px;white-space:nowrap;color:' + (on ? 'var(--ink)' : 'var(--muted)') + '">' + esc(state) + '</td>'
+      + '<td style="padding:10px 0;font-size:11px;color:var(--muted);line-height:1.5">' + esc(m.owns)
+      + (extras ? ' <span style="opacity:.7">· ' + extras + (extras === 1 ? ' table or function' : ' tables and functions') + '</span>' : '') + '</td>'
+      + '</tr>';
+  }).join('');
+  box.innerHTML = '<table style="width:100%;border-collapse:collapse">'
+    + '<thead><tr>'
+    + '<th style="text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 12px 8px 0">Module</th>'
+    + '<th style="text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 12px 8px 0">Tier</th>'
+    + '<th style="text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 12px 8px 0">Status</th>'
+    + '<th style="text-align:left;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:0 0 8px">What it owns</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table>'
+    + '<div style="font-size:10px;color:var(--muted);margin-top:14px">Brand: VENIA'
+    + (known ? '' : ' · subscriptions not read yet, so everything shows as on') + '</div>';
+};
 
 // ── TEAM & ACCESS ─────────────────────────────────────────────────────────
 // The screen behind venia_members. Everything here goes through the `team`
@@ -54919,7 +55008,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // ever stopped being true the cost is a refused blob write, not a leak.
       var writesBlob = moduleWritable('legacy', roles);
       var modErr = null, modStatus = 0;
-      var ids = Object.keys(parts).filter(function(id){ return moduleWritable(id, roles); });
+      // A module switched off for this brand is never written (Build 611): its
+      // screens are gone and its data in memory may be empty, and publishing
+      // that would erase what is kept in the cloud for when it comes back on.
+      var ids = Object.keys(parts).filter(function(id){
+        return moduleWritable(id, roles) && (typeof veniaModuleEntitled !== 'function' || veniaModuleEntitled(id));
+      });
       try {
         var modRes = ids.length ? await c.from('venia_module_data').upsert(
           ids.map(function(id){

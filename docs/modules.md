@@ -82,6 +82,21 @@ is the very same object as the STATE key, so reading through it changes
 nothing. Only reads go through offers: a module still never writes another
 module's keys, and the check counts any direct use that is left.
 
+## Brands and subscriptions
+
+Every brand is a row in `venia_tenants`; VENIA is `main`, the same id the
+cloud rows already carry in `workspace_id`. `venia_tenant_members` says who
+belongs to a brand (owner, admin, member) and `venia_entitlements` says which
+add-ons it has (`on`, `trial` until a date, `paused`, `off`).
+
+- In the app, `window.VENIA_ENTITLED` holds the brand's switches after sign-in.
+  A module is off only when its row says so; unknown, missing or failed means on.
+- An off module is hidden from the nav, its offers return empty, and its cloud
+  row is never written, so its data is kept for when it comes back on.
+- In the database, `venia_can(brand, module, 'read' | 'write')` answers for
+  every table. Existing policies move onto it when a second brand is close.
+- Settings → Modules shows what the brand has. It is read-only for VENIA.
+
 ## The check
 
 `node scripts/check-modules.mjs` fails when a STATE key has two owners, a
