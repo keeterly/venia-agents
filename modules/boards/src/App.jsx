@@ -9,7 +9,9 @@ export const LEGACY_ID = 'b-brainstorm-board';
 function useRoute() {
   const read = () => {
     const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?/);
-    return m ? { view: 'board', id: m[1], comment: m[2] || null } : { view: 'home' };
+    if (m) return { view: 'board', id: m[1], comment: m[2] || null };
+    // "#/new": VENIA OS's Today asked for a new board straight away.
+    return { view: 'home', fresh: /^#\/new\b/.test(window.location.hash || '') };
   };
   const [route, setRoute] = useState(read);
   useEffect(() => { const f = () => setRoute(read()); window.addEventListener('hashchange', f); return () => window.removeEventListener('hashchange', f); }, []);
@@ -21,7 +23,7 @@ export default function App() {
   const route = useRoute();
   return route.view === 'board'
     ? <Board key={route.id} boardId={route.id} commentId={route.comment} />
-    : <Home />;
+    : <Home fresh={route.fresh} />;
 }
 
 function ago(iso) {
@@ -53,7 +55,7 @@ async function ensureLegacyBoard(boards) {
   try { await store.createBoard({ ...row, id: LEGACY_ID }); return true; } catch (e) { return false; }
 }
 
-function Home() {
+function Home({ fresh = false }) {
   const [boards, setBoards] = useState(null);
   const [trash, setTrash] = useState(false);
   const [q, setQ] = useState('');
@@ -66,6 +68,14 @@ function Home() {
   const [moving, setMoving] = useState(null);     // board being moved into another
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
+
+  // Opened as "#/new": show the New board sheet, then tidy the address so a
+  // reload or Back doesn't ask again.
+  useEffect(() => {
+    if (!fresh) return;
+    if (store.canEdit) setCreating(true);
+    try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e) {}
+  }, [fresh]);
 
   const load = useCallback(async () => {
     try {
