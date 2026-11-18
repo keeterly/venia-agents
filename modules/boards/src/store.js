@@ -114,19 +114,29 @@ export const store = {
 
   async purge(id) {
     if (this.mode === 'cloud') {
-      const files = await sb.from('venia_board_files').select('path').eq('board_id', id);
-      const paths = (files.data || []).map(f => f.path).concat([`${WS}/thumbs/${id}.png`]);
-      if (paths.length) await sb.storage.from(BUCKET).remove(paths);
-      const { data, error } = await sb.from('venia_boards').delete().eq('id', id).select('id');
-      if (error) throw error;
-      // Until permanent delete is switched on in the database, the row stays
-      // (RLS removes nothing, quietly). Say so rather than pretend.
-      if (!data || !data.length) throw new Error('Deleting for good isn\'t switched on yet. The board stays in Trash.');
+      // The database keeps no delete rights for browsers: one function,
+      // boards-purge, removes a trashed board, its images and its thumbnail,
+      // and records what went (venia_boards_purged).
+      const { data, error } = await sb.functions.invoke('boards-purge', { body: { boardId: id } });
+      if (error) {
+        let msg = '';
+        try { msg = (await error.context.json()).error || ''; } catch (e) { /* no body */ }
+        throw new Error(msg ? msg.charAt(0).toUpperCase() + msg.slice(1) + '.' : 'Couldn\'t delete the board just now. It stays in Trash.');
+      }
+      if (!data || !data.ok) throw new Error('Couldn\'t delete the board just now. It stays in Trash.');
       return;
     }
     const all = ((await get('boards', idb)) || []).filter(b => b.id !== id);
     await set('boards', all, idb);
     await del('scene:' + id, idb); await del('thumb:' + id, idb);
+  },
+
+  // Was this board deleted for good? (Keeps the old Brainstorm board from
+  // being imported a second time after someone purged it.)
+  async wasPurged(id) {
+    if (this.mode !== 'cloud') return false;
+    const { data, error } = await sb.from('venia_boards_purged').select('id').eq('id', id).maybeSingle();
+    return !error && !!data;
   },
 
   async loadBoard(id) {

@@ -40,6 +40,7 @@ async function ensureLegacyBoard(boards) {
   if (boards.some(b => b.id === LEGACY_ID)) return false;
   const trashed = await store.listBoards({ trash: true });
   if (trashed.some(b => b.id === LEGACY_ID)) return false;
+  if (await store.wasPurged(LEGACY_ID)) return false;
   const cards = await store.legacyBoardCards();
   if (!cards.length) return false;
   const elements = cards.filter(c => c.kind !== 'img').flatMap(legacyCardElements);
