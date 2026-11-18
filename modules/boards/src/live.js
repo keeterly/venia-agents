@@ -16,11 +16,19 @@ import { store, nameOf } from './store.js';
 
 const COLOURS = ['#C2410C', '#0F766E', '#7C3AED', '#B45309', '#1D4ED8', '#BE185D', '#4D7C0F'];
 const colourOf = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return COLOURS[h % COLOURS.length]; };
+// Everyone on the board gets their own colour. A hash alone gave Keeter and
+// Christine the same purple, so colours are handed out in order of the people
+// actually here (sorted by email), which every browser works out the same way.
+function colourMap(emails) {
+  const out = new Map();
+  [...new Set(emails.filter(Boolean))].sort().forEach((e, i) => out.set(e, COLOURS[i % COLOURS.length]));
+  return out;
+}
 
 export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
   const [people, setPeople] = useState([]);
   const [on, setOn] = useState(false);
-  const L = useRef({ ch: null, sent: new Map(), collaborators: new Map(), timer: null, lastPointer: 0, applying: false });
+  const L = useRef({ ch: null, sent: new Map(), collaborators: new Map(), timer: null, lastPointer: 0, applying: false, seen: new Set(), colours: new Map(), welcome: null });
 
   useEffect(() => {
     if (!api || store.mode !== 'cloud') return;
@@ -39,21 +47,38 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
         const st = ch.presenceState();
         const list = [];
         const keys = new Set();
+        const emails = [me.email];
+        let someoneNew = false;
         Object.entries(st).forEach(([key, metas]) => {
           const m = metas && metas[0]; if (!m) return;
-          keys.add(key);
-          if (key !== myKey) list.push({ key, ...m });
+          keys.add(key); emails.push(m.email);
+          if (key !== myKey) {
+            list.push({ key, ...m });
+            if (!L.current.seen.has(key)) { L.current.seen.add(key); someoneNew = true; }
+          }
         });
-        // forget cursors of people who left
-        for (const k of [...L.current.collaborators.keys()]) if (!keys.has(k)) L.current.collaborators.delete(k);
+        const colours = colourMap(emails);
+        L.current.colours = colours;
+        me.color = colours.get(me.email) || me.color;
+        list.forEach(p => { p.color = colours.get(p.email) || p.color; });
+        // forget cursors of people who left; recolour the ones still here
+        for (const [k, c] of [...L.current.collaborators.entries()]) {
+          if (!keys.has(k)) { L.current.collaborators.delete(k); L.current.seen.delete(k); continue; }
+          const col = colours.get(c.email); if (col) c.color = { background: col, stroke: col };
+        }
         redrawCollaborators();
         setPeople(list);
+        // Someone just opened the board. They loaded it from the cloud, which
+        // can be a second or two behind what's on screen here, so send them
+        // the whole board once and they're level straight away.
+        if (someoneNew) { clearTimeout(L.current.welcome); L.current.welcome = setTimeout(() => sendAll(), 250 + Math.random() * 500); }
       });
       ch.on('broadcast', { event: 'pointer' }, ({ payload }) => {
         if (!payload || !payload.key) return;
+        const col = (payload.email && L.current.colours.get(payload.email)) || payload.color;
         L.current.collaborators.set(payload.key, {
           pointer: { x: payload.x, y: payload.y, tool: 'pointer' }, button: payload.button || 'up',
-          username: payload.name, color: { background: payload.color, stroke: payload.color },
+          username: payload.name, email: payload.email, color: { background: col, stroke: col },
           selectedElementIds: payload.selected || {}, id: payload.key,
         });
         redrawCollaborators();
@@ -87,7 +112,8 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
     })();
     return () => {
       dead = true; setOn(false); setPeople([]);
-      clearTimeout(L.current.timer);
+      clearTimeout(L.current.timer); clearTimeout(L.current.welcome);
+      L.current.seen.clear();
       store.dropChannel(L.current.ch); L.current.ch = null;
       L.current.collaborators.clear();
     };
@@ -112,13 +138,24 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
     }, 120);
   }
 
+  // The whole board, deleted items included so a delete reaches them too.
+  function sendAll() {
+    const l = L.current;
+    if (!l.ch || !api || !store.canEdit) return;
+    const els = api.getSceneElementsIncludingDeleted();
+    els.forEach(e => l.sent.set(e.id, e.version));
+    for (let i = 0; i < els.length; i += 200) {
+      l.ch.send({ type: 'broadcast', event: 'scene', payload: { elements: els.slice(i, i + 200) } });
+    }
+  }
+
   function pointerMoved({ pointer, button }) {
     const l = L.current;
     if (!l.ch || !l.me) return;
     const t = Date.now(); if (t - l.lastPointer < 60) return; l.lastPointer = t;
     const st = api.getAppState();
     l.ch.send({ type: 'broadcast', event: 'pointer', payload: {
-      key: l.myKey, name: l.me.name, color: l.me.color, x: pointer.x, y: pointer.y, button, selected: st.selectedElementIds } });
+      key: l.myKey, name: l.me.name, email: l.me.email, color: l.me.color, x: pointer.x, y: pointer.y, button, selected: st.selectedElementIds } });
   }
 
   function commentsChanged() {

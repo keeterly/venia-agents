@@ -197,14 +197,15 @@ export default function Board({ boardId, commentId }) {
 
   // ── live together ────────────────────────────────────────────────────────
   const fetchMissing = useCallback(async (ids) => {
-    // Their image may still be on its way up; try for a little while.
-    for (let i = 0; i < 6 && api; i++) {
+    // Their image may still be on its way up (a big photo from a phone can
+    // take a while); keep trying for about a minute.
+    for (let i = 0; i < 15 && api; i++) {
       const have = new Set(Object.keys(api.getFiles()));
       const need = ids.filter(id => !have.has(id)); if (!need.length) return;
       const got = await store.loadFiles(boardId, need).catch(() => []);
       if (got.length) { api.addFiles(got); got.forEach(f => R.current.uploaded.add(f.id)); }
       if (got.length === need.length) return;
-      await new Promise(r => setTimeout(r, 2500));
+      await new Promise(r => setTimeout(r, 4000));
     }
   }, [api, boardId]);
 
@@ -290,7 +291,7 @@ export default function Board({ boardId, commentId }) {
     const t = setInterval(async () => {
       if (document.hidden || R.current.saving) return;
       // live edits arrive by themselves; this only catches what the channel missed
-      if (live.on && Date.now() - (R.current.lastPoll || 0) < 60000) return;
+      if (live.on && Date.now() - (R.current.lastPoll || 0) < 30000) return;
       R.current.lastPoll = Date.now();
       try {
         const r = await store.remoteRev(boardId);
