@@ -3237,7 +3237,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '609';
+  const BUILD = '610';
   const BUILD_DATE = '2026.11.18';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7080,6 +7080,115 @@ function veniaModuleManifest(id){
                        MODULE_MANIFEST[id] || {});
 }
 window.veniaModuleManifest = veniaModuleManifest;
+
+// ── VENIA OS CORE: how modules reach each other (Build 610) ────────────────
+// A module never reads another module's STATE key directly any more; it asks
+// the core for a named OFFER. While the owning module is on, the offer is the
+// very same object as STATE[key] — same reference, same mutations, nothing
+// copied — so for VENIA today every screen behaves exactly as before. The
+// difference is what happens when a brand does NOT have that module: the
+// offer comes back as an empty list (or undefined for a single value) instead
+// of whatever happened to be in memory, so the asking screen shows nothing
+// rather than breaking. scripts/check-modules.mjs counts the direct reads
+// that are left; the baseline only goes down.
+//
+// Offers are named <module>.<thing>. The 'core.' ones are shared data every
+// module may rely on; they still live in a module's keys today and move into
+// core storage in a later stage, behind these same names.
+const VENIA_OFFERS = {
+  // core — always on, whoever owns the key today
+  'core.catalog':      { key: 'styles',        list: true,  core: true },
+  'core.seasonCal':    { key: 'seasonCal',     list: false, core: true },
+  'core.colorLib':     { key: 'colorLib',      list: false, core: true },
+  'core.fx':           { key: 'fxRates',       list: false, core: true },
+  'core.brand.tone':   { key: 'brTone',        list: false, core: true },
+  'core.brand.prefs':  { key: 'brPrefs',       list: false, core: true },
+  'core.brand.docs':   { key: 'brandDocs',     list: true,  core: true },
+  'core.brand.marketing': { key: 'mkPrefs',    list: false, core: true },
+  // product
+  'product.materials': { key: 'materials',     list: true },
+  'product.vendors':   { key: 'vendors',       list: true },
+  'product.bom':       { key: 'bom',           list: false },
+  'product.pom':       { key: 'pom',           list: false },
+  'product.pos':       { key: 'pos',           list: true },
+  // growth
+  'growth.pulls':      { key: 'prPulls',       list: true },
+  'growth.workingPullId': { key: 'workingPullId', list: false },
+  'growth.coverage':   { key: 'prCoverage',    list: true },
+  'growth.editors':    { key: 'prEditors',     list: true },
+  'growth.calendar':   { key: 'mkCalendar',    list: true },
+  'growth.seen':       { key: 'growthSeen',    list: false },
+  // sales
+  'sales.buyers':      { key: 'slBuyers',      list: true },
+  'sales.quotes':      { key: 'slQuotes',      list: true },
+  'sales.orders':      { key: 'slOrders',      list: true },
+  'sales.linesheets':  { key: 'slLinesheets',  list: true },
+  'sales.prefs':       { key: 'slPrefs',       list: false },
+  // money
+  'money.bank':        { key: 'finBank',       list: false },
+  'money.txns':        { key: 'finTxns',       list: true },
+  'money.watch':       { key: 'finWatch',      list: false },
+  'money.snapshot':    { key: 'bizSnap',       list: false },
+  // brainstorm
+  'brainstorm.dump':   { key: 'dump',          list: true },
+};
+const VeniaOS = (function(){
+  const listeners = Object.create(null);
+  const slots = Object.create(null);
+  const warned = Object.create(null);
+  // Is a module on for this brand AND reachable by this person? Core modules
+  // always are. window.VENIA_MY_MODULES is null for a founder (everything);
+  // window.VENIA_ENTITLED is the brand's subscriptions, null until known —
+  // and unknown always means on, so a slow read never hides a founder's data.
+  function enabled(id){
+    if (!id) return true;
+    const man = (typeof MODULE_MANIFEST !== 'undefined') && MODULE_MANIFEST[id];
+    if (man && man.tier === 'core') return true;
+    const ent = window.VENIA_ENTITLED;
+    if (ent && ent[id] === false) return false;
+    // VENIA_MY_MODULES is {module: role} for a scoped member, null for a
+    // founder or anyone holding everything.
+    const mine = window.VENIA_MY_MODULES;
+    if (mine && typeof mine === 'object' && !mine[id]) return false;
+    return true;
+  }
+  function get(name){
+    const o = VENIA_OFFERS[name];
+    if (!o) {
+      if (!warned[name]) { warned[name] = 1; try { console.warn('[VeniaOS] no offer named', name); } catch(e){} }
+      return undefined;
+    }
+    if (!o.core && !enabled(o.mod || (o.mod = moduleOfKey(o.key)))) return o.list ? [] : undefined;
+    return STATE[o.key];
+  }
+  // Events: a module announces, any module that is on may listen. A listener
+  // that throws never stops the announcer or the other listeners.
+  function on(event, moduleId, fn){
+    (listeners[event] = listeners[event] || []).push({ m: moduleId, fn: fn });
+  }
+  function emit(event, payload){
+    (listeners[event] || []).forEach(function(l){
+      if (!enabled(l.m)) return;
+      try { l.fn(payload); } catch(e){ try { console.warn('[VeniaOS] listener for', event, 'failed', e); } catch(_){} }
+    });
+  }
+  // Contributions: Today cards, assistant context, search results. Collected
+  // only from modules that are on.
+  function contribute(slot, moduleId, fn){ (slots[slot] = slots[slot] || []).push({ m: moduleId, fn: fn }); }
+  function collect(slot, arg){
+    const out = [];
+    (slots[slot] || []).forEach(function(c){
+      if (!enabled(c.m)) return;
+      try { const r = c.fn(arg); if (Array.isArray(r)) out.push.apply(out, r); else if (r != null) out.push(r); } catch(e){}
+    });
+    return out;
+  }
+  return { enabled: enabled, get: get, on: on, emit: emit, contribute: contribute, collect: collect,
+           offers: function(){ return Object.keys(VENIA_OFFERS); },
+           manifest: function(id){ return veniaModuleManifest(id); } };
+})();
+window.VeniaOS = VeniaOS;
+window.VENIA_OFFERS = VENIA_OFFERS;
 // Which module rows a person may WRITE.
 //
 // `roles` is window.VENIA_MY_ROLES — what they HOLD — and not
@@ -8212,7 +8321,7 @@ function renderDashboard() {
   const overdue = active.filter(s => s.drop && ['production','development','sms'].includes(s.status) && new Date(s.drop) < today);
   const noCogs = active.filter(s => ['development','production','active'].includes(s.status) && !s.cogs);
   const noBom = active.filter(s => s.status !== 'concept' && (!STATE.bom[s.id]||!STATE.bom[s.id].length));
-  const activePulls = (STATE.prPulls||[]).filter(p=>p.status==='active');
+  const activePulls = (VeniaOS.get('growth.pulls')||[]).filter(p=>p.status==='active');
 
   // Product-space actions only — PR / sample pulls live in Growth, not here.
   // qa-nav = pure shortcuts that duplicate the sidebar / topbar on desktop;
@@ -8441,7 +8550,7 @@ function rpActuals(season){
   // Sell-in booked = accepted quotes for this season (orders are created FROM
   // accepted quotes, so counting the quote once covers both without doubling).
   // In dollars: a euro quote's total is euros (Build 587).
-  const booked = (STATE.slQuotes||[]).filter(q => q.status==='accepted' && String(q.season||'').trim()===season)
+  const booked = (VeniaOS.get('sales.quotes')||[]).filter(q => q.status==='accepted' && String(q.season||'').trim()===season)
     .reduce((s,q)=>s+slToUsd(q.total||0, q.currency, q.fxRate),0);
   return { styles: styles.length, cats, avgMargin, booked };
 }
@@ -8632,10 +8741,10 @@ function seasonRetroData(season){
     const roundsN = (s.sampleLog||[]).length;
     return { s, f, sold, moved, movedShared, margin, roundsN, cat: s.category || 'Other' };
   });
-  const booked = (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
+  const booked = (VeniaOS.get('sales.quotes')||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
     .reduce((a,q) => a + slToUsd(q.total||0, q.currency, q.fxRate), 0);
   const names = styles.map(s => String(s.name||'').toLowerCase()).filter(Boolean);
-  const covN = (STATE.prCoverage||[]).filter(c =>
+  const covN = (VeniaOS.get('growth.coverage')||[]).filter(c =>
     (c.stylesFeature||[]).some(n => names.includes(String(n||'').toLowerCase()))).length;
   const margins = rows.map(r => r.margin).filter(m => m != null);
   const withRounds = rows.filter(r => r.roundsN > 0);
@@ -8706,7 +8815,7 @@ window.seasonRetroSave = function(season){
   const body = seasonRetroText(d);
   if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
   const title = season + ' Retro';
-  const existing = STATE.brandDocs.find(x => x.title === title);
+  const existing = VeniaOS.get('core.brand.docs').find(x => x.title === title);
   if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
   else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title, kind: 'retro', body,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -8768,7 +8877,7 @@ const LL_COLOUR_FIX = { oxblod:'oxblood', sulphur:'sulfur' };
 // Material vocabulary grows with the brand: anything in the material library
 // is recognised too, longest phrase first so "cotton terry" beats "cotton".
 function llMaterialVocab(){
-  const lib = ((window.STATE && STATE.materials) || []).map(m => String(m.name||'').toLowerCase().trim()).filter(Boolean);
+  const lib = ((window.STATE && VeniaOS.get('product.materials')) || []).map(m => String(m.name||'').toLowerCase().trim()).filter(Boolean);
   return [...new Set(lib.concat(LL_MATERIALS))].sort((a,b) => b.length - a.length);
 }
 function llSplit(cell){
@@ -8841,7 +8950,7 @@ function llParse(rows){
 // Reconcile the parsed list against PLM: what's new, what needs repairing
 // (a style whose material was swallowed into its colourways), what's already right.
 function llReconcile(parsed, season){
-  const existing = ((window.STATE && STATE.styles) || []).filter(x => x.status !== 'archived');
+  const existing = ((window.STATE && VeniaOS.get('core.catalog')) || []).filter(x => x.status !== 'archived');
   const plan = { create: [], repair: [], ok: [], ambiguous: [] };
   // One existing record can only be repaired ONCE. A style whose colourways
   // swallowed two materials ("Parchment Viscose, Black Leather") would
@@ -9094,7 +9203,7 @@ function fxView(){
 function fxRate(code){
   code = code || fxView();
   if (code === 'USD') return 1;
-  const r = Number(((window.STATE && STATE.fxRates) || {})[code]);
+  const r = Number(((window.STATE && VeniaOS.get('core.fx')) || {})[code]);
   return (isFinite(r) && r > 0) ? r : 0;      // 0 means "not set yet"
 }
 // Convert and format a USD amount for display. Whole units throughout — a line
@@ -9122,7 +9231,7 @@ function fxEnsureRate(code){
   const r = Number(String(inp).replace(/[^0-9.]/g, ''));
   if (!(r > 0)) { toast('That is not a rate I can use', 'warn'); return false; }
   if (!STATE.fxRates) STATE.fxRates = {};
-  STATE.fxRates[code] = r;
+  VeniaOS.get('core.fx')[code] = r;
   save();
   return true;
 }
@@ -11320,7 +11429,7 @@ async function archiveSeason() {
   if (!targets.length) { toast(`Nothing to archive in ${season}`); return; }
   // Archiving mutes the season's live actuals everywhere — capture the retro
   // first so the numbers survive as a saved doc. Skipped if one already exists.
-  const hasRetro = (STATE.brandDocs||[]).some(d => d.title === season + ' Retro');
+  const hasRetro = (VeniaOS.get('core.brand.docs')||[]).some(d => d.title === season + ' Retro');
   // One sheet, three plain answers. Cancel used to MEAN "archive without the
   // retro", so closing the first dialog went on to archive (Build 590).
   const canRetro = !hasRetro && typeof seasonRetroOpen === 'function';
@@ -14115,7 +14224,7 @@ async function dpDelete() {
   STATE.styles = STATE.styles.filter(x => x.id !== s.id);
   if (STATE.bom) delete STATE.bom[s.id];
   if (STATE.pom) delete STATE.pom[s.id];
-  if (STATE.workingPullId && false) {}   // pulls reference styles by embedded copy, not id — nothing to prune
+  if (VeniaOS.get('growth.workingPullId') && false) {}   // pulls reference styles by embedded copy, not id — nothing to prune
   try { if (typeof buildSkus === 'function') buildSkus(); } catch(e){}
   save();
   toast(s.name+' deleted');
@@ -16000,7 +16109,7 @@ function renderLineSheet() {
           <span>VENIA Collection — Trade Only</span>
           <span>${styles.length} styles · ${seasonLabel}</span>
         </div>
-        <div style="line-height:1.6">Terms — Minimum opening order: ${(STATE.slPrefs&&STATE.slPrefs.moq)?String(STATE.slPrefs.moq).replace(/</g,'&lt;'):'per line sheet'}. Lead times in days from PO. Wholesale USD, FOB. Prices confidential.</div>
+        <div style="line-height:1.6">Terms — Minimum opening order: ${(VeniaOS.get('sales.prefs')&&VeniaOS.get('sales.prefs').moq)?String(VeniaOS.get('sales.prefs').moq).replace(/</g,'&lt;'):'per line sheet'}. Lead times in days from PO. Wholesale USD, FOB. Prices confidential.</div>
       </div>
     </div>`;
 }
@@ -16182,7 +16291,7 @@ function invWholesaleSince(s){
   if (st.src !== 'shopify' || !st.at) return 0;
   const since = new Date(st.at).getTime();
   let n = 0;
-  (STATE.slOrders || []).forEach(function(o){
+  (VeniaOS.get('sales.orders') || []).forEach(function(o){
     if (!o || o.status !== 'delivered' || !o.inventoryApplied) return;
     const when = new Date(o.deliveredAt || o.updatedAt || 0).getTime();
     if (!when || when < since) return;
@@ -16616,8 +16725,8 @@ function filterInv(filter,el){
   if (el) el.classList.add('active');
   renderInventory(filter);
 }
-function setStock(id, qty) { const s=STATE.styles.find(x=>x.id===id); if(s){s.stock=parseInt(qty)||0; save(); logActivity(`Stock updated: ${s.name} → ${s.stock} units`);} }
-function setReorderQty(id,qty){const s=STATE.styles.find(x=>x.id===id);if(s){s.reorderQty=parseInt(qty)||0;save();}}
+function setStock(id, qty) { const s=VeniaOS.get('core.catalog').find(x=>x.id===id); if(s){s.stock=parseInt(qty)||0; save(); logActivity(`Stock updated: ${s.name} → ${s.stock} units`);} }
+function setReorderQty(id,qty){const s=VeniaOS.get('core.catalog').find(x=>x.id===id);if(s){s.reorderQty=parseInt(qty)||0;save();}}
 
 // ═══════════════════════════════════════════════
 //  PRODUCTION POs — factory buys, payments, receiving
@@ -16716,7 +16825,7 @@ window.poOrderFabric = function(matId){
 };
 function poSoldUnitsForStyle(styleId, season){
   let n = 0;
-  (STATE.slQuotes||[]).filter(q => q.status === 'accepted' && (!season || String(q.season||'').trim() === season))
+  (VeniaOS.get('sales.quotes')||[]).filter(q => q.status === 'accepted' && (!season || String(q.season||'').trim() === season))
     .forEach(q => (q.items||[]).forEach(it => {
       if (it.styleId !== styleId) return;
       const szSum = Object.values(it.sizes||{}).reduce((a,b) => a + (parseInt(b,10)||0), 0);
@@ -16943,7 +17052,7 @@ window.poRecalc = function(){
 // Consolidate the season's won demand (accepted quotes, size-level) into PO lines.
 window.poPullDemand = function(){
   const season = (document.getElementById('po-season')?.value||'').trim();
-  const won = (STATE.slQuotes||[]).filter(q=>q.status==='accepted' && (!season || String(q.season||'').trim()===season));
+  const won = (VeniaOS.get('sales.quotes')||[]).filter(q=>q.status==='accepted' && (!season || String(q.season||'').trim()===season));
   const byStyle = {};
   won.forEach(q=>(q.items||[]).forEach(it=>{
     if (!it.styleId) return;
@@ -17205,14 +17314,14 @@ function runSearch(q) {
   );
   // Search is app-wide, not PLM-only: CRM accounts, quotes, Brainstorm
   // items/briefs, and press contacts are all findable from anywhere.
-  const buyerHits = (STATE.slBuyers||[]).filter(b =>
+  const buyerHits = (VeniaOS.get('sales.buyers')||[]).filter(b =>
     (b.name||'').toLowerCase().includes(q) || (b.contactName||'').toLowerCase().includes(q) ||
     (b.location||'').toLowerCase().includes(q) || (b.notes||'').toLowerCase().includes(q));
-  const quoteHits = (STATE.slQuotes||[]).filter(qu =>
+  const quoteHits = (VeniaOS.get('sales.quotes')||[]).filter(qu =>
     (qu.buyerName||'').toLowerCase().includes(q) || (qu.season||'').toLowerCase().includes(q));
-  const dumpHits = (STATE.dump||[]).filter(d =>
+  const dumpHits = (VeniaOS.get('brainstorm.dump')||[]).filter(d =>
     (d.t||'').toLowerCase().includes(q) || (d.work && (d.work.md||'').toLowerCase().includes(q)));
-  const editorHits = (STATE.prEditors||[]).filter(ed =>
+  const editorHits = (VeniaOS.get('growth.editors')||[]).filter(ed =>
     (ed.name||'').toLowerCase().includes(q) || (ed.outlet||'').toLowerCase().includes(q));
 
   let html = '';
@@ -22538,7 +22647,7 @@ function prSearchStyles(query) {
   if (!resultsEl) return;
   if (!query.trim()) { resultsEl.innerHTML = ''; return; }
   const q = query.toLowerCase();
-  const matches = STATE.styles
+  const matches = VeniaOS.get('core.catalog')
     .filter(s => s.status !== 'archived' &&
       (s.name.toLowerCase().includes(q) || s.styleId.toLowerCase().includes(q) || (s.season||'').toLowerCase().includes(q)))
     .slice(0, 8);
@@ -22564,7 +22673,7 @@ function prSearchStyles(query) {
   // The way out of the dead end. Offered whenever what you typed is not already
   // a style by that exact name — not only when there are zero matches, because
   // "LARA VEST (archive)" is a real thing to pull and it partial-matches.
-  const exact = STATE.styles.some(s => s.status !== 'archived'
+  const exact = VeniaOS.get('core.catalog').some(s => s.status !== 'archived'
     && (String(s.name||'').toLowerCase() === q || String(s.styleId||'').toLowerCase() === q));
   const typed = query.trim();
   if (!exact && typed) {
@@ -22676,12 +22785,12 @@ function prCartValueGate(){
 
 function prItemStyle(item){
   if (!item) return null;
-  return (STATE.styles||[]).find(x => x.id === item.styleId)
-      || (STATE.styles||[]).find(x => String(x.styleId||'') === String(item.styleCode||'')) || null;
+  return (VeniaOS.get('core.catalog')||[]).find(x => x.id === item.styleId)
+      || (VeniaOS.get('core.catalog')||[]).find(x => String(x.styleId||'') === String(item.styleCode||'')) || null;
 }
 
 function prAddToCart(styleId, nfcTag='', size='', color='') {
-  const s = STATE.styles.find(x => x.id === styleId);
+  const s = VeniaOS.get('core.catalog').find(x => x.id === styleId);
   if (!s) return;
   PR_CART.push({
     styleId: s.id,
@@ -22766,7 +22875,7 @@ function prGoPulls() {
 
 function prTagCheck(tagVal) {
   prInit();
-  const s = STATE.styles.find(x => x.id === tagVal || x.styleId === tagVal);
+  const s = VeniaOS.get('core.catalog').find(x => x.id === tagVal || x.styleId === tagVal);
   if (!s) { toast(`Tag "${tagVal}" doesn't match a style`, 'error'); return; }
 
   // The explicit working pull matches by id REGARDLESS of status: a draft
@@ -23745,7 +23854,7 @@ window.setTestStripe = async function(){
   const iv = setInterval(() => {
     const gate = document.getElementById('venia-auth-gate');
     if (gate && !gate.classList.contains('hidden')) return;      // wait for unlock
-    if (typeof STATE === 'undefined' || !STATE.styles || !STATE.styles.length) return;
+    if (typeof STATE === 'undefined' || !VeniaOS.get('core.catalog') || !VeniaOS.get('core.catalog').length) return;
     // A tag tap usually opens Safari, whose local data starts empty — the real
     // pulls arrive with the first cloud sync. Deciding before it lands would
     // miss the working pull and wrongly offer a new one. Wait for the sync,
@@ -23762,7 +23871,7 @@ window.setTestStripe = async function(){
 // Helper: the tag URL for every live style, ready to write to NTAG stickers
 // (NFC Tools app) or print as QR codes.
 function prTagUrlsModal() {
-  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived');
+  const styles = (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived');
   const ov = document.createElement('div');
   ov.id = 'pr-tag-urls-overlay';
   ov.style.cssText = 'position:fixed;inset:0;background:var(--overlay-backdrop);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
@@ -25216,7 +25325,7 @@ window.slSnippetStore = slSnippetStore;
 // one address, and searching for that address finds every message of it in one
 // pass — where a blanket scan of the mailbox does not get near it.
 window.slAgentSenders = function(){
-  const raw = (window.STATE && STATE.slPrefs && STATE.slPrefs.agentSenders) || '';
+  const raw = (window.STATE && VeniaOS.get('sales.prefs') && VeniaOS.get('sales.prefs').agentSenders) || '';
   return String(raw).split(/[,;\s]+/).map(function(x){ return x.trim().toLowerCase(); })
     .filter(function(x){ return x.indexOf('@') > 0; }).slice(0, 8);
 };
@@ -25248,7 +25357,7 @@ window.gmailScanOutreach = async function(days, onProgress, opts){
   const broad = await gmailSearch('newer_than:' + win + 'd -in:draft', 500);
   const broadCapped = broad.length >= 500;
   broad.forEach(function(x){ if (x && x.id && !seenId[x.id]) { seenId[x.id] = 1; ids.push(x); } });
-  const buyers = (STATE.slBuyers || []).filter(Boolean);
+  const buyers = (VeniaOS.get('sales.buyers') || []).filter(Boolean);
   // Index the CRM by every address and domain we hold for it.
   const byAddr = {}, byDomain = {}, byName = [];
   buyers.forEach(function(b){
@@ -26405,7 +26514,7 @@ function cmdInit() {
   cmdRenderPulls();
   revRender();
   // Update home tiles — "Active leads" = pipeline stores still in play.
-  const leadsN = (STATE.slBuyers||[]).filter(b => ['new','approached','warm','quoted'].includes(slBuyerStage(b))).length;
+  const leadsN = (VeniaOS.get('sales.buyers')||[]).filter(b => ['new','approached','warm','quoted'].includes(slBuyerStage(b))).length;
   const el_l = document.getElementById('cpl-stat-leads');
   if (el_l) el_l.textContent = leadsN || '0';
 }
@@ -26420,12 +26529,12 @@ function cpRenderToday(){
     const seasonEl = document.getElementById('cpl-season');
     if (seasonEl && typeof smDefaultSeason === 'function') {
       const s = smDefaultSeason();
-      const inDev = (STATE.styles||[]).filter(x => x.season === s && x.status !== 'archived').length;
+      const inDev = (VeniaOS.get('core.catalog')||[]).filter(x => x.season === s && x.status !== 'archived').length;
       seasonEl.textContent = s ? (s + (inDev ? ' · ' + inDev + ' style' + (inDev>1?'s':'') : ' line')) : '';
     }
   } catch(e){}
   try {
-    const leadsN = (STATE.slBuyers||[]).filter(b => ['new','approached','warm','quoted'].includes(slBuyerStage(b))).length;
+    const leadsN = (VeniaOS.get('sales.buyers')||[]).filter(b => ['new','approached','warm','quoted'].includes(slBuyerStage(b))).length;
     const el_l = document.getElementById('cpl-stat-leads');
     if (el_l) el_l.textContent = leadsN || '0';
     cmdLoadShopify();  // decides live-vs-demo itself, based on the server proxy
@@ -26522,7 +26631,7 @@ function buildTodayFocus() {
   //    Only the pieces still out: naming ones already checked back in sent the
   //    chase after samples that are on the rail. A pull with nothing left out
   //    is not overdue, whatever its status says.
-  (STATE.prPulls||[]).filter(p => p.status==='active').forEach(p => {
+  (VeniaOS.get('growth.pulls')||[]).filter(p => p.status==='active').forEach(p => {
     const all = (p.items||[]).filter(Boolean);
     const out = all.filter(i => !i.returned);
     if (all.length && !out.length) return;
@@ -26541,7 +26650,7 @@ function buildTodayFocus() {
   //     which — Mark sent (it went out; normal tracking takes over) or Delete
   //     (asks first, in the app).
   const todayIso = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  (STATE.prPulls||[]).filter(p => p.status === 'draft').forEach(p => {
+  (VeniaOS.get('growth.pulls')||[]).filter(p => p.status === 'draft').forEach(p => {
     const endIso = p.returnDate || p.pullDate || p.shootDate;
     if (!endIso) return;
     const end = new Date(String(endIso).slice(0,10) + 'T00:00:00');
@@ -26580,7 +26689,7 @@ function buildTodayFocus() {
   const _today = now.toISOString().slice(0,10);
   const _d10 = (v) => String(v || '').slice(0, 10);
   const _late = [], _lateDropped = [];
-  (STATE.slBuyers||[]).forEach(b => {
+  (VeniaOS.get('sales.buyers')||[]).forEach(b => {
     if (b.stage === 'inactive' || !b.nextDate || b.nextDate >= _today) return;
     // Spoken to on or after the day it was planned for: it happened. The
     // nextDate is just stale, and nagging about it is how this list lost its
@@ -26625,7 +26734,7 @@ function buildTodayFocus() {
     });
   } catch(e){}
   // 3. Sample rounds past their ETA with no result logged.
-  (STATE.styles||[]).forEach(s => {
+  (VeniaOS.get('core.catalog')||[]).forEach(s => {
     try {
       if (typeof sampleOverdue === 'function' && sampleOverdue(s)) {
         items.push({key:'sample|'+s.id, pri:'high', text:`Sample overdue — ${s.name||s.styleId} (chase the factory)`,
@@ -26634,7 +26743,7 @@ function buildTodayFocus() {
     } catch(e){}
   });
   // 4. Timeline: styles late against their drop-date workback.
-  (STATE.styles||[]).filter(s => s.status !== 'archived' && s.drop).forEach(s => {
+  (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && s.drop).forEach(s => {
     try {
       const sched = typeof tlSchedule === 'function' ? tlSchedule(s) : null;
       if (!sched) return;
@@ -26656,7 +26765,7 @@ function buildTodayFocus() {
   //     surfaces as a heads-up inside 14.
   const _scMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const SC_NAG = { linesheetFreeze:'Line sheet freeze', orderClose:'Order close', factoryCommit:'Factory commit', marketStart:'Market opens', deliveryStart:'Delivery window opens' };
-  Object.entries(STATE.seasonCal||{}).forEach(([season, cal]) => {
+  Object.entries(VeniaOS.get('core.seasonCal')||{}).forEach(([season, cal]) => {
     if (!cal) return;
     Object.entries(SC_NAG).forEach(([k, label]) => {
       if (!cal[k]) return;
@@ -26672,12 +26781,12 @@ function buildTodayFocus() {
   //     season that aren't on a PO yet. Quiet until 21 days out (no log-time
   //     interrupts), high inside 7 — after the commit date it stops nagging
   //     (the decision window is over; the retro owns what happened).
-  Object.entries(STATE.seasonCal||{}).forEach(([season, cal]) => {
+  Object.entries(VeniaOS.get('core.seasonCal')||{}).forEach(([season, cal]) => {
     if (!cal || !cal.factoryCommit || typeof poUnitsForStyle !== 'function') return;
     const days = Math.round((new Date(cal.factoryCommit + 'T00:00:00') - _scMid) / 86400000);
     if (days < 0 || days > 21) return;
     let gapUnits = 0, gapStyles = 0;
-    (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season).forEach(s => {
+    (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season).forEach(s => {
       const f = parseInt(s.forecastUnits,10)||0; if (!f) return;
       const gap = Math.max(0, f - poUnitsForStyle(s.id) - invStockEffective(s).units);
       if (gap > 0){ gapUnits += gap; gapStyles++; }
@@ -26694,7 +26803,7 @@ function buildTodayFocus() {
     if (gN) items.push({key:'growth', pri:'low', text:`Press → sales: ${gN} coverage-backed intro${gN>1?'s':''} suggested`, act:"cpGoto('sl')"});
   } catch(e){}
   // 5. Quotes that went quiet (sent, no movement in 7+ days).
-  (STATE.slQuotes||[]).filter(q => q.status === 'sent').forEach(q => {
+  (VeniaOS.get('sales.quotes')||[]).filter(q => q.status === 'sent').forEach(q => {
     const at = new Date(q.createdAt || 0);
     const days = Math.floor((now - at) / 86400000);
     if (days >= 7) items.push({key:'quote|'+q.id, pri:'med', text:`Quote to ${q.buyerName} is quiet — ${slMoney(q.total||0, q.currency)}, sent ${days}d ago`,
@@ -26703,7 +26812,7 @@ function buildTodayFocus() {
   // 6. Wholesale deliveries due or past due. Calendar-day distance (vs midnight),
   //    so "today" is 0 and "yesterday" is -1 regardless of the time of day.
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  (STATE.slOrders || dbGet('slOrders') || []).forEach(o => {
+  (VeniaOS.get('sales.orders') || dbGet('slOrders') || []).forEach(o => {
     if (!o.deliveryDate || ['delivered','cancelled'].includes(o.status)) return;
     const days = Math.round((new Date(o.deliveryDate + 'T00:00:00') - midnight) / 86400000);
     if (days < 0) items.push({key:'del|'+o.id, pri:'high', text:`Wholesale order #${o.id} (${o.account}) delivery is ${-days}d past due`,
@@ -26715,7 +26824,7 @@ function buildTodayFocus() {
   //     items past the Stripe due date (or invoice date + 14d terms) surface.
   //     Instalment orders count each billed deposit or balance (invoice or
   //     payment link) on its own due date; older orders read o.payment as before.
-  (STATE.slOrders || dbGet('slOrders') || []).forEach(o => {
+  (VeniaOS.get('sales.orders') || dbGet('slOrders') || []).forEach(o => {
     if (o.status === 'cancelled') return;
     slOrderReceivables(o).forEach(p => {
       if (!p.billed || (p.legacy && !p.invoiceId)) return;
@@ -26729,7 +26838,7 @@ function buildTodayFocus() {
     });
   });
   // 6b. Production POs: factory payments coming due, and ex-factory dates near.
-  (STATE.pos||[]).filter(po => !['received','cancelled'].includes(po.status)).forEach(po => {
+  (VeniaOS.get('product.pos')||[]).filter(po => !['received','cancelled'].includes(po.status)).forEach(po => {
     const dep = Math.round((po.total||0)*((po.depositPct!=null?po.depositPct:30)/100));
     const bal = Math.round((po.total||0)-dep);
     const payDays = (d) => Math.round((new Date(d + 'T00:00:00') - midnight) / 86400000);
@@ -26759,7 +26868,7 @@ function buildTodayFocus() {
     }
   });
   // 7. Content going out in the next 48h.
-  (STATE.mkCalendar||[]).forEach(e => {
+  (VeniaOS.get('growth.calendar')||[]).forEach(e => {
     const d = new Date(e.date + 'T00:00:00');
     const days = Math.round((d - midnight) / 86400000);
     if (days >= 0 && days <= 1 && e.status !== 'posted') {
@@ -26776,7 +26885,7 @@ function buildTodayFocus() {
     const fesc = window.__fcEsc || (x => String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'));
     Object.keys(fc).forEach(sid => {
       const e = fc[sid]; if (!e || !e.count) return;
-      const s = (STATE.styles||[]).find(x => x.id === sid); if (!s) return;
+      const s = (VeniaOS.get('core.catalog')||[]).find(x => x.id === sid); if (!s) return;
       items.push({ key:'fc|'+sid, pri:'med',
         text:`Factory asked: “${fesc(String(e.latest||'').slice(0,70))}${(e.latest||'').length>70?'…':''}” — ${s.name}${e.count>1?` (+${e.count-1} more)`:''}`,
         act:"cpGoto('plm');setTimeout(function(){openDp('"+sid+"')},150)" });
@@ -26785,7 +26894,7 @@ function buildTodayFocus() {
   // 7c. Open bulk-gating conditions: an "approved with corrections" means the
   //     factory owes something BEFORE cutting bulk — these are blocking, so
   //     they sit high until checked off on the sample card.
-  (STATE.styles||[]).filter(s => s.status !== 'archived' && (s.gates||[]).some(g => !g.done)).forEach(s => {
+  (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && (s.gates||[]).some(g => !g.done)).forEach(s => {
     const open = (s.gates||[]).filter(g => !g.done);
     items.push({ key:'gate|'+s.id, pri:'high',
       text:`Before bulk on ${s.name}: ${open[0].text.slice(0,80)}${open.length>1?` (+${open.length-1} more)`:''}`,
@@ -26815,7 +26924,7 @@ function buildTodayFocus() {
   //     when the money involved is real, because that is when it distorts the
   //     statement rather than merely annoying somebody.
   try {
-    const unfiled = (STATE.finTxns || []).filter(function(t){
+    const unfiled = (VeniaOS.get('money.txns') || []).filter(function(t){
       return t && t.status !== 'void' && !(typeof finTxnCat === 'function' ? finTxnCat(t) : t.category); });
     if (unfiled.length) {
       const out = unfiled.reduce(function(v, t){ return v + ((t.amount || 0) < 0 ? -(t.amount || 0) : 0); }, 0);
@@ -26830,7 +26939,7 @@ function buildTodayFocus() {
   //     second is a block — an outreach list you cannot write to makes the
   //     pipeline look larger than it is.
   try {
-    if (typeof slDeskAudit === 'function' && (STATE.slBuyers || []).length) {
+    if (typeof slDeskAudit === 'function' && (VeniaOS.get('sales.buyers') || []).length) {
       const da = slDeskAudit();
       const q = slDeskQueue(5);
       if (q.length) items.push({ key: 'wholesale', pri: 'high',
@@ -26904,7 +27013,7 @@ function buildTodayFocus() {
       else if (WEEKLY[k]) i.sig = _wk;
       else if (k === 'task' || k === 'nag') i.sig = '';
       else if (k === 'pull' && !/\|draft$/.test(i.key)) {
-        const p = (STATE.prPulls || []).find(function (x) { return x && 'pull|' + x.id === i.key; });
+        const p = (VeniaOS.get('growth.pulls') || []).find(function (x) { return x && 'pull|' + x.id === i.key; });
         i.sig = p ? String(p.returnDate || '') : '';
       } else i.sig = todayPlain(i.text).replace(/[0-9][0-9,.]*/g, '#');
     }
@@ -27068,7 +27177,7 @@ window.todayDone = function(key){
     // Done on a follow-up means it happened: today becomes the last contact,
     // with a line in the buyer's history, which is also what keeps the
     // follow-up from coming back.
-    const b = (STATE.slBuyers || []).find(function (x) { return x && x.id === i.buyer; });
+    const b = (VeniaOS.get('sales.buyers') || []).find(function (x) { return x && x.id === i.buyer; });
     if (b) {
       const d = new Date().toISOString().slice(0, 10);
       b.lastContact = d;
@@ -27092,7 +27201,7 @@ window.todayDrop = async function(key){
     return;
   }
   if (i.buyer) {
-    const b = (STATE.slBuyers || []).find(function (x) { return x && x.id === i.buyer; });
+    const b = (VeniaOS.get('sales.buyers') || []).find(function (x) { return x && x.id === i.buyer; });
     const pick = await veniaChoose({
       title: 'Stop following up with ' + (b ? b.name : 'this buyer') + '?',
       body: 'Dormant takes them off Today and out of the daily approach list in Sales. Their history stays, and you can move them back from their card any time.',
@@ -27186,7 +27295,7 @@ window.todayShowSnoozed = function(){
 // becomes a sent ('active') pull, so the overdue chase above takes over. No
 // email is sent. Delete goes through prDeletePull, which asks first.
 window.todayDraftPullSent = function(id){
-  const p = (STATE.prPulls||[]).find(x => x && x.id === id);
+  const p = (VeniaOS.get('growth.pulls')||[]).find(x => x && x.id === id);
   if (!p || p.status !== 'draft') return false;
   p.status = 'active';
   p.markedSentAt = new Date().toISOString();
@@ -27197,9 +27306,9 @@ window.todayDraftPullSent = function(id){
   return true;
 };
 window.todayDraftPullDelete = function(id){
-  const before = (STATE.prPulls||[]).length;
+  const before = (VeniaOS.get('growth.pulls')||[]).length;
   try { prDeletePull(id); } catch(e){}
-  if ((STATE.prPulls||[]).length !== before) { try { buildTodayFocus(); } catch(e){} }
+  if ((VeniaOS.get('growth.pulls')||[]).length !== before) { try { buildTodayFocus(); } catch(e){} }
 };
 
 window.todayTaskAdd = function(text){
@@ -27782,11 +27891,11 @@ function cmdFilterOrders() {
 }
 
 // ── SALES PIPELINE — Command Center window onto the ONE Buyers CRM ──────
-// Same records as Sales → Buyers (STATE.slBuyers). The legacy person-level
+// Same records as Sales → Buyers (VeniaOS.get('sales.buyers')). The legacy person-level
 // "leads" store is folded into the CRM at boot by slMigrateLeads().
 const CMD_LEAD_TYPE_MAP = { boutique:'Boutique', stylist:'Stylist', retail:'Direct client' };
 function cmdRenderPipeline() {
-  const buyers = STATE.slBuyers || [];
+  const buyers = VeniaOS.get('sales.buyers') || [];
   const today = new Date().toISOString().slice(0,10);
   const isOverdue = (b) => slBuyerStage(b) !== 'inactive' && b.nextDate && b.nextDate < today;
   // KPI tile: stores actively in play (not yet accounts, not dormant).
@@ -27842,7 +27951,7 @@ async function cmdEventLeads() {
       const person = String(p.name||'').trim();
       if (!person || isInternal(person)) return;
       const acct = String(p.business||'').trim() || person;
-      if (STATE.slBuyers.some(b => norm(b.name) === norm(acct))) return;
+      if (VeniaOS.get('sales.buyers').some(b => norm(b.name) === norm(acct))) return;
       const noteParts = [];
       if (p.interest) noteParts.push(String(p.interest).trim());
       if (p.ig) noteParts.push('IG ' + String(p.ig).trim());
@@ -27885,9 +27994,9 @@ async function cmdRunBriefing() {
   }
   if (el) el.innerHTML = '<span style="color:var(--muted)">Generating briefing…</span>';
   try {
-    const buyers = STATE.slBuyers || [];
+    const buyers = VeniaOS.get('sales.buyers') || [];
     const hits  = dbGet('hits');
-    const pulls = (STATE.prPulls||[]).filter(p=>p.status==='active');
+    const pulls = (VeniaOS.get('growth.pulls')||[]).filter(p=>p.status==='active');
     const brief = await callClaude(
       `You are a sharp, concise business intelligence assistant for VENIA Collection, a 2-person LA luxury fashion label. Give a tight daily briefing — action items first, context second. No fluff.`,
       `PLM Context:\n${plmContext()}\n\nActive PR pulls: ${pulls.length} (${pulls.map(p=>p.client).join(', ')||'none'})\nWholesale pipeline: ${buyers.filter(b=>slBuyerStage(b)==='new').length} stores to reach, ${buyers.filter(b=>['warm','quoted'].includes(slBuyerStage(b))).length} in conversation, ${buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length} doing business\nRecent PR hits: ${hits.slice(0,3).map(h=>h.person||h.source).join(', ')||'none'}\n\nDate: ${new Date().toLocaleDateString()}\n\nGive 3-5 concise action items for today.`
@@ -28220,7 +28329,7 @@ function cmdRenderWatchlist() {
 function populateLMStyles() {
   const sel = document.getElementById('lm-style-sel');
   if (!sel) return;
-  const styles = (STATE.styles||[]).filter(s=>s.status!=='archived');
+  const styles = (VeniaOS.get('core.catalog')||[]).filter(s=>s.status!=='archived');
   sel.innerHTML = '<option value="">— Pick a style —</option>' +
     styles.map(s=>`<option value="${s.id}">${s.styleId} — ${s.name}</option>`).join('');
 }
@@ -28228,7 +28337,7 @@ function lmFillFromStyle() {
   const id = document.getElementById('lm-style-sel')?.value;
   const prev = document.getElementById('lm-style-preview');
   if (!id) { if(prev) prev.style.display='none'; return; }
-  const s = (STATE.styles||[]).find(st=>st.id===id);
+  const s = (VeniaOS.get('core.catalog')||[]).find(st=>st.id===id);
   if (!s) return;
   const desc = `${s.styleId} — ${s.name}. ${s.category||''} ${s.gender||''}. Retail $${s.retail||'?'}, Wholesale $${s.wholesale||'?'}. Materials: ${s.materials||'—'}. Colors: ${s.colors||'—'}. Sizes: ${s.sizes||'—'}. Status: ${s.status}.`;
   if (prev) { prev.textContent = desc; prev.style.display=''; }
@@ -28243,7 +28352,7 @@ async function lmRun() {
   const brief = document.getElementById('lm-brief')?.value.trim();
   let styleDesc = brief;
   if (selId) {
-    const s = (STATE.styles||[]).find(st=>st.id===selId);
+    const s = (VeniaOS.get('core.catalog')||[]).find(st=>st.id===selId);
     if (s) styleDesc = `${s.styleId} — ${s.name}. ${s.category||''} ${s.gender||''}. Retail $${s.retail||'?'}, Wholesale $${s.wholesale||'?'}. Materials: ${s.materials||'—'}. Colors: ${s.colors||'—'}. ${brief?'Additional context: '+brief:''}`;
   }
   if (!styleDesc) { toast('Describe what you\'re launching or pick a style'); return; }
@@ -28310,7 +28419,7 @@ let _oeHistory = [];
 function populateOEStyles() {
   const sel = document.getElementById('oe-style');
   if (!sel) return;
-  const styles = (STATE.styles||[]).filter(s=>s.status!=='archived');
+  const styles = (VeniaOS.get('core.catalog')||[]).filter(s=>s.status!=='archived');
   sel.innerHTML = '<option value="">— General brand intro —</option>' +
     styles.map(s=>`<option value="${s.id}">${s.styleId} — ${s.name}</option>`).join('');
 }
@@ -28328,7 +28437,7 @@ async function oeGenerate() {
   if (outEl) outEl.textContent = 'Writing email in VENIA voice…';
   let styleDesc = '';
   if (styleId) {
-    const s = (STATE.styles||[]).find(st=>st.id===styleId);
+    const s = (VeniaOS.get('core.catalog')||[]).find(st=>st.id===styleId);
     if (s) styleDesc = `Pitching: ${s.styleId} — ${s.name}, retail $${s.retail||'?'}, wholesale $${s.wholesale||'?'}.`;
   }
   const system = `You are VENIA Collection's outreach writer. VENIA is a 2-person LA luxury label, architectural aesthetic, influenced by Yohji Yamamoto and Rick Owens. Voice: specific, minimal, confident. Never generic. Write emails editors and buyers actually open.`;
@@ -28694,13 +28803,13 @@ function setOpenAddContact() {
   const f = document.getElementById('set-add-contact-form');
   if (f) f.style.display = f.style.display==='none'?'':'none';
 }
-// Media contacts now have ONE home: STATE.prEditors (PR → Editors & Stylists).
+// Media contacts now have ONE home: VeniaOS.get('growth.editors') (PR → Editors & Stylists).
 // This Settings table reads that store; the old dbGet('mediaContacts') list was
 // folded in by prMergeMediaContacts() on boot.
 function setRenderContacts() {
   const el = document.getElementById('set-contacts-table');
   if (!el) return;
-  let contacts = (STATE.prEditors||[]);
+  let contacts = (VeniaOS.get('growth.editors')||[]);
   const q = (document.getElementById('set-mc-search')?.value||'').toLowerCase();
   if (q) contacts = contacts.filter(c=>((c.name||'')+(c.publication||'')+(c.email||'')).toLowerCase().includes(q));
   if (!contacts.length) { el.innerHTML='<div style="font-size:10px;color:var(--muted);padding:12px 0">No contacts yet — add your press list above. Contacts live in PR → Editors &amp; Stylists.</div>'; return; }
@@ -29788,7 +29897,7 @@ let PR_PITCH_FILTER = 'all';
 // and a data: URI is a megabyte of base64 that breaks the moment the page is
 // copied anywhere.
 function prKitAssets(){
-  return (STATE.styles || []).filter(function (st) {
+  return (VeniaOS.get('core.catalog') || []).filter(function (st) {
     return st && /^https?:\/\//i.test(String(st.photoUrl || ''));
   }).map(function (st) {
     return { id: st.id, name: st.name || st.styleId || 'Style', code: st.styleId || '',
@@ -29801,7 +29910,7 @@ function prKitAssets(){
 // the document a journalist quotes, and a wrong number in it is a correction
 // with the brand's name on it.
 function prKitFacts(){
-  const live = (STATE.styles || []).filter(x => x && x.name);
+  const live = (VeniaOS.get('core.catalog') || []).filter(x => x && x.name);
   const f = [];
   const uniq = (k) => [...new Set(live.map(x => String(x[k] || '').trim()).filter(Boolean))];
   const seasons = uniq('season'), cats = uniq('category'), coos = uniq('coo');
@@ -29814,7 +29923,7 @@ function prKitFacts(){
   // Stockists only once there are some. "Available at 0 retailers" is worse
   // than silence, and announcing prospects is how you lose them.
   let stk = 0;
-  try { stk = (STATE.slBuyers || []).filter(x => slBuyerStage(x) === 'stockist').length; } catch (e) {}
+  try { stk = (VeniaOS.get('sales.buyers') || []).filter(x => slBuyerStage(x) === 'stockist').length; } catch (e) {}
   if (stk) f.push({ k: 'Stockists', v: String(stk) });
   return f;
 }
@@ -29836,7 +29945,7 @@ window.prPressKit = prPressKit;
 // only shows what exists lets you believe it is finished.
 function prPressKitGaps(){
   const gaps = [];
-  const live = (STATE.styles || []).filter(x => x && x.name);
+  const live = (VeniaOS.get('core.catalog') || []).filter(x => x && x.name);
   const withPhoto = prKitAssets().length;
   if (live.length && withPhoto < live.length) {
     gaps.push({ what: withPhoto + ' of ' + live.length + ' styles have a usable photo',
@@ -30066,12 +30175,12 @@ function prMoments(){
   // market IS the business. Only once they are actually a stockist — announcing
   // a prospect is how you lose one.
   const marketsBefore = {};
-  (STATE.slBuyers || []).forEach(function (bz) {
+  (VeniaOS.get('sales.buyers') || []).forEach(function (bz) {
     if (!bz || slBuyerStage(bz) !== 'stockist') return;
     const c = String(bz.country || '').trim();
     marketsBefore[c] = (marketsBefore[c] || 0) + 1;
   });
-  (STATE.slBuyers || []).forEach(function (bz) {
+  (VeniaOS.get('sales.buyers') || []).forEach(function (bz) {
     if (!bz || !bz.id || slBuyerStage(bz) !== 'stockist') return;
     const d = prDaysSince(bz.updatedAt);
     if (d !== null && d > 60) return;            // not news two months later
@@ -35788,7 +35897,7 @@ function socThumb(p){
   }
   const sid = (p.styleIds || [])[0];
   if (sid) {
-    const st = (STATE.styles || []).find(function(x){ return x && (x.id === sid || x.styleId === sid); });
+    const st = (VeniaOS.get('core.catalog') || []).find(function(x){ return x && (x.id === sid || x.styleId === sid); });
     if (st && st.photoUrl) return st.photoUrl;
   }
   return '';
@@ -36773,7 +36882,7 @@ window.socCampaignOpen = function(id){
   const c = id ? mkFindCampaign(id) : null;
   const st = c ? socCampaignStats(c) : null;
   const gaps = c ? socCampaignGaps(c) : ['objective', 'narrative', 'audience', 'dates', 'styles'];
-  const styles = (STATE.styles || []).filter(function(x){ return x && x.status !== 'archived'; });
+  const styles = (VeniaOS.get('core.catalog') || []).filter(function(x){ return x && x.status !== 'archived'; });
   const picked = (c && c.styleIds) || [];
   socSheet('soc-camp-modal',
     '<div class="modal" style="max-width:560px"><div class="modal-head">'
@@ -36853,7 +36962,7 @@ window.socCampaignPlan = function(id){
   const c = mkFindCampaign(id); if (!c) return;
   const st = socCampaignStats(c);
   const names = (c.styleIds || []).map(function(sid){
-    const x = (STATE.styles || []).find(function(y){ return y && y.id === sid; });
+    const x = (VeniaOS.get('core.catalog') || []).find(function(y){ return y && y.id === sid; });
     return x ? (x.name || x.styleId) : null;
   }).filter(Boolean);
   closeModal('soc-camp-modal');
@@ -37117,7 +37226,7 @@ window.socDraftToFeed = function(id){
 window.socImportOpen = function(){
   const have = {};
   (STATE.mkAssets || []).forEach(function(a){ if (a && a.sourceUrl) have[a.sourceUrl] = 1; });
-  const styles = (STATE.styles || []).filter(function(x){ return x && x.photoUrl && !have[x.photoUrl]; });
+  const styles = (VeniaOS.get('core.catalog') || []).filter(function(x){ return x && x.photoUrl && !have[x.photoUrl]; });
   socSheet('soc-import-modal',
     '<div class="modal" style="max-width:520px"><div class="modal-head">'
     + '<div class="modal-title">Import</div>'
@@ -37159,7 +37268,7 @@ window.socImportOpen = function(){
 window.socImportStyles = function(){
   const have = {};
   (STATE.mkAssets || []).forEach(function(a){ if (a && a.sourceUrl) have[a.sourceUrl] = 1; });
-  const styles = (STATE.styles || []).filter(function(x){ return x && x.photoUrl && !have[x.photoUrl]; });
+  const styles = (VeniaOS.get('core.catalog') || []).filter(function(x){ return x && x.photoUrl && !have[x.photoUrl]; });
   if (!styles.length) { socToast('Nothing new to import'); return; }
   let n = 0;
   try {
@@ -37323,7 +37432,7 @@ function agBuildSection(key, section, cfg) {
 function agSectionData(key, section) {
   // Every stat here is computed from real stores or omitted — no invented
   // numbers, no fictional contacts. Prompts are functionality and stay.
-  const buyers = STATE.slBuyers || [];
+  const buyers = VeniaOS.get('sales.buyers') || [];
   const _today = new Date().toISOString().slice(0,10);
   const _daysAgo = (iso) => { const d = new Date(String(iso||'')); return isNaN(d) ? null : Math.floor((Date.now() - d.getTime()) / 86400000); };
   let _watch = [];
@@ -37364,9 +37473,9 @@ function agSectionData(key, section) {
   };
 
   const SL_DATA = {
-    linesheets: { stats:[{l:'Line sheets',v:(STATE.slLinesheets||[]).length+'',s:'built'},{l:'Active styles',v:(STATE.styles||[]).filter(st=>st.status!=='archived').length+'',s:'in the line plan'}], prompts:[{t:'Generate a line sheet for the season — all styles, wholesale pricing, MOQ, delivery windows',tag:'BUILD',d:'Complete wholesale line sheet from PLM data.'},{t:'Which styles should lead the line sheet for a new European concept store?',tag:'ANALYZE',d:'Based on sell-through, aesthetic fit, and price point.'}] },
+    linesheets: { stats:[{l:'Line sheets',v:(VeniaOS.get('sales.linesheets')||[]).length+'',s:'built'},{l:'Active styles',v:(VeniaOS.get('core.catalog')||[]).filter(st=>st.status!=='archived').length+'',s:'in the line plan'}], prompts:[{t:'Generate a line sheet for the season — all styles, wholesale pricing, MOQ, delivery windows',tag:'BUILD',d:'Complete wholesale line sheet from PLM data.'},{t:'Which styles should lead the line sheet for a new European concept store?',tag:'ANALYZE',d:'Based on sell-through, aesthetic fit, and price point.'}] },
     buyers:     { stats:[{l:'Accounts',v:buyers.length+'',s:'in CRM'},{l:'In conversation',v:buyers.filter(b=>['warm','quoted'].includes(slBuyerStage(b))).length+'',s:'talking · quote out'},{l:'Doing business',v:buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length+'',s:'stockists'},{l:'To reach',v:buyers.filter(b=>slBuyerStage(b)==='new').length+'',s:'not yet contacted'}], prompts:[{t:'Who are our top 5 buyers to close this season?',tag:'ANALYZE',d:'By order value, likelihood, and relationship stage.'},{t:'Write a wholesale outreach email to a new European concept store',tag:'DRAFT',d:'Short, VENIA voice, lead with the collection.'}] },
-    quotes:     { stats:[{l:'Open quotes',v:(STATE.slQuotes||[]).filter(q=>q.status==='sent').length+'',s:'awaiting response'},{l:'Drafts',v:(STATE.slQuotes||[]).filter(q=>q.status==='draft').length+'',s:'in progress'},{l:'Accepted',v:(STATE.slQuotes||[]).filter(q=>q.status==='accepted').length+'',s:'won'},{l:'Total value',v:'$'+(((STATE.slQuotes||[]).reduce((t,q)=>t+slToUsd(q.total||0, q.currency, q.fxRate),0))/1000).toFixed(1)+'k',s:'all quotes'}], prompts:[{t:'Write a follow-up for a quote sent 7 days ago with no reply',tag:'DRAFT',d:'Short, not pushy. Reference their specific interest.'},{t:'Should we offer net-30 terms to close a hesitant buyer?',tag:'ANALYZE',d:'Risk/reward of extending payment terms at VENIA scale.'}] },
+    quotes:     { stats:[{l:'Open quotes',v:(VeniaOS.get('sales.quotes')||[]).filter(q=>q.status==='sent').length+'',s:'awaiting response'},{l:'Drafts',v:(VeniaOS.get('sales.quotes')||[]).filter(q=>q.status==='draft').length+'',s:'in progress'},{l:'Accepted',v:(VeniaOS.get('sales.quotes')||[]).filter(q=>q.status==='accepted').length+'',s:'won'},{l:'Total value',v:'$'+(((VeniaOS.get('sales.quotes')||[]).reduce((t,q)=>t+slToUsd(q.total||0, q.currency, q.fxRate),0))/1000).toFixed(1)+'k',s:'all quotes'}], prompts:[{t:'Write a follow-up for a quote sent 7 days ago with no reply',tag:'DRAFT',d:'Short, not pushy. Reference their specific interest.'},{t:'Should we offer net-30 terms to close a hesitant buyer?',tag:'ANALYZE',d:'Risk/reward of extending payment terms at VENIA scale.'}] },
     orders:     { prompts:[{t:'Draft an order confirmation email',tag:'DRAFT',d:'Professional, VENIA voice, delivery expectations.'},{t:'What is our current season performance vs target?',tag:'REVIEW',d:'Booked, invoiced, shipped, outstanding.'}] },
     health:     {
       stats:[{l:'Stockists',v:buyers.filter(b=>['active','closed'].includes(slBuyerStage(b))).length+'',s:'doing business'},{l:'Gone quiet',v:buyers.filter(b=>['approached','warm','quoted','active','closed'].includes(slBuyerStage(b))&&(_daysAgo(b.lastContact)==null||_daysAgo(b.lastContact)>=30)).length+'',s:'no touch in 30d+'},{l:'Follow-ups due',v:buyers.filter(b=>slBuyerStage(b)!=='inactive'&&b.nextDate&&b.nextDate<_today).length+'',s:'overdue'},{l:'Dormant',v:buyers.filter(b=>slBuyerStage(b)==='inactive').length+'',s:'parked accounts'}],
@@ -37452,12 +37561,12 @@ const GROWTH_COV_DAYS = 45;        // coverage counts as "fresh proof" this long
 const GROWTH_TOUCH_COOLDOWN = 14;  // don't suggest buyers touched this recently
 function growthKey(covId, buyerId){ return covId + '|' + buyerId; }
 function slGrowthSuggestions(){
-  const seen = STATE.growthSeen || {};
+  const seen = VeniaOS.get('growth.seen') || {};
   const now = Date.now();
   const covCut   = new Date(now - GROWTH_COV_DAYS * 86400000).toISOString().slice(0,10);
   const touchCut = new Date(now - GROWTH_TOUCH_COOLDOWN * 86400000).toISOString().slice(0,10);
   const today = new Date().toISOString().slice(0,10);
-  const fresh = (STATE.prCoverage||[]).filter(c => String(c.publishDate || c.createdAt || '').slice(0,10) >= covCut)
+  const fresh = (VeniaOS.get('growth.coverage')||[]).filter(c => String(c.publishDate || c.createdAt || '').slice(0,10) >= covCut)
     .sort((a,b) => String(b.publishDate||b.createdAt||'').localeCompare(String(a.publishDate||a.createdAt||'')));
   if (!fresh.length) return [];
   const tierRank = { dream:0, strong:1 };
@@ -37484,7 +37593,7 @@ window.growthDismiss = function(covId, buyerId){
   try { agNavSl('overview'); } catch(e){}
 };
 window.growthLogTouch = function(covId, buyerId){
-  const b = (STATE.slBuyers||[]).find(x => x.id === buyerId);
+  const b = (VeniaOS.get('sales.buyers')||[]).find(x => x.id === buyerId);
   const c = (STATE.prCoverage||[]).find(x => x.id === covId);
   if (!b || !c) return;
   slTouchAccount(b.name, 'Sent press proof — ' + (c.outlet||'coverage') + (c.headline ? ' · “' + c.headline + '”' : ''));
@@ -37495,7 +37604,7 @@ window.growthLogTouch = function(covId, buyerId){
   try { buildTodayFocus(); } catch(e){}
 };
 window.growthDraft = function(covId, buyerId){
-  const b = (STATE.slBuyers||[]).find(x => x.id === buyerId);
+  const b = (VeniaOS.get('sales.buyers')||[]).find(x => x.id === buyerId);
   const c = (STATE.prCoverage||[]).find(x => x.id === covId);
   if (!b || !c) return;
   // The pair stays pending until the send is actually logged — drafting isn't sending.
@@ -37580,7 +37689,7 @@ function agBuildMkOverview() {
   const week = ahead.filter(e => new Date(e.date) <= in7);
   let campaigns = [];
   try { const c = JSON.parse(localStorage.getItem('venia_campaigns') || '[]'); if (Array.isArray(c)) campaigns = c; } catch (e) {}
-  const liveStyles = (STATE.styles||[]).filter(st => st.status === 'active').length;
+  const liveStyles = (VeniaOS.get('core.catalog')||[]).filter(st => st.status === 'active').length;
   const stat = (l, v, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${l}</div><div class="ag-stat-v"${color ? ` style="color:${color}"` : ''}>${v}</div><div class="ag-stat-s">${sub}</div></div>`;
   const upRows = ahead.slice(0,5).map(e => {
     const d = new Date(e.date);
@@ -39797,7 +39906,7 @@ window.slSetWsMoq = function(id, v){
   // line arrived as the catalogue projection cannot publish that edit — better
   // to say so than to accept a change that vanishes on the next pull.
   if (window.VENIA_STYLES_PROJECTED){ showToast('MOQ is set in Product — ask a founder','warning'); return; }
-  const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
+  const s = (VeniaOS.get('core.catalog')||[]).find(x => x.id === id); if (!s) return;
   const t = String(v||'').trim();
   if (t) s.wsMoq = t; else delete s.wsMoq;
   save();
@@ -39837,7 +39946,7 @@ function slLsRank(s){
   return (isFinite(r) && r >= 0) ? r : Infinity;
 }
 function slLsStyles(){
-  return (STATE.styles||[]).filter(s => s.status !== 'archived'
+  return (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived'
     && (!SL_LS_SEASON || SL_LS_SEASON === 'all' || String(s.season||'').trim() === SL_LS_SEASON))
     .slice()
     .sort((a,b) => {
@@ -39969,7 +40078,7 @@ window.slOrderMoveStyle = function(i, d){
   // style added later lands after it rather than in the middle of it.
   const at = new Date().toISOString();
   next.forEach(function (st, n) {
-    const real = (STATE.styles || []).find(function (x) { return x && x.id === st.id; });
+    const real = (VeniaOS.get('core.catalog') || []).find(function (x) { return x && x.id === st.id; });
     if (real && real.lsRank !== n) { real.lsRank = n; real.updatedAt = at; }
   });
   save();
@@ -39981,7 +40090,7 @@ window.slOrderReset = function(){
       + 'and every style sorts by name again.')) return;
   delete STATE.lsCatOrder;
   const at = new Date().toISOString();
-  (STATE.styles || []).forEach(function (st) {
+  (VeniaOS.get('core.catalog') || []).forEach(function (st) {
     if (st && st.lsRank != null) { delete st.lsRank; st.updatedAt = at; }
   });
   save();
@@ -40667,7 +40776,7 @@ window.slVlsDoc = function(opts){
   const per = SL_VLS.perPage, { cols, rows: gridRows } = slVlsGrid(per, SL_VLS.cols);
   const esc = v => String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
-  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
+  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (VeniaOS.get('core.seasonCal')||{})[SL_LS_SEASON] : null;
   const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
   const gLabel = SL_VLS.genders.length ? SL_VLS.genders.join(' · ') : 'all genders';
   const cur = SL_VLS.currency || 'USD';
@@ -41291,7 +41400,7 @@ window.slLsCount = function(){
 };
 function slPrintLineSheet() {
   const seasonLabel = (!SL_LS_SEASON || SL_LS_SEASON === 'all') ? 'All Seasons' : SL_LS_SEASON;
-  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (STATE.seasonCal||{})[SL_LS_SEASON] : null;
+  const cal = SL_LS_SEASON && SL_LS_SEASON !== 'all' ? (VeniaOS.get('core.seasonCal')||{})[SL_LS_SEASON] : null;
   const delivery = cal && cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' → ' + cal.deliveryEnd : '') : '';
   const o = { wholesale: SL_LS_OPT.wholesale !== false, retail: SL_LS_OPT.retail !== false,
               cogs: SL_LS_OPT.cogs === true };
@@ -41323,7 +41432,7 @@ window.slFreezeLinesheet = function(){
   const season = (SL_LS_SEASON && SL_LS_SEASON !== 'all') ? SL_LS_SEASON : '';
   const ver = 1 + (STATE.slLinesheets||[]).filter(l => String(l.season||'') === season)
     .reduce((m,l) => Math.max(m, l.version||0), 0);
-  const cal = season ? ((STATE.seasonCal||{})[season] || {}) : {};
+  const cal = season ? ((VeniaOS.get('core.seasonCal')||{})[season] || {}) : {};
   const now = new Date().toISOString();
   STATE.slLinesheets.unshift({
     // Season+version in the id keeps it unique even for freezes in the same
@@ -41363,7 +41472,7 @@ window.slLinesheetOrderForm = function(id){
   const empty = document.getElementById('sl-q-empty'); if (empty) empty.remove();
   let missing = 0;
   (snap.styles||[]).forEach(r => {
-    const live = (STATE.styles||[]).find(s => s.id === r.styleId);
+    const live = (VeniaOS.get('core.catalog')||[]).find(s => s.id === r.styleId);
     if (!live || live.status === 'archived'){ missing++; return; }
     slQuoteAddItem({ styleId: r.styleId, ws: r.wholesale, color: '' });
   });
@@ -41447,7 +41556,7 @@ function slQuoteSzCell(sz, val){
 }
 
 function slQuoteStyleOpts(sel) {
-  return `<option value="">— style —</option>` + (STATE.styles||[]).filter(s => s.status !== 'archived').map(s =>
+  return `<option value="">— style —</option>` + (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived').map(s =>
     `<option value="${s.id}" data-ws="${s.wholesale||0}" data-name="${slEsc(s.styleId ? s.styleId + ' ' + (s.name||'') : (s.name||''))}" ${sel===s.id?'selected':''}>${slEsc((s.styleId||'') + ' — ' + (s.name||''))} ($${s.wholesale||0} ws)</option>`).join('');
 }
 // ── TYPABLE STYLE LOOKUP ──────────────────────────────────────────────────
@@ -41464,7 +41573,7 @@ function slStyleLabel(s){
 // One datalist for the whole quote, not one per line.
 function slStyleDatalist(){
   if (document.getElementById('sl-style-options')) return '';
-  const opts = (STATE.styles || []).filter(s => s && s.status !== 'archived')
+  const opts = (VeniaOS.get('core.catalog') || []).filter(s => s && s.status !== 'archived')
     .map(s => '<option value="' + slEsc(slStyleLabel(s)) + '">' + slEsc(
       (s.fabric ? s.fabric + ' \u00b7 ' : '') + (s.wholesale ? s.wholesale + ' ws' : '')) + '</option>').join('');
   return '<datalist id="sl-style-options">' + opts + '</datalist>';
@@ -41475,7 +41584,7 @@ function slStyleDatalist(){
 window.slStyleFromText = function(txt){
   const q = String(txt || '').trim().toLowerCase();
   if (!q) return null;
-  const live = (STATE.styles || []).filter(s => s && s.status !== 'archived');
+  const live = (VeniaOS.get('core.catalog') || []).filter(s => s && s.status !== 'archived');
   const hit = live.find(s => slStyleLabel(s).toLowerCase() === q)
     || live.find(s => String(s.styleId || '').toLowerCase() === q)
     || live.find(s => String(s.name || '').toLowerCase() === q);
@@ -41523,7 +41632,7 @@ window.slQuoteStylePick = function(el){
 };
 function slQuoteItemRowHTML(it) {
   it = it || {};
-  const style = it.styleId ? (STATE.styles||[]).find(s => s.id === it.styleId) : null;
+  const style = it.styleId ? (VeniaOS.get('core.catalog')||[]).find(s => s.id === it.styleId) : null;
   const sizes = slQuoteSizesFor(style);
   const sizeVals = it.sizes || {};
   // Legacy quotes stored a single qty with no size run — seed it onto the first
@@ -41567,13 +41676,13 @@ window.slQuoteSeasonGuess = function(){
   // Whatever is already on the quote wins.
   try {
     [...document.querySelectorAll('#sl-q-items .sl-q-item')].forEach(r => {
-      const st = (STATE.styles||[]).find(x => x.id === r.dataset.styleid);
+      const st = (VeniaOS.get('core.catalog')||[]).find(x => x.id === r.dataset.styleid);
       if (st) bump(st.season);
     });
   } catch(e){}
   if (Object.keys(count).length) return Object.entries(count).sort((a,b)=>b[1]-a[1])[0][0];
   // An empty quote: the season the line is actually working in.
-  (STATE.styles||[]).forEach(s => { if (s.status !== 'archived') bump(s.season); });
+  (VeniaOS.get('core.catalog')||[]).forEach(s => { if (s.status !== 'archived') bump(s.season); });
   const top = Object.entries(count).sort((a,b)=>b[1]-a[1])[0];
   return top ? top[0] : '';
 };
@@ -41592,7 +41701,7 @@ window.slQuoteStyleChanged = function(sel){
   row.dataset.styleid = sel.value;
   const prev = {};
   row.querySelectorAll('.sl-qi-sz').forEach(i => { if (i.value) prev[i.dataset.size] = i.value; });
-  const style = (STATE.styles||[]).find(s => s.id === sel.value);
+  const style = (VeniaOS.get('core.catalog')||[]).find(s => s.id === sel.value);
   const sizes = slQuoteSizesFor(style);
   const holder = row.querySelector('.sl-qi-sizes');
   if (holder) holder.innerHTML = sizes.map(sz => slQuoteSzCell(sz, prev[sz])).join('');
@@ -41614,7 +41723,7 @@ window.slQuoteReadItems = function(){
   return [...document.querySelectorAll('#sl-q-items .sl-q-item')].map(r => {
     const hid = r.querySelector('.sl-qi-styleid');
     const sid = hid ? hid.value : (r.dataset.styleid || '');
-    const st = (STATE.styles || []).find(x => x && x.id === sid);
+    const st = (VeniaOS.get('core.catalog') || []).find(x => x && x.id === sid);
     const sizes = {}; let units = 0;
     r.querySelectorAll('.sl-qi-sz').forEach(i => { const n = parseInt(i.value,10)||0; if (n>0){ sizes[i.dataset.size]=n; units+=n; } });
     const ws = parseFloat(r.querySelector('.sl-qi-ws').value) || 0;
@@ -42183,7 +42292,7 @@ function slSizeRun(it){
 // one place they are maintained.
 function slDocStyle(it){
   var id = it && it.styleId;
-  return (STATE.styles || []).find(function (s) { return s && s.id === id; }) || null;
+  return (VeniaOS.get('core.catalog') || []).find(function (s) { return s && s.id === id; }) || null;
 }
 window.slConfirmDoc = function(kind, id){
   var src = kind === 'order'
@@ -42724,7 +42833,7 @@ function slOpenQuoteDetail(id) {
   };
   const itemsHtml = items.length
     ? `<div><div style="${lbl}">Styles · ${units} unit${units === 1 ? '' : 's'}</div>${items.map(it => {
-        const st = (STATE.styles || []).find(x => x && x.id === it.styleId);
+        const st = (VeniaOS.get('core.catalog') || []).find(x => x && x.id === it.styleId);
         const code = (st && st.styleId) ? st.styleId : '';
         return `<div style="padding:7px 0;border-bottom:1px solid var(--border)">
           <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px">
@@ -43063,7 +43172,7 @@ window.brRestoreToneDoc = function(){
 };
 window.brInstallVeniaTone = function(){
   if (!STATE.brTone) STATE.brTone = { approved:[], avoid:[], phrases:[] };
-  const t = STATE.brTone;
+  const t = VeniaOS.get('core.brand.tone');
   const add = function(list, words){
     const have = {};
     (t[list] || []).forEach(function(w){ have[String(w).toLowerCase()] = 1; });
@@ -43087,7 +43196,7 @@ window.brInstallVeniaTone = function(){
   if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
   const title = 'VENIA — Tone & Brand Language System';
   const body = VENIA_TONE_DOC;
-  const existing = STATE.brandDocs.find(function(d){ return d.title === title; });
+  const existing = VeniaOS.get('core.brand.docs').find(function(d){ return d.title === title; });
   if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
   else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: title, kind: 'tone', body: body,
                                  createdAt: new Date().toISOString() });
@@ -43201,7 +43310,7 @@ function brRemoveToneWord(list, idx) {
     if (STATE.slBuyers  !== undefined) dbSet('slBuyers',  STATE.slBuyers);
     if (STATE.slQuotes  !== undefined) dbSet('slQuotes',  STATE.slQuotes);
     if (STATE.slLinesheets !== undefined) dbSet('slLinesheets', STATE.slLinesheets||[]);
-    if (STATE.brTone    !== undefined) dbSet('brTone',    STATE.brTone);
+    if (VeniaOS.get('core.brand.tone')    !== undefined) dbSet('brTone',    VeniaOS.get('core.brand.tone'));
   };
 })();
 
@@ -43801,7 +43910,7 @@ function slSaveOrder() {
   let shipped = 0;
   if (merged.status === 'delivered' && !merged.inventoryApplied) {
     (merged.items||[]).forEach(it => {
-      const st = (STATE.styles||[]).find(x => x.id === it.styleId);
+      const st = (VeniaOS.get('core.catalog')||[]).find(x => x.id === it.styleId);
       if (st && it.qty) { st.stock = Math.max(0, (st.stock||0) - it.qty); shipped += it.qty; }
     });
     merged.inventoryApplied = true;
@@ -44852,7 +44961,7 @@ function slBestColour(it, st){
 function slBestFabric(st){ return String((st && st.fabric) || '').trim(); }
 function slBestStyleOf(it){
   if (!it || it.styleId == null) return null;
-  return (STATE.styles || []).find(function (s) { return s && s.id === it.styleId; }) || null;
+  return (VeniaOS.get('core.catalog') || []).find(function (s) { return s && s.id === it.styleId; }) || null;
 }
 // An order carries no season of its own. Ask the order, then the quote it came
 // from, then the styles on it — a season is never guessed from the date.
@@ -44954,7 +45063,7 @@ function slBestRows(season, group){
     r.pieceCount = Object.keys(r.pieces).length;
     r.ways       = r.codeList.length || r.idList.length;
     r.flagged    = r.idList.length > 0 && r.idList.every(function (id) {
-      var st = (STATE.styles || []).find(function (s) { return s && String(s.id) === String(id); });
+      var st = (VeniaOS.get('core.catalog') || []).find(function (s) { return s && String(s.id) === String(id); });
       return !!(st && st.bestSeller);
     });
     r.children = Object.keys(r.kids).map(function (c) {
@@ -45002,7 +45111,7 @@ window.slBestFlag = function(enc){
   if (!row.idList.length) { showToast('No style record behind this line to flag', 'warning'); return; }
   var on = !row.flagged, at = new Date().toISOString();
   row.idList.forEach(function (id) {
-    var st = (STATE.styles || []).find(function (s) { return s && String(s.id) === String(id); });
+    var st = (VeniaOS.get('core.catalog') || []).find(function (s) { return s && String(s.id) === String(id); });
     if (st) { st.bestSeller = on; st.updatedAt = at; }
   });
   save();
@@ -46596,7 +46705,7 @@ window.finLedgerCoverage = finLedgerCoverage;
 // which would quietly understate the shelf.
 function finInventoryAtCost(){
   let value = 0, units = 0, styles = 0, uncostedUnits = 0, uncostedStyles = 0;
-  (STATE.styles || []).forEach(function(st){
+  (VeniaOS.get('core.catalog') || []).forEach(function(st){
     if (!st) return;
     const u = (typeof invStockEffective === 'function' ? (invStockEffective(st).units || 0) : (st.stock || 0));
     if (!(u > 0)) return;
@@ -46715,10 +46824,10 @@ function finPLStatement(opts){
   let wsUncostedUnits = 0;
   try {
     const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
-    (STATE.slOrders || []).filter(o => o.status !== 'cancelled'
+    (VeniaOS.get('sales.orders') || []).filter(o => o.status !== 'cancelled'
         && (typeof slOrderBookedAt === 'function' ? slOrderBookedAt(o) : '') >= jan1)
       .forEach(o => (o.items || []).forEach(it => {
-        const st = (STATE.styles || []).find(x => x.id === it.styleId);
+        const st = (VeniaOS.get('core.catalog') || []).find(x => x.id === it.styleId);
         if (st && !(landedCost(st) > 0)) wsUncostedUnits += (it.qty || 0);
       }));
   } catch (e) {}
@@ -46751,7 +46860,7 @@ function finPLStatement(opts){
   const estStyles = [];
   try {
     const sheets = JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}');
-    (STATE.styles || []).forEach(function(st){
+    (VeniaOS.get('core.catalog') || []).forEach(function(st){
       const d = st && sheets[st.id];
       if (d && typeof csEstList === 'function' && csEstList(d).length) {
         estStyles.push(st.name);
@@ -47882,7 +47991,7 @@ function cmdMoneyData(opts) {
   const endMonth = end ? end.slice(0, 7) : null;
   const p = STATE.bizPulse || {};
   const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
-  const orders = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled')
+  const orders = (VeniaOS.get('sales.orders') || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled')
     .filter(o => !endT || slOrderBookedAt(o) <= endT);
   // Every wholesale figure below is in dollars: each order converts at its
   // own rate (slToUsd), and fxSeen records which rates were used so the
@@ -47891,7 +48000,7 @@ function cmdMoneyData(opts) {
   const oUsd = (o, amt) => slToUsd(amt, o && o.currency, o && o.fxRate, fxSeen);
   const wsYtd = orders.filter(o => slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + oUsd(o, o.total||0), 0);
   const wsAll = orders.reduce((s,o) => s + oUsd(o, o.total||0), 0);
-  const quotes = STATE.slQuotes || [];
+  const quotes = VeniaOS.get('sales.quotes') || [];
   const pipeSent = quotes.filter(q => q.status === 'sent').reduce((s,q) => s + oUsd(q, q.total||0), 0);
   const pipeAccepted = quotes.filter(q => q.status === 'accepted' && !q.orderId).reduce((s,q) => s + oUsd(q, q.total||0), 0);
   // AR truth: booked ≠ collected. Collected = Stripe-confirmed payments minus
@@ -47963,7 +48072,7 @@ function cmdMoneyData(opts) {
     return Object.keys(m.m).filter(_inPeriod).reduce((t,k) => t + ((m.m[k] || {}).u || 0), 0);
   };
   const byName = {};
-  (STATE.styles || []).forEach(s => {
+  (VeniaOS.get('core.catalog') || []).forEach(s => {
     const k = typeof plmSalesNorm === 'function' ? plmSalesNorm(s.name) : '';
     if (!k) return;
     (byName[k] = byName[k] || []).push(s);
@@ -47985,7 +48094,7 @@ function cmdMoneyData(opts) {
   // Wholesale COGS from order line items (styles carry their landed cost).
   let wsCogsYtd = 0;
   orders.filter(o => slOrderBookedAt(o) >= jan1iso).forEach(o => (o.items||[]).forEach(it => {
-    const st = (STATE.styles||[]).find(x => x.id === it.styleId);
+    const st = (VeniaOS.get('core.catalog')||[]).find(x => x.id === it.styleId);
     const lc = st && typeof landedCost === 'function' ? (landedCost(st) || 0) : 0;
     wsCogsYtd += lc * (it.qty || 0);
   }));
@@ -48090,7 +48199,7 @@ function cmdMoneyData(opts) {
   // COGS above already carries landed cost against units sold.
   let poPaidYtd = 0, poCommitted = 0;
   try {
-    (STATE.pos||[]).forEach(po => {
+    (VeniaOS.get('product.pos')||[]).forEach(po => {
       const dep = Math.round((po.total||0)*((po.depositPct!=null?po.depositPct:30)/100));
       const bal = Math.round((po.total||0)-dep);
       if (po.depositPaidAt && po.depositPaidAt >= jan1iso) poPaidYtd += dep;
@@ -48112,12 +48221,12 @@ function cmdMoneyData(opts) {
   // says whether a season was bought too deep.
   const seasons = {};
   const seasonOf = {};
-  (STATE.styles || []).forEach(st => { if (st && st.season) seasonOf[st.id] = st.season; });
+  (VeniaOS.get('core.catalog') || []).forEach(st => { if (st && st.season) seasonOf[st.id] = st.season; });
   const seasonRow = (k) => (seasons[k] = seasons[k] || { season: k, wsRev: 0, wsUnits: 0, dtcRev: 0, dtcUnits: 0, cogs: 0, made: 0, styles: 0, accounts: {} });
-  (STATE.styles || []).forEach(st => { if (st && st.season) seasonRow(st.season).styles++; });
+  (VeniaOS.get('core.catalog') || []).forEach(st => { if (st && st.season) seasonRow(st.season).styles++; });
   orders.filter(o => o.status !== 'cancelled').forEach(o => (o.items||[]).forEach(it => {
     const k = seasonOf[it.styleId]; if (!k) return;
-    const st = (STATE.styles||[]).find(x => x.id === it.styleId);
+    const st = (VeniaOS.get('core.catalog')||[]).find(x => x.id === it.styleId);
     const r = seasonRow(k);
     const q = it.qty || 0;
     r.wsRev += oUsd(o, (it.ws || 0) * q);
@@ -48137,7 +48246,7 @@ function cmdMoneyData(opts) {
     r.dtcRev += m.r || 0; r.dtcUnits += m.u || 0; r.cogs += lc * (m.u || 0);
   });
   // Units actually ordered from the factory, for sell-through.
-  (STATE.pos || []).forEach(po => {
+  (VeniaOS.get('product.pos') || []).forEach(po => {
     if (po.status === 'cancelled') return;
     (po.items||[]).forEach(it => { const k = seasonOf[it.styleId]; if (k) seasonRow(k).made += (it.qty || 0); });
   });
@@ -48786,7 +48895,7 @@ function finCashCalendar(days){
     };
 
     // ── OUT: factory obligations with real dates on them ──────────────────
-    (STATE.pos||[]).filter(po => po && ['received','cancelled'].indexOf(po.status) < 0).forEach(po => {
+    (VeniaOS.get('product.pos')||[]).filter(po => po && ['received','cancelled'].indexOf(po.status) < 0).forEach(po => {
       const total = po.total || 0; if (!total) return;
       const dep = Math.round(total * ((po.depositPct != null ? po.depositPct : 30) / 100));
       const bal = Math.round(total - dep);
@@ -48797,7 +48906,7 @@ function finCashCalendar(days){
     });
 
     // ── IN: receivables with a due date, and orders that will invoice ─────
-    const orders = (STATE.slOrders || []).filter(o => o && o.status !== 'cancelled');
+    const orders = (VeniaOS.get('sales.orders') || []).filter(o => o && o.status !== 'cancelled');
     orders.forEach(o => {
       // INSTALMENT ORDERS: each deposit and balance on its own date. Billed
       // ones (invoice or payment link) are committed on their due date, or
@@ -49078,7 +49187,7 @@ function cfoPlanVariance(){
     const pulse = STATE.bizPulse || {};
     const jan1 = new Date(new Date().getFullYear(), 0, 1).toISOString();
     const mStart = key + '-01T00:00:00.000Z';
-    const ws = (STATE.slOrders || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= mStart)
+    const ws = (VeniaOS.get('sales.orders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= mStart)
       .reduce((s,o) => s + slToUsd(o.total||0, o.currency, o.fxRate), 0);
     // Exact calendar month-to-date when the pulse has it; the trailing-30-day
     // figure only as a fallback, and flagged so nothing presents it as exact.
@@ -49387,7 +49496,7 @@ function finWatchAlerts(){
   // 4. Styles under the margin floor (live styles that carry real cost data).
   try {
     if (cfg.marginFloor > 0) {
-      const under = (STATE.styles||[]).filter(s => s.status !== 'archived' && s.wholesale > 0).map(s => {
+      const under = (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && s.wholesale > 0).map(s => {
         const lc = (typeof landedCost === 'function' ? landedCost(s) : 0) || 0;
         if (lc <= 0) return null;
         const m = Math.round((1 - lc / s.wholesale) * 100);
@@ -49462,7 +49571,7 @@ function finHash(str){
   return (h >>> 0).toString(36);
 }
 function finBriefBasis(){
-  const orders = (STATE.slOrders || []).filter(Boolean).map(o => [
+  const orders = (VeniaOS.get('sales.orders') || []).filter(Boolean).map(o => [
     o.id, o.status || '', Math.round((parseFloat(o.total) || 0) * 100), o.currency || '', o.fxRate || '',
     o.discountPct || '', (o.payments || []).map(p => p && (Math.round((parseFloat(p.amount) || 0) * 100) + '@' + (p.date || ''))).join(',')
   ].join('|')).sort();
@@ -49505,7 +49614,7 @@ async function finWriteWeeklyBrief(force){
     if (!window.__sbSyncDone) { if (force) showToast('Still syncing with the cloud — try again in a moment', 'info'); return; }
     const wk = finWeekKey();
     if (!force && STATE.finWatchBrief && STATE.finWatchBrief.week === wk) return;
-    if (!(STATE.styles||[]).length && !(STATE.finTxns||[]).length) return;   // nothing to report on
+    if (!(VeniaOS.get('core.catalog')||[]).length && !(STATE.finTxns||[]).length) return;   // nothing to report on
     __finBriefBusy = true;
     if (force) { try { cmdRenderCfo(); } catch(e){} }
     const sys = [
@@ -49520,7 +49629,7 @@ async function finWriteWeeklyBrief(force){
     if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
     // A re-run replaces this week's copy in the Brand Library rather than filing a second one.
     const docTitle = 'Money brief — week of ' + wk;
-    const prevDoc = force ? STATE.brandDocs.find(d => d && d.title === docTitle) : null;
+    const prevDoc = force ? VeniaOS.get('core.brand.docs').find(d => d && d.title === docTitle) : null;
     if (prevDoc) { prevDoc.body = String(clean).slice(0, 40000); prevDoc.updatedAt = new Date().toISOString(); }
     else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: docTitle, kind: 'note',
       body: String(clean).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -51678,7 +51787,7 @@ function revSourceValue(src) {
   if (src === 'wholesale-ytd' || src === 'total-ytd') {
     const jan1iso = new Date(new Date().getFullYear(), 0, 1).toISOString();
     // In dollars: a euro order's total is euros (Build 587).
-    const ws = (STATE.slOrders || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + slToUsd(o.total||0, o.currency, o.fxRate), 0);
+    const ws = (VeniaOS.get('sales.orders') || dbGet('slOrders') || []).filter(o => o.status !== 'cancelled' && slOrderBookedAt(o) >= jan1iso).reduce((s,o) => s + slToUsd(o.total||0, o.currency, o.fxRate), 0);
     return src === 'wholesale-ytd' ? ws : ws + (p.ytd || 0);
   }
   return null;
@@ -52036,8 +52145,8 @@ window.oeGenerate = async function() {
       // connected, OR local stock exists (PO receiving fills it now), OR any
       // production PO has been cut.
       const hasLocal = (window.STATE && (
-        (STATE.styles||[]).some(s => (typeof invStock === 'function' ? invStock(s).units : (s.stock||0)) > 0)
-        || (STATE.pos||[]).length > 0));
+        (VeniaOS.get('core.catalog')||[]).some(s => (typeof invStock === 'function' ? invStock(s).units : (s.stock||0)) > 0)
+        || (VeniaOS.get('product.pos')||[]).length > 0));
       const on = ((typeof shopifyConnected === 'function') && shopifyConnected()) || hasLocal;
       document.querySelectorAll('.nav-inventory').forEach(el => { el.style.display = on ? '' : 'none'; });
     };
@@ -52089,26 +52198,26 @@ window.veniaPurgeDemoData = function() {
   try {
     var sIds = ['STY001','STY002','STY003','STY004','STY005','STY006','STY007','STY008','STY009','STY010','STY011','STY012'];
     var sNames = ['HAMLET CLOAK','HEATHCLIFF PANTS','RACKET PANT','TUMULT SHIRT','MISTRAL TANK','ANTIGONE SKIRT','JULIET BLOUSE','WAVE TOP','FUJIN HARNESS','ZIYOU JACKET','ARIEL COAT','OPHELIA DRESS'];
-    if (Array.isArray(STATE.styles)) {
-      var b1 = STATE.styles.length;
+    if (Array.isArray(VeniaOS.get('core.catalog'))) {
+      var b1 = VeniaOS.get('core.catalog').length;
       STATE.styles = STATE.styles.filter(function(x){ return !(x && sIds.indexOf(x.id) >= 0 && sNames.indexOf(x.name) >= 0); });
-      removed += b1 - STATE.styles.length;
+      removed += b1 - VeniaOS.get('core.catalog').length;
       sIds.forEach(function(id){
         if (STATE.bom && STATE.bom[id]) { delete STATE.bom[id]; removed++; }
         if (STATE.pom && STATE.pom[id]) { delete STATE.pom[id]; removed++; }
       });
     }
     var mNames = ['2x2 Rib Knit','Wool Crepe','Silk Charmeuse','Nylon Ripstop','Boucle Wool','Self Binding Tape','Care Label','Hang Tag','Branded Dust Bag','YKK Invisible Zip','Vegetable Leather Strap','Brass Buckle 38mm'];
-    if (Array.isArray(STATE.materials)) {
-      var b2 = STATE.materials.length;
+    if (Array.isArray(VeniaOS.get('product.materials'))) {
+      var b2 = VeniaOS.get('product.materials').length;
       STATE.materials = STATE.materials.filter(function(x){ return !(x && /^MAT\d{3}$/.test(x.id || '') && mNames.indexOf(x.name) >= 0); });
-      removed += b2 - STATE.materials.length;
+      removed += b2 - VeniaOS.get('product.materials').length;
     }
     var vNames = ['Atelier Primo','Korea Mills','Silk Route Co.','Leather Works LA','Label Depot','Global Trim Co.','Packstudio'];
-    if (Array.isArray(STATE.vendors)) {
-      var b3 = STATE.vendors.length;
+    if (Array.isArray(VeniaOS.get('product.vendors'))) {
+      var b3 = VeniaOS.get('product.vendors').length;
       STATE.vendors = STATE.vendors.filter(function(x){ return !(x && /^VEN\d{3}$/.test(x.id || '') && vNames.indexOf(x.name) >= 0); });
-      removed += b3 - STATE.vendors.length;
+      removed += b3 - VeniaOS.get('product.vendors').length;
     }
     // Demo buyer leads (name|company pairs from the retired seeder).
     var demoLeads = ['Caroline Huang|SSENSE','Marc Dupuis|L\'Eclaireur Paris','Keiko Mori|Dover Street Market','Alex Torres|Revolve','Sophie Laurent|Net-a-Porter','James Osei|Nordstrom','Hana Park|Selfridges','Remi Blanc|Centre Commercial','Valentina Cruz|Patron of the New','Tariq Nouri|Assembly New York','Ingrid Holm|Antonioli','Cass Whitfield|Voo Store Berlin','Michelle Kwon|Goop','Dani Ferreira|Farfetch','Yara Okafor|The Webster'];
@@ -56679,7 +56788,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.tpShareOpen = async function(){
     var sid = (typeof TP_STYLE_ID !== 'undefined' && TP_STYLE_ID) || (document.getElementById('tp-style-select')||{}).value;
     if (!sid){ showToast('Select a style first','warning'); return; }
-    var s = STATE.styles.find(function(x){ return x.id===sid; });
+    var s = VeniaOS.get('core.catalog').find(function(x){ return x.id===sid; });
     if (!s) return;
     var c = sb();
     if (!c){ showToast('Cloud connection needed for share links','warning'); return; }
@@ -56710,7 +56819,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     if (!confirm('Revoke this factory link? Anyone holding it loses access immediately.')) return;
     try {
       await c.from('venia_shares').update({ revoked: true }).eq('token', token);
-      var held = (STATE.styles||[]).find(function(x){ return x.shareToken === token; });
+      var held = (VeniaOS.get('core.catalog')||[]).find(function(x){ return x.shareToken === token; });
       if (held){ delete held.shareToken; save(); }
       var ov = document.getElementById('tp-share-overlay'); if (ov) ov.remove();
       showToast('Link revoked','success');
@@ -56740,7 +56849,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   window.__fcRowHtml = fcRowHtml; window.__fcEsc = fcEsc;
   window.dpFcLoad = async function(styleId){
-    var s = STATE.styles.find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
+    var s = VeniaOS.get('core.catalog').find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
     var box = document.getElementById('dp-fc'); if (!box) return;
     var c = sb(); if (!c){ box.innerHTML = '<div style="font-size:10px;color:var(--muted)">Cloud connection needed for the factory thread.</div>'; return; }
     try {
@@ -56757,7 +56866,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){ box.innerHTML = '<div style="font-size:10px;color:var(--muted)">Could not load the thread — ' + fcEsc((e&&e.message)||e) + '</div>'; }
   };
   window.fcReply = async function(styleId){
-    var s = STATE.styles.find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
+    var s = VeniaOS.get('core.catalog').find(function(x){ return x.id === styleId; }); if (!s || !s.shareToken) return;
     var inp = document.getElementById('dp-fc-input'); var body = ((inp && inp.value) || '').trim(); if (!body) return;
     var c = sb(); if (!c) return;
     var who = (typeof veniaWho === 'function' && veniaWho()) || '';
@@ -56774,7 +56883,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     try {
       var r = await c.functions.invoke('factory-comments', { body: { token: token, action: 'resolve', id: id, resolved: true } });
       if (r.data && r.data.error) throw new Error(r.data.error === 'founders only' ? 'Sign in under Settings → Team to resolve comments' : r.data.error);
-      var held = (STATE.styles||[]).find(function(x){ return x.shareToken === token; });
+      var held = (VeniaOS.get('core.catalog')||[]).find(function(x){ return x.shareToken === token; });
       if (held) window.dpFcLoad(held.id);
       if (window.fcRefreshSummary) window.fcRefreshSummary();
       showToast('Resolved','success');
@@ -56785,7 +56894,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   window.fcRefreshSummary = async function(){
     try {
       var c = sb(); if (!c) return;
-      var tokens = (STATE.styles||[]).map(function(s){ return s.shareToken; }).filter(Boolean);
+      var tokens = (VeniaOS.get('core.catalog')||[]).map(function(s){ return s.shareToken; }).filter(Boolean);
       if (!tokens.length){ window.__fcSummary = {}; return; }
       var r = await c.functions.invoke('factory-comments', { body: { action: 'summary', tokens: tokens } });
       window.__fcSummary = (r.data && r.data.styles) || {};
@@ -60125,7 +60234,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     // Real business data from the connected OS — so briefs about VENIA state
     // facts, not guesses. This is the source of truth for the line plan.
     try {
-      var sts = bsVeniaOn() ? (STATE.styles || []).filter(function(x){ return x && x.status !== 'archived'; }) : [];
+      var sts = bsVeniaOn() ? (VeniaOS.get('core.catalog') || []).filter(function(x){ return x && x.status !== 'archived'; }) : [];
       if (sts.length){
         var byStatus = {};
         sts.forEach(function(x){ var k = x.status || 'unknown'; byStatus[k] = (byStatus[k] || 0) + 1; });
@@ -60143,12 +60252,12 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
                  + (ss.shared ? ' — SHARED across ' + ss.shared + ' fabrications of this name, not this one alone' : '') : '') + ')';
         }).join('; ') + (sts.length > 24 ? ' — plus ' + (sts.length - 24) + ' more.' : ''));
       }
-      if (bsVeniaOn() && STATE.bizSnap && STATE.bizSnap.txt) lines.push(STATE.bizSnap.txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');
+      if (bsVeniaOn() && VeniaOS.get('money.snapshot') && VeniaOS.get('money.snapshot').txt) lines.push(VeniaOS.get('money.snapshot').txt + ' Use these live commerce numbers as the source of truth for revenue and traction, and state the window they cover.');
       var pulse = [];
-      var actPulls = bsVeniaOn() ? (STATE.prPulls || []).filter(function(p){ return p && p.status === 'active'; }).length : 0;
+      var actPulls = bsVeniaOn() ? (VeniaOS.get('growth.pulls') || []).filter(function(p){ return p && p.status === 'active'; }).length : 0;
       if (actPulls) pulse.push(actPulls + ' active PR pulls');
-      if (bsVeniaOn() && (STATE.slBuyers || []).length) pulse.push((STATE.slBuyers || []).length + ' wholesale buyer contacts');
-      if (bsVeniaOn() && (STATE.materials || []).length) pulse.push((STATE.materials || []).length + ' materials on file');
+      if (bsVeniaOn() && (VeniaOS.get('sales.buyers') || []).length) pulse.push((VeniaOS.get('sales.buyers') || []).length + ' wholesale buyer contacts');
+      if (bsVeniaOn() && (VeniaOS.get('product.materials') || []).length) pulse.push((VeniaOS.get('product.materials') || []).length + ' materials on file');
       if (pulse.length) lines.push('OS pulse: ' + pulse.join(', ') + '.');
       var mem = (STATE.eniMemory || []);
       if (mem.length) lines.push('MEMORY — things the founders told Enigma before (trust and apply these):\n' + mem.slice(-15).map(function(m){ return '- ' + m.t; }).join('\n'));
@@ -60231,7 +60340,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   async function delegBizSnap(){
     try {
       if (!bsVeniaOn()) return;
-      var snap = STATE.bizSnap;
+      var snap = VeniaOS.get('money.snapshot');
       if (snap && snap.v !== 3) { delete STATE.bizSnap; snap = null; }   // pre-v3 snapshots mislabel capped data as YTD — drop on sight
       // Capped-history snapshots retry hourly so granting read_all_orders
       // in Shopify heals the picture fast; full ones refresh every 12h.
@@ -60719,7 +60828,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       var season = String(a.season || 'SS27').toUpperCase().slice(0, 6);
       var n = 1, sid;
       do { sid = 'VN-' + season + '-' + ('00' + n).slice(-3); n++; }
-      while (STATE.styles.some(function(st){ return st.styleId === sid; }));
+      while (VeniaOS.get('core.catalog').some(function(st){ return st.styleId === sid; }));
       var st = {
         id: 'STY' + Date.now(), styleId: sid,
         name: String(a.name || a.label).toUpperCase().slice(0, 60),
