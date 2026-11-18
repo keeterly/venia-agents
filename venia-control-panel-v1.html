@@ -1472,6 +1472,7 @@ html.no-growth    [data-space="growth"],    html.no-growth    .cpl-door[onclick*
 html.no-sales     [data-space="sales"],     html.no-sales     .cpl-door[onclick*="'sl'"],
 html.no-money     [data-space="money"],     html.no-money     .cpl-door[onclick*="cmdGoMoney"],
 html.no-brainstorm [data-space="brainstorm"],
+html.no-brainstorm [data-space="boards"],
 html.no-settings  [data-space="settings"]{ display:none !important; }
 .cp-gb-logo{
   font-family:'Archivo',Helvetica,Arial,sans-serif;
@@ -1521,6 +1522,9 @@ html.no-settings  [data-space="settings"]{ display:none !important; }
   color:var(--ink);
 }
 .cp-screen.active{display:flex;animation:cpFadeIn .22s ease-out}
+/* Boards runs in its own frame (Build 608): a module, not part of this page. */
+#cp-screen-boards iframe{flex:1 1 auto;width:100%;height:100%;border:0;display:block;background:#fff}
+@media (max-width: 768px){ #cp-screen-boards{ bottom:calc(62px + var(--sab, 0px)); } }
 /* The money page's ledger blocks are deliberately narrow — a column of
    figures is unreadable stretched to 1440px. That left the right half of a
    desktop screen empty, so on a wide viewport they pair up instead. */
@@ -3237,8 +3241,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '607';
-  const BUILD_DATE = '2026.11.17';
+  const BUILD = '608';
+  const BUILD_DATE = '2026.11.18';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -3529,6 +3533,7 @@ window.veniaYmd = veniaYmd;
       <button class="cp-space" data-space="sales" onclick="cpGoto('sl')">Sales</button>
       <button class="cp-space" data-space="money" onclick="cmdGoMoney()">Money</button>
       <button class="cp-space" data-space="brainstorm" onclick="dumpOpen()">Brainstorm</button>
+      <button class="cp-space" data-space="boards" onclick="veniaOpenBoards()">Boards</button>
     </nav>
   </div>
   <div class="cp-gb-right">
@@ -3856,6 +3861,12 @@ window.veniaYmd = veniaYmd;
     </main>
   </div>
 </section>
+
+<!-- ── BOARDS (Build 608) ──
+     Brainstorm's creative space, built as a self-contained module in
+     modules/boards and hosted here in a frame. The shell only opens it and
+     shows its title; the module owns its own code, tables and storage. -->
+<section class="cp-screen" id="cp-screen-boards"></section>
 
 <!-- ── SETTINGS ── -->
 <section class="cp-screen" id="cp-screen-set">
@@ -6869,7 +6880,11 @@ const MODULES = {
   },
   brainstorm: {
     label: 'Brainstorm', space: null, nav: true,
-    owns: 'the scratchpad — ideas, notes, goals, the day plan and the canvas',
+    // Boards (Build 608) is this module's creative space. It is its own app in
+    // modules/boards with its own tables (venia_boards, venia_board_files) and
+    // private bucket (venia-boards); the shell hosts it on screen 'boards'.
+    spaces: ['boards'],
+    owns: 'the scratchpad — ideas, notes, goals, the day plan, the canvas, and Boards (moodboards and whiteboards)',
     keys: ['dump', 'dumpPlan', 'dumpMap', 'dumpMasterPos', 'dumpMasterCollapsed',
            'dumpMasterTitle', 'dumpSchedule', 'dumpWeek', 'schedPrefs', 'schedFixed',
            'board', 'bsVenia'],
@@ -14984,6 +14999,7 @@ function mobDrawerBuild() {
     + '<div class="nav-item" onclick="cpGoto(\'pr\');closeDrawer()">Growth</div>'
     + '<div class="nav-item" onclick="cmdGoMoney();closeDrawer()">Money</div>'
     + '<div class="nav-item" onclick="dumpOpen();closeDrawer()">Brainstorm</div>'
+    + '<div class="nav-item" data-space="boards" onclick="veniaOpenBoards();closeDrawer()">Boards</div>'
     + '<div class="nav-item" onclick="cpGoto(\'set\');closeDrawer()">Settings</div>'
     + '</div>';
   ctx.innerHTML = html;
@@ -25512,7 +25528,7 @@ const ROUTE_KEY = 'venia_route_v1';
 // Spaces the app can actually restore into. An unknown value (an old build's
 // name, a hand-edited store) falls through to the default rather than leaving
 // the app on a screen that does not exist.
-const ROUTE_SPACES = ['cp','plm','pr','mk','sl','br','cmd','set'];
+const ROUTE_SPACES = ['cp','plm','pr','mk','sl','br','cmd','set', 'boards'];
 function routeSave(space, page) {
   // Outside parties and one-shot screens have no route to remember: a factory
   // share link, an agent portal, the Stripe return, a password recovery link.
@@ -25540,6 +25556,8 @@ function routeRestore() {
       if (r.page) STATE.currentPage = r.page;
       cpGoto('plm');
       if (r.page && r.page !== 'dashboard') setTimeout(function(){ try { goTo(r.page); } catch(e){} }, 60);
+    } else if (r.space === 'boards') {
+      if (typeof window.veniaOpenBoards === 'function') window.veniaOpenBoards();
     } else {
       cpGoto(r.space);
     }
@@ -25608,6 +25626,7 @@ function cpGoto(id) {
     : (id === 'sl') ? 'sales'
     : (['pr','mk','br'].includes(id)) ? 'growth'
     : (id === 'cmd') ? 'money'
+    : (id === 'boards') ? 'boards'
     : (id === 'cp') ? 'today' : null;
   document.querySelectorAll('.cp-space').forEach(b => b.classList.toggle('active', b.dataset.space === space));
   // …and the unified bottom bar. Growth (PR/Mktg/Brand) now has its own tab.
@@ -25616,6 +25635,35 @@ function cpGoto(id) {
     : (id === 'cp') ? 'today' : null;
   document.querySelectorAll('.mob-nav-item[data-space]').forEach(b => b.classList.toggle('active', b.dataset.space === tabSpace));
 }
+
+// ── MODULE HOST: Boards (Build 608) ──────────────────────────────────
+// The first section built as a plugin: its own app at /boards, loaded once
+// into a frame the first time it opens and kept alive after. The only things
+// that cross the frame are postMessages from the module (its title), checked
+// against this origin. Nothing here reads the module's data.
+window.veniaOpenBoards = function(boardId){
+  const scr = document.getElementById('cp-screen-boards');
+  if (!scr) return;
+  let fr = scr.querySelector('iframe');
+  const want = '/boards' + (boardId ? '#/b/' + encodeURIComponent(boardId) : '');
+  if (!fr) {
+    fr = document.createElement('iframe');
+    fr.title = 'Boards';
+    fr.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen');
+    fr.src = want;
+    scr.appendChild(fr);
+  } else if (boardId) {
+    try { fr.contentWindow.location.hash = '#/b/' + encodeURIComponent(boardId); } catch(e){ fr.src = want; }
+  }
+  cpGoto('boards');
+};
+window.addEventListener('message', function(e){
+  if (e.origin !== location.origin || !e.data || e.data.source !== 'venia-module') return;
+  if (e.data.type === 'boards:title' && document.getElementById('cp-screen-boards')?.classList.contains('active')) {
+    const t = String((e.data.payload && e.data.payload.title) || 'Boards').slice(0, 120);
+    document.title = t + ' · VENIA OS';
+  }
+});
 
 // ── VENIA_DB — localStorage data layer ───────────────────────────────
 const DB_KEY   = 'VENIA_CC_DB';
@@ -53743,7 +53791,7 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     growth:     'press, marketing, brand — pulls, pitches, the calendar',
     sales:      'buyers, quotes, orders, line sheets — plus the line itself, prices but no costs',
     money:      'cash, P&L, margins, the bank feed',
-    brainstorm: 'the shared scratchpad',
+    brainstorm: 'the shared scratchpad and Boards (moodboards, whiteboards)',
     settings:   'connections and preferences',
   };
   function esc(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
@@ -61143,7 +61191,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
   }
   function bdRender(){ var canvas = document.getElementById('bd-canvas'); if (!canvas) return; canvas.innerHTML = boardState().cards.map(bdCardHTML).join(''); bdApplyTransform(); }
   function bdBtn(onclick, label){ return '<button onclick="' + onclick + '" style="width:44px;height:44px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-size:18px;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,.14)">' + label + '</button>'; }
-  window.boardOpen = function(){
+  // Brainstorm's Board grew into Boards (Build 608). Its cards are brought
+  // across on first open and keep arriving there (Enigma still pins here), so
+  // the old canvas below stays reachable only as boardOpenLegacy.
+  window.boardOpen = function(){ if (typeof window.veniaOpenBoards === 'function') { try { if (typeof dumpClose === 'function') dumpClose(); } catch(e){} return window.veniaOpenBoards('b-brainstorm-board'); } return window.boardOpenLegacy(); };
+  window.boardOpenLegacy = function(){
     bd = { drag: null, pointers: {}, pinch: null, suppressClick: false, editing: null };
     var ex = document.getElementById('dump-board'); if (ex) ex.remove();
     var ov = document.createElement('div');
