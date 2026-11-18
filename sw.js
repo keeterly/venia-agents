@@ -2,7 +2,7 @@
    Offline app-shell caching. API calls pass straight through; the one thing
    it reads on the way is whether a workspace save was refused (see THE WINDOW
    THAT CANNOT SAVE, below). It never caches, changes or holds back a write. */
-const CACHE = 'venia-shell-v598';
+const CACHE = 'venia-shell-v612';
 // The last build that fixed SAVING. Bump this (to that build's number) only in
 // a build that fixes how changes reach the cloud. An open page on an older
 // build asks the waiting worker for it, and a page whose saves are failing
@@ -196,19 +196,24 @@ self.addEventListener('fetch', (e) => {
   // App shell: network-first so updates land when online, cache when offline.
   if (req.mode === 'navigate') {
     const isBrainstorm = url.pathname === '/brainstorm.html' || url.pathname === '/brainstorm';
+    // A module's page (Boards, Build 612) is its own document. It must never be
+    // filed as the OS shell, or the next offline open would show the module
+    // instead of VENIA OS. It keeps its own cache entry.
+    const isModule = url.pathname === '/boards' || url.pathname.startsWith('/modules/');
+    const shellKey = isBrainstorm ? '/brainstorm.html' : isModule ? url.pathname : '/venia-control-panel-v1.html';
     // Fetch with redirect:'follow' (fresh Request) so a Netlify .html pretty-URL
     // 301 can't surface as an unusable opaqueredirect for the navigation.
     e.respondWith(
       fetch(new Request(req.url, { redirect: 'follow', credentials: 'same-origin' }))
         .then((r) => {
           const copy = r.clone();
-          caches.open(CACHE).then((c) => c.put(isBrainstorm ? '/brainstorm.html' : '/venia-control-panel-v1.html', copy));
+          if (r.ok) caches.open(CACHE).then((c) => c.put(shellKey, copy));
           return r;
         })
         // Offline: serve the matching shell — the Brainstorm entry keeps its own
         // identity, everything else falls back to the OS shell.
-        .catch(() => caches.match(isBrainstorm ? '/brainstorm.html' : '/venia-control-panel-v1.html')
-          .then((r) => r || caches.match('/venia-control-panel-v1.html')).then((r) => r || caches.match('/')))
+        .catch(() => caches.match(shellKey).then((r) => r || (isModule ? Response.error()
+          : caches.match('/venia-control-panel-v1.html').then((r2) => r2 || caches.match('/')))))
     );
     return;
   }
