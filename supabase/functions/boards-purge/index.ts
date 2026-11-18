@@ -9,6 +9,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 // someone the database itself says may purge (venia_boards_can('purge'):
 // a founder, or the Brainstorm owner). Everything it removes is listed in
 // venia_boards_purged first, so there is a record of what went and who sent it.
+// Its comments, mentions and pins go with it.
 //
 // POST {boardId}  with the person's own session as Authorization.
 // Boards inside the purged board are kept: they move to the top level.
@@ -64,6 +65,12 @@ Deno.serve(async (req: Request) => {
 
     // Keep any boards that lived inside it.
     await admin.from("venia_boards").update({ parent_id: null }).eq("parent_id", boardId);
+
+    // Its comments, the mentions they sent, and anyone's pin on it go too.
+    for (const t of ["venia_board_mentions", "venia_board_comments", "venia_board_pins"]) {
+      const { error } = await admin.from(t).delete().eq("board_id", boardId);
+      if (error) return json({ error: "couldn't clear its comments" }, 500);
+    }
 
     const thumb = `${board.workspace_id}/thumbs/${boardId}.png`;
     for (let i = 0; i < paths.length + 1; i += 100) {

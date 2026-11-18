@@ -273,6 +273,139 @@ export const store = {
     return cards.map(c => c.kind === 'goal' ? { ...c, goalTitle: goals[c.goalId] || '' } : c);
   },
 
+  // ── comments and @ mentions ──────────────────────────────────────────────
+  // A comment sits on a spot on the board, or on one item (then x, y is its
+  // offset from that item). Replies carry thread_id. Nothing is ever removed
+  // here: a comment is hidden (hidden_at) or resolved (resolved_at).
+  async listComments(boardId) {
+    if (this.mode === 'cloud') {
+      const { data, error } = await sb.from('venia_board_comments').select('*')
+        .eq('board_id', boardId).is('hidden_at', null).order('created_at');
+      if (error) throw error;
+      return data || [];
+    }
+    return ((await get('comments:' + boardId, idb)) || []).filter(c => !c.hidden_at);
+  },
+  async addComment(boardId, c, boardTitle) {
+    const row = { id: uid('c'), workspace_id: WS, board_id: boardId, thread_id: c.thread_id || null, element_id: c.element_id || null,
+      x: c.x || 0, y: c.y || 0, body: c.body, mentions: c.mentions || [], author: this.email || 'you', created_at: now() };
+    if (this.mode === 'cloud') {
+      const { error } = await sb.from('venia_board_comments').insert(row);
+      if (error) throw error;
+      const tell = (row.mentions || []).filter(e => e && e !== this.email);
+      if (tell.length) {
+        const m = await sb.from('venia_board_mentions').insert(tell.map(email => ({
+          comment_id: row.id, email, board_id: boardId, board_title: boardTitle || null,
+          author: this.email, excerpt: row.body.slice(0, 200) })));
+        if (m.error) console.warn('[boards] mention not sent', m.error);
+      }
+      return row;
+    }
+    const all = (await get('comments:' + boardId, idb)) || [];
+    all.push(row); await set('comments:' + boardId, all, idb);
+    return row;
+  },
+  async patchComment(boardId, id, patch) {
+    if (this.mode === 'cloud') {
+      const { error } = await sb.from('venia_board_comments').update(patch).eq('id', id);
+      if (error) throw error;
+      return;
+    }
+    const all = (await get('comments:' + boardId, idb)) || [];
+    const i = all.findIndex(c => c.id === id); if (i >= 0) all[i] = { ...all[i], ...patch };
+    await set('comments:' + boardId, all, idb);
+  },
+  resolveComment(boardId, id, yes = true) { return this.patchComment(boardId, id, yes ? { resolved_at: now(), resolved_by: this.email || null } : { resolved_at: null, resolved_by: null }); },
+  hideComment(boardId, id) { return this.patchComment(boardId, id, { hidden_at: now() }); },
+  async markMentionsSeen(boardId) {
+    if (this.mode !== 'cloud' || !this.email) return;
+    await sb.from('venia_board_mentions').update({ seen_at: now() }).eq('email', this.email).eq('board_id', boardId).is('seen_at', null);
+  },
+  // Who can be @ mentioned: the founders and everyone holding Brainstorm.
+  async people() {
+    if (this.mode !== 'cloud') return [];
+    if (this._people) return this._people;
+    const { data } = await sb.rpc('venia_boards_people');
+    this._people = (data || []).map(r => r.email || r).filter(Boolean).map(email => ({ email, name: nameOf(email) }));
+    return this._people;
+  },
+
+  // ── pinned boards (each person's own) ────────────────────────────────────
+  async pins() {
+    if (this.mode === 'cloud') {
+      const { data } = await sb.from('venia_board_pins').select('board_id,pinned').eq('email', this.email);
+      return new Set((data || []).filter(r => r.pinned).map(r => r.board_id));
+    }
+    return new Set((await get('pins', idb)) || []);
+  },
+  async setPin(boardId, pinned) {
+    if (this.mode === 'cloud') {
+      const { error } = await sb.from('venia_board_pins').upsert({ email: this.email, board_id: boardId, pinned, updated_at: now() }, { onConflict: 'email,board_id' });
+      if (error) throw error;
+      return;
+    }
+    const s = new Set((await get('pins', idb)) || []);
+    pinned ? s.add(boardId) : s.delete(boardId);
+    await set('pins', [...s], idb);
+  },
+
+  // ── folders: put a board inside another ──────────────────────────────────
+  // The board's parent changes, and its card moves with it: a card appears on
+  // the new parent (to the right of what's there) and leaves the old one, so
+  // you always reach a board by opening the board that holds it.
+  async moveInto(id, parentId, makeCard) {
+    const all = await this.listBoards();
+    const me = all.find(b => b.id === id); if (!me) return;
+    if (parentId) {
+      // never inside itself or inside something it holds
+      let p = parentId, guard = 0;
+      while (p && guard++ < 50) { if (p === id) throw new Error('A board can\'t go inside itself.'); p = (all.find(b => b.id === p) || {}).parent_id; }
+    }
+    const was = me.parent_id;
+    await this.move(id, parentId || null);
+    const edit = async (boardId, fn) => {
+      for (let i = 0; i < 3; i++) {
+        const row = await this.loadBoard(boardId); if (!row) return;
+        const scene = row.scene || { elements: [], appState: {} };
+        const next = fn(scene.elements || []); if (!next) return;
+        const res = await this.saveScene(boardId, { ...scene, elements: next }, row.rev || 0, {});
+        if (!res.conflict) return;
+      }
+    };
+    if (was && was !== parentId) await edit(was, els => {
+      const hit = els.filter(e => !e.isDeleted && e.customData && e.customData.kind === 'board' && e.customData.boardId === id);
+      if (!hit.length) return null;
+      const ids = new Set(hit.map(e => e.id));
+      hit.forEach(e => (e.boundElements || []).forEach(b => ids.add(b.id)));
+      return els.map(e => ids.has(e.id) || (e.containerId && ids.has(e.containerId)) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e);
+    });
+    if (parentId) await edit(parentId, els => {
+      const live = els.filter(e => !e.isDeleted);
+      if (live.some(e => e.customData && e.customData.kind === 'board' && e.customData.boardId === id)) return null;
+      let x = 0, y = 0;
+      if (live.length) { x = Math.max(...live.map(e => e.x + (e.width || 0))) + 60; y = Math.min(...live.map(e => e.y)); }
+      return [...els, ...makeCard(x, y, me)];
+    });
+  },
+
+  // ── link cards ───────────────────────────────────────────────────────────
+  // The page's title, picture and site, read on the server (a browser can't
+  // read another site's page).
+  async linkPreview(url) {
+    if (this.mode !== 'cloud') return null;
+    const { data, error } = await sb.functions.invoke('boards-link', { body: { url } });
+    if (error || !data || data.error) return null;
+    return data;
+  },
+
+  // ── live: a private channel per board ────────────────────────────────────
+  async channel(boardId, presenceKey) {
+    if (this.mode !== 'cloud') return null;
+    try { await sb.realtime.setAuth(); } catch (e) {}
+    return sb.channel('board:' + boardId, { config: { private: true, broadcast: { self: false }, presence: { key: presenceKey } } });
+  },
+  dropChannel(ch) { try { if (ch) sb.removeChannel(ch); } catch (e) {} },
+
   // ── carry boards made on this device up to the cloud ─────────────────────
   async localBoardsWaiting() {
     if (this.mode !== 'cloud') return [];
@@ -294,6 +427,12 @@ export const store = {
     await set('boards', all, idb);
   },
 };
+
+// "keeter@veniacollection.com" -> "Keeter"
+export function nameOf(email) {
+  const n = String(email || '').split('@')[0].split(/[._-]/)[0];
+  return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Someone';
+}
 
 export function dataURLToBlob(dataURL) {
   const [head, body] = dataURL.split(',');
