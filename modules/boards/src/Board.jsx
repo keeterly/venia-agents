@@ -385,6 +385,8 @@ export default function Board({ boardId, commentId }) {
       appState: select ? { selectedElementIds: Object.fromEntries(els.filter(e => !e.containerId).map(e => [e.id, true])), selectedGroupIds: {} } : undefined,
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     });
+    // bring it into view if it landed off screen
+    try { api.scrollToContent(els.filter(e => !e.containerId), { animate: true }); } catch (e) {}
   };
 
   function addNote(colour) {
