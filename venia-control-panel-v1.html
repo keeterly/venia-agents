@@ -3237,8 +3237,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '607';
-  const BUILD_DATE = '2026.11.17';
+  const BUILD = '609';
+  const BUILD_DATE = '2026.11.18';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -6952,6 +6952,134 @@ function moduleOfKey(key){
 }
 window.moduleOfSpace = moduleOfSpace;
 window.moduleOfKey = moduleOfKey;
+
+// ── THE MODULE CONTRACT (Build 609) ────────────────────────────────────────
+// MODULES above says what each module OWNS. This says how it fits into the
+// system: what it needs, what it offers, what it announces, and what it is
+// sold as. It is the first step toward VENIA OS as plugins that a brand can
+// subscribe to à la carte (docs/modules.md has the whole contract).
+//
+// Nothing in the running app reads this yet; it is the written-down contract
+// that the next builds wire up, and scripts/check-modules.mjs holds the code
+// to it. Field by field:
+//   tier      core  — every brand has it and it cannot be switched off
+//             base  — part of every subscription
+//             addon — subscribed to on its own
+//   requires  core services the module cannot work without. A module may
+//             require ONLY the core, never another module.
+//   uses      other modules' offers it reads WHEN they are on. Each one must
+//             have a fallback, because the other module may be off.
+//   provides  what it offers the rest of the system through VeniaOS.get().
+//   emits     events it announces; listens are wired in code, not here.
+//   tables / server / edge / mcp
+//             what it owns outside STATE: Supabase tables, Netlify functions,
+//             Supabase edge functions and Claude-connector tools. Switching
+//             a module off has to switch all of these off with it.
+const MODULE_MANIFEST = {
+  home: {
+    tier: 'core', version: '1.0.0',
+    requires: ['core.activity', 'core.assistant'],
+    uses: ['sales.followUps', 'growth.pullsDue', 'product.drops', 'money.cash'],
+    provides: ['today.cards'],
+    emits: ['today.task.added', 'today.task.done'],
+    tables: ['venia_daily_digest'],
+    server: ['digest'], edge: [],
+    mcp: ['venia_today', 'add_task', 'complete_task', 'search_venia'],
+  },
+  product: {
+    tier: 'addon', version: '1.0.0',
+    requires: ['core.catalog', 'core.fx', 'core.files', 'core.activity'],
+    uses: ['sales.committedDemand', 'growth.pulls', 'growth.brandDocs'],
+    provides: ['product.costing', 'product.line', 'product.drops', 'product.techPack'],
+    emits: ['product.style.saved', 'product.po.placed'],
+    // venia_styles … venia_pom are the pre-module copies the old Supabase
+    // integration still writes; they retire in a later stage, not before.
+    tables: ['venia_styles', 'venia_materials', 'venia_vendors', 'venia_bom', 'venia_pom',
+             'venia_shares', 'venia_share_comments'],
+    server: ['shopify'], edge: ['factory-share', 'factory-comments'],
+    mcp: ['list_styles', 'get_style', 'list_vendors', 'update_styles', 'add_vendors'],
+  },
+  growth: {
+    tier: 'addon', version: '1.0.0',
+    requires: ['core.catalog', 'core.brand', 'core.mail', 'core.activity'],
+    uses: ['sales.buyers'],
+    provides: ['growth.pulls', 'growth.pullsDue', 'growth.coverage', 'growth.brandDocs'],
+    emits: ['growth.pull.created', 'growth.pull.returned', 'growth.coverage.logged'],
+    tables: ['venia_pull_sign', 'venia_instagram', 'venia_instagram_oauth'],
+    server: ['stripe', 'mail', 'news'], edge: ['pull-sign', 'instagram', 'instagram-callback'],
+    mcp: ['list_pulls', 'list_coverage', 'create_pull', 'log_coverage'],
+  },
+  sales: {
+    tier: 'addon', version: '1.0.0',
+    requires: ['core.catalog', 'core.brand', 'core.mail', 'core.fx', 'core.activity'],
+    uses: ['money.cash', 'money.watch', 'growth.coverage', 'product.costing'],
+    provides: ['sales.buyers', 'sales.followUps', 'sales.committedDemand', 'sales.receivables'],
+    emits: ['sales.quote.sent', 'sales.order.confirmed', 'sales.payment.recorded'],
+    tables: ['venia_agents', 'venia_agent_leads', 'venia_agent_sessions'],
+    server: ['stripe', 'mail'], edge: ['agent-portal'],
+    mcp: ['list_buyers', 'get_buyer', 'list_orders', 'add_buyers', 'update_buyers',
+          'log_outreach', 'set_order_status', 'record_payment'],
+  },
+  money: {
+    tier: 'addon', version: '1.0.0',
+    requires: ['core.fx', 'core.activity', 'core.assistant'],
+    uses: ['product.costing', 'sales.receivables', 'growth.brandDocs'],
+    provides: ['money.cash', 'money.watch', 'money.snapshot'],
+    emits: ['money.watch.alert'],
+    tables: [],
+    server: ['bank', 'bank-sync', 'cfo-chat-background', 'cfo-plan-background', 'cfo-weekly'], edge: [],
+    mcp: ['money_snapshot', 'list_transactions', 'set_txn_category'],
+  },
+  brainstorm: {
+    tier: 'addon', version: '1.0.0',
+    requires: ['core.assistant', 'core.files'],
+    uses: ['product.line', 'money.snapshot', 'sales.buyers', 'growth.pulls'],
+    provides: ['brainstorm.capture'],
+    emits: ['brainstorm.item.added'],
+    tables: ['venia_agent_jobs'],
+    server: ['agent-background'], edge: [],
+    mcp: ['add_to_brainstorm'],
+  },
+  settings: {
+    tier: 'core', version: '1.0.0',
+    requires: [], uses: [], provides: ['core.mail', 'core.google'], emits: [],
+    tables: [], server: [], edge: ['team'], mcp: [],
+  },
+  legacy: {
+    // Retires once VENIA_CC_DB is split up; never offered to a subscriber.
+    tier: 'core', version: '0.0.0',
+    requires: [], uses: [], provides: [], emits: [],
+    tables: [], server: [], edge: [], mcp: [],
+  },
+  catalog: {
+    // The cost-stripped line. Core, so a brand can buy Sales or Growth
+    // without Product; Product adds cost, BOM, POM and tech packs on top.
+    tier: 'core', version: '1.0.0',
+    requires: [], uses: [], provides: ['core.catalog'], emits: [],
+    tables: [], server: [], edge: [], mcp: [],
+  },
+};
+// The core services every module may require, and where each lives today.
+// Several still sit inside a module's STATE keys; they move behind
+// VeniaOS.get() first and into core storage later, so nothing is lost on the way.
+const CORE_SERVICES = {
+  'core.catalog':   'the sellable line, cost stripped (catalog projection of Product styles)',
+  'core.brand':     'brand voice, tone, guidelines and references (today in Growth: brTone, brPrefs, brandDocs)',
+  'core.mail':      'sending as VENIA and the Gmail connection (today in Settings)',
+  'core.google':    'Google sign-in and Drive (today in Settings)',
+  'core.fx':        'the season currency rates (today in Sales: fxRates)',
+  'core.activity':  'the activity log and deletes (today in Today: activityLog, _tomb)',
+  'core.assistant': 'Enigma, its memory and the From Claude inbox (today in Today: eniMemory)',
+  'core.files':     'photos and files in Supabase Storage',
+};
+window.MODULE_MANIFEST = MODULE_MANIFEST;
+window.CORE_SERVICES = CORE_SERVICES;
+function veniaModuleManifest(id){
+  const m = MODULES[id]; if (!m) return null;
+  return Object.assign({ id: id, label: m.label, keys: m.keys.slice(), ls: (m.ls || []).slice() },
+                       MODULE_MANIFEST[id] || {});
+}
+window.veniaModuleManifest = veniaModuleManifest;
 // Which module rows a person may WRITE.
 //
 // `roles` is window.VENIA_MY_ROLES — what they HOLD — and not
