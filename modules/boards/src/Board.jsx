@@ -330,6 +330,21 @@ export default function Board({ boardId, commentId }) {
     const s = api.getAppState(); const z = s.zoom.value;
     return { x: s.width / 2 / z - s.scrollX, y: s.height / 2 / z - s.scrollY };
   };
+  // Somewhere near the middle that isn't already covered, so a new thing
+  // never lands under (or over) something else. Cards in particular float
+  // above the drawing, so they must not land on it.
+  const spotFor = (w, h) => {
+    const c = center();
+    const live = api.getSceneElements().filter(e => !e.containerId);
+    const hits = (x, y) => live.some(e => x < e.x + e.width + 16 && x + w + 16 > e.x && y < e.y + e.height + 16 && y + h + 16 > e.y);
+    let x = c.x - w / 2, y = c.y - h / 2;
+    for (let i = 0; i < 24 && hits(x, y); i++) {
+      // walk right along the row, then start a row below
+      x += w + 24;
+      if (i % 6 === 5) { x = c.x - w / 2; y += h + 24; }
+    }
+    return { x, y };
+  };
   const addEls = (els, select = true) => {
     api.updateScene({
       elements: [...api.getSceneElementsIncludingDeleted(), ...els],
@@ -339,8 +354,8 @@ export default function Board({ boardId, commentId }) {
   };
 
   function addNote(colour) {
-    const c = center();
-    addEls(note(c.x - 110, c.y - 80, 'New note', colour));
+    const p = spotFor(220, 160);
+    addEls(note(p.x, p.y, 'New note', colour));
     setPanel(null);
   }
 
@@ -375,10 +390,10 @@ export default function Board({ boardId, commentId }) {
     url = String(url || '').trim(); if (!url) return;
     if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
     setPanel(null);
-    const c = center();
     // video, music and design files play right on the board
     if (PLAYS_IN_PLACE.test(hostOf(url))) {
-      const [r] = convertToExcalidrawElements([{ type: 'rectangle', x: c.x - 240, y: c.y - 135, width: 480, height: 270 }]);
+      const p = spotFor(480, 270);
+      const [r] = convertToExcalidrawElements([{ type: 'rectangle', x: p.x, y: p.y, width: 480, height: 270 }]);
       addEls(restoreElements([{ ...r, type: 'embeddable', link: url, strokeColor: 'transparent', backgroundColor: 'transparent' }], null));
       return;
     }
@@ -392,14 +407,15 @@ export default function Board({ boardId, commentId }) {
       if (info && info.kind === 'image' && !looksLikeImageUrl(url)) {
         const blob = await fetchImage(url); if (blob) return addImages([blob], null, [url]);
       }
-      addEls(linkCard(c.x - 150, c.y - 100, { url, ...(info || {}), site: (info && info.site) || hostOf(url) }));
+      const p = spotFor(300, info && info.image ? 290 : 128);
+      addEls(linkCard(p.x, p.y, { url, ...(info || {}), site: (info && info.site) || hostOf(url) }));
       if (!info) setStatus(store.mode === 'cloud' ? 'Couldn\'t read that page, so it\'s a plain link card' : 'Saved as a link card');
     } finally { setBusy(''); }
   }
 
   function addTodo() {
-    const c = center();
-    addEls(todoCard(c.x - 140, c.y - 80));
+    const p = spotFor(280, 128);
+    addEls(todoCard(p.x, p.y));
     setStatus('Click the list to tick things off or add to it');
   }
 
@@ -408,7 +424,6 @@ export default function Board({ boardId, commentId }) {
     const st = api.getAppState();
     const units = selectionUnits(api.getSceneElementsIncludingDeleted(), st.selectedElementIds);
     const members = units.flatMap(u => u.members).filter(m => m.type !== 'frame');
-    const c = center();
     let col;
     if (members.length) {
       const name = window.prompt('Name this column', 'Column'); if (name === null) return;
@@ -418,7 +433,8 @@ export default function Board({ boardId, commentId }) {
       const rest = api.getSceneElementsIncludingDeleted().map(e => ids.has(e.id) ? newElementWith(e, { frameId: col.id }) : e);
       api.updateScene({ elements: [col, ...rest], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     } else {
-      col = newColumn(c.x - 150, c.y - 60, 'Column');
+      const p = spotFor(300, 120);
+      col = newColumn(p.x, p.y, 'Column');
       api.updateScene({ elements: [col, ...api.getSceneElementsIncludingDeleted()], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
       setStatus('Drag notes, photos and cards into the column');
     }
@@ -456,8 +472,8 @@ export default function Board({ boardId, commentId }) {
   }
 
   function placeBoardCard(b) {
-    const c = center();
-    addEls(boardCard(c.x - 120, c.y - 75, b));
+    const p = spotFor(240, 150);
+    addEls(boardCard(p.x, p.y, b));
     setPanel(null);
   }
 
@@ -499,6 +515,12 @@ export default function Board({ boardId, commentId }) {
   const onLinkOpen = useCallback((element, event) => {
     const cd = element.customData || {};
     const link = element.link || '';
+    // To-do and link cards carry a marker link, never a page to open.
+    if (isCardUrl(link)) {
+      event.preventDefault();
+      if (cd.kind === 'link' && cd.url) window.open(cd.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const m = cd.boardId || (link.match(/\/boards#\/b\/([\w-]+)/) || [])[1];
     if (m) { event.preventDefault(); save(); go('/b/' + m); }
   }, [save]);
