@@ -84,7 +84,7 @@ $$;
 -- Module grants (venia_members) are VENIA's until they gain a brand column.
 create or replace function public.venia_can(t text, m text, action text)
   returns boolean language sql stable security definer set search_path = '' as $$
-  select
+  select coalesce(
     (t = 'main' and public.venia_is_founder())
     or (
       public.venia_entitled(t, m)
@@ -93,7 +93,7 @@ create or replace function public.venia_can(t text, m text, action text)
         or (t = 'main' and action = 'read'  and public.venia_module_role(m) is not null)
         or (t = 'main' and action = 'write' and public.venia_module_role(m) in ('owner', 'editor'))
       )
-    )
+    ), false)
 $$;
 
 revoke all on function public.venia_tenant_role(text)          from public, anon;
