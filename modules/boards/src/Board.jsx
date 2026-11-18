@@ -84,7 +84,9 @@ export default function Board({ boardId }) {
     const firstImage = live.find(e => e.type === 'image' && e.fileId);
     return {
       scene: { elements: els, appState: { viewBackgroundColor: st.viewBackgroundColor, gridModeEnabled: !!st.gridModeEnabled } },
-      extra: { search_text: (meta ? meta.title + ' ' : '') + words, item_count: live.filter(e => !e.containerId && !(e.type === 'text' && e.groupIds.length)).length, cover_file: firstImage ? firstImage.fileId : null },
+      // Count what a person would call one thing: a palette, a group or a
+      // labelled note is one item, not its parts.
+      extra: { search_text: (meta ? meta.title + ' ' : '') + words, item_count: new Set(live.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size, cover_file: firstImage ? firstImage.fileId : null },
       version: getSceneVersion(els),
     };
   }, [meta]);
@@ -130,12 +132,14 @@ export default function Board({ boardId }) {
       if (res.conflict) { setStatus('Someone else is editing; retrying'); R.current.again = true; return; }
       R.current.rev = res.rev; R.current.savedVersion = version; R.current.bg = scene.appState.viewBackgroundColor;
       setStatus(store.mode === 'cloud' ? 'Saved' : 'Saved on this device');
+      if (Date.now() - R.current.thumbAt > 15000) R.current.wantThumb = true;
     } catch (e) {
       setStatus('Not saved yet: ' + (e.message || 'offline'));
       R.current.again = true;
     } finally {
       R.current.saving = false;
       if (R.current.again) { R.current.again = false; clearTimeout(R.current.timer); R.current.timer = setTimeout(save, 2500); }
+      if (R.current.wantThumb && R.current.thumbFn) { R.current.wantThumb = false; R.current.thumbFn(); }
     }
   }, [api, boardId, sceneFor, uploadFiles, mergeRemote]);
 
@@ -151,6 +155,8 @@ export default function Board({ boardId }) {
       R.current.thumbVersion = v; R.current.thumbAt = Date.now();
     } catch (e) {}
   }, [api, boardId]);
+
+  R.current.thumbFn = thumb;
 
   const onChange = useCallback((elements, appState) => {
     const ids = Object.keys(appState.selectedElementIds || {}).filter(k => appState.selectedElementIds[k]);
@@ -277,7 +283,7 @@ export default function Board({ boardId }) {
 
   function doArrange(mode) {
     const next = arrange(api.getSceneElementsIncludingDeleted(), api.getAppState().selectedElementIds, mode);
-    if (next) api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    if (next) { api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY }); setStatus(''); }
     else setStatus('Select two or more things to arrange');
     setPanel(null);
   }
