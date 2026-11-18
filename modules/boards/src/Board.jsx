@@ -10,6 +10,11 @@ import { go, NewBoard, LEGACY_ID } from './App.jsx';
 import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette } from './images.js';
+import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf } from './cards.jsx';
+import { newColumn, isColumn, restack } from './columns.js';
+import { useLive } from './live.js';
+import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
+import { nameOf } from './store.js';
 
 const BG = '#F7F6F2';
 const DEFAULTS = {
@@ -24,7 +29,12 @@ const DEFAULTS = {
 };
 const IMG_SIDE = 320;   // how big a new photo lands on the canvas
 
-export default function Board({ boardId }) {
+// Pages that play in place (video, music, design files) stay embeds; every
+// other link becomes a card with the page's picture and title.
+const PLAYS_IN_PLACE = /(^|\.)(youtube\.com|youtu\.be|vimeo\.com|figma\.com|open\.spotify\.com|soundcloud\.com|loom\.com|giphy\.com)$/i;
+const isWebUrl = (t) => /^https?:\/\/\S+$/i.test(t);
+
+export default function Board({ boardId, commentId }) {
   const [initial, setInitial] = useState(null);
   const [meta, setMeta] = useState(null);
   const [trail, setTrail] = useState([]);
@@ -34,6 +44,12 @@ export default function Board({ boardId }) {
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
+  const [rows, setRows] = useState([]);           // comments, flat
+  const [adding, setAdding] = useState(false);    // placing a new comment
+  const [openId, setOpenId] = useState(null);     // the open thread
+  const [showResolved, setShowResolved] = useState(false);
+  const [people, setPeople] = useState([]);
+  const [view, setView] = useState(0);            // bumps when the canvas moves, to move the pins
   const R = useRef({ rev: 0, savedVersion: -1, timer: null, saving: false, again: false, uploaded: new Set(), uploading: new Set(), thumbAt: 0, thumbVersion: -1, bg: BG });
   const wrapRef = useRef(null);
   const fileInput = useRef(null);
@@ -80,7 +96,8 @@ export default function Board({ boardId }) {
     const st = a.getAppState();
     const live = els.filter(e => !e.isDeleted);
     const words = live.filter(e => e.type === 'text').map(e => e.text)
-      .concat(live.filter(e => e.type === 'frame' && e.name).map(e => e.name)).join(' ').replace(/\s+/g, ' ').slice(0, 20000);
+      .concat(live.filter(e => e.type === 'frame' && e.name).map(e => e.name))
+      .concat(live.filter(e => e.type === 'embeddable').map(cardWords)).join(' ').replace(/\s+/g, ' ').slice(0, 20000);
     const firstImage = live.find(e => e.type === 'image' && e.fileId);
     return {
       // files and appState travel with the snapshot: on the way out the
@@ -178,24 +195,103 @@ export default function Board({ boardId }) {
 
   R.current.thumbFn = thumb;
 
+  // ── live together ────────────────────────────────────────────────────────
+  const fetchMissing = useCallback(async (ids) => {
+    // Their image may still be on its way up; try for a little while.
+    for (let i = 0; i < 6 && api; i++) {
+      const have = new Set(Object.keys(api.getFiles()));
+      const need = ids.filter(id => !have.has(id)); if (!need.length) return;
+      const got = await store.loadFiles(boardId, need).catch(() => []);
+      if (got.length) { api.addFiles(got); got.forEach(f => R.current.uploaded.add(f.id)); }
+      if (got.length === need.length) return;
+      await new Promise(r => setTimeout(r, 2500));
+    }
+  }, [api, boardId]);
+
+  // ── comments ─────────────────────────────────────────────────────────────
+  const loadComments = useCallback(async () => {
+    try { setRows(await store.listComments(boardId)); } catch (e) {}
+  }, [boardId]);
+  const live = useLive({ api, boardId, onFilesNeeded: fetchMissing, onCommentsChanged: loadComments });
+  const threads = threadsOf(rows);
+  const openCount = threads.filter(t => !t.root.resolved_at).length;
+
+  useEffect(() => {
+    if (!api) return;
+    loadComments();
+    store.people().then(setPeople).catch(() => {});
+    store.markMentionsSeen(boardId).then(() => tellHost('boards:mentions-seen', { boardId })).catch(() => {});
+  }, [api, boardId, loadComments]);
+  // without a live channel, look for new comments now and then
+  useEffect(() => {
+    if (!api || live.on) return;
+    const t = setInterval(() => { if (!document.hidden) loadComments(); }, 20000);
+    return () => clearInterval(t);
+  }, [api, live.on, loadComments]);
+  // opened from a mention: go to that thread
+  useEffect(() => {
+    if (!api || !commentId || !rows.length) return;
+    const c = rows.find(r => r.id === commentId); if (!c) return;
+    const root = c.thread_id ? rows.find(r => r.id === c.thread_id) || c : c;
+    const spot = spotOf(api, root);
+    if (root.resolved_at) setShowResolved(true);
+    if (spot) focusSpot(api, spot);
+    setOpenId(root.id);
+  }, [api, commentId, rows.length]);
+
+  async function addComment({ body, mentions, element_id, x, y, thread_id }) {
+    try {
+      await store.addComment(boardId, { body, mentions, element_id, x, y, thread_id }, meta && meta.title);
+      await loadComments(); live.commentsChanged();
+      const names = (mentions || []).filter(m => m !== store.email).map(nameOf);
+      setStatus(names.length ? 'Sent to ' + names.join(' and ') : 'Comment added');
+    } catch (e) { setStatus('Couldn\'t add the comment: ' + (e.message || e)); }
+  }
+  async function resolveThread(root, yes) {
+    try { await store.resolveComment(boardId, root.id, yes); await loadComments(); live.commentsChanged(); if (yes && !showResolved) setOpenId(null); }
+    catch (e) { setStatus('Couldn\'t change it: ' + (e.message || e)); }
+  }
+  async function hideComment(c) {
+    if (!window.confirm('Remove this comment?')) return;
+    try { await store.hideComment(boardId, c.id); await loadComments(); live.commentsChanged(); if (!c.thread_id) setOpenId(null); }
+    catch (e) { setStatus('Couldn\'t remove it: ' + (e.message || e)); }
+  }
+
+  // ── columns keep themselves stacked ──────────────────────────────────────
+  const tidyColumns = useCallback(() => {
+    const a = api; if (!a) return;
+    const next = restack(a.getSceneElementsIncludingDeleted());
+    if (next) a.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.EVENTUALLY });
+  }, [api]);
+
   const onChange = useCallback((elements, appState) => {
     const ids = Object.keys(appState.selectedElementIds || {}).filter(k => appState.selectedElementIds[k]);
     const picked = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
     setSel(s => (s.count === picked.length && s.oneImage === oneImage) ? s : { count: picked.length, oneImage });
+    // pins follow the canvas and the items they're on
+    const vk = [appState.scrollX, appState.scrollY, appState.zoom.value, appState.width, appState.height, getSceneVersion(elements)].join('|');
+    if (vk !== R.current.viewKey) { R.current.viewKey = vk; if (!R.current.viewRaf) R.current.viewRaf = requestAnimationFrame(() => { R.current.viewRaf = 0; setView(x => x + 1); }); }
     if (!store.canEdit) return;
+    live.sceneChanged(elements);
+    // once nothing is moving, columns close up around what's in them
+    const still = !appState.selectedElementsAreBeingDragged && !appState.resizingElement && !appState.newElement && !appState.editingTextElement;
+    if (still && elements.some(isColumn)) { cancelAnimationFrame(R.current.colRaf); R.current.colRaf = requestAnimationFrame(tidyColumns); }
     const v = getSceneVersion(elements);
     if (v !== R.current.savedVersion || appState.viewBackgroundColor !== R.current.bg) {
       clearTimeout(R.current.timer);
       R.current.timer = setTimeout(save, 1200);
     }
-  }, [save]);
+  }, [save, live, tidyColumns]);
 
   // ── follow other people's edits (Christine on her phone, say) ───────────
   useEffect(() => {
     if (!api || store.mode !== 'cloud') return;
     const t = setInterval(async () => {
       if (document.hidden || R.current.saving) return;
+      // live edits arrive by themselves; this only catches what the channel missed
+      if (live.on && Date.now() - (R.current.lastPoll || 0) < 60000) return;
+      R.current.lastPoll = Date.now();
       try {
         const r = await store.remoteRev(boardId);
         if (!r || r.rev <= R.current.rev) return;
@@ -208,7 +304,7 @@ export default function Board({ boardId }) {
       } catch (e) {}
     }, 12000);
     return () => clearInterval(t);
-  }, [api, boardId, mergeRemote, save]);
+  }, [api, boardId, mergeRemote, save, live.on]);
 
   // thumbnails: now and then while working, and on the way out
   useEffect(() => {
@@ -268,17 +364,34 @@ export default function Board({ boardId }) {
     const s = api.getAppState(); const z = s.zoom.value;
     return { x: s.width / 2 / z - s.scrollX, y: s.height / 2 / z - s.scrollY };
   };
+  // Somewhere near the middle that isn't already covered, so a new thing
+  // never lands under (or over) something else. Cards in particular float
+  // above the drawing, so they must not land on it.
+  const spotFor = (w, h) => {
+    const c = center();
+    const live = api.getSceneElements().filter(e => !e.containerId);
+    const hits = (x, y) => live.some(e => x < e.x + e.width + 16 && x + w + 16 > e.x && y < e.y + e.height + 16 && y + h + 16 > e.y);
+    let x = c.x - w / 2, y = c.y - h / 2;
+    for (let i = 0; i < 24 && hits(x, y); i++) {
+      // walk right along the row, then start a row below
+      x += w + 24;
+      if (i % 6 === 5) { x = c.x - w / 2; y += h + 24; }
+    }
+    return { x, y };
+  };
   const addEls = (els, select = true) => {
     api.updateScene({
       elements: [...api.getSceneElementsIncludingDeleted(), ...els],
       appState: select ? { selectedElementIds: Object.fromEntries(els.filter(e => !e.containerId).map(e => [e.id, true])), selectedGroupIds: {} } : undefined,
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     });
+    // bring it into view if it landed off screen
+    try { api.scrollToContent(els.filter(e => !e.containerId), { animate: true }); } catch (e) {}
   };
 
   function addNote(colour) {
-    const c = center();
-    addEls(note(c.x - 110, c.y - 80, 'New note', colour));
+    const p = spotFor(220, 160);
+    addEls(note(p.x, p.y, 'New note', colour));
     setPanel(null);
   }
 
@@ -311,15 +424,57 @@ export default function Board({ boardId }) {
 
   async function addFromLink(url) {
     url = String(url || '').trim(); if (!url) return;
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
     setPanel(null);
-    const blob = await fetchImage(url);
-    if (blob) return addImages([blob], null, [url]);
-    // The site won't let us read the picture: keep it as a link card instead.
-    const c = center();
-    let host = url; try { host = new URL(url).hostname.replace(/^www\./, ''); } catch (e) {}
-    addEls(convertToExcalidrawElements([{ type: 'rectangle', x: c.x - 130, y: c.y - 40, width: 260, height: 80, roughness: 0, strokeWidth: 1, roundness: null, fillStyle: 'solid', backgroundColor: '#ffffff', strokeColor: '#cfcac0', link: url, customData: { kind: 'link' },
-      label: { text: '↗ ' + host, fontSize: 16, fontFamily: FONT_FAMILY.Helvetica, textAlign: 'left', verticalAlign: 'middle', strokeColor: '#111111' } }]));
-    setStatus('That site doesn\'t share its images, so it\'s saved as a link');
+    // video, music and design files play right on the board
+    if (PLAYS_IN_PLACE.test(hostOf(url))) {
+      const p = spotFor(480, 270);
+      const [r] = convertToExcalidrawElements([{ type: 'rectangle', x: p.x, y: p.y, width: 480, height: 270 }]);
+      addEls(restoreElements([{ ...r, type: 'embeddable', link: url, strokeColor: 'transparent', backgroundColor: 'transparent' }], null));
+      return;
+    }
+    if (looksLikeImageUrl(url)) {
+      const blob = await fetchImage(url);
+      if (blob) return addImages([blob], null, [url]);
+    }
+    setBusy('Reading the page…');
+    try {
+      const info = await store.linkPreview(url);
+      if (info && info.kind === 'image' && !looksLikeImageUrl(url)) {
+        const blob = await fetchImage(url); if (blob) return addImages([blob], null, [url]);
+      }
+      const p = spotFor(300, info && info.image ? 290 : 128);
+      addEls(linkCard(p.x, p.y, { url, ...(info || {}), site: (info && info.site) || hostOf(url) }));
+      if (!info) setStatus(store.mode === 'cloud' ? 'Couldn\'t read that page, so it\'s a plain link card' : 'Saved as a link card');
+    } finally { setBusy(''); }
+  }
+
+  function addTodo() {
+    const p = spotFor(280, 128);
+    addEls(todoCard(p.x, p.y));
+    setStatus('Click the list to tick things off or add to it');
+  }
+
+  // A column: wraps what's selected, or starts empty in the middle.
+  function addColumn() {
+    const st = api.getAppState();
+    const units = selectionUnits(api.getSceneElementsIncludingDeleted(), st.selectedElementIds);
+    const members = units.flatMap(u => u.members).filter(m => m.type !== 'frame');
+    let col;
+    if (members.length) {
+      const name = window.prompt('Name this column', 'Column'); if (name === null) return;
+      const [x1, y1] = [Math.min(...members.map(m => m.x)), Math.min(...members.map(m => m.y))];
+      col = { ...newColumn(x1 - 16, y1 - 16, name || 'Column') };
+      const ids = new Set(members.map(m => m.id));
+      const rest = api.getSceneElementsIncludingDeleted().map(e => ids.has(e.id) ? newElementWith(e, { frameId: col.id }) : e);
+      api.updateScene({ elements: [col, ...rest], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    } else {
+      const p = spotFor(300, 120);
+      col = newColumn(p.x, p.y, 'Column');
+      api.updateScene({ elements: [col, ...api.getSceneElementsIncludingDeleted()], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      setStatus('Drag notes, photos and cards into the column');
+    }
+    requestAnimationFrame(tidyColumns);
   }
 
   function doArrange(mode) {
@@ -353,8 +508,8 @@ export default function Board({ boardId }) {
   }
 
   function placeBoardCard(b) {
-    const c = center();
-    addEls(boardCard(c.x - 120, c.y - 75, b));
+    const p = spotFor(240, 150);
+    addEls(boardCard(p.x, p.y, b));
     setPanel(null);
   }
 
@@ -389,13 +544,19 @@ export default function Board({ boardId }) {
 
   const onPaste = useCallback((data) => {
     const text = (data && data.text || '').trim();
-    if (api && looksLikeImageUrl(text)) { addFromLink(text); return false; }
+    if (api && store.canEdit && (looksLikeImageUrl(text) || isWebUrl(text))) { addFromLink(text); return false; }
     return true;
   }, [api]);
 
   const onLinkOpen = useCallback((element, event) => {
     const cd = element.customData || {};
     const link = element.link || '';
+    // To-do and link cards carry a marker link, never a page to open.
+    if (isCardUrl(link)) {
+      event.preventDefault();
+      if (cd.kind === 'link' && cd.url) window.open(cd.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
     const m = cd.boardId || (link.match(/\/boards#\/b\/([\w-]+)/) || [])[1];
     if (m) { event.preventDefault(); save(); go('/b/' + m); }
   }, [save]);
@@ -406,6 +567,8 @@ export default function Board({ boardId }) {
     await store.rename(boardId, t);
     document.title = t + ' · Boards'; tellHost('boards:title', { title: t });
   }
+
+  const renderCard = React.useMemo(() => makeRenderCard(() => api, store.canEdit), [api]);
 
   if (missing) return <div className="empty">This board isn't here any more. <button className="link" onClick={() => go('/')}>Back to Boards</button></div>;
 
@@ -434,6 +597,8 @@ export default function Board({ boardId }) {
               <button className="act" onClick={() => setPanel(panel === 'board' ? null : 'board')} title="A board inside this board"><Ico d="M4 4h16v16H4z M8 8h8v8H8z" />Board</button>
               {panel === 'board' && <BoardPop currentId={boardId} onPick={placeBoardCard} onNew={() => setPanel('newboard')} />}
             </div>
+            <button className="act" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
+            <button className="act" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
             <span className="divider" />
             <div className="pop-wrap">
               <button className="act" disabled={sel.count < 2} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
@@ -450,7 +615,21 @@ export default function Board({ boardId }) {
             <button className="act" disabled={!sel.oneImage} onClick={doPalette} title="Pull a colour palette from the selected image"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>
           </div>
         )}
-        <div className="status">{busy || status}</div>
+        {api && (
+          <div className="actions">
+            <span className="divider" />
+            <button className={'act' + (adding ? ' on' : '')} onClick={() => { setAdding(a => !a); setOpenId(null); }} title="Click, then click a spot on the board to comment there"><Ico d="M4 5h16v11H9l-5 4z" />Comment</button>
+            <button className={'act' + (panel === 'comments' ? ' on' : '')} onClick={() => setPanel(panel === 'comments' ? null : 'comments')} title="All comments on this board">
+              <Ico d="M4 6h16 M4 12h16 M4 18h10" />{openCount ? <span className="count">{openCount}</span> : null}
+            </button>
+          </div>
+        )}
+        {live.on && live.people.length > 0 && (
+          <div className="here" title={'Here now: ' + live.people.map(p => p.name).join(', ')}>
+            {live.people.slice(0, 4).map(p => <span key={p.key} className="face" style={{ background: p.color }}>{(p.name || '?').slice(0, 1)}</span>)}
+          </div>
+        )}
+        <div className="status">{busy || status || (live.on ? 'Live' : '')}</div>
       </header>
       <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={e => { addImages([...e.target.files]); e.target.value = ''; }} />
       <div className="canvas">
@@ -461,11 +640,14 @@ export default function Board({ boardId }) {
             onChange={onChange}
             onPaste={onPaste}
             onLinkOpen={onLinkOpen}
+            onPointerUpdate={live.pointerMoved}
+            isCollaborating={live.on}
+            renderEmbeddable={renderCard}
             viewModeEnabled={!store.canEdit}
             langCode="en"
             name={meta ? meta.title : 'Board'}
             UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, toggleTheme: false, export: { saveFileToDisk: true } }, tools: { image: true } }}
-            validateEmbeddable={true}
+            validateEmbeddable={url => (isCardUrl(url) ? true : undefined)}
           >
             <MainMenu>
               <MainMenu.Item onSelect={() => { save(); go('/'); }}>All boards</MainMenu.Item>
@@ -484,11 +666,21 @@ export default function Board({ boardId }) {
                 <div className="welcome-hints">
                   <p>Drop photos anywhere, or paste an image or a link.</p>
                   <p>Press N for a note. Draw, write and connect with the tools above.</p>
-                  <p>Select a few things, then Arrange or Group them.</p>
+                  <p>Select a few things, then Arrange, Group or put them in a Column.</p>
+                  <p>Click Comment to leave a note for someone. Type @ to mention them.</p>
                 </div>
               </WelcomeScreen.Center>
             </WelcomeScreen>
           </Excalidraw>
+        )}
+        <CommentsLayer api={api} threads={threads} adding={adding} setAdding={setAdding} openId={openId} setOpenId={setOpenId}
+          people={people} showResolved={showResolved} view={view}
+          onAdd={addComment} onReply={(root, body, mentions) => addComment({ body, mentions, thread_id: root.id, element_id: root.element_id, x: root.x, y: root.y })}
+          onResolve={resolveThread} onHide={hideComment} />
+        {panel === 'comments' && api && (
+          <CommentsPanel api={api} threads={threads} people={people} showResolved={showResolved} setShowResolved={setShowResolved}
+            onClose={() => setPanel(null)}
+            onPick={t => { const s = spotOf(api, t.root); if (s) focusSpot(api, s); if (t.root.resolved_at) setShowResolved(true); setOpenId(t.root.id); }} />
         )}
       </div>
       {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeBoardCard} />}
