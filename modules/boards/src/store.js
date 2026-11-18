@@ -65,15 +65,15 @@ export const store = {
   async listBoards({ trash = false } = {}) {
     if (this.mode === 'cloud') {
       let q = sb.from('venia_boards')
-        .select('id,parent_id,title,search_text,item_count,cover_file,updated_at,updated_by,deleted_at,sort')
+        .select('id,parent_id,title,search_text,item_count,cover_file,updated_at,updated_by,trashed_at,sort')
         .eq('workspace_id', WS);
-      q = trash ? q.not('deleted_at', 'is', null) : q.is('deleted_at', null);
+      q = trash ? q.not('trashed_at', 'is', null) : q.is('trashed_at', null);
       const { data, error } = await q.order('updated_at', { ascending: false });
       if (error) throw error;
       return data || [];
     }
     const all = (await get('boards', idb)) || [];
-    return all.filter(b => trash ? !!b.deleted_at : !b.deleted_at)
+    return all.filter(b => trash ? !!b.trashed_at : !b.trashed_at)
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
   },
 
@@ -108,8 +108,8 @@ export const store = {
     await set('boards', all, idb);
   },
   rename(id, title) { return this.patchBoard(id, { title, updated_at: now(), updated_by: this.email || null }); },
-  trash(id)   { return this.patchBoard(id, { deleted_at: now() }); },
-  restore(id) { return this.patchBoard(id, { deleted_at: null }); },
+  trash(id)   { return this.patchBoard(id, { trashed_at: now() }); },
+  restore(id) { return this.patchBoard(id, { trashed_at: null }); },
   move(id, parent_id) { return this.patchBoard(id, { parent_id }); },
 
   async purge(id) {
@@ -117,8 +117,11 @@ export const store = {
       const files = await sb.from('venia_board_files').select('path').eq('board_id', id);
       const paths = (files.data || []).map(f => f.path).concat([`${WS}/thumbs/${id}.png`]);
       if (paths.length) await sb.storage.from(BUCKET).remove(paths);
-      const { error } = await sb.from('venia_boards').delete().eq('id', id);
+      const { data, error } = await sb.from('venia_boards').delete().eq('id', id).select('id');
       if (error) throw error;
+      // Until permanent delete is switched on in the database, the row stays
+      // (RLS removes nothing, quietly). Say so rather than pretend.
+      if (!data || !data.length) throw new Error('Deleting for good isn\'t switched on yet. The board stays in Trash.');
       return;
     }
     const all = ((await get('boards', idb)) || []).filter(b => b.id !== id);
@@ -263,12 +266,12 @@ export const store = {
   // ── carry boards made on this device up to the cloud ─────────────────────
   async localBoardsWaiting() {
     if (this.mode !== 'cloud') return [];
-    return ((await get('boards', idb)) || []).filter(b => !b.deleted_at && !b.uploaded);
+    return ((await get('boards', idb)) || []).filter(b => !b.trashed_at && !b.uploaded);
   },
   async uploadLocalBoards(onStep) {
     const all = (await get('boards', idb)) || [];
     const idMap = {};
-    for (const b of all.filter(x => !x.deleted_at && !x.uploaded)) {
+    for (const b of all.filter(x => !x.trashed_at && !x.uploaded)) {
       const scene = (await get('scene:' + b.id, idb)) || { elements: [], appState: {} };
       const row = await this.createBoard({ title: b.title, parent_id: null, scene });
       idMap[b.id] = row.id;
