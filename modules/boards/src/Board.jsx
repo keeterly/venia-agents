@@ -199,6 +199,13 @@ export default function Board({ boardId }) {
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', out); save(); thumb(); };
   }, [api, save, thumb]);
 
+  // open on the whole board, not just its top-left corner
+  useEffect(() => {
+    if (!api) return;
+    const t = setTimeout(() => { try { if (api.getSceneElements().length) api.scrollToContent(undefined, { fitToContent: true }); } catch (e) {} }, 60);
+    return () => clearTimeout(t);
+  }, [api]);
+
   // ── the old Brainstorm Board: photos, and cards pinned since ────────────
   useEffect(() => {
     if (!api || boardId !== LEGACY_ID || !store.canEdit) return;

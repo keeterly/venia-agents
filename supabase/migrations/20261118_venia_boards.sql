@@ -39,6 +39,7 @@ create index if not exists venia_boards_parent_idx on public.venia_boards (works
 -- ── images and files placed on a board ─────────────────────────────────────
 create table if not exists public.venia_board_files (
   id          text not null,                 -- Excalidraw file id
+  workspace_id text not null default 'main', -- becomes the brand (tenant) id
   board_id    text not null references public.venia_boards(id) on delete cascade,
   path        text not null,                 -- object path in the venia-boards bucket
   mime        text,
@@ -51,6 +52,23 @@ create table if not exists public.venia_board_files (
   primary key (board_id, id)
 );
 
+-- ── one access question, asked in one place ────────────────────────────────
+-- Every policy below calls this, so when brands and subscriptions arrive
+-- (the planned venia_can(tenant, module, 'read' | 'write')) only this
+-- function changes.
+create or replace function public.venia_boards_can(mode text)
+  returns boolean language sql stable security definer set search_path = '' as $$
+  select public.venia_is_founder()
+      or case mode
+           when 'read'  then public.venia_module_role('brainstorm') is not null
+           when 'write' then public.venia_module_role('brainstorm') in ('owner','editor')
+           when 'purge' then public.venia_module_role('brainstorm') = 'owner'
+           else false
+         end
+$$;
+revoke all on function public.venia_boards_can(text) from public, anon;
+grant execute on function public.venia_boards_can(text) to authenticated;
+
 alter table public.venia_boards      enable row level security;
 alter table public.venia_board_files enable row level security;
 
@@ -62,19 +80,19 @@ drop policy if exists venia_boards_drop  on public.venia_boards;
 
 create policy venia_boards_read on public.venia_boards
   for select to authenticated
-  using (public.venia_is_founder() or public.venia_module_role('brainstorm') is not null);
+  using (public.venia_boards_can('read'));
 create policy venia_boards_write on public.venia_boards
   for insert to authenticated
-  with check (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor'));
+  with check (public.venia_boards_can('write'));
 create policy venia_boards_edit on public.venia_boards
   for update to authenticated
-  using      (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor'))
-  with check (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor'));
+  using      (public.venia_boards_can('write'))
+  with check (public.venia_boards_can('write'));
 -- Boards are soft-deleted (deleted_at) so a mistake can be undone from Trash;
 -- the hard delete is kept to founders and owners.
 create policy venia_boards_drop on public.venia_boards
   for delete to authenticated
-  using (public.venia_is_founder() or public.venia_module_role('brainstorm') = 'owner');
+  using (public.venia_boards_can('purge'));
 
 drop policy if exists venia_board_files_read  on public.venia_board_files;
 drop policy if exists venia_board_files_write on public.venia_board_files;
@@ -82,13 +100,13 @@ drop policy if exists venia_board_files_drop  on public.venia_board_files;
 
 create policy venia_board_files_read on public.venia_board_files
   for select to authenticated
-  using (public.venia_is_founder() or public.venia_module_role('brainstorm') is not null);
+  using (public.venia_boards_can('read'));
 create policy venia_board_files_write on public.venia_board_files
   for insert to authenticated
-  with check (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor'));
+  with check (public.venia_boards_can('write'));
 create policy venia_board_files_drop on public.venia_board_files
   for delete to authenticated
-  using (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor'));
+  using (public.venia_boards_can('write'));
 
 -- ── the image store: PRIVATE ───────────────────────────────────────────────
 -- Unlike venia-photos this bucket is not public. The app reads images through
@@ -107,19 +125,19 @@ drop policy if exists venia_boards_obj_edit  on storage.objects;
 create policy venia_boards_obj_read on storage.objects
   for select to authenticated
   using (bucket_id = 'venia-boards'
-         and (public.venia_is_founder() or public.venia_module_role('brainstorm') is not null));
+         and public.venia_boards_can('read'));
 create policy venia_boards_obj_write on storage.objects
   for insert to authenticated
   with check (bucket_id = 'venia-boards'
-              and (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor')));
+              and public.venia_boards_can('write'));
 -- Board thumbnails are rewritten in place as the board changes.
 create policy venia_boards_obj_edit on storage.objects
   for update to authenticated
   using      (bucket_id = 'venia-boards'
-              and (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor')))
+              and public.venia_boards_can('write'))
   with check (bucket_id = 'venia-boards'
-              and (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor')));
+              and public.venia_boards_can('write'));
 create policy venia_boards_obj_drop on storage.objects
   for delete to authenticated
   using (bucket_id = 'venia-boards'
-         and (public.venia_is_founder() or public.venia_module_role('brainstorm') in ('owner','editor')));
+         and public.venia_boards_can('write'));
