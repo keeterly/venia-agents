@@ -69,17 +69,17 @@ function TodoCard({ el, api, canEdit }) {
   const save = (nextItems, title = d.title) => patchCard(api, el, { items: nextItems, title }, todoHeight(nextItems));
   const done = items.filter(i => i.done && i.t).length, total = items.filter(i => i.t).length;
   return (
-    <div className="card-todo" onPointerDown={e => e.stopPropagation()}>
+    <div className="card-todo">
       <div className="todo-head">
-        <input className="todo-title" defaultValue={d.title} readOnly={!canEdit} key={d.title}
+        <input className="todo-title" onPointerDown={e => e.stopPropagation()} defaultValue={d.title} readOnly={!canEdit} key={d.title}
           onBlur={e => { if (e.target.value !== d.title) save(items, e.target.value); }} onKeyDown={e => e.key === 'Enter' && e.target.blur()} />
         <span className="todo-count">{total ? `${done}/${total}` : ''}</span>
       </div>
       {items.map((it, i) => (
         <label key={it.id} className={'todo-item' + (it.done ? ' done' : '')}>
-          <input type="checkbox" checked={!!it.done} disabled={!canEdit}
+          <input type="checkbox" checked={!!it.done} disabled={!canEdit} onPointerDown={e => e.stopPropagation()}
             onChange={() => save(items.map(x => x.id === it.id ? { ...x, done: !x.done } : x))} />
-          <input className="todo-text" defaultValue={it.t} readOnly={!canEdit} key={it.id + ':' + it.t} placeholder="Something to do"
+          <input className="todo-text" onPointerDown={e => e.stopPropagation()} defaultValue={it.t} readOnly={!canEdit} key={it.id + ':' + it.t} placeholder="Something to do"
             onBlur={e => {
               const t = e.target.value;
               if (t === it.t) return;
@@ -89,7 +89,7 @@ function TodoCard({ el, api, canEdit }) {
         </label>
       ))}
       {canEdit && (
-        <input className="todo-add" placeholder="+ Add an item" value={draft} onChange={e => setDraft(e.target.value)}
+        <input className="todo-add" onPointerDown={e => e.stopPropagation()} placeholder="+ Add an item" value={draft} onChange={e => setDraft(e.target.value)}
           onKeyDown={e => {
             if (e.key !== 'Enter' || !draft.trim()) return;
             const keep = items.filter(x => x.t);
@@ -100,17 +100,18 @@ function TodoCard({ el, api, canEdit }) {
   );
 }
 
+// The card itself moves like anything else on the board; only "Open" opens.
 function LinkCardView({ el }) {
   const d = el.customData;
   return (
-    <a className="card-link" href={d.url} target="_blank" rel="noopener noreferrer">
+    <div className="card-link">
       {d.image ? <div className="link-img"><img src={d.image} alt="" referrerPolicy="no-referrer" onError={e => { e.currentTarget.parentNode.style.display = 'none'; }} /></div> : null}
       <div className="link-body">
-        <div className="link-site">{d.site || hostOf(d.url)}</div>
+        <div className="link-site">{d.site || hostOf(d.url)}<a className="link-open" href={d.url} target="_blank" rel="noopener noreferrer" onPointerDown={e => e.stopPropagation()}>Open ↗</a></div>
         <div className="link-title">{d.title || d.url}</div>
         {d.description && !d.image ? <div className="link-desc">{d.description}</div> : null}
       </div>
-    </a>
+    </div>
   );
 }
 

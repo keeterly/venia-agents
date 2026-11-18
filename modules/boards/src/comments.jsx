@@ -158,7 +158,8 @@ export function CommentsLayer({ api, threads, adding, setAdding, openId, setOpen
   const shown = threads.filter(t => showResolved || !t.root.resolved_at);
   let n = 0;
   return (
-    <div ref={layer} className={'comments-layer' + (adding ? ' adding' : '')} onClick={place} data-v={view}>
+    <div ref={layer} className={'comments-layer' + (adding ? ' adding' : '')} onClick={place} data-v={view}
+      {...(adding && !draft ? { role: 'button', 'aria-label': 'Click a spot on the board to comment there' } : {})}>
       {shown.map(t => {
         n++;
         const spot = spotOf(api, t.root); if (!spot) return null;
