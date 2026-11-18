@@ -66,6 +66,22 @@ shell and the frame talk only by `postMessage` with `source: 'venia-module'`.
 Its tables carry `workspace_id` (the brand) and check access through one SQL
 helper, so they can follow the core's per-brand rules.
 
+## Reaching another module: `VeniaOS`
+
+```js
+VeniaOS.get('sales.buyers')        // the same array as STATE.slBuyers while Sales is on; [] when it is off
+VeniaOS.get('core.catalog')        // the line: always on
+VeniaOS.enabled('money')           // is Money on for this brand and this person?
+VeniaOS.emit('growth.coverage.logged', { id })
+VeniaOS.on('growth.coverage.logged', 'sales', fn)       // runs only while Sales is on
+VeniaOS.contribute('today.cards', 'sales', () => cards)  // VeniaOS.collect('today.cards')
+```
+
+Offers are listed in `VENIA_OFFERS`. While the owning module is on, an offer
+is the very same object as the STATE key, so reading through it changes
+nothing. Only reads go through offers: a module still never writes another
+module's keys, and the check counts any direct use that is left.
+
 ## The check
 
 `node scripts/check-modules.mjs` fails when a STATE key has two owners, a

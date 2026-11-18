@@ -114,6 +114,7 @@ if (args.has('--report')) {
   Object.keys(counts).sort((a, b) => counts[b] - counts[a]).forEach(p =>
     console.log(p.padEnd(24), String(counts[p]).padStart(4), ' ', detail[p].slice(0, 12).join(' ')));
 }
+if (args.has('--json')) { console.log(JSON.stringify(detail)); process.exit(0); }
 if (args.has('--update')) {
   fs.writeFileSync(BASE_FILE, JSON.stringify({ _about: 'Cross-module STATE reads allowed per reader->owner pair. Only ever goes down. Rewrite with: node scripts/check-modules.mjs --update', counts: Object.fromEntries(Object.entries(counts).sort()) }, null, 2) + '\n');
   console.log('baseline written:', Object.values(counts).reduce((a, b) => a + b, 0), 'cross-module reads');
