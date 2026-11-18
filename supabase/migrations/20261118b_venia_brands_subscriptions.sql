@@ -6,7 +6,7 @@
 -- ask: venia_can(brand, module, 'read' | 'write').
 --
 -- ADDITIVE ONLY. No existing table, column, row, policy or function is
--- changed or dropped. VENIA is brand 'main' (the workspace_id venia_module_data
+-- changed or removed, and every statement is safe to run twice. VENIA is brand 'main' (the workspace_id venia_module_data
 -- already uses) with every module on, so nothing anyone sees changes. The
 -- existing policies keep using venia_is_founder() and venia_module_role();
 -- they move onto venia_can() only when a second brand is close (Stage 6).
@@ -107,45 +107,69 @@ grant execute on function public.venia_can(text, text, text)    to authenticated
 -- Read: anyone in the brand (or with a module grant in VENIA). Change: the
 -- brand's owners and admins for members; subscriptions only by VENIA's
 -- founders, who run the platform until billing does.
-drop policy if exists venia_tenants_read on public.venia_tenants;
-create policy venia_tenants_read on public.venia_tenants for select to authenticated
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_tenants' and policyname = 'venia_tenants_read') then
+    create policy venia_tenants_read on public.venia_tenants for select to authenticated
   using (public.venia_is_founder() or public.venia_tenant_role(id) is not null
          or (id = 'main' and public.venia_has_access()));
-drop policy if exists venia_tenants_admin on public.venia_tenants;
-create policy venia_tenants_admin on public.venia_tenants for update to authenticated
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_tenants' and policyname = 'venia_tenants_admin') then
+    create policy venia_tenants_admin on public.venia_tenants for update to authenticated
   using (public.venia_is_founder()) with check (public.venia_is_founder());
-drop policy if exists venia_tenants_insert on public.venia_tenants;
-create policy venia_tenants_insert on public.venia_tenants for insert to authenticated
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_tenants' and policyname = 'venia_tenants_insert') then
+    create policy venia_tenants_insert on public.venia_tenants for insert to authenticated
   with check (public.venia_is_founder());
+  end if;
+end $$;
 
-drop policy if exists venia_tenant_members_read on public.venia_tenant_members;
-create policy venia_tenant_members_read on public.venia_tenant_members for select to authenticated
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_tenant_members' and policyname = 'venia_tenant_members_read') then
+    create policy venia_tenant_members_read on public.venia_tenant_members for select to authenticated
   using (public.venia_is_founder()
          or lower(email) = lower(coalesce(auth.jwt() ->> 'email', ''))
          or public.venia_tenant_role(tenant_id) in ('owner', 'admin'));
-drop policy if exists venia_tenant_members_admin on public.venia_tenant_members;
-create policy venia_tenant_members_admin on public.venia_tenant_members for all to authenticated
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_tenant_members' and policyname = 'venia_tenant_members_admin') then
+    create policy venia_tenant_members_admin on public.venia_tenant_members for all to authenticated
   using (public.venia_is_founder() or public.venia_tenant_role(tenant_id) in ('owner', 'admin'))
   with check (public.venia_is_founder() or public.venia_tenant_role(tenant_id) in ('owner', 'admin'));
+  end if;
+end $$;
 
-drop policy if exists venia_entitlements_read on public.venia_entitlements;
-create policy venia_entitlements_read on public.venia_entitlements for select to authenticated
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_entitlements' and policyname = 'venia_entitlements_read') then
+    create policy venia_entitlements_read on public.venia_entitlements for select to authenticated
   using (public.venia_is_founder() or public.venia_tenant_role(tenant_id) is not null
          or (tenant_id = 'main' and public.venia_has_access()));
-drop policy if exists venia_entitlements_admin on public.venia_entitlements;
-create policy venia_entitlements_admin on public.venia_entitlements for insert to authenticated
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_entitlements' and policyname = 'venia_entitlements_admin') then
+    create policy venia_entitlements_admin on public.venia_entitlements for insert to authenticated
   with check (public.venia_is_founder());
-drop policy if exists venia_entitlements_edit on public.venia_entitlements;
-create policy venia_entitlements_edit on public.venia_entitlements for update to authenticated
+  end if;
+end $$;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'venia_entitlements' and policyname = 'venia_entitlements_edit') then
+    create policy venia_entitlements_edit on public.venia_entitlements for update to authenticated
   using (public.venia_is_founder()) with check (public.venia_is_founder());
+  end if;
+end $$;
 
 -- Start from nothing, as the inbox migration does: Supabase hands new tables
--- to authenticated with ALL, including DELETE and TRUNCATE (which ignores RLS).
--- No deletes through the API: a brand or a subscription is closed or switched
--- off, never erased.
+-- to authenticated with every privilege, including ones that bypass RLS.
+-- Then grant only read, add and change. A brand, a member or a subscription
+-- is closed, switched off or given another role, never erased.
 revoke all on public.venia_tenants, public.venia_tenant_members, public.venia_entitlements from anon, public, authenticated;
 grant select, insert, update on public.venia_tenants        to authenticated;
-grant select, insert, update, delete on public.venia_tenant_members to authenticated;
+grant select, insert, update on public.venia_tenant_members to authenticated;
 grant select, insert, update on public.venia_entitlements   to authenticated;
 
 -- ── VENIA: brand 'main', both founders as owners, every module on ───────────
