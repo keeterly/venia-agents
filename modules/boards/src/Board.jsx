@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react';
 import {
   Excalidraw, MainMenu, WelcomeScreen, CaptureUpdateAction,
   convertToExcalidrawElements, restoreElements, reconcileElements, getSceneVersion,
@@ -83,6 +83,9 @@ export default function Board({ boardId }) {
       .concat(live.filter(e => e.type === 'frame' && e.name).map(e => e.name)).join(' ').replace(/\s+/g, ' ').slice(0, 20000);
     const firstImage = live.find(e => e.type === 'image' && e.fileId);
     return {
+      // files and appState travel with the snapshot: on the way out the
+      // canvas is torn down before a slow save would get to read them.
+      files: a.getFiles(), appState: st,
       scene: { elements: els, appState: { viewBackgroundColor: st.viewBackgroundColor, gridModeEnabled: !!st.gridModeEnabled } },
       // Count what a person would call one thing: a palette, a group or a
       // labelled note is one item, not its parts.
@@ -91,9 +94,9 @@ export default function Board({ boardId }) {
     };
   }, [meta]);
 
-  const uploadFiles = useCallback(async (a) => {
-    const files = a.getFiles();
-    const live = new Set(a.getSceneElements().filter(e => e.type === 'image').map(e => e.fileId));
+  const uploadFiles = useCallback(async (snap) => {
+    const files = snap.files || {};
+    const live = new Set(snap.scene.elements.filter(e => !e.isDeleted && e.type === 'image').map(e => e.fileId));
     for (const id of Object.keys(files)) {
       if (!live.has(id) || R.current.uploaded.has(id) || R.current.uploading.has(id)) continue;
       R.current.uploading.add(id);
@@ -114,19 +117,33 @@ export default function Board({ boardId }) {
     return merged;
   }, [boardId]);
 
-  const save = useCallback(async () => {
+  // Save what's on the canvas. The scene is read FIRST, in one go, and
+  // everything after works from that copy. Leaving a board tears the canvas
+  // down; reading it afterwards would find it empty and save an empty board
+  // over the real one. So once the board is closing (R.current.dead) only the
+  // copy taken while it was still open may be saved.
+  const save = useCallback(async (given) => {
     const a = api; if (!a || !store.canEdit) return;
-    if (R.current.saving) { R.current.again = true; return; }
+    const snapIn = given && given.scene ? given : null;
+    if (R.current.dead && !snapIn) return;
+    if (R.current.saving) { if (snapIn) R.current.pendingSnap = snapIn; else R.current.again = true; return; }
     R.current.saving = true;
     try {
-      await uploadFiles(a);
-      let { scene, extra, version } = sceneFor(a);
+      let snap = snapIn || sceneFor(a);
+      let { scene, extra, version } = snap;
       if (version === R.current.savedVersion && R.current.bg === scene.appState.viewBackgroundColor) return;
-      setStatus('Saving…');
+      await uploadFiles(snap);
+      if (!R.current.dead) setStatus('Saving…');
       let res = await store.saveScene(boardId, scene, R.current.rev, extra);
       if (res.conflict && res.remote) {
-        await mergeRemote(a, res.remote);
-        ({ scene, extra, version } = sceneFor(a));
+        if (!R.current.dead) {
+          await mergeRemote(a, res.remote);
+          ({ scene, extra, version } = sceneFor(a));
+        } else {
+          const merged = reconcileElements(scene.elements, restoreElements(res.remote.scene && res.remote.scene.elements || [], null), snap.appState);
+          scene = { ...scene, elements: merged }; version = getSceneVersion(merged);
+          R.current.rev = res.remote.rev;
+        }
         res = await store.saveScene(boardId, scene, R.current.rev, extra);
       }
       if (res.conflict) { setStatus('Someone else is editing; retrying'); R.current.again = true; return; }
@@ -138,19 +155,22 @@ export default function Board({ boardId }) {
       R.current.again = true;
     } finally {
       R.current.saving = false;
-      if (R.current.again) { R.current.again = false; clearTimeout(R.current.timer); R.current.timer = setTimeout(save, 2500); }
+      if (R.current.pendingSnap) { const p = R.current.pendingSnap; R.current.pendingSnap = null; R.current.again = false; save(p); return; }
+      if (R.current.again && !R.current.dead) { R.current.again = false; clearTimeout(R.current.timer); R.current.timer = setTimeout(save, 2500); }
       if (R.current.wantThumb && R.current.thumbFn) { R.current.wantThumb = false; R.current.thumbFn(); }
     }
   }, [api, boardId, sceneFor, uploadFiles, mergeRemote]);
 
-  const thumb = useCallback(async () => {
+  const thumb = useCallback(async (snap) => {
     const a = api; if (!a || !store.canEdit) return;
-    const els = a.getSceneElements();
-    const v = getSceneVersion(a.getSceneElementsIncludingDeleted());
+    if (R.current.dead && !(snap && snap.scene)) return;
+    const all = snap && snap.scene ? snap.scene.elements : a.getSceneElementsIncludingDeleted();
+    const els = all.filter(e => !e.isDeleted);
+    const v = getSceneVersion(all);
     if (!els.length || v === R.current.thumbVersion) return;
     try {
-      const blob = await exportToBlob({ elements: els, files: a.getFiles(), mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 24,
-        appState: { exportBackground: true, viewBackgroundColor: a.getAppState().viewBackgroundColor } });
+      const blob = await exportToBlob({ elements: els, files: snap && snap.files ? snap.files : a.getFiles(), mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 24,
+        appState: { exportBackground: true, viewBackgroundColor: snap && snap.scene ? snap.scene.appState.viewBackgroundColor : a.getAppState().viewBackgroundColor } });
       await store.saveThumb(boardId, blob);
       R.current.thumbVersion = v; R.current.thumbAt = Date.now();
     } catch (e) {}
@@ -196,8 +216,22 @@ export default function Board({ boardId }) {
     const t = setInterval(() => { if (Date.now() - R.current.thumbAt > 40000) thumb(); }, 20000);
     const out = () => { if (document.visibilityState === 'hidden') { save(); thumb(); } };
     document.addEventListener('visibilitychange', out);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', out); save(); thumb(); };
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', out); };
   }, [api, save, thumb]);
+
+  // On the way out: a layout effect's cleanup runs before the canvas below it
+  // is torn down, so this is the last moment the scene can be read. Take the
+  // copy now, mark the board closed, then save the copy.
+  const latest = useRef({ save, thumb, sceneFor, api });
+  latest.current = { save, thumb, sceneFor, api };
+  useLayoutEffect(() => () => {
+    const { save: sv, thumb: th, sceneFor: sf, api: a } = latest.current;
+    clearTimeout(R.current.timer);
+    let snap = null;
+    try { if (a && store.canEdit) snap = sf(a); } catch (e) {}
+    R.current.dead = true;
+    if (snap) { sv(snap); th(snap); }
+  }, []);
 
   // open on the whole board, not just its top-left corner
   useEffect(() => {
