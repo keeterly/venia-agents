@@ -5051,9 +5051,6 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="ag-nav-lbl">Workspace</div>
           <div class="ag-nav-item active" onclick="agNav('mk','social',this)">Social Command</div>
           <div class="ag-nav-item" onclick="agNav('mk','overview',this)">Overview</div>
-          <div class="ag-nav-item" onclick="agNav('mk','calendar',this)">Content Calendar</div>
-          <div class="ag-nav-item" onclick="agNav('mk','captions',this)">Captions</div>
-          <div class="ag-nav-item" onclick="mkShowCampaigns(this)">Campaigns</div>
         </div>
         <div class="ag-nav-grp">
           <div class="ag-nav-lbl">Tools</div>
@@ -5064,6 +5061,14 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
           <div class="ag-nav-lbl">System</div>
           <div class="ag-nav-item" onclick="agNav('mk','mk-prefs',this)">Settings</div>
         </div>
+      </div>
+      <!-- Build 660: Content Calendar, Captions and Campaigns are views of Social
+           Command now (Calendar, Feed, Create). Kept, unlisted; old links open
+           Social Command, and their old records are brought into it. -->
+      <div class="ag-nav-retired" hidden>
+        <div class="ag-nav-item" onclick="agNav('mk','calendar',this)">Content Calendar</div>
+        <div class="ag-nav-item" onclick="agNav('mk','captions',this)">Captions</div>
+        <div class="ag-nav-item" onclick="mkShowCampaigns(this)">Campaigns</div>
       </div>
       <div class="ag-nav-foot">
         <div class="ag-nav-back" onclick="cpGoto('cp')">← Today</div>
@@ -31453,7 +31458,7 @@ const AG_SECTIONS = {
   },
   mk: {
     social:      { title:'Marketing · Social',             actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socImportOpen()">Import</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="socNewPost()">+ New Post</button>`, suggests:['Read my planned sequence and tell me what it is missing','What should the next three posts be?','Which planned posts have no photo yet?'] },
-    overview:    { title:'Marketing · Overview',           actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="mkExport('overview')">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="mkOpenCaptionModal(null)">+ New Caption</button>`,    suggests:['Plan next 14 days','Repurpose shoot for all channels','Find influencer for FW26'] },
+    overview:    { title:'Marketing · Overview',           actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="mkExport('overview')">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="mkOpenSocial('feed');setTimeout(function(){try{socNewPost()}catch(e){}},120)">+ New Post</button>`,    suggests:['Plan next 14 days','Repurpose shoot for all channels','Find influencer for FW26'] },
     calendar:    { title:'Marketing · Content Calendar',   actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="mkExport('calendar')">Export</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="mkOpenCalEntryModal(null)">+ Add Post</button>`,       suggests:['Fill content calendar for next 14 days','Schedule FW26 drop — 5 posts','Best days to post for fashion'] },
     captions:    { title:'Marketing · Captions',           actions:`<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="mkExport('captions')">Export CSV</button><button class="ag-btn ag-btn-primary ag-btn-sm" onclick="mkOpenCaptionModal(null)">+ Save Caption</button>`,  suggests:['Draft 5 captions for FW26 editorial shoot','Rewrite this caption in a more restrained tone','Short + long version of Linen Edit launch'] },
     campaigns:   { title:'Marketing · Campaigns',          actions:``,   suggests:['Generate a campaign brief for the FW26 drop','What is the current campaign missing?','Plan a capsule drop campaign — 2 weeks'] },
@@ -37635,7 +37640,7 @@ function mkNow(){ return new Date().toISOString(); }
 // 2. A CAMPAIGN IS SIX FIELDS, none of which are objective, narrative or
 //    audience. Those are left genuinely empty rather than invented; a campaign
 //    brief written by nobody is worse than a blank one.
-function mkSocialMigrateV1(){
+function mkSocialMigrateV1(skip){
   mkSocialInit();
   const cal = Array.isArray(STATE.mkCalendar) ? STATE.mkCalendar : [];
   const caps = Array.isArray(STATE.mkCaptions) ? STATE.mkCaptions : [];
@@ -37654,6 +37659,7 @@ function mkSocialMigrateV1(){
     const id = mkSocialId('CMP', 'legacy-' + String(r.name).toLowerCase().replace(/\s+/g, '-'));
     byName[String(r.name).trim().toLowerCase()] = id;
     if (haveCamp[id]) return;
+    if (skip && skip('campaign', id)) return;
     const st = String(r.status || '').toLowerCase();
     STATE.mkCampaigns.push({
       id: id, name: String(r.name),
@@ -37677,6 +37683,7 @@ function mkSocialMigrateV1(){
     if (!e || !e.id) { report.skipped++; return; }
     const id = mkSocialId('PST', 'cal-' + e.id);
     if (havePost[id]) return;
+    if (skip && skip('calendar', id)) return;
     const legacyStatus = String(e.status || 'planned').toLowerCase();
     // §7 rule 3: preserve status without UPGRADING trust. planned/scheduled both
     // become draft — a legacy row was never reviewed by the new approval model,
@@ -37709,6 +37716,7 @@ function mkSocialMigrateV1(){
     if (!c || !c.id) { report.skipped++; return; }
     const id = mkSocialId('PST', 'cap-' + c.id);
     if (havePost[id]) return;
+    if (skip && skip('caption', id)) return;
     const lp = mkLegacyPlatform(c.platform);
     const platform = lp.platform;
     const variants = {};
@@ -38396,7 +38404,7 @@ function socAssetsView(f){
 // is the silent-drift failure this app has already had once.
 function socMigrateOnce(){
   mkSocialInit();
-  if ((STATE.mkSocialPrefs || {}).schemaVersion === MK_SOCIAL_SCHEMA) return null;
+  if ((STATE.mkSocialPrefs || {}).schemaVersion === MK_SOCIAL_SCHEMA) return socCatchUp();
   if (typeof moduleWritable === 'function' && !moduleWritable('growth')) return null;
   // Not before init() has read localStorage. Migrating an empty STATE would
   // stamp the schema and leave the founder's actual calendar unconverted
@@ -38446,6 +38454,87 @@ function agBuildSocialSection(){
 }
 window.agBuildSocialSection = agBuildSocialSection;
 window.socGo = function(v){ SOC.view = v; socRender(); };
+
+// ── SOCIAL COMMAND IS THE ONE HOME (Build 660) ────────────────────────────
+// Calendar, Captions and Campaigns were separate pages with their own stores
+// (mkCalendar, mkCaptions, and venia_campaigns on the device). Social Command
+// already has a Calendar, a Feed of drafts and a Create view with campaigns,
+// and its first run copied the old rows in. Two things were left: the old
+// pages were still in the rail, and anything saved to the old stores after
+// that first run (the Writer still saves captions there) never arrived.
+//
+// So the old pages open Social Command, and socCatchUp() brings each new
+// old-store row in once. Nothing old is changed or deleted, and a row the
+// first pass already covered is never brought back, so a post deleted or
+// merged in Social Command stays gone.
+const MK_TO_SOC = { calendar: 'calendar', captions: 'feed', campaigns: 'create' };
+window.mkOpenSocial = function(view){
+  if (view) SOC.view = view;
+  const scr = document.getElementById('cp-screen-mk');
+  if (scr && !scr.classList.contains('active')) cpGoto('mk');
+  const nav = document.querySelector('#cp-screen-mk .ag-nav-list .ag-nav-item[onclick*="\'social\'"]');
+  try { (window.__agNavRaw || agNav)('mk', 'social', nav); } catch(e){}
+};
+function socLegacyRows(){
+  const out = [];
+  (Array.isArray(STATE.mkCalendar) ? STATE.mkCalendar : []).forEach(function(e){
+    if (e && e.id) out.push({ id: mkSocialId('PST', 'cal-' + e.id), at: String(e.createdAt || '') }); });
+  (Array.isArray(STATE.mkCaptions) ? STATE.mkCaptions : []).forEach(function(c){
+    if (c && c.id) out.push({ id: mkSocialId('PST', 'cap-' + c.id), at: String(c.createdAt || '') }); });
+  let camps = [];
+  try { const raw = JSON.parse(localStorage.getItem('venia_campaigns') || '[]'); if (Array.isArray(raw)) camps = raw; } catch(e){}
+  camps.forEach(function(r){
+    if (r && r.name) out.push({ id: mkSocialId('CMP', 'legacy-' + String(r.name).toLowerCase().replace(/\s+/g, '-')), at: '' }); });
+  return out;
+}
+function socCatchUp(){
+  if (typeof moduleWritable === 'function' && !moduleWritable('growth')) return null;
+  if (!window.__veniaBooted) return null;
+  mkSocialInit();
+  const prefs = STATE.mkSocialPrefs;
+  const have = Object.create(null);
+  (STATE.mkPosts || []).forEach(function(p){ if (p && p.id) have[p.id] = 1; });
+  (STATE.mkCampaigns || []).forEach(function(c){ if (c && c.id) have[c.id] = 1; });
+  const tomb = (STATE._tomb && typeof STATE._tomb === 'object') ? STATE._tomb : {};
+  const rows = socLegacyRows();
+  if (!prefs.legacySeen || typeof prefs.legacySeen !== 'object' || Array.isArray(prefs.legacySeen)) {
+    // First time here: whatever the first pass already had a chance at is
+    // seen, whether or not it is still in Social Command.
+    const seen = {}, cut = String(prefs.migratedAt || '');
+    rows.forEach(function(r){ if (have[r.id] || (r.at && cut && r.at <= cut)) seen[r.id] = 1; });
+    prefs.legacySeen = seen;
+  }
+  const todo = rows.filter(function(r){ return !have[r.id] && !tomb[r.id] && !prefs.legacySeen[r.id]; });
+  if (!todo.length) return { posts: 0, captions: 0, campaigns: 0, alreadyDone: true };
+  const want = Object.create(null); todo.forEach(function(r){ want[r.id] = 1; });
+  // A copy of this device's workspace first, in case anything about the merge is wrong.
+  try { if (typeof window.veniaUnsavedBackup === 'function') window.veniaUnsavedBackup('before Social Command brings in new calendar, caption and campaign rows (Build 660)'); } catch(e){}
+  let r = null;
+  try { r = mkSocialMigrateV1(function(kind, id){ return !want[id]; }); } catch(e){ return null; }
+  todo.forEach(function(t){ prefs.legacySeen[t.id] = 1; });
+  try { save(); } catch(e){}
+  if (r && (r.posts || r.captions || r.campaigns)) {
+    try { logActivity('Social Command: brought in ' + (r.posts + r.captions) + ' new post' + ((r.posts + r.captions) === 1 ? '' : 's')
+      + (r.campaigns ? ' and ' + r.campaigns + ' campaign' + (r.campaigns === 1 ? '' : 's') : '') + ' from the old Calendar, Captions and Campaigns'); } catch(e){}
+  }
+  return r;
+}
+window.socCatchUp = socCatchUp;
+document.addEventListener('DOMContentLoaded', function(){
+  const a = window.agNav;
+  if (typeof a === 'function' && !a.__soc) {
+    const w = function(key, section){
+      if (key === 'mk' && MK_TO_SOC[section]) { window.mkOpenSocial(MK_TO_SOC[section]); return; }
+      return a.apply(this, arguments);
+    };
+    w.__soc = true; window.__agNavRaw = a; window.agNav = w;
+  }
+  if (typeof window.mkShowCampaigns === 'function' && !window.mkShowCampaigns.__soc) {
+    window.mkShowCampaignsLegacy = window.mkShowCampaigns;
+    const c = function(){ window.mkOpenSocial('create'); };
+    c.__soc = true; window.mkShowCampaigns = c;
+  }
+});
 // Re-render in place, keeping where the founder was looking. A grid that jumps
 // to the top every time a tile is tapped is unusable at twelve posts.
 function socRender(){
@@ -39851,36 +39940,38 @@ function loadCampaignRows(){
 
 // Live Marketing overview — real calendar, captions, campaigns and line plan.
 function agBuildMkOverview() {
-  const cal = STATE.mkCalendar || [];
-  const caps = STATE.mkCaptions || [];
-  const t0 = new Date(); t0.setHours(0,0,0,0);
-  const in7 = new Date(t0); in7.setDate(in7.getDate() + 7);
-  const ahead = cal.filter(e => { const d = new Date(e.date); return !isNaN(d) && d >= t0; }).sort((a,b) => new Date(a.date) - new Date(b.date));
-  const week = ahead.filter(e => new Date(e.date) <= in7);
-  let campaigns = [];
-  try { const c = JSON.parse(localStorage.getItem('venia_campaigns') || '[]'); if (Array.isArray(c)) campaigns = c; } catch (e) {}
-  const liveStyles = (VeniaOS.get('core.catalog')||[]).filter(st => st.status === 'active').length;
-  const stat = (l, v, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${l}</div><div class="ag-stat-v"${color ? ` style="color:${color}"` : ''}>${v}</div><div class="ag-stat-s">${sub}</div></div>`;
-  const upRows = ahead.slice(0,5).map(e => {
-    const d = new Date(e.date);
-    return `<div class="ag-list-row" style="cursor:pointer" onclick="agNavGo('mk','calendar')">
-      <div><div class="ag-lr-name">${slEsc(e.title||e.t||'Planned post')}</div><div class="ag-lr-sub">${slEsc(e.note||e.type||'')}</div></div>
-      <div class="ag-lr-mono">${slEsc((e.platform||e.channel||'').toUpperCase())}</div>
-      <div class="ag-lr-mono">${d.toLocaleDateString('en-US',{weekday:'short'})}</div>
-      <div class="ag-lr-mono">${d.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+  // Social Command's records (Build 660): the old calendar, captions and
+  // campaign stores are brought into it, so this reads the one source.
+  try { if (typeof socMigrateOnce === 'function') socMigrateOnce(); } catch (e) {}
+  const posts = (STATE.mkPosts || []).filter(p => p && p.status !== 'archived');
+  const day = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+  const today = day(new Date());
+  const in7 = (() => { const d = new Date(); d.setDate(d.getDate() + 7); return day(d); })();
+  const when = p => { try { return socWhen(p) || ''; } catch (e) { return ''; } };
+  const ahead = posts.filter(p => p.status !== 'published' && when(p) && when(p) >= today).sort((a, b) => when(a).localeCompare(when(b)));
+  const week = ahead.filter(p => when(p) <= in7);
+  const drafts = posts.filter(p => ['idea', 'proposed', 'draft', 'needs_asset'].includes(p.status));
+  const camps = (STATE.mkCampaigns || []).filter(c => c && c.status !== 'complete');
+  const stat = (l, v, sub) => `<div class="ag-stat"><div class="ag-stat-l">${l}</div><div class="ag-stat-v">${v}</div><div class="ag-stat-s">${sub}</div></div>`;
+  const plat = p => { try { const v = socVariant(p); return (v && v.platform) || ''; } catch (e) { return ''; } };
+  const upRows = ahead.slice(0, 5).map(p => {
+    const d = new Date(when(p) + 'T12:00:00');
+    return `<div class="ag-list-row" style="cursor:pointer" onclick="mkOpenSocial('calendar')">
+      <div><div class="ag-lr-name">${slEsc(p.title || 'Untitled post')}</div><div class="ag-lr-sub">${slEsc(p.status === 'approved' || p.status === 'scheduled' ? 'Ready' : 'Draft')}</div></div>
+      <div class="ag-lr-mono">${slEsc(plat(p).toUpperCase())}</div>
+      <div class="ag-lr-mono">${d.toLocaleDateString('en-US', { weekday: 'short' })}</div>
+      <div class="ag-lr-mono">${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
     </div>`;
   }).join('');
   return `
     <div class="ag-stats">
       ${stat('Next 7 days', week.length, week.length ? 'posts planned' : 'nothing planned yet')}
-      ${stat('Scheduled ahead', ahead.length, 'calendar entries')}
-      ${stat('Captions saved', caps.length, 'in the library')}
-      ${stat('Styles live', liveStyles, campaigns.length ? campaigns.length + ' campaign rows logged' : 'ready to promote')}
+      ${stat('Planned ahead', ahead.length, 'posts with a date')}
+      ${stat('Drafts', drafts.length, 'not ready yet')}
+      ${stat('Campaigns', camps.length, camps.length ? 'running or planned' : 'none yet')}
     </div>
-    <div class="ag-sec-head"><h2 class="ag-sec-title">Quick Actions</h2></div>
-    <div class="ag-workflows"><div class="ag-wf"><div class="ag-wf-tag">DRAFT</div><div class="ag-wf-title">Caption Draft</div><div class="ag-wf-desc">Pick a style or asset. Agent drafts on-brand captions in 3 lengths.</div></div><div class="ag-wf"><div class="ag-wf-tag">PLAN</div><div class="ag-wf-title">Content Calendar</div><div class="ag-wf-desc">Auto-fill the next 14 days based on drops, hits, and campaign milestones.</div></div><div class="ag-wf"><div class="ag-wf-tag">BRIEF</div><div class="ag-wf-title">Campaign Brief</div><div class="ag-wf-desc">Generate a one-pager: audience, channels, hero asset, KPIs.</div></div><div class="ag-wf"><div class="ag-wf-tag">INFLUENCER</div><div class="ag-wf-title">Influencer Match</div><div class="ag-wf-desc">Suggest creators by aesthetic fit, audience overlap, and rate range.</div></div><div class="ag-wf"><div class="ag-wf-tag">RECAP</div><div class="ag-wf-title">Weekly Recap</div><div class="ag-wf-desc">Performance summary across IG, TikTok, email — what worked, what didn't.</div></div><div class="ag-wf"><div class="ag-wf-tag">REPURPOSE</div><div class="ag-wf-title">Asset Repurpose</div><div class="ag-wf-desc">Take one shoot, generate variants for IG grid, story, reel, TikTok, email hero.</div></div></div>
-    <div class="ag-sec-head"><h2 class="ag-sec-title">Upcoming Posts</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('mk','calendar')">Open calendar</button></div></div>
-    ${ahead.length ? `<div class="ag-list">${upRows}</div>` : `<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">Nothing on the calendar yet — plan the next 14 days with the agent or add entries in Content Calendar.</div>`}`;
+    <div class="ag-sec-head"><h2 class="ag-sec-title">Upcoming Posts</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="mkOpenSocial('calendar')">Open calendar</button></div></div>
+    ${ahead.length ? `<div class="ag-list">${upRows}</div>` : `<div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">Nothing dated yet. Plan posts in Social Command.</div>`}`;
 }
 
 // Live Brand overview — real tone library, brand watch, memory and voice tools.
