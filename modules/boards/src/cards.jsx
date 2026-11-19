@@ -5,13 +5,15 @@
 // with the board like anything else. Their content lives in customData, so it
 // saves, syncs and searches with the scene. The link points back at Boards
 // itself and is never loaded: it only marks the element as one of ours.
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { convertToExcalidrawElements, newElementWith, restoreElements, CaptureUpdateAction } from '@excalidraw/excalidraw';
 import { uid } from './store.js';
+import { readableOn } from './images.js';
+import { htmlOf, parasFromDom, plainOf, pointAt, heightFor } from './rich.js';
 
 const CARD_BASE = '/boards/card/';
 export const isCardUrl = (u) => typeof u === 'string' && u.indexOf(CARD_BASE) !== -1;
-const cardLink = (kind, id) => (typeof location !== 'undefined' ? location.origin : '') + CARD_BASE + kind + '/' + id;
+export const cardLink = (kind, id) => (typeof location !== 'undefined' ? location.origin : '') + CARD_BASE + kind + '/' + id;
 
 // Excalidraw has no skeleton for embeddables: draw a rectangle and turn it
 // into one, then let restore fill in anything missing.
@@ -37,9 +39,25 @@ export function linkCard(x, y, info) {
   });
 }
 
+// A note whose words can be styled one by one (Build 651). It is still a
+// note (kind 'note', same colours, same place in Find); it just draws its own
+// words. Notes only become one when you style something in them.
+export const isRich = (el) => !!(el && el.type === 'embeddable' && el.customData && el.customData.kind === 'note' && el.customData.rich);
+
+// Turn a plain note into one that can style words, in place: the same id,
+// spot, size, group and section, so arrows, comments and undo still find it.
+export function richFrom(rect, paras) {
+  const [r] = restoreElements([{ ...rect, type: 'embeddable', link: cardLink('note', rect.id),
+    boundElements: (rect.boundElements || []).filter(b => b.type !== 'text'),
+    customData: { ...(rect.customData || {}), kind: 'note', rich: true, paras, text: plainOf(paras) },
+    height: Math.max(rect.height, heightFor(paras, rect.width)) }], null);
+  return newElementWith(r, {});
+}
+
 // Words on cards, for search.
 export function cardWords(el) {
   const d = el.customData || {};
+  if (d.kind === 'note' && d.rich) return d.text || plainOf(d.paras);
   if (d.kind === 'todo') return [d.title, ...(d.items || []).map(i => i.t)].join(' ');
   if (d.kind === 'link') return [d.title, d.site, d.description].join(' ');
   return '';
@@ -59,6 +77,7 @@ export function makeRenderCard(getApi, canEdit) {
     if (!isCardUrl(el.link)) return null;
     if (d.kind === 'todo') return <TodoCard el={el} api={getApi()} canEdit={canEdit} />;
     if (d.kind === 'link') return <LinkCardView el={el} />;
+    if (d.kind === 'note' && d.rich) return <RichNote el={el} api={getApi()} canEdit={canEdit} />;
     return null;
   };
 }
@@ -108,6 +127,107 @@ function TodoCard({ el, api, canEdit }) {
       )}
     </div>
   );
+}
+
+// A styled note. Shown, it is only a picture of its words (clicks go through
+// to the board, so it moves and selects like any note). Double-click, double
+// tap or Enter opens it for typing: a small editor where any word can be
+// bold, italic, underlined or struck through.
+export const RICH_EDIT = 'boards:rich-edit';       // { id, range?, then? }  open a note for typing
+export const RICH_EDITING = 'boards:rich-editing'; // { id | null }          which note is open
+const KEYS = { b: 'bold', i: 'italic', u: 'underline' };
+
+function RichNote({ el, api, canEdit }) {
+  const d = el.customData;
+  const box = useRef(null);
+  const [editing, setEditing] = useState(null);   // null, or how to start: { range, then }
+  const bg = el.backgroundColor || '#F1ECE2';
+  const parasKey = JSON.stringify(d.paras || []);
+  const wasEditing = useRef(false);
+
+  // shown words follow the saved ones, except while you type (and just after,
+  // when the editor already shows what is being saved)
+  useLayoutEffect(() => {
+    const just = wasEditing.current && !editing; wasEditing.current = !!editing;
+    if (!editing && !just && box.current) box.current.innerHTML = htmlOf(d.paras);
+  }, [parasKey, !!editing]);
+
+  // the note grows to fit its words, as a plain note does
+  useLayoutEffect(() => {
+    if (!api || !canEdit || !box.current) return;
+    const need = Math.ceil(box.current.offsetHeight);
+    if (need <= el.height + 1) return;
+    grow(api, el.id, need, CaptureUpdateAction.NEVER);
+  });
+
+  useEffect(() => {
+    if (!canEdit) return;
+    const on = (e) => { if (e.detail && e.detail.id === el.id) setEditing({ range: e.detail.range, then: e.detail.then }); };
+    window.addEventListener(RICH_EDIT, on);
+    return () => window.removeEventListener(RICH_EDIT, on);
+  }, [el.id, canEdit]);
+
+  useEffect(() => {
+    const ed = box.current; if (!editing || !ed) return;
+    try { document.execCommand('styleWithCSS', false, false); document.execCommand('defaultParagraphSeparator', false, 'div'); } catch (e) {}
+    ed.focus();
+    const s = window.getSelection();
+    const r = document.createRange();
+    if (editing.range) { r.setStart(...pointAt(ed, editing.range[0])); r.setEnd(...pointAt(ed, editing.range[1])); }
+    else { r.selectNodeContents(ed); r.collapse(false); }
+    s.removeAllRanges(); s.addRange(r);
+    if (editing.then) { try { document.execCommand(editing.then); } catch (e) {} }
+    window.dispatchEvent(new CustomEvent(RICH_EDITING, { detail: { id: el.id } }));
+  }, [editing]);
+
+  const save = (how) => {
+    if (!api || !box.current) return;
+    const paras = parasFromDom(box.current);
+    const cur = api.getSceneElementsIncludingDeleted().find(e => e.id === el.id);
+    if (!cur || cur.isDeleted) return;
+    const need = Math.max(cur.height, Math.ceil(box.current.offsetHeight));
+    const same = JSON.stringify(paras) === JSON.stringify(cur.customData.paras || []);
+    if (same && need === cur.height) return;
+    const next = newElementWith(cur, { height: need, ...(same ? {} : { customData: { ...cur.customData, paras, text: plainOf(paras) } }) });
+    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => e.id === el.id ? next : e), captureUpdate: how });
+  };
+  const done = () => {
+    save(CaptureUpdateAction.IMMEDIATELY);
+    setEditing(null);
+    window.dispatchEvent(new CustomEvent(RICH_EDITING, { detail: { id: null, was: el.id } }));
+  };
+
+  return (
+    <div className={'card-rich' + (editing ? ' editing' : '')} style={{ background: bg, color: readableOn(bg) }}>
+      <div ref={box} className="rich-words" contentEditable={!!editing} suppressContentEditableWarning spellCheck={!!editing}
+        onPointerDown={e => { if (editing) e.stopPropagation(); }}
+        onInput={() => { if (box.current && box.current.offsetHeight > el.height + 1) grow(api, el.id, Math.ceil(box.current.offsetHeight), CaptureUpdateAction.EVENTUALLY); }}
+        onBlur={() => { if (editing) done(); }}
+        onPaste={e => {   // words only: a pasted style or picture would not save
+          e.preventDefault();
+          const t = (e.clipboardData && e.clipboardData.getData('text/plain')) || '';
+          document.execCommand('insertText', false, t);
+        }}
+        onDrop={e => e.preventDefault()}
+        onKeyDown={e => {
+          if (!editing) return;
+          e.stopPropagation();
+          if (e.key === 'Escape') { e.preventDefault(); box.current.blur(); return; }
+          const mod = e.metaKey || e.ctrlKey;
+          if (!mod) return;
+          const k = e.key.toLowerCase();
+          if (!e.shiftKey && KEYS[k]) { e.preventDefault(); document.execCommand(KEYS[k]); }
+          else if (e.shiftKey && (k === 'x' || k === 's')) { e.preventDefault(); document.execCommand('strikeThrough'); }
+        }} />
+    </div>
+  );
+}
+
+function grow(api, id, height, how) {
+  if (!api) return;
+  const cur = api.getSceneElementsIncludingDeleted().find(e => e.id === id);
+  if (!cur || cur.isDeleted || cur.height + 1 >= height) return;
+  api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => e.id === id ? newElementWith(e, { height }) : e), captureUpdate: how });
 }
 
 // The card itself moves like anything else on the board; only "Open" opens.
