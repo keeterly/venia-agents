@@ -54,7 +54,7 @@ export function paletteRow(x, y, colours) {
 // The Library: VENIA's own pieces, ready to drag onto any board, followed by
 // whatever you've added to it yourself on this device.
 export function builtInLibrary() {
-  const item = (id, name, elements) => ({ id: 'venia-' + id, status: 'published', created: 1, name, elements });
+  const item = (id, name, elements) => ({ id: 'venia-' + id, status: 'unpublished', created: 1, name, elements });
   return [
     ...NOTE_COLOURS.map(c => item('note-' + c.name.toLowerCase(), c.name + ' note', note(0, 0, c.name + ' note', c.hex))),
     item('section', 'Section', convertToExcalidrawElements([frame(0, 0, 520, 380, 'Section')])),

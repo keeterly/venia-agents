@@ -1346,8 +1346,8 @@ export default function Board({ boardId, commentId, find }) {
                 <WelcomeScreen.Center.Heading>{meta ? meta.title : 'Board'}</WelcomeScreen.Center.Heading>
                 <div className="welcome-hints">
                   <p>Drop photos anywhere, or paste an image or a link. Hold one picture over another to make a board.</p>
-                  <p>Press N for a note. Draw, write and connect with the tools above.</p>
-                  <p>Select a few things, then Arrange, Group or put them in a Column.</p>
+                  <p>Press N for a note. Press Draw for shapes, arrows and the pen. Library has notes, sections and layouts to drag in.</p>
+                  <p>Select something for Move, Group, Palette and Style; select a few to Arrange them.</p>
                   <p>Click Comment to leave a note for someone. Type @ to mention them.</p>
                 </div>
               </WelcomeScreen.Center>
