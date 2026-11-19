@@ -78,6 +78,7 @@ export default function Board({ boardId, commentId, find }) {
   const [meta, setMeta] = useState(null);
   const [trail, setTrail] = useState([]);
   const [kids, setKids] = useState([]);   // boards whose parent is this one
+  const [kidsReady, setKidsReady] = useState(false);   // the list above has loaded
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
   const [sel, setSel] = useState({ count: 0, oneImage: null, busy: false, notes: false });
@@ -94,6 +95,7 @@ export default function Board({ boardId, commentId, find }) {
   const [moving, setMoving] = useState(false);     // the Move to… list is open
   const backRef = useRef(null);
   const doDeleteRef = useRef(() => {});
+  const copyCardsRef = useRef(() => {});
   const selbarRef = useRef(null);
   // keep the selection bar whole on screen, however near the edge the selection is
   useLayoutEffect(() => {
@@ -110,6 +112,11 @@ export default function Board({ boardId, commentId, find }) {
   const [showResolved, setShowResolved] = useState(false);
   const [people, setPeople] = useState([]);
   const [view, setView] = useState(0);            // bumps when the canvas moves, to move the pins
+  // Every board card this canvas already knows about: what it opened with,
+  // what we placed ourselves, what arrived from someone else. A card that
+  // turns up without being any of those was pasted or duplicated.
+  const knownCards = useRef(new Set());
+  const noteCards = (els) => { (els || []).forEach(e => { if (e && e.customData && e.customData.kind === 'board') knownCards.current.add(e.id); }); };
   const R = useRef({ rev: 0, savedVersion: -1, timer: null, saving: false, again: false, uploaded: new Set(), uploading: new Set(), thumbAt: 0, thumbVersion: -1, bg: BG });
   // The drawing tools show only while you ask for them. Hiding them puts you
   // back to selecting, so no drawing tool is left switched on out of sight.
@@ -142,6 +149,7 @@ export default function Board({ boardId, commentId, find }) {
         // browser's link editor pop up on every tap.
         const raw = (row.scene && row.scene.elements || []).map(e => (e && e.customData && e.customData.kind === 'board' && e.link) ? { ...e, link: null } : e);
         const elements = restoreElements(raw, null);
+        noteCards(elements);
         R.current.savedVersion = getSceneVersion(elements);
         R.current.thumbVersion = R.current.savedVersion;
         R.current.openVersion = R.current.savedVersion;
@@ -162,7 +170,7 @@ export default function Board({ boardId, commentId, find }) {
         const t = []; let p = row.parent_id; let guard = 0;
         while (p && by[p] && guard++ < 12) { t.unshift(by[p]); p = by[p].parent_id; }
         setTrail(t);
-        if (!dead) setKids(list.filter(b => b.parent_id === boardId && !b.trashed_at));
+        if (!dead) { setKids(list.filter(b => b.parent_id === boardId && !b.trashed_at)); setKidsReady(true); }
         document.title = row.title + ' · Boards';
         tellHost('boards:title', { title: row.title });
       } catch (e) { setStatus('Couldn\'t open: ' + (e.message || e)); }
@@ -209,6 +217,7 @@ export default function Board({ boardId, commentId, find }) {
     const have = new Set(Object.keys(a.getFiles()));
     const need = merged.filter(e => e.type === 'image' && e.fileId && !have.has(e.fileId)).map(e => e.fileId);
     if (need.length) a.addFiles(await store.loadFiles(boardId, need));
+    noteCards(merged);
     a.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER });
     R.current.rev = remote.rev;
     return merged;
@@ -295,7 +304,7 @@ export default function Board({ boardId, commentId, find }) {
   const loadComments = useCallback(async () => {
     try { setRows(await store.listComments(boardId)); } catch (e) {}
   }, [boardId]);
-  const live = useLive({ api, boardId, onFilesNeeded: fetchMissing, onCommentsChanged: loadComments });
+  const live = useLive({ api, boardId, onFilesNeeded: fetchMissing, onCommentsChanged: loadComments, onRemoteElements: noteCards });
   const threads = threadsOf(rows);
   const openCount = threads.filter(t => !t.root.resolved_at).length;
 
@@ -714,6 +723,10 @@ export default function Board({ boardId, commentId, find }) {
     const picked = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
     if (store.canEdit) watchStack(elements, appState, picked);
     const cardIds = elements.filter(e => !e.isDeleted && e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => e.customData.boardId);
+    if (store.canEdit) {
+      const fresh = elements.filter(e => !e.isDeleted && e.customData && e.customData.kind === 'board' && e.customData.boardId && !knownCards.current.has(e.id));
+      if (fresh.length) { noteCards(fresh); const copies = fresh.filter(e => !e.customData.linked); if (copies.length) setTimeout(() => copyCardsRef.current(copies), 0); }
+    }
     const ck = cardIds.join(',');
     if (ck !== R.current.cardKey) { R.current.cardKey = ck; const fresh = cardIds.filter(id => !R.current.cardSeen || !R.current.cardSeen.has(id));
       R.current.cardSeen = new Set(cardIds); if (fresh.length) loadCardInfo(fresh); }
@@ -933,6 +946,7 @@ export default function Board({ boardId, commentId, find }) {
     if (!inView) { try { api.scrollToContent(top, { animate: true }); } catch (e) {} }
   };
   const addEls = (els, select = true) => {
+    noteCards(els);
     setTools(false);   // on a phone, the Add sheet steps aside once something lands
     api.updateScene({
       elements: [...api.getSceneElementsIncludingDeleted(), ...els],
@@ -1147,6 +1161,9 @@ export default function Board({ boardId, commentId, find }) {
   // exists (removing a card never trashes the board). Offer it back.
   const shownKids = new Set((api ? api.getSceneElements() : []).filter(e => e.customData && e.customData.kind === 'board').map(e => e.customData.boardId));
   const hiddenKids = kids.filter(b => !shownKids.has(b.id));
+  // How many cards on this canvas show each board (more than one = linked).
+  const cardCount = {};
+  (api ? api.getSceneElements() : []).forEach(x => { if (x.customData && x.customData.kind === 'board' && x.customData.boardId) cardCount[x.customData.boardId] = (cardCount[x.customData.boardId] || 0) + 1; });
   function showKids() {
     const els = [];
     hiddenKids.forEach((b) => { els.push(...placeEls(boardCard(0, 0, b), { frame: null, extra: els.filter(e => !e.containerId) })); });
@@ -1154,8 +1171,53 @@ export default function Board({ boardId, commentId, find }) {
   }
 
   function placeBoardCard(b) {
-    addEls(placeEls(boardCard(0, 0, b)));
+    // An existing board placed here is the same board, shown in two places.
+    const els = placeEls(boardCard(0, 0, b)).map(e => (e.customData && e.customData.kind === 'board') ? { ...e, customData: { ...e.customData, linked: true } } : e);
+    addEls(els);
     setPanel(null);
+  }
+
+  // A pasted or duplicated board card becomes its own board: a full copy,
+  // pictures and inner boards included, so changing one never changes the
+  // other. (A card copied with "Copy link" stays a link.)
+  async function copyCards(cards) {
+    for (const card of cards) {
+      const srcId = card.customData.boardId;
+      const srcTitle = (cardInfo[srcId] && cardInfo[srcId].title) || card.customData.title || 'Untitled board';
+      const title = srcTitle + ' copy';
+      setBusy('Copying \u201c' + srcTitle + '\u201d\u2026');
+      try {
+        const newId = await store.copyBoard(srcId, { parent_id: boardId, title });
+        if (!newId) throw new Error('the original isn\u2019t here any more');
+        const all = api.getSceneElementsIncludingDeleted();
+        api.updateScene({ elements: all.map(e => e.id === card.id ? newElementWith(e, { customData: { ...e.customData, boardId: newId, title, linked: undefined } })
+          : (e.containerId === card.id && e.type === 'text') ? newElementWith(e, { text: '\u25a6  ' + title, originalText: '\u25a6  ' + title }) : e),
+          captureUpdate: CaptureUpdateAction.NEVER });
+        setKids(k => [...k, { id: newId, title, parent_id: boardId }]);
+        R.current.cardKey = null; // look the new card's picture and count up
+        setStatus('Made \u201c' + title + '\u201d');
+        save();
+      } catch (e) {
+        // Couldn't copy: the card stays, showing the original, and says so.
+        const all = api.getSceneElementsIncludingDeleted();
+        api.updateScene({ elements: all.map(x => x.id === card.id ? newElementWith(x, { customData: { ...x.customData, linked: true } }) : x), captureUpdate: CaptureUpdateAction.NEVER });
+        setStatus('Couldn\u2019t copy \u201c' + srcTitle + '\u201d (' + (e.message || e) + '); this card links to the original');
+      } finally { setBusy(''); }
+    }
+  }
+  copyCardsRef.current = copyCards;
+
+  // Copy a link to the selected board: pasting it on any board shows this
+  // same board there (a linked card), instead of making a copy.
+  async function copyLink() {
+    const st = api.getAppState();
+    const card = api.getSceneElements().find(e => st.selectedElementIds && st.selectedElementIds[e.id] && e.customData && e.customData.kind === 'board');
+    if (!card) return;
+    const els = api.getSceneElements().filter(e => e.id === card.id || e.containerId === card.id)
+      .map(e => e.id === card.id ? { ...e, customData: { ...e.customData, linked: true } } : e);
+    const text = JSON.stringify({ type: 'excalidraw/clipboard', elements: els, files: {} });
+    try { await navigator.clipboard.writeText(text); setUndoStack({ text: 'Link copied. Paste it on any board to show this same board there.' }); }
+    catch (e) { setStatus('Couldn\u2019t copy the link here'); }
   }
 
   // drop several photos at once, where they're dropped
@@ -1426,9 +1488,11 @@ export default function Board({ boardId, commentId, find }) {
           const r = rectOf(e); const info = cardInfo[e.customData.boardId] || {};
           if (r.width < 24 || r.height < 16) return null;
           const held = stackOn && stackOn.id === e.id;
-          return <div key={e.id} className={'bcard' + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
+          const bid = e.customData.boardId;
+          const linked = !!e.customData.linked || (kidsReady && !kids.some(k => k.id === bid)) || cardCount[bid] > 1;
+          return <div key={e.id} className={'bcard' + (linked ? ' linked' : '') + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
             <div className={'bcard-img' + (info.updating ? ' updating' : '')} style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}{info.updating && <i className="bcard-loading" aria-label="Updating" />}</div>
-            <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{info.count != null && <small>{info.count} {info.count === 1 ? 'item' : 'items'}</small>}</div>
+            <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{(info.count != null || linked) && <small>{linked && <span className="bcard-link" title="A link: the same board also shows somewhere else">Linked</span>}{info.count != null && (info.count + ' ' + (info.count === 1 ? 'item' : 'items'))}</small>}</div>
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
         })}</div>}
@@ -1456,6 +1520,7 @@ export default function Board({ boardId, commentId, find }) {
             <div className="selbar" ref={selbarRef} style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
               {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
               {sel.card && <button className="selbar-open" onClick={() => openCard(sel.card)} title="Open this board (or double-click it)"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open</button>}
+              {sel.card && <button onClick={copyLink} title="Copy a link to this board: paste it on any board to show the same board there (copy or duplicate makes a separate board)"><Ico d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />Copy link</button>}
               <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
               {sel.units > 1 && <span className="pop-wrap">
                 <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
@@ -1563,7 +1628,7 @@ function BoardPop({ currentId, onPick, onNew }) {
   return (
     <div className="pop list">
       <button onClick={onNew}><b>New board inside this one</b></button>
-      {list && list.length > 0 && <div className="pop-label">Or link an existing board</div>}
+      {list && list.length > 0 && <div className="pop-label">Or link a board (the same board, shown here too)</div>}
       <div className="pop-scroll">{(list || []).map(b => <button key={b.id} onClick={() => onPick(b)}>{b.title}</button>)}</div>
     </div>
   );

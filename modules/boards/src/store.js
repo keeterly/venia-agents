@@ -399,6 +399,43 @@ export const store = {
     });
   },
 
+  // A real, separate copy of a board: its own row, its own pictures (so
+  // deleting either one never takes the other's), and every board made inside
+  // it copied too. Cards that only link to a board elsewhere stay links.
+  // Nothing about the original is changed.
+  async copyBoard(srcId, { parent_id = null, title = null, seen = new Set() } = {}) {
+    if (seen.has(srcId) || seen.size > 100) return null;
+    seen.add(srcId);
+    const src = await this.loadBoard(srcId);
+    if (!src || src.trashed_at) return null;
+    const newId = uid('b');
+    const name = title || src.title || 'Untitled board';
+    const srcScene = src.scene || { elements: [], appState: {} };
+    const live = (srcScene.elements || []).filter(e => e && !e.isDeleted);
+    await this.createBoard({ id: newId, title: name, parent_id, scene: { elements: [], appState: srcScene.appState || {} } });
+    // boards made inside the original
+    const kids = (await this.listBoards()).filter(b => b.parent_id === srcId);
+    const map = new Map();
+    for (const k of kids) {
+      const c = await this.copyBoard(k.id, { parent_id: newId, seen });
+      if (c) map.set(k.id, c);
+    }
+    const elements = live.map(e => (e.customData && e.customData.kind === 'board' && map.has(e.customData.boardId))
+      ? { ...e, customData: { ...e.customData, boardId: map.get(e.customData.boardId) } } : e);
+    // pictures, copied under the new board
+    const used = [...new Set(live.filter(e => e.type === 'image' && e.fileId).map(e => e.fileId))];
+    if (used.length) {
+      const files = await this.loadFiles(srcId, used);
+      for (const f of files) await this.saveFile(newId, { id: f.id, dataURL: f.dataURL, mimeType: f.mimeType, created: f.created });
+    }
+    await this.saveScene(newId, { ...srcScene, elements }, 0, { item_count: src.item_count || 0, search_text: src.search_text || name });
+    try {
+      const t = (await this.thumbs([srcId]))[srcId];
+      if (t) await this.saveThumb(newId, await (await fetch(t)).blob());
+    } catch (e) { /* the card draws its own picture once opened */ }
+    return newId;
+  },
+
   // ── link cards ───────────────────────────────────────────────────────────
   // The page's title, picture and site, read on the server (a browser can't
   // read another site's page).
