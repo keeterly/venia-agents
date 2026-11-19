@@ -38,6 +38,7 @@ export default function Board({ boardId, commentId }) {
   const [initial, setInitial] = useState(null);
   const [meta, setMeta] = useState(null);
   const [trail, setTrail] = useState([]);
+  const [kids, setKids] = useState([]);   // boards whose parent is this one
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
   const [sel, setSel] = useState({ count: 0, oneImage: null });
@@ -97,6 +98,7 @@ export default function Board({ boardId, commentId }) {
         const t = []; let p = row.parent_id; let guard = 0;
         while (p && by[p] && guard++ < 12) { t.unshift(by[p]); p = by[p].parent_id; }
         setTrail(t);
+        if (!dead) setKids(list.filter(b => b.parent_id === boardId && !b.trashed_at));
         document.title = row.title + ' · Boards';
         tellHost('boards:title', { title: row.title });
       } catch (e) { setStatus('Couldn\'t open: ' + (e.message || e)); }
@@ -490,6 +492,7 @@ export default function Board({ boardId, commentId }) {
         if (id === targetId) continue;
         await store.moveInto(id, targetId, boardCard);
         job.movedBoards.push(id);
+        setKids(k => k.filter(b => b.id !== id));
       }
       setCardInfo(ci => ({ ...ci, [targetId]: { ...(ci[targetId] || {}), count: ((ci[targetId] && ci[targetId].count) || 0) + items.filter(e => !e.containerId).length + job.movedBoards.length } }));
       R.current.wantThumb = true; // this board's preview should show what's left
@@ -660,8 +663,11 @@ export default function Board({ boardId, commentId }) {
     if (!api || boardId !== LEGACY_ID || !store.canEdit) return;
     (async () => {
       const cards = await store.legacyBoardCards().catch(() => []);
-      const have = new Set(api.getSceneElements().map(e => e.customData && e.customData.legacyId).filter(Boolean));
-      const fresh = cards.filter(c => !have.has(c.id));
+      // Count ones you've since deleted or moved away too: they were brought
+      // across once already, and must not come back each time the board opens.
+      const have = new Set(api.getSceneElementsIncludingDeleted().map(e => e.customData && e.customData.legacyId).filter(Boolean));
+      // an old note with nothing written on it carries nothing worth bringing
+      const fresh = cards.filter(c => !have.has(c.id) && !(c.kind !== 'img' && c.kind !== 'goal' && !String(c.text || '').trim()));
       if (!fresh.length) return;
       const add = [];
       for (const c of fresh) {
@@ -825,6 +831,16 @@ export default function Board({ boardId, commentId }) {
       const cols = await extractPalette(f.dataURL, 6);
       addEls(paletteRow(el.x, el.y + el.height + 18, cols));
     } finally { setBusy(''); }
+  }
+
+  // A board inside this one whose card was removed from the canvas still
+  // exists (removing a card never trashes the board). Offer it back.
+  const shownKids = new Set((api ? api.getSceneElements() : []).filter(e => e.customData && e.customData.kind === 'board').map(e => e.customData.boardId));
+  const hiddenKids = kids.filter(b => !shownKids.has(b.id));
+  function showKids() {
+    const els = [];
+    hiddenKids.forEach((b, i) => { const p = spotFor(240, 150); els.push(...boardCard(p.x + i * 264, p.y, b)); });
+    if (els.length) addEls(els);
   }
 
   function placeBoardCard(b) {
@@ -1144,6 +1160,9 @@ export default function Board({ boardId, commentId }) {
             <button className="link quiet" onClick={() => { const u = naming.undo; setNaming(null); u(); }}>Undo</button>
           </div>
         )}
+        {hiddenKids.length > 0 && !undoStack && <div className="toast kids-toast">
+          {hiddenKids.length === 1 ? '“' + (hiddenKids[0].title || 'Untitled board') + '” is inside this board but its card isn’t showing' : hiddenKids.length + ' boards inside this one aren’t showing'}
+          <button onClick={showKids}>Show {hiddenKids.length === 1 ? 'it' : 'them'}</button></div>}
         {undoStack && <div className="toast">{undoStack.text}{undoStack.undo && <button onClick={() => { const u = undoStack.undo; setUndoStack(null); u(); }}>Undo</button>}</div>}
         <CommentsLayer api={api} threads={threads} adding={adding} setAdding={setAdding} openId={openId} setOpenId={setOpenId}
           people={people} showResolved={showResolved} view={view}
