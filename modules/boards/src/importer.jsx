@@ -101,15 +101,16 @@ export function ImportSheet({ go }) {
   );
 }
 
+const stage = (v) => { v = String(v || ''); return v === 'sms' ? 'SMS' : v.charAt(0).toUpperCase() + v.slice(1); };
 // The words on a style's card.
 export const styleCaption = (it) => {
   const price = Number(it.retail) > 0 ? '$' + Math.round(Number(it.retail)).toLocaleString('en-US') : '';
-  const line2 = [it.colors, price, it.status ? it.status.charAt(0).toUpperCase() + it.status.slice(1) : ''].filter(Boolean).join(' · ');
+  const line2 = [it.colors, price, it.status ? stage(it.status) : ''].filter(Boolean).join(' · ');
   return (it.name || 'Untitled style') + (line2 ? '\n' + line2 : '');
 };
 export const groupName = (it, by) => {
   if (by === 'none') return '';
   const v = String(it[by] || '').trim();
-  if (by === 'status') return v ? v.charAt(0).toUpperCase() + v.slice(1) : 'No stage';
+  if (by === 'status') return v ? stage(v) : 'No stage';
   return v || (by === 'category' ? 'No category' : 'No delivery');
 };
