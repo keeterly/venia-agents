@@ -5,13 +5,13 @@ import {
   exportToBlob, viewportCoordsToSceneCoords, sceneCoordsToViewportCoords, newElementWith, FONT_FAMILY,
 } from '@excalidraw/excalidraw';
 import { store, uid, dataURLToBlob } from './store.js';
-import { inHost, tellHost } from './host.js';
+import { inHost, tellHost, askHost } from './host.js';
 import { go, NewBoard, LEGACY_ID } from './App.jsx';
 import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems, loadLibrary, saveLibrary } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
 import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRich, richFrom, focusRichNow, RICH_EDIT, RICH_EDITING } from './cards.jsx';
-import { parasFromText, allHave, setAll } from './rich.js';
+import { parasFromText, allHave, setAll, plainOf } from './rich.js';
 import { flattenCards } from './export.js';
 import { useTouchCanvas } from './touch.js';
 import { SlidesPanel, Presenter, printDeck } from './present.jsx';
@@ -21,7 +21,8 @@ import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './co
 import { nameOf } from './store.js';
 import { FindPanel } from './find.jsx';
 import { NameBox } from './namebox.jsx';
-import { pendingKey, styleCaption, groupName } from './importer.jsx';
+import { pendingKey, styleCaption, groupName, materialCaption } from './importer.jsx';
+import { useProductLink, ProductPicker } from './product.jsx';
 
 const BG = '#F7F6F2';
 
@@ -104,6 +105,8 @@ export default function Board({ boardId, commentId, find }) {
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
   const [presenting, setPresenting] = useState(null);   // slide to start at, or null
+  const productLink = useProductLink();                   // Product and Boards both on
+  const [pickingVenia, setPickingVenia] = useState(false);
   const [sel, setSel] = useState({ count: 0, oneImage: null, busy: false, notes: false });
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
   const [tools, setTools] = useState(false);       // phone: the Add sheet is open
@@ -789,7 +792,12 @@ export default function Board({ boardId, commentId, find }) {
     const card = tops.length === 1 && tops[0].customData && tops[0].customData.kind === 'board' ? tops[0].customData.boardId || null : null;
     const styleIds = [...new Set(picked.map(e => e.customData && e.customData.styleId).filter(Boolean))];
     const style = units === 1 && styleIds.length === 1 ? styleIds[0] : null;
-    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units && s.card === card && s.style === style) ? s : { count: picked.length, oneImage, busy, notes, units, card, style });
+    // One photo, maybe with notes: it can become a material or a style in Product.
+    const imgs = tops.filter(e => e.type === 'image');
+    const pushOk = imgs.length === 1 && tops.every(e => e.type === 'image' || e.type === 'text' || (e.customData && e.customData.kind === 'note'));
+    const cd0 = pushOk ? (imgs[0].customData || {}) : {};
+    const push = pushOk ? imgs[0].id + '|' + (cd0.styleId ? 's' : '') + (cd0.materialId ? 'm' : '') : '';
+    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units && s.card === card && s.style === style && s.push === push) ? s : { count: picked.length, oneImage, busy, notes, units, card, style, push });
     // picking a drawing tool by its key shows the drawing tools, so it's never a hidden mode
     const tool = appState.activeTool && appState.activeTool.type;
     if (tool && !['selection', 'hand', 'laser'].includes(tool) && !R.current.drawingOn) { R.current.drawingOn = true; setDrawing(true); }
@@ -906,6 +914,12 @@ export default function Board({ boardId, commentId, find }) {
     let job = null;
     try { job = JSON.parse(sessionStorage.getItem(pendingKey(boardId)) || 'null'); sessionStorage.removeItem(pendingKey(boardId)); } catch (e) {}
     if (!job || !Array.isArray(job.items) || !job.items.length) return;
+    placeJob(job);
+  }, [api, initial]);
+  // Styles and materials as cards: a photo with its words under it, grouped
+  // into sections. Linked ones keep the record's id and update when the board
+  // opens. Used by Send to Board (from Product) and Add from VENIA (from here).
+  function placeJob(job) {
     (async () => {
       const items = job.items.slice(0, 300);
       setBusy(items.length > 1 ? `Adding ${items.length} to the board…` : 'Adding it to the board…');
@@ -937,7 +951,8 @@ export default function Board({ boardId, commentId, find }) {
           idx.forEach((i, k) => {
             const it = items[i];
             const cx = sx + P + (k % cols) * (CW + G), cy = y0 + P + Math.floor(k / cols) * (IH + CAP + G);
-            const tag = { styleId: it.styleId || undefined, linked: !!(job.linked && it.styleId) || undefined };
+            const tag = { styleId: it.styleId || undefined, materialId: it.materialId || undefined, linked: !!(job.linked && (it.styleId || it.materialId)) || undefined };
+            const words = it.styleId ? styleCaption(it) : it.materialId ? materialCaption(it) : (it.name || '');
             const g = 'g' + Math.random().toString(36).slice(2, 10);
             const fid = frame ? { frameId: frame.id } : {};
             const img = pics[i];
@@ -947,13 +962,13 @@ export default function Board({ boardId, commentId, find }) {
               const sc = Math.min(CW / img.width, IH / img.height);
               const w = Math.round(img.width * sc), h = Math.round(img.height * sc);
               const [pic] = convertToExcalidrawElements([{ type: 'image', fileId: id, x: cx + (CW - w) / 2, y: cy + (IH - h), width: w, height: h,
-                customData: { kind: 'style', source: it.image, ...tag } }]);
-              const [cap] = convertToExcalidrawElements([{ type: 'text', x: cx, y: cy + IH + 12, text: it.styleId ? styleCaption(it) : (it.name || ''),
-                fontSize: 18, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#111111', customData: { kind: 'style-caption', ...tag } }]);
+                customData: { kind: it.materialId ? 'material' : 'style', source: it.image, ...tag } }]);
+              const [cap] = convertToExcalidrawElements([{ type: 'text', x: cx, y: cy + IH + 12, text: words,
+                fontSize: 18, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#111111', customData: { kind: it.materialId ? 'material-caption' : 'style-caption', ...tag } }]);
               add.push({ ...pic, groupIds: [g], ...fid }, ...(cap.text ? [{ ...cap, groupIds: [g], ...fid }] : []));
             } else {
               if (it.image) failed++;
-              const els = note(cx, cy + IH - 170, it.styleId ? styleCaption(it) : (it.name || 'Photo'), NOTE_COLOURS[1].hex, CW, 170);
+              const els = note(cx, cy + IH - 170, words || 'Photo', NOTE_COLOURS[1].hex, CW, 170);
               add.push(...els.map(e => ({ ...e, ...fid, ...(e.type === 'rectangle' ? { customData: { ...(e.customData || {}), ...tag } } : {}) })));
             }
           });
@@ -963,12 +978,12 @@ export default function Board({ boardId, commentId, find }) {
         noteCards(add);
         api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), ...add], appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
         try { api.scrollToContent(add.filter(e => !e.containerId), { fitToViewport: true, viewportZoomFactor: 0.9, animate: true }); } catch (e) {}
-        setStatus(failed ? failed + (failed === 1 ? ' photo' : ' photos') + ' couldn\u2019t be loaded, so ' + (failed === 1 ? 'it is' : 'they are') + ' a note' : (job.linked ? 'Added. The cards stay in step with the line list' : 'Added'));
+        setStatus(failed ? failed + (failed === 1 ? ' photo' : ' photos') + ' couldn\u2019t be loaded, so ' + (failed === 1 ? 'it is' : 'they are') + ' a note' : (job.linked ? 'Added. The cards stay in step with Product' : 'Added'));
         save();
       } catch (e) { setStatus('Couldn\u2019t add them all: ' + (e.message || e)); }
       finally { setBusy(''); }
     })();
-  }, [api, initial]);
+  }
 
   // Linked style cards ask VENIA OS for the style as it is now, and take its
   // name, colourway, price and stage. Nothing else on the card changes, and the
@@ -998,6 +1013,31 @@ export default function Board({ boardId, commentId, find }) {
     tellHost('boards:style-info', { ids });
     const t = setTimeout(() => window.removeEventListener('message', got), 8000);
     return () => { clearTimeout(t); window.removeEventListener('message', got); };
+  }, [api, initial]);
+  // Linked material cards do the same with Materials (Build 657).
+  useEffect(() => {
+    if (!api || !initial || !inHost || !store.canEdit) return;
+    const ids = [...new Set(api.getSceneElements().filter(e => e.customData && e.customData.linked && e.customData.materialId).map(e => e.customData.materialId))];
+    if (!ids.length) return;
+    let live = true;
+    askHost('boards:material-info', { ids }, 8000).then(r => {
+      if (!live || !r) return;
+      const by = Object.fromEntries((r.materials || []).map(x => [x.materialId, x]));
+      const all = api.getSceneElementsIncludingDeleted();
+      const linkedRect = new Map(all.filter(e => !e.isDeleted && e.type === 'rectangle' && e.customData && e.customData.linked && e.customData.materialId).map(e => [e.id, e.customData.materialId]));
+      let changed = false;
+      const next = all.map(e => {
+        if (e.isDeleted || e.type !== 'text') return e;
+        const mid = (e.customData && e.customData.linked && e.customData.kind === 'material-caption' && e.customData.materialId) || (e.containerId && linkedRect.get(e.containerId));
+        const m = mid && by[mid]; if (!m) return e;
+        const t = materialCaption(m);
+        if (e.originalText === t || e.text === t) return e;
+        changed = true;
+        return newElementWith(e, { text: t, originalText: t });
+      });
+      if (changed) { api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.EVENTUALLY }); setStatus('Updated from Materials'); }
+    });
+    return () => { live = false; };
   }, [api, initial]);
 
   // ── pictures not on this device yet: fetch, then show each as it lands ──
@@ -1357,6 +1397,44 @@ export default function Board({ boardId, commentId, find }) {
     const next = { b: q('bold'), i: q('italic'), u: q('underline'), s: q('strikeThrough') };
     setFmtOn(o => (o.b === next.b && o.i === next.i && o.u === next.u && o.s === next.s) ? o : next);
   };
+
+  // ── Product from a board (Build 657) ──────────────────────────────────
+  // A selected photo, with any notes beside it, becomes a draft material or a
+  // draft style in Product. VENIA OS makes the record; the photo then stays
+  // linked to it here. Nothing already in Product is changed.
+  async function pushToProduct(kind) {
+    const st = api.getAppState();
+    const ids = new Set(Object.keys(st.selectedElementIds || {}).filter(k => st.selectedElementIds[k]));
+    const all = api.getSceneElements();
+    const picked = all.filter(e => ids.has(e.id) && !e.containerId);
+    const img = picked.find(e => e.type === 'image'); if (!img) return;
+    const words = picked.filter(e => e !== img).map(e => {
+      if (e.type === 'text') return e.originalText || e.text || '';
+      if (isRich(e)) return e.customData.text || plainOf(e.customData.paras);
+      const t = all.find(x => x.containerId === e.id && x.type === 'text');
+      return t ? (t.originalText || t.text || '') : '';
+    }).map(t => String(t).trim()).filter(Boolean);
+    const notes = words.join('\n\n');
+    const first = (words[0] || '').split('\n')[0].trim().slice(0, 60);
+    const name = await askName(kind === 'style' ? 'Name this style' : 'Name this material', first || (kind === 'style' ? 'New style' : 'New material'));
+    if (name === null || !String(name).trim()) return;
+    const file = api.getFiles()[img.fileId];
+    const source = img.customData && /^https:\/\//i.test(String(img.customData.source || '')) ? img.customData.source : '';
+    setBusy(kind === 'style' ? 'Making a draft style…' : 'Making a draft material…');
+    try {
+      const r = await askHost(kind === 'style' ? 'boards:create-style' : 'boards:save-material',
+        { name: String(name).trim(), notes, image: source ? '' : (file && file.dataURL) || '', source, board: meta && meta.title }, 40000);
+      if (!r) { setStatus('VENIA OS didn’t answer, so nothing was made'); return; }
+      if (!r.ok) { setStatus(r.message || 'Couldn’t make the draft'); return; }
+      const tag = kind === 'style' ? { kind: 'style', styleId: r.id, linked: true } : { kind: 'material', materialId: r.id, linked: true };
+      const next = api.getSceneElementsIncludingDeleted().map(e => e.id === img.id ? newElementWith(e, { customData: { ...(e.customData || {}), ...tag } }) : e);
+      api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      save();
+      setStatus(r.existing ? '“' + r.name + '” is already in Materials, so the photo is linked to it'
+        : (kind === 'style' ? 'Draft style “' + r.name + '”' + (r.code ? ' (' + r.code + ')' : '') + ' is in the line list' : 'Draft material “' + r.name + '” is in Materials')
+          + (r.photo === false ? '. The photo couldn’t be saved with it' : ''));
+    } finally { setBusy(''); }
+  }
 
   // Delete what's selected, with an Undo. A section takes what's in it along.
   function doDelete() {
@@ -1797,6 +1875,7 @@ export default function Board({ boardId, commentId, find }) {
               <button className="act" onClick={() => setPanel(panel === 'board' ? null : 'board')} title="A board inside this board"><Ico d="M4 4h16v16H4z M8 8h8v8H8z" />Board</button>
               {panel === 'board' && <BoardPop currentId={boardId} onPick={placeBoardCard} onNew={() => setPanel('newboard')} />}
             </div>
+            {productLink && <button className="act closes" onClick={() => setPickingVenia(true)} title="Add styles or materials from Product"><Ico d="M4 6h16 M4 12h10 M4 18h7 M17 14v8 M13 18h8" />From VENIA</button>}
             <button className="act closes" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
             <button className="act closes" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
             <button className="act closes lib-act" onClick={() => { try { api.toggleSidebar({ name: 'default', tab: 'library' }); } catch (e) {} }} title="Notes, sections and layouts to drag in"><Ico d="M4 5h5v14H4z M10 5h4v14h-4z M15 6l4-1 2 13-4 1z" />Library</button>
@@ -1957,6 +2036,8 @@ export default function Board({ boardId, commentId, find }) {
               {sel.card && <button className="selbar-open" onClick={() => openCard(sel.card)} title="Open this board (or double-click it)"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open</button>}
               {sel.card && <button onClick={copyLink} title="Copy a link to this board: paste it on any board to show the same board there (copy or duplicate makes a separate board)"><Ico d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />Copy link</button>}
               {sel.style && inHost && <button className="selbar-open" onClick={() => tellHost('boards:open-style', { styleId: sel.style })} title="Open this style in the line list"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open style</button>}
+              {productLink && store.canEdit && sel.push && !/m$/.test(sel.push) && <button onClick={() => pushToProduct('material')} title="Make a draft material in Product from this photo (and any notes with it)"><Ico d="M4 4h16v16H4z M4 9h16 M9 4v16" />Save as material</button>}
+              {productLink && store.canEdit && sel.push && !/\|s/.test(sel.push) && <button onClick={() => pushToProduct('style')} title="Make a draft style in Product from this sketch (and any notes with it)"><Ico d="M12 3l3 3h4v4l-7 11L5 10V6h4z" />Create style</button>}
               <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
               {sel.units > 1 && <span className="pop-wrap">
                 <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
@@ -2022,6 +2103,7 @@ export default function Board({ boardId, commentId, find }) {
         count={sel.count} onClose={() => setMoving(false)}
         onPick={(b) => { setMoving(false); moveTo(b.id, selectionNow(), { title: b.title, flyTo: trail.length && b.id === trail[trail.length - 1].id ? backRect() : null }); }} />}
       {presenting !== null && api && <Presenter api={api} start={presenting} onClose={() => setPresenting(null)} />}
+      {pickingVenia && api && <ProductPicker onClose={() => setPickingVenia(false)} onAdd={(job) => { setPickingVenia(false); placeJob(job); }} />}
       {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeNewKid} />}
     </div>
   );
