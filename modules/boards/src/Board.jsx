@@ -7,9 +7,9 @@ import {
 import { store, uid, dataURLToBlob } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { go, NewBoard, LEGACY_ID } from './App.jsx';
-import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements } from './elements.js';
+import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
-import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette } from './images.js';
+import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
 import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf } from './cards.jsx';
 import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
@@ -50,14 +50,14 @@ const IMG_SIDE = 320;   // how big a new photo lands on the canvas
 const PLAYS_IN_PLACE = /(^|\.)(youtube\.com|youtu\.be|vimeo\.com|figma\.com|open\.spotify\.com|soundcloud\.com|loom\.com|giphy\.com)$/i;
 const isWebUrl = (t) => /^https?:\/\/\S+$/i.test(t);
 
-export default function Board({ boardId, commentId }) {
+export default function Board({ boardId, commentId, find }) {
   const [initial, setInitial] = useState(null);
   const [meta, setMeta] = useState(null);
   const [trail, setTrail] = useState([]);
   const [kids, setKids] = useState([]);   // boards whose parent is this one
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
-  const [sel, setSel] = useState({ count: 0, oneImage: null });
+  const [sel, setSel] = useState({ count: 0, oneImage: null, busy: false, notes: false });
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
   const [tools, setTools] = useState(false);       // phone: the Add sheet is open
   const [dropping, setDropping] = useState(false); // something is being dragged over the board
@@ -66,10 +66,18 @@ export default function Board({ boardId, commentId }) {
   const [ghosts, setGhosts] = useState(null);      // pictures flying into a new board card
   const [cardInfo, setCardInfo] = useState({});    // board id -> { title, count, thumb }
   const [naming, setNaming] = useState(null);      // a board just made: name it, or undo
-  const [drawing, setDrawing] = useState(false);   // phone: the drawing tools are showing
+  const [drawing, setDrawing] = useState(false);   // the drawing tools are showing (hidden until you ask)
   const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
   const [moving, setMoving] = useState(false);     // the Move to… list is open
   const backRef = useRef(null);
+  const selbarRef = useRef(null);
+  // keep the selection bar whole on screen, however near the edge the selection is
+  useLayoutEffect(() => {
+    const b = selbarRef.current; if (!b || !b.parentElement) return;
+    const W = b.parentElement.clientWidth, w = b.offsetWidth, c = parseFloat(b.style.left) || 0;
+    const fixed = Math.max(w / 2 + 8, Math.min(c, W - w / 2 - 8));
+    if (Math.abs(fixed - c) > 0.5) b.style.left = fixed + 'px';
+  });
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
   const [rows, setRows] = useState([]);           // comments, flat
@@ -79,6 +87,12 @@ export default function Board({ boardId, commentId }) {
   const [people, setPeople] = useState([]);
   const [view, setView] = useState(0);            // bumps when the canvas moves, to move the pins
   const R = useRef({ rev: 0, savedVersion: -1, timer: null, saving: false, again: false, uploaded: new Set(), uploading: new Set(), thumbAt: 0, thumbVersion: -1, bg: BG });
+  // The drawing tools show only while you ask for them. Hiding them puts you
+  // back to selecting, so no drawing tool is left switched on out of sight.
+  useEffect(() => {
+    R.current.drawingOn = drawing;
+    if (!drawing && api) { try { const t = api.getAppState().activeTool; if (t && !['selection', 'hand'].includes(t.type)) api.setActiveTool({ type: 'selection' }); } catch (e) {} }
+  }, [drawing, api]);
   const wrapRef = useRef(null);
   const fileInput = useRef(null);
 
@@ -147,7 +161,7 @@ export default function Board({ boardId, commentId }) {
       scene: { elements: els, appState: { viewBackgroundColor: st.viewBackgroundColor, gridModeEnabled: !!st.gridModeEnabled } },
       // Count what a person would call one thing: a palette, a group or a
       // labelled note is one item, not its parts.
-      extra: { search_text: (meta ? meta.title + ' ' : '') + words, item_count: new Set(live.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size, cover_file: firstImage ? firstImage.fileId : null },
+      extra: { search_text: (meta ? meta.title + ' ' : '') + words, item_count: countItems(live), cover_file: firstImage ? firstImage.fileId : null },
       version: getSceneVersion(els),
     };
   }, [meta]);
@@ -227,8 +241,10 @@ export default function Board({ boardId, commentId }) {
     const v = getSceneVersion(all);
     if (!els.length || v === R.current.thumbVersion) return;
     try {
-      const blob = await exportToBlob({ elements: els, files: snap && snap.files ? snap.files : a.getFiles(), mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 24,
-        appState: { exportBackground: true, viewBackgroundColor: snap && snap.scene ? snap.scene.appState.viewBackgroundColor : a.getAppState().viewBackgroundColor } });
+      // the same picture as the card on a board above, so the two never differ
+      const blob = await previewBlob(all, snap && snap.files ? snap.files : a.getFiles(),
+        snap && snap.scene ? snap.scene.appState.viewBackgroundColor : a.getAppState().viewBackgroundColor);
+      if (!blob) return;
       await store.saveThumb(boardId, blob);
       R.current.thumbVersion = v; R.current.thumbAt = Date.now();
     } catch (e) {}
@@ -535,7 +551,7 @@ export default function Board({ boardId, commentId }) {
       if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
       const scene = row.scene || { elements: [], appState: {} };
       const next = fn(scene.elements || []);
-      const count = next.filter(e => !e.isDeleted && !e.containerId).length;
+      const count = countItems(next);
       const res = await store.saveScene(id, { ...scene, elements: next }, row.rev || 0, { item_count: count });
       if (!res.conflict) return;
     }
@@ -677,7 +693,13 @@ export default function Board({ boardId, commentId }) {
     if (ck !== R.current.cardKey) { R.current.cardKey = ck; const fresh = cardIds.filter(id => !R.current.cardSeen || !R.current.cardSeen.has(id));
       R.current.cardSeen = new Set(cardIds); if (fresh.length) loadCardInfo(fresh); }
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
-    setSel(s => (s.count === picked.length && s.oneImage === oneImage) ? s : { count: picked.length, oneImage });
+    const busy = !!(appState.selectedElementsAreBeingDragged || appState.resizingElement || appState.newElement || appState.editingTextElement || appState.isRotating);
+    const notes = picked.length > 0 && picked.every(e => e.customData && e.customData.kind === 'note');
+    const units = new Set(picked.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
+    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units) ? s : { count: picked.length, oneImage, busy, notes, units });
+    // picking a drawing tool by its key shows the drawing tools, so it's never a hidden mode
+    const tool = appState.activeTool && appState.activeTool.type;
+    if (tool && !['selection', 'hand', 'laser'].includes(tool) && !R.current.drawingOn) { R.current.drawingOn = true; setDrawing(true); }
     // pins follow the canvas and the items they're on
     const vk = [appState.scrollX, appState.scrollY, appState.zoom.value, appState.width, appState.height, getSceneVersion(elements)].join('|');
     if (vk !== R.current.viewKey) { R.current.viewKey = vk; if (!R.current.viewRaf) R.current.viewRaf = requestAnimationFrame(() => { R.current.viewRaf = 0; setView(x => x + 1); }); }
@@ -747,10 +769,32 @@ export default function Board({ boardId, commentId }) {
     if (snap) { sv(snap); th(snap); }
   }, []);
 
-  // open on the whole board, not just its top-left corner
+  // Open on the whole board with a little room round it, never zoomed in past
+  // 100%. Or, coming from a search, on the thing that matched.
   useEffect(() => {
     if (!api) return;
-    const t = setTimeout(() => { try { if (api.getSceneElements().length) api.scrollToContent(undefined, { fitToContent: true }); } catch (e) {} }, 60);
+    const fit = () => {
+      try {
+        const els = api.getSceneElements(); if (!els.length) return;
+        const term = String(find || '').trim().toLowerCase();
+        if (term) {
+          const hit = els.find(e => (e.type === 'text' && String(e.text || '').toLowerCase().includes(term))
+            || (e.type === 'frame' && String(e.name || '').toLowerCase().includes(term))
+            || (e.type === 'embeddable' && cardWords(e).toLowerCase().includes(term)));
+          if (hit) {
+            const target = hit.containerId ? els.find(e => e.id === hit.containerId) || hit : hit;
+            api.scrollToContent([target], { fitToViewport: true, viewportZoomFactor: 0.35 });
+            if (api.getAppState().zoom.value > 1) api.updateScene({ appState: { zoom: { value: 1 } } });
+            api.scrollToContent([target]);
+            api.updateScene({ appState: { selectedElementIds: { [target.id]: true } } });
+            return;
+          }
+        }
+        api.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.9 });
+        if (api.getAppState().zoom.value > 1) { api.updateScene({ appState: { zoom: { value: 1 } } }); api.scrollToContent(); }
+      } catch (e) {}
+    };
+    const t = setTimeout(fit, 60);
     return () => clearTimeout(t);
   }, [api]);
 
@@ -800,20 +844,60 @@ export default function Board({ boardId, commentId }) {
     const s = api.getAppState(); const z = s.zoom.value;
     return { x: s.width / 2 / z - s.scrollX, y: s.height / 2 / z - s.scrollY };
   };
-  // Somewhere near the middle that isn't already covered, so a new thing
-  // never lands under (or over) something else. Cards in particular float
-  // above the drawing, so they must not land on it.
-  const spotFor = (w, h) => {
+  const box = (els) => {
+    const xs = els.flatMap(e => [e.x, e.x + e.width]), ys = els.flatMap(e => [e.y, e.y + e.height]);
+    return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  };
+  // The section you're working in: the one you've selected, or the one in the
+  // middle of the screen. Things you add go in it, the way a template means.
+  const workingFrame = () => {
+    const st = api.getAppState();
+    const live = api.getSceneElements();
+    const picked = live.filter(e => st.selectedElementIds && st.selectedElementIds[e.id]);
+    if (picked.length === 1 && picked[0].type === 'frame') return picked[0];
     const c = center();
-    const live = api.getSceneElements().filter(e => !e.containerId);
+    const under = live.filter(e => e.type === 'frame' && c.x >= e.x && c.x <= e.x + e.width && c.y >= e.y && c.y <= e.y + e.height);
+    return under.sort((a, b) => a.width * a.height - b.width * b.height)[0] || null;
+  };
+  // A free spot for something w × h. Inside a section it fills from the top
+  // left, row by row; otherwise near the middle of the screen. Never on top of
+  // something already there, including what's being added with it.
+  const spotFor = (w, h, frame = null, extra = []) => {
+    const live = [...api.getSceneElements().filter(e => !e.containerId && e.type !== 'frame' && (!frame || e.frameId === frame.id || overlaps(e, frame))), ...extra];
     const hits = (x, y) => live.some(e => x < e.x + e.width + 16 && x + w + 16 > e.x && y < e.y + e.height + 16 && y + h + 16 > e.y);
+    if (frame) {
+      const P = 20;
+      for (let y = frame.y + P; y + h <= frame.y + frame.height - P + 0.5; y += 24) {
+        for (let x = frame.x + P; x + w <= frame.x + frame.width - P + 0.5; x += 24) if (!hits(x, y)) return { x, y, frame };
+      }
+    }
+    const c = center();
     let x = c.x - w / 2, y = c.y - h / 2;
     for (let i = 0; i < 24 && hits(x, y); i++) {
       // walk right along the row, then start a row below
       x += w + 24;
       if (i % 6 === 5) { x = c.x - w / 2; y += h + 24; }
     }
-    return { x, y };
+    return { x, y, frame: null };
+  };
+  const overlaps = (e, f) => e.x < f.x + f.width && e.x + e.width > f.x && e.y < f.y + f.height && e.y + e.height > f.y;
+  // Put a set of elements (built anywhere) at a free spot, in the section
+  // you're working in when there's room there.
+  const placeEls = (els, { frame = workingFrame(), extra = [] } = {}) => {
+    const top = els.filter(e => !e.containerId);
+    const b = box(top.length ? top : els);
+    const p = spotFor(b.w, b.h, frame, extra);
+    const fid = p.frame ? p.frame.id : null;
+    return els.map(e => ({ ...e, x: e.x - b.x + p.x, y: e.y - b.y + p.y, ...(fid ? { frameId: fid } : {}) }));
+  };
+  // Show what was added only if it isn't on screen already, so the view
+  // doesn't jump about while you work.
+  const bringIntoView = (els) => {
+    const st = api.getAppState();
+    const top = els.filter(e => !e.containerId); if (!top.length) return;
+    const r = top.map(e => rectOf(e));
+    const inView = r.every(q => q.left >= 0 && q.top >= 0 && q.left + q.width <= st.width && q.top + q.height <= st.height);
+    if (!inView) { try { api.scrollToContent(top, { animate: true }); } catch (e) {} }
   };
   const addEls = (els, select = true) => {
     setTools(false);   // on a phone, the Add sheet steps aside once something lands
@@ -822,14 +906,29 @@ export default function Board({ boardId, commentId }) {
       appState: select ? { selectedElementIds: Object.fromEntries(els.filter(e => !e.containerId).map(e => [e.id, true])), selectedGroupIds: {} } : undefined,
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     });
-    // bring it into view if it landed off screen
-    try { api.scrollToContent(els.filter(e => !e.containerId), { animate: true }); } catch (e) {}
+    bringIntoView(els);
   };
 
-  function addNote(colour) {
-    const p = spotFor(220, 160);
-    addEls(note(p.x, p.y, 'New note', colour));
+  // Start typing straight into a note, its words selected so typing replaces them.
+  const editNote = (rect) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try {
+        const canvas = wrapRef.current && wrapRef.current.querySelector('canvas.interactive');
+        if (!canvas) return;
+        const st = api.getAppState();
+        const p = sceneCoordsToViewportCoords({ sceneX: rect.x + rect.width / 2, sceneY: rect.y + rect.height / 2 }, st);
+        canvas.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, clientX: p.x, clientY: p.y, view: window }));
+        setTimeout(() => { const t = wrapRef.current && wrapRef.current.querySelector('textarea.excalidraw-wysiwyg'); if (t) { t.focus(); t.select(); } }, 30);
+      } catch (e) {}
+    }));
+  };
+
+  function addNote(colour = NOTE_COLOURS[0].hex) {
+    const els = placeEls(note(0, 0, 'New note', colour));
+    addEls(els);
     setPanel(null);
+    const rect = els.find(e => !e.containerId);
+    if (rect) editNote(rect);
   }
 
   // Photos: any number at once, laid out as a moodboard where they land.
@@ -837,20 +936,25 @@ export default function Board({ boardId, commentId }) {
     if (!blobs.length) return;
     setBusy(blobs.length > 1 ? `Adding ${blobs.length} images…` : 'Adding image…');
     try {
-      const start = at || center();
+      // dropped on a spot: there; otherwise in the section you're working in
+      const frame = at ? null : workingFrame();
       const placed = [];
-      let x = start.x, y = start.y;
+      let x = at ? at.x : 0, y = at ? at.y : 0;
       for (let i = 0; i < blobs.length; i++) {
         const img = await prepareImage(blobs[i]);
         const id = uid('f');
         api.addFiles([{ id, dataURL: img.dataURL, mimeType: img.mimeType, created: Date.now() }]);
-        const s = Math.min(1, IMG_SIDE / Math.max(img.width, img.height));
+        // a picture fits inside the section it goes in
+        const side = frame ? Math.min(IMG_SIDE, frame.width - 40, frame.height - 40) : IMG_SIDE;
+        const s = Math.min(1, Math.max(80, side) / Math.max(img.width, img.height));
         const w = Math.round(img.width * s), h = Math.round(img.height * s);
-        placed.push(...convertToExcalidrawElements([{ type: 'image', fileId: id, x, y, width: w, height: h, customData: sources[i] ? { source: sources[i] } : undefined }]));
+        let [el] = convertToExcalidrawElements([{ type: 'image', fileId: id, x, y, width: w, height: h, customData: sources[i] ? { source: sources[i] } : undefined }]);
+        if (!at) [el] = placeEls([el], { frame, extra: placed });
+        placed.push(el);
         x += w + 24;
       }
       addEls(placed);
-      if (placed.length > 1) {
+      if (placed.length > 1 && at) {
         const ids = Object.fromEntries(placed.map(e => [e.id, true]));
         const next = arrange(api.getSceneElementsIncludingDeleted(), ids, 'masonry');
         if (next) api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
@@ -865,9 +969,8 @@ export default function Board({ boardId, commentId }) {
     setPanel(null);
     // video, music and design files play right on the board
     if (PLAYS_IN_PLACE.test(hostOf(url))) {
-      const p = spotFor(480, 270);
-      const [r] = convertToExcalidrawElements([{ type: 'rectangle', x: p.x, y: p.y, width: 480, height: 270 }]);
-      addEls(restoreElements([{ ...r, type: 'embeddable', link: url, strokeColor: 'transparent', backgroundColor: 'transparent' }], null));
+      const [r] = convertToExcalidrawElements([{ type: 'rectangle', x: 0, y: 0, width: 480, height: 270 }]);
+      addEls(placeEls(restoreElements([{ ...r, type: 'embeddable', link: url, strokeColor: 'transparent', backgroundColor: 'transparent' }], null)));
       return;
     }
     if (looksLikeImageUrl(url)) {
@@ -880,15 +983,13 @@ export default function Board({ boardId, commentId }) {
       if (info && info.kind === 'image' && !looksLikeImageUrl(url)) {
         const blob = await fetchImage(url); if (blob) return addImages([blob], null, [url]);
       }
-      const p = spotFor(300, info && info.image ? 290 : 128);
-      addEls(linkCard(p.x, p.y, { url, ...(info || {}), site: (info && info.site) || hostOf(url) }));
+      addEls(placeEls(linkCard(0, 0, { url, ...(info || {}), site: (info && info.site) || hostOf(url) })));
       if (!info) setStatus(store.mode === 'cloud' ? 'Couldn\'t read that page, so it\'s a plain link card' : 'Saved as a link card');
     } finally { setBusy(''); }
   }
 
   function addTodo() {
-    const p = spotFor(280, 128);
-    addEls(todoCard(p.x, p.y));
+    addEls(placeEls(todoCard(0, 0)));
     setStatus('Click the list to tick things off or add to it');
   }
 
@@ -906,7 +1007,7 @@ export default function Board({ boardId, commentId }) {
       const rest = api.getSceneElementsIncludingDeleted().map(e => ids.has(e.id) ? newElementWith(e, { frameId: col.id }) : e);
       api.updateScene({ elements: [col, ...rest], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     } else {
-      const p = spotFor(300, 120);
+      const p = spotFor(300, 120, null);
       col = newColumn(p.x, p.y, 'Column');
       api.updateScene({ elements: [col, ...api.getSceneElementsIncludingDeleted()], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
       setStatus('Drag notes, photos and cards into the column');
@@ -919,6 +1020,34 @@ export default function Board({ boardId, commentId }) {
     if (next) { api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY }); setStatus(''); }
     else setStatus('Select two or more things to arrange');
     setPanel(null);
+  }
+
+  function recolourNotes(hex) {
+    const st = api.getAppState();
+    const ids = new Set(Object.keys(st.selectedElementIds || {}).filter(k => st.selectedElementIds[k]));
+    const next = api.getSceneElementsIncludingDeleted().map(e => {
+      if (ids.has(e.id) && e.customData && e.customData.kind === 'note') return newElementWith(e, { backgroundColor: hex, strokeColor: hex === '#161616' ? '#161616' : '#d9d3c7' });
+      if (e.containerId && ids.has(e.containerId) && e.type === 'text') return newElementWith(e, { strokeColor: readableOn(hex) });
+      return e;
+    });
+    api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+  }
+
+  // Delete what's selected, with an Undo. A section takes what's in it along.
+  function doDelete() {
+    const st = api.getAppState();
+    const all = api.getSceneElementsIncludingDeleted();
+    const ids = new Set(Object.keys(st.selectedElementIds || {}).filter(k => st.selectedElementIds[k]));
+    all.forEach(e => { if (e.frameId && ids.has(e.frameId)) ids.add(e.id); });
+    all.forEach(e => { if (e.containerId && ids.has(e.containerId)) ids.add(e.id); });
+    const gone = all.filter(e => ids.has(e.id) && !e.isDeleted);
+    if (!gone.length) return;
+    const n = gone.filter(e => !e.containerId).length;
+    api.updateScene({ elements: all.map(e => ids.has(e.id) && !e.isDeleted ? newElementWith(e, { isDeleted: true }) : e), appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    const back = new Set(gone.map(e => e.id));
+    setUndoStack({ text: n === 1 ? 'Deleted' : 'Deleted ' + n + ' things', undo: () => {
+      api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => back.has(e.id) && e.isDeleted ? newElementWith(e, { isDeleted: false }) : e), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    } });
   }
 
   function doFrame() {
@@ -940,7 +1069,8 @@ export default function Board({ boardId, commentId }) {
     setBusy('Reading colours…');
     try {
       const cols = await extractPalette(f.dataURL, 6);
-      addEls(paletteRow(el.x, el.y + el.height + 18, cols));
+      const colour = api.getSceneElements().find(e => e.type === 'frame' && /^(colou?rs?|palette)$/i.test(String(e.name || '').trim()));
+      addEls(colour ? placeEls(paletteRow(0, 0, cols), { frame: colour }) : paletteRow(el.x, el.y + el.height + 18, cols));
     } finally { setBusy(''); }
   }
 
@@ -950,13 +1080,12 @@ export default function Board({ boardId, commentId }) {
   const hiddenKids = kids.filter(b => !shownKids.has(b.id));
   function showKids() {
     const els = [];
-    hiddenKids.forEach((b, i) => { const p = spotFor(240, 150); els.push(...boardCard(p.x + i * 264, p.y, b)); });
+    hiddenKids.forEach((b) => { els.push(...placeEls(boardCard(0, 0, b), { frame: null, extra: els.filter(e => !e.containerId) })); });
     if (els.length) addEls(els);
   }
 
   function placeBoardCard(b) {
-    const p = spotFor(240, 150);
-    addEls(boardCard(p.x, p.y, b));
+    addEls(placeEls(boardCard(0, 0, b)));
     setPanel(null);
   }
 
@@ -1040,8 +1169,7 @@ export default function Board({ boardId, commentId }) {
   function pasteText(text) {
     text = String(text).trim(); if (!text) return;
     if (isWebUrl(text) || looksLikeImageUrl(text)) return addFromLink(text);
-    const p = spotFor(260, 160);
-    addEls(note(p.x, p.y, text.slice(0, 2000), NOTE_COLOURS[0].hex));
+    addEls(placeEls(note(0, 0, text.slice(0, 2000), NOTE_COLOURS[0].hex, 260, 160)));
   }
 
   useEffect(() => {
@@ -1124,7 +1252,7 @@ export default function Board({ boardId, commentId }) {
   if (missing) return <div className="empty">This board isn't here any more. <button className="link" onClick={() => go('/')}>Back to Boards</button></div>;
 
   return (
-    <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef}>
+    <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef} style={api ? { '--fz': Math.max(0.55, Math.min(1, api.getAppState().zoom.value * 1.6)) } : null}>
       <header className={'bar' + (tools ? ' tools-open' : '')}>
         <nav className="crumbs">
           <button ref={backRef} className={'back' + (backHot ? ' hot' : '')} onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
@@ -1140,10 +1268,7 @@ export default function Board({ boardId, commentId }) {
         </nav>
         {store.canEdit && api && (
           <div className="actions edit-actions" onClick={e => { if (e.target.closest('.act.closes')) setTools(false); }}>
-            <div className="pop-wrap">
-              <button className="act" onClick={() => setPanel(panel === 'note' ? null : 'note')} title="Add a note (N)"><Ico d="M5 4h14v11l-5 5H5z M14 20v-5h5" />Note</button>
-              {panel === 'note' && <div className="pop swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => addNote(c.hex)} />)}</div>}
-            </div>
+            <button className="act closes" onClick={() => addNote()} title="Add a note and start typing (N)"><Ico d="M5 4h14v11l-5 5H5z M14 20v-5h5" />Note</button>
             <button className="act closes" onClick={() => fileInput.current.click()} title="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" />Photos</button>
             <button className="act" onClick={pasteButton} title="Paste a copied picture or link (or press Ctrl/⌘ V)"><Ico d="M9 4h6v3H9z M7 5H5v16h14V5h-2 M9 12h6 M9 16h4" />Paste</button>
             <div className="pop-wrap">
@@ -1157,26 +1282,11 @@ export default function Board({ boardId, commentId }) {
             <button className="act closes" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
             <button className="act closes" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
             <span className="divider" />
-            <button className="act closes" disabled={sel.count < 1} onClick={() => setMoving(true)} title="Move what's selected to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
-            <div className="pop-wrap">
-              <button className="act" disabled={sel.count < 2} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
-              {panel === 'arrange' && (
-                <div className="pop list">
-                  <button onClick={() => doArrange('masonry')}>Moodboard<small>pictures in even columns</small></button>
-                  <button onClick={() => doArrange('grid')}>Grid</button>
-                  <button onClick={() => doArrange('column')}>Column</button>
-                  <button onClick={() => doArrange('row')}>Row</button>
-                </div>
-              )}
-            </div>
-            <button className="act closes" disabled={sel.count < 1} onClick={doFrame} title="Group the selection in a named frame"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
-            <button className={'act closes phone-draw' + (drawing ? ' on' : '')} onClick={() => setDrawing(d => !d)} title="Show the drawing tools"><Ico d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z M13.9 6.6l3.5 3.5" />{drawing ? 'Hide tools' : 'Draw'}</button>
-            <button className="act closes" disabled={!sel.oneImage} onClick={doPalette} title="Pull a colour palette from the selected image"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>
+            <button className={'act closes draw-toggle' + (drawing ? ' on' : '')} onClick={() => setDrawing(d => !d)} title={drawing ? 'Hide the drawing tools' : 'Shapes, arrows, pen and text tools'}><Ico d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z M13.9 6.6l3.5 3.5" />{drawing ? 'Hide tools' : 'Draw'}</button>
           </div>
         )}
         {store.canEdit && api && (
           <div className="actions phone-only">
-            {sel.count > 0 && <button className="act" onClick={() => { setTools(false); setMoving(true); }} aria-label="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" /></button>}
             <button className="act" onClick={() => { setTools(false); fileInput.current.click(); }} aria-label="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" /></button>
             <button className={'act' + (tools ? ' on' : '')} onClick={() => { setTools(t => !t); setPanel(null); }} aria-label={tools ? 'Close' : 'Add to the board'} aria-expanded={tools}>
               <Ico d={tools ? 'M6 6l12 12 M18 6L6 18' : 'M12 5v14 M5 12h14'} />
@@ -1253,6 +1363,37 @@ export default function Board({ boardId, commentId }) {
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
         })}</div>}
+        {store.canEdit && api && sel.count > 0 && !sel.busy && !moving && !stackOn && !backHot && (() => {
+          const st = api.getAppState();
+          const picked = api.getSceneElements().filter(e => st.selectedElementIds && st.selectedElementIds[e.id] && !e.containerId);
+          if (!picked.length) return null;
+          const rs = picked.map(e => rectOf(e));
+          const L = Math.min(...rs.map(r => r.left)), T = Math.min(...rs.map(r => r.top));
+          const Rt = Math.max(...rs.map(r => r.left + r.width)), B = Math.max(...rs.map(r => r.top + r.height));
+          const top = T > 60 ? T - 52 : Math.min(Math.max(B + 12, 8), st.height - 56);
+          const left = Math.max(12, Math.min((L + Rt) / 2, st.width - 12));
+          return (
+            <div className="selbar" ref={selbarRef} style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
+              {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
+              <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
+              {sel.units > 1 && <span className="pop-wrap">
+                <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
+                {panel === 'arrange' && (
+                  <div className="pop list">
+                    <button onClick={() => doArrange('masonry')}>Moodboard<small>pictures in even columns</small></button>
+                    <button onClick={() => doArrange('grid')}>Grid</button>
+                    <button onClick={() => doArrange('column')}>Column</button>
+                    <button onClick={() => doArrange('row')}>Row</button>
+                  </div>
+                )}
+              </span>}
+              <button onClick={doFrame} title="Group the selection in a named section"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
+              {sel.oneImage && <button onClick={doPalette} title="Pull a colour palette from this picture"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>}
+              {!drawing && <button onClick={() => setDrawing(true)} title="Stroke, fill, text size and layers"><Ico d="M4 20h16 M7 16l9-9 3 3-9 9H7z" />Style</button>}
+              <button onClick={doDelete} title="Delete (you can undo)"><Ico d="M5 7h14 M9 7V4h6v3 M7 7l1 13h8l1-13" /></button>
+            </div>
+          );
+        })()}
         {stackOn && api && (() => {
           const t = api.getSceneElements().find(e => e.id === stackOn.id);
           if (!t || (t.customData && t.customData.kind === 'board')) return null;
