@@ -78,7 +78,6 @@ export default function Board({ boardId, commentId, find }) {
   const [meta, setMeta] = useState(null);
   const [trail, setTrail] = useState([]);
   const [kids, setKids] = useState([]);   // boards whose parent is this one
-  const [kidsReady, setKidsReady] = useState(false);   // the list above has loaded
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
   const [sel, setSel] = useState({ count: 0, oneImage: null, busy: false, notes: false });
@@ -170,7 +169,7 @@ export default function Board({ boardId, commentId, find }) {
         const t = []; let p = row.parent_id; let guard = 0;
         while (p && by[p] && guard++ < 12) { t.unshift(by[p]); p = by[p].parent_id; }
         setTrail(t);
-        if (!dead) { setKids(list.filter(b => b.parent_id === boardId && !b.trashed_at)); setKidsReady(true); }
+        if (!dead) { setKids(list.filter(b => b.parent_id === boardId && !b.trashed_at)); }
         document.title = row.title + ' · Boards';
         tellHost('boards:title', { title: row.title });
       } catch (e) { setStatus('Couldn\'t open: ' + (e.message || e)); }
@@ -1177,6 +1176,13 @@ export default function Board({ boardId, commentId, find }) {
     setPanel(null);
   }
 
+  // A board just made inside this one: its card is the board's home, not a link.
+  function placeNewKid(b) {
+    setKids(k => k.some(x => x.id === b.id) ? k : [...k, b]);
+    addEls(placeEls(boardCard(0, 0, b)));
+    setPanel(null);
+  }
+
   // A pasted or duplicated board card becomes its own board: a full copy,
   // pictures and inner boards included, so changing one never changes the
   // other. (A card copied with "Copy link" stays a link.)
@@ -1489,7 +1495,7 @@ export default function Board({ boardId, commentId, find }) {
           if (r.width < 24 || r.height < 16) return null;
           const held = stackOn && stackOn.id === e.id;
           const bid = e.customData.boardId;
-          const linked = !!e.customData.linked || (kidsReady && !kids.some(k => k.id === bid)) || cardCount[bid] > 1;
+          const linked = !!e.customData.linked || cardCount[bid] > 1;
           return <div key={e.id} className={'bcard' + (linked ? ' linked' : '') + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
             <div className={'bcard-img' + (info.updating ? ' updating' : '')} style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}{info.updating && <i className="bcard-loading" aria-label="Updating" />}</div>
             <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{(info.count != null || linked) && <small>{linked && <span className="bcard-link" title="A link: the same board also shows somewhere else">Linked</span>}{info.count != null && (info.count + ' ' + (info.count === 1 ? 'item' : 'items'))}</small>}</div>
@@ -1579,7 +1585,7 @@ export default function Board({ boardId, commentId, find }) {
         children={(api ? api.getSceneElements() : []).filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => ({ id: e.customData.boardId, title: (cardInfo[e.customData.boardId] || {}).title || e.customData.title || 'Board' }))}
         count={sel.count} onClose={() => setMoving(false)}
         onPick={(b) => { setMoving(false); moveTo(b.id, selectionNow(), { title: b.title, flyTo: trail.length && b.id === trail[trail.length - 1].id ? backRect() : null }); }} />}
-      {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeBoardCard} />}
+      {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeNewKid} />}
     </div>
   );
 }
