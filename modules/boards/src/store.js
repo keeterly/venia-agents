@@ -80,7 +80,7 @@ export const store = {
   email: '',
   role: 'owner',          // owner | editor | viewer   (Boards as a whole)
   // What I can do on the board that's open: 'owner' | 'edit' | 'view', or
-  // null on the boards list (Build 660). The database decides; this only
+  // null on the boards list (Build 661). The database decides; this only
   // keeps the screen in step with it.
   boardRole: null,
   get canEdit() { return this.role !== 'viewer' && this.boardRole !== 'view'; },
@@ -147,7 +147,7 @@ export const store = {
       q = trash ? q.not('trashed_at', 'is', null) : q.is('trashed_at', null);
       const { data, error } = await q.order('updated_at', { ascending: false });
       if (error) throw error;
-      // how many named people each board is shared with (Build 660)
+      // how many named people each board is shared with (Build 661)
       const sh = await sb.from('venia_board_shares').select('board_id');
       const n = {}; (sh.data || []).forEach(r => { n[r.board_id] = (n[r.board_id] || 0) + 1; });
       return (data || []).map(b => ({ ...b, shared_with: n[b.id] || 0 }));
@@ -165,7 +165,7 @@ export const store = {
       created_by: this.email || null, created_at: now(), updated_by: this.email || null, updated_at: now(), rev: 0,
     };
     if (this.mode === 'cloud') {
-      // Sharing (Build 660): a new board starts private to whoever makes it.
+      // Sharing (Build 661): a new board starts private to whoever makes it.
       // One made inside another board starts shared the way that board is,
       // so the people working on the outer board see what's made in it.
       let shares = [];
@@ -191,7 +191,7 @@ export const store = {
     return row;
   },
 
-  // ── sharing (Build 660) ──────────────────────────────────────────────────
+  // ── sharing (Build 661) ──────────────────────────────────────────────────
   // What I can do on this board. Asked as a board opens; the answer also
   // decides whether the board opens in view-only mode.
   async roleOn(id) {

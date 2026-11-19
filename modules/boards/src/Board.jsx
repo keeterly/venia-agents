@@ -166,7 +166,7 @@ export default function Board({ boardId, commentId, find }) {
     let dead = false;
     (async () => {
       try {
-        // Sharing (Build 660): what I can do here decides view-only or not.
+        // Sharing (Build 661): what I can do here decides view-only or not.
         const myRole = await store.roleOn(boardId);
         const row = await store.loadBoard(boardId);
         if (dead) return;

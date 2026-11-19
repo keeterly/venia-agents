@@ -1,4 +1,4 @@
--- VENIA OS — Boards: sharing (Build 660)
+-- VENIA OS — Boards: sharing (Build 661)
 --
 -- Who sees a board, chosen per board:
 --   everyone   'edit' | 'view' | 'none'  — everyone in the workspace who has

@@ -1,7 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
-// Board view link (Build 660). Given a link token, returns ONE board to look
+// Board view link (Build 661). Given a link token, returns ONE board to look
 // at: its title, its drawing, and its pictures as signed addresses that stop
 // working after ten minutes. Read-only by construction: this function only
 // reads, and the person holding the link never gets a key to the workspace.

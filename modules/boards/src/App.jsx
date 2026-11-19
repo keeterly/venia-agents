@@ -7,7 +7,7 @@ import { NameBox } from './namebox.jsx';
 import { ImportSheet } from './importer.jsx';
 import { ViewOnly } from './share.jsx';
 
-// Who sees a board, in a word or two on its card (Build 660).
+// Who sees a board, in a word or two on its card (Build 661).
 function accessTag(b) {
   if (store.mode !== 'cloud' || !b.everyone) return '';
   const mine = String(b.owner || b.created_by || '').toLowerCase() === store.email;
@@ -22,7 +22,7 @@ export const LEGACY_ID = 'b-brainstorm-board';
 function useRoute() {
   const read = () => {
     const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?(?:\/f\/([^/]+))?/);
-    // "#/v/…": a view-only link someone was sent (Build 660)
+    // "#/v/…": a view-only link someone was sent (Build 661)
     const v = (window.location.hash || '').match(/^#\/v\/([a-f0-9]{32})\b/);
     if (v) return { view: 'viewonly', token: v[1] };
     if (m) { let find = null; try { find = m[3] ? decodeURIComponent(m[3]) : null; } catch (e) {} return { view: 'board', id: m[1], comment: m[2] || null, find }; }

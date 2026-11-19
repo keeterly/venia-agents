@@ -1,4 +1,4 @@
-// Sharing (Build 660): who sees a board, and a view-only link for people
+// Sharing (Build 661): who sees a board, and a view-only link for people
 // outside VENIA OS (a buyer, a factory).
 //
 // The database decides who sees what (venia_board_role and the policies in
