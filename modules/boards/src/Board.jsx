@@ -10,7 +10,7 @@ import { go, NewBoard, LEGACY_ID } from './App.jsx';
 import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems, loadLibrary, saveLibrary } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
-import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRich, richFrom, RICH_EDIT, RICH_EDITING } from './cards.jsx';
+import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRich, richFrom, focusRichNow, RICH_EDIT, RICH_EDITING } from './cards.jsx';
 import { parasFromText, allHave, setAll } from './rich.js';
 import { flattenCards } from './export.js';
 import { newColumn, isColumn, restack } from './columns.js';
@@ -1304,7 +1304,7 @@ export default function Board({ boardId, commentId, find }) {
     const st = api.getAppState();
     const n = api.getSceneElements().find(e => st.selectedElementIds && st.selectedElementIds[e.id] && e.customData && e.customData.kind === 'note');
     if (!n) return;
-    if (isRich(n)) openRich(n.id); else editNote(n);
+    if (isRich(n)) { if (!focusRichNow(n.id)) openRich(n.id); } else editNote(n);
   }
 
   // A button on the bar over an open note
@@ -1583,10 +1583,12 @@ export default function Board({ boardId, commentId, find }) {
       return hits.length ? hits[hits.length - 1] : null;
     };
     // a board card opens the board; a styled note opens for typing
-    const open = (c) => { if (isRich(c)) openRich(c.id); else openCard(c.customData.boardId); };
+    const open = (c) => { if (isRich(c)) { if (!focusRichNow(c.id)) openRich(c.id); } else openCard(c.customData.boardId); };
     const down = (e) => {
       if (e.button > 0 || !e.target || !e.target.closest('.excalidraw canvas, .bcard')) return;
       const c = cardAt(e);
+      // a finger on a styled note is handled by the touch listeners below
+      if (e.pointerType === 'touch' && c && isRich(c)) { R.current.lastTap = null; return; }
       const last = R.current.lastTap;
       const now = Date.now();
       if (c && last && last.id === c.id && now - last.t < 380 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 30) {
@@ -1598,9 +1600,35 @@ export default function Board({ boardId, commentId, find }) {
       R.current.lastTap = c ? { id: c.id, t: now, x: e.clientX, y: e.clientY } : null;
     };
     const dbl = (e) => { const c = cardAt(e); if (c && !(e.target && e.target.isContentEditable)) { e.preventDefault(); e.stopPropagation(); } };
+    // Phones (Build 655): a double tap on a styled note opens it for typing
+    // within the tap itself, so the keyboard comes up. The board's own double
+    // tap, which would start a new text box on top of the note, is held back.
+    const at = (e) => { const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]); return t ? { clientX: t.clientX, clientY: t.clientY } : null; };
+    const tstart = (e) => {
+      if (!store.canEdit || e.touches.length !== 1 || !e.target || !e.target.closest('.excalidraw canvas')) { R.current.richTap = null; return; }
+      const p = at(e); const c = p && cardAt(p);
+      const now = Date.now(), last = R.current.richTap;
+      if (c && isRich(c) && last && last.id === c.id && now - last.t < 400 && Math.hypot(p.clientX - last.x, p.clientY - last.y) < 40) {
+        e.preventDefault(); e.stopPropagation();
+        R.current.richTap = null; R.current.richOpen = c.id;
+        return;
+      }
+      R.current.richTap = c && isRich(c) ? { id: c.id, t: now, x: p.clientX, y: p.clientY } : null;
+    };
+    const tend = (e) => {
+      const id = R.current.richOpen; if (!id) return;
+      R.current.richOpen = null;
+      if (e.cancelable) e.preventDefault();
+      if (!focusRichNow(id)) openRich(id);
+    };
     el.addEventListener('pointerdown', down, true);
     el.addEventListener('dblclick', dbl, true);
-    return () => { el.removeEventListener('pointerdown', down, true); el.removeEventListener('dblclick', dbl, true); };
+    el.addEventListener('touchstart', tstart, { capture: true, passive: false });
+    el.addEventListener('touchend', tend, { capture: true, passive: false });
+    return () => {
+      el.removeEventListener('pointerdown', down, true); el.removeEventListener('dblclick', dbl, true);
+      el.removeEventListener('touchstart', tstart, { capture: true }); el.removeEventListener('touchend', tend, { capture: true });
+    };
   }, [api]);
 
   // N drops a note, unless you're typing
