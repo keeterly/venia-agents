@@ -116,7 +116,7 @@ export default function Board({ boardId, commentId, find }) {
   // turns up without being any of those was pasted or duplicated.
   const knownCards = useRef(new Set());
   const noteCards = (els) => { (els || []).forEach(e => { if (e && e.customData && e.customData.kind === 'board') knownCards.current.add(e.id); }); };
-  const R = useRef({ rev: 0, savedVersion: -1, timer: null, saving: false, again: false, uploaded: new Set(), uploading: new Set(), thumbAt: 0, thumbVersion: -1, bg: BG });
+  const R = useRef({ rev: 0, savedVersion: -1, timer: null, saving: false, again: false, uploaded: new Set(), uploading: new Set(), thumbAt: 0, thumbVersion: -1, bg: BG, binned: new Map() });
   // The drawing tools show only while you ask for them. Hiding them puts you
   // back to selecting, so no drawing tool is left switched on out of sight.
   useEffect(() => {
@@ -205,7 +205,7 @@ export default function Board({ boardId, commentId, find }) {
       if (!live.has(id) || R.current.uploaded.has(id) || R.current.uploading.has(id)) continue;
       R.current.uploading.add(id);
       try { await store.saveFile(boardId, files[id]); R.current.uploaded.add(id); }
-      catch (e) { setStatus('An image didn\'t upload; will retry'); }
+      catch (e) { R.current.filesOwed = true; setStatus('An image didn\'t upload; will retry'); }
       finally { R.current.uploading.delete(id); }
     }
   }, [boardId]);
@@ -236,7 +236,9 @@ export default function Board({ boardId, commentId, find }) {
     try {
       let snap = snapIn || sceneFor(a);
       let { scene, extra, version } = snap;
-      if (version === R.current.savedVersion && R.current.bg === scene.appState.viewBackgroundColor) return;
+      // An image that didn't upload last time is retried even when nothing else changed.
+      if (version === R.current.savedVersion && R.current.bg === scene.appState.viewBackgroundColor && !R.current.filesOwed) return;
+      R.current.filesOwed = false;
       await uploadFiles(snap);
       if (!R.current.dead) setStatus('Saving…');
       let res = await store.saveScene(boardId, scene, R.current.rev, extra);
@@ -263,6 +265,7 @@ export default function Board({ boardId, commentId, find }) {
       if (R.current.pendingSnap) { const p = R.current.pendingSnap; R.current.pendingSnap = null; R.current.again = false; save(p); return; }
       if (R.current.again && !R.current.dead) { R.current.again = false; clearTimeout(R.current.timer); R.current.timer = setTimeout(save, 2500); }
       if (R.current.wantThumb && R.current.thumbFn) { R.current.wantThumb = false; R.current.thumbFn(); }
+      if (R.current.filesOwed && !R.current.dead) { clearTimeout(R.current.fileTimer); R.current.fileTimer = setTimeout(save, 15000); }
     }
   }, [api, boardId, sceneFor, uploadFiles, mergeRemote]);
 
@@ -336,7 +339,8 @@ export default function Board({ boardId, commentId, find }) {
       await loadComments(); live.commentsChanged();
       const names = (mentions || []).filter(m => m !== store.email).map(nameOf);
       setStatus(names.length ? 'Sent to ' + names.join(' and ') : 'Comment added');
-    } catch (e) { setStatus('Couldn\'t add the comment: ' + (e.message || e)); }
+      return true;
+    } catch (e) { setStatus('Couldn\'t add the comment: ' + (e.message || e) + '. Your words are still in the box.'); return false; }
   }
   async function resolveThread(root, yes) {
     try { await store.resolveComment(boardId, root.id, yes); await loadComments(); live.commentsChanged(); if (yes && !showResolved) setOpenId(null); }
@@ -533,7 +537,8 @@ export default function Board({ boardId, commentId, find }) {
       setDeleted(goneIds, false); R.current.wantThumb = true; save();
       try {
         if (job.cloneIds.length) await editScene(targetId, list => list.map(e => job.cloneIds.includes(e.id) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e));
-        for (const id of job.movedBoards) await store.moveInto(id, boardId, boardCard).catch(() => {});
+        // the card is already back on this board; don't let a save still on its way make a second one
+        for (const id of job.movedBoards) await store.moveInto(id, boardId, boardCard, { addCard: false }).catch(() => {});
       } catch (e) { setStatus('Couldn\'t undo it all: ' + (e.message || e)); }
     } });
     try {
@@ -725,6 +730,17 @@ export default function Board({ boardId, commentId, find }) {
     if (store.canEdit) {
       const fresh = elements.filter(e => !e.isDeleted && e.customData && e.customData.kind === 'board' && e.customData.boardId && !knownCards.current.has(e.id));
       if (fresh.length) { noteCards(fresh); const copies = fresh.filter(e => !e.customData.linked); if (copies.length) setTimeout(() => copyCardsRef.current(copies), 0); }
+      // A card brought back with Undo (keys or button) brings its board back
+      // out of Trash, the same as the Undo on the toast.
+      if (R.current.binned.size) {
+        for (const id of cardIds) {
+          const b = R.current.binned.get(id); if (!b) continue;
+          R.current.binned.delete(id);
+          store.restore(id).catch(() => setStatus('Couldn\u2019t take \u201c' + (b.title || 'Untitled board') + '\u201d out of Trash'));
+          setKids(k => k.some(x => x.id === id) ? k : [...k, b]);
+          setUndoStack(null);
+        }
+      }
     }
     const ck = cardIds.join(',');
     if (ck !== R.current.cardKey) { R.current.cardKey = ck; const fresh = cardIds.filter(id => !R.current.cardSeen || !R.current.cardSeen.has(id));
@@ -792,7 +808,7 @@ export default function Board({ boardId, commentId, find }) {
   latest.current = { save, thumb, sceneFor, api };
   useLayoutEffect(() => () => {
     const { save: sv, thumb: th, sceneFor: sf, api: a } = latest.current;
-    clearTimeout(R.current.timer);
+    clearTimeout(R.current.timer); clearTimeout(R.current.fileTimer);
     let snap = null;
     try { if (a && store.canEdit) snap = sf(a); } catch (e) {}
     R.current.dead = true;
@@ -908,7 +924,10 @@ export default function Board({ boardId, commentId, find }) {
   // left, row by row; otherwise near the middle of the screen. Never on top of
   // something already there, including what's being added with it.
   const spotFor = (w, h, frame = null, extra = []) => {
-    const live = [...api.getSceneElements().filter(e => !e.containerId && e.type !== 'frame' && (!frame || e.frameId === frame.id || overlaps(e, frame))), ...extra];
+    // Everything on the board counts, not only what's in the section: when the
+    // section is full the spot is found outside it, and must not land on
+    // something there (a new note used to land on a palette).
+    const live = [...api.getSceneElements().filter(e => !e.containerId && e.type !== 'frame'), ...extra];
     const hits = (x, y) => live.some(e => x < e.x + e.width + 16 && x + w + 16 > e.x && y < e.y + e.height + 16 && y + h + 16 > e.y);
     if (frame) {
       const P = 20;
@@ -1098,7 +1117,7 @@ export default function Board({ boardId, commentId, find }) {
     api.updateScene({ elements: all.map(e => ids.has(e.id) && !e.isDeleted ? newElementWith(e, { isDeleted: true }) : e), appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     if (binned.length) {
       setKids(k => k.filter(b => !binned.some(x => x.id === b.id)));
-      binned.forEach(b => store.trash(b.id).catch(() => setStatus('Couldn\u2019t move \u201c' + (b.title || 'Untitled board') + '\u201d to Trash')));
+      binned.forEach(b => { R.current.binned.set(b.id, b); store.trash(b.id).catch(() => setStatus('Couldn\u2019t move \u201c' + (b.title || 'Untitled board') + '\u201d to Trash')); });
     }
     const back = new Set(gone.map(e => e.id));
     const text = binned.length === 1 && n === 1 ? 'Moved \u201c' + (binned[0].title || 'Untitled board') + '\u201d to Trash'
@@ -1108,7 +1127,7 @@ export default function Board({ boardId, commentId, find }) {
       api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => back.has(e.id) && e.isDeleted ? newElementWith(e, { isDeleted: false }) : e), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
       if (binned.length) {
         setKids(k => [...k, ...binned.filter(b => !k.some(x => x.id === b.id))]);
-        binned.forEach(b => store.restore(b.id).catch(() => {}));
+        binned.forEach(b => { R.current.binned.delete(b.id); store.restore(b.id).catch(() => {}); });
       }
     } });
   }
@@ -1124,12 +1143,25 @@ export default function Board({ boardId, commentId, find }) {
       if (t && (t.closest('input, textarea, select, [contenteditable="true"], .pop, .side-panel'))) return;
       const st = api.getAppState();
       if (st.editingTextElement || st.newElement || st.openDialog) return;
+      if (document.querySelector('.modal-wrap')) return;   // a dialog is open: the key is for it
       if (!Object.values(st.selectedElementIds || {}).some(Boolean)) return;
       e.preventDefault(); e.stopPropagation();
       doDeleteRef.current();
     };
+    // The canvas's own Delete buttons (the phone's bottom bar, the right-click
+    // menu) go the same way, so they never leave a board without its card.
+    const click = (e) => {
+      const t = e.target; if (!t || !t.closest) return;
+      const hit = t.closest('.excalidraw button[aria-label="Delete"], .excalidraw .context-menu-item.dangerous');
+      if (!hit) return;
+      const st = api.getAppState();
+      if (st.editingLinearElement || !Object.values(st.selectedElementIds || {}).some(Boolean)) return;
+      if (hit.tagName === 'BUTTON') { e.preventDefault(); e.stopPropagation(); }
+      doDeleteRef.current();
+    };
     window.addEventListener('keydown', key, true);
-    return () => window.removeEventListener('keydown', key, true);
+    window.addEventListener('click', click, true);
+    return () => { window.removeEventListener('keydown', key, true); window.removeEventListener('click', click, true); };
   }, [api]);
 
   function doFrame() {
@@ -1349,7 +1381,8 @@ export default function Board({ boardId, commentId, find }) {
     const k = (e) => {
       const t = e.target; if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (api.getAppState().editingTextElement) return;
+      const st0 = api.getAppState();
+      if (st0.editingTextElement || st0.openDialog || e.repeat || document.querySelector('.modal-wrap')) return;
       if (e.key === 'n' || e.key === 'N') { e.preventDefault(); addNote(NOTE_COLOURS[0].hex); }
     };
     window.addEventListener('keydown', k);
@@ -1379,8 +1412,10 @@ export default function Board({ boardId, commentId, find }) {
 
   async function rename(t) {
     t = t.trim(); if (!t || !meta || t === meta.title) return;
+    const was = meta.title;
     setMeta(m => ({ ...m, title: t }));
-    await store.rename(boardId, t);
+    try { await store.rename(boardId, t); }
+    catch (e) { setMeta(m => ({ ...m, title: was })); setStatus('Couldn\u2019t rename it: ' + (e.message || 'offline')); return; }
     document.title = t + ' · Boards'; tellHost('boards:title', { title: t });
   }
 
@@ -1445,8 +1480,14 @@ export default function Board({ boardId, commentId, find }) {
             {live.people.slice(0, 4).map(p => <span key={p.key} className="face" style={{ background: p.color }}>{(p.name || '?').slice(0, 1)}</span>)}
           </div>
         )}
-        <div className="status">{busy || status || (live.on ? 'Live' : '')}</div>
+        <div className={'status' + (!busy && /^(Not saved|Couldn|An image didn|Someone else)/.test(status || '') ? ' err' : '')}
+          onClick={() => { if (!busy && /^(Couldn|An image didn)/.test(status || '')) setStatus(''); }}>{busy || status || (live.on ? 'Live' : '')}</div>
       </header>
+      {meta && meta.trashed_at && (
+        <div className="note-bar warn">This board is in Trash. <button className="link" onClick={async () => {
+          try { await store.restore(boardId); setMeta(m => ({ ...m, trashed_at: null })); } catch (e) { setStatus('Couldn\u2019t restore it: ' + (e.message || 'offline')); }
+        }}>Restore it</button></div>
+      )}
       <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={e => { addImages([...e.target.files]); e.target.value = ''; }} />
       <div className="canvas">
         {!initial && !missing && <div className="board-loading">Opening…</div>}
@@ -1507,7 +1548,8 @@ export default function Board({ boardId, commentId, find }) {
           const picked = api.getSceneElements().filter(e => st.selectedElementIds && st.selectedElementIds[e.id] && !e.containerId);
           if (!picked.length) return null;
           const rs = picked.map(e => rectOf(e));
-          const L = Math.min(...rs.map(r => r.left)), T = Math.min(...rs.map(r => r.top));
+          // a selected section's own name sits above it, so the bar sits above the name
+          const L = Math.min(...rs.map(r => r.left)), T = Math.min(...rs.map((r, i) => r.top - (picked[i].type === 'frame' ? 22 : 0)));
           const Rt = Math.max(...rs.map(r => r.left + r.width)), B = Math.max(...rs.map(r => r.top + r.height));
           const left = Math.max(12, Math.min((L + Rt) / 2, st.width - 12));
           // Above or below, whichever covers less of what's on the board

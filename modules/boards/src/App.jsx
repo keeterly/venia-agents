@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { store } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { TEMPLATES, templateElements, legacyCardElements, boardCard } from './elements.js';
@@ -76,6 +76,7 @@ function Home({ fresh = false }) {
   const [moving, setMoving] = useState(null);     // board being moved into another
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
+  const [uploading, setUploading] = useState(false);
 
   // Opened as "#/new": show the New board sheet, then tidy the address so a
   // reload or Back doesn't ask again.
@@ -85,15 +86,21 @@ function Home({ fresh = false }) {
     try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (e) {}
   }, [fresh]);
 
+  // Only the newest load may show: flipping to Trash and back quickly must not
+  // leave the slower, older list on screen.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++loadSeq.current;
+    const stale = () => mine !== loadSeq.current;
     try {
       let list = await store.listBoards({ trash });
       if (!trash && await ensureLegacyBoard(list)) list = await store.listBoards();
+      if (stale()) return;
       setBoards(list);
-      setThumbs(await store.thumbs(list.map(b => b.id)));
-      setPins(await store.pins().catch(() => new Set()));
-      if (!trash) setWaiting(await store.localBoardsWaiting());
-    } catch (e) { setErr(String(e.message || e)); setBoards([]); }
+      const th = await store.thumbs(list.map(b => b.id)); if (stale()) return; setThumbs(th);
+      const pn = await store.pins().catch(() => new Set()); if (stale()) return; setPins(pn);
+      if (!trash) { const w = await store.localBoardsWaiting(); if (!stale()) setWaiting(w); }
+    } catch (e) { if (!stale()) { setErr(String(e.message || e)); setBoards([]); } }
   }, [trash]);
   useEffect(() => { load(); tellHost('boards:title', { title: 'Boards' }); document.title = 'Boards · VENIA OS'; }, [load]);
 
@@ -194,7 +201,11 @@ function Home({ fresh = false }) {
       {waiting.length > 0 && (
         <div className="note-bar">
           {waiting.length} board{waiting.length > 1 ? 's' : ''} saved on this device before cloud saving was on.
-          <button className="link" onClick={async () => { await store.uploadLocalBoards(); load(); }}>Move to the cloud</button>
+          <button className="link" disabled={uploading} onClick={async () => {
+            if (uploading) return; setUploading(true); setErr('');
+            try { await store.uploadLocalBoards(); } catch (e) { setErr('Couldn\'t move every board to the cloud: ' + (e.message || e) + ' The rest are still on this device; try again.'); }
+            setUploading(false); load();
+          }}>{uploading ? 'Moving…' : 'Move to the cloud'}</button>
         </div>
       )}
       {err && <div className="note-bar warn">{err}</div>}
@@ -229,7 +240,10 @@ export function NewBoard({ onClose, parentId = null, onCreated }) {
   const [title, setTitle] = useState('');
   const [tpl, setTpl] = useState('blank');
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   async function make() {
+    if (busyRef.current) return;   // Enter pressed twice makes one board
+    busyRef.current = true;
     setBusy(true);
     try {
       const name = title.trim() || (tpl === 'blank' ? 'Untitled board' : TEMPLATES.find(t => t.id === tpl).name);
@@ -237,7 +251,7 @@ export function NewBoard({ onClose, parentId = null, onCreated }) {
       const row = await store.createBoard({ title: name, parent_id: parentId, scene: { elements, appState: {} } });
       if (onCreated) onCreated(row); else go('/b/' + row.id);
       onClose();
-    } catch (e) { alert('Couldn\'t create the board: ' + (e.message || e)); setBusy(false); }
+    } catch (e) { alert('Couldn\'t create the board: ' + (e.message || e)); busyRef.current = false; setBusy(false); }
   }
   return (
     <div className="modal-wrap" onClick={onClose}>
