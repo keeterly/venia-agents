@@ -74,7 +74,14 @@ export default function Board({ boardId, commentId }) {
         const row = await store.loadBoard(boardId);
         if (dead) return;
         if (!row) { setMissing(true); return; }
-        const files = await store.loadFiles(boardId);
+        // Open at once with the pictures this device already has; the rest
+        // arrive one by one. Only pictures still on the board are fetched,
+        // never ones that were deleted or moved away.
+        const liveIds = [...new Set((row.scene && row.scene.elements || []).filter(e => e && !e.isDeleted && e.type === 'image' && e.fileId).map(e => e.fileId))];
+        const files = await store.cachedFiles(liveIds);
+        const have = new Set(files.map(f => f.id));
+        const later = liveIds.filter(id => !have.has(id));
+        R.current.lateFiles = later.length ? later : null;
         R.current.rev = row.rev || 0;
         (await store.knownFileIds(boardId)).forEach(id => R.current.uploaded.add(id));
         // Board cards open with a double tap, not a link: a link made the
@@ -570,8 +577,38 @@ export default function Board({ boardId, commentId }) {
         });
         return next;
       });
+      setTimeout(() => freshenPreviews(ids.filter(id => by[id] && by[id].item_count > 0), by), 2500);
     } catch (e) {}
   }, []);
+
+  // A board card shows a picture of what's on that board, scaled to fill the
+  // card. The picture is redrawn here whenever that board has changed since
+  // this device last drew it, so it never lags behind what's inside.
+  async function freshenPreviews(ids, by) {
+    for (const id of ids.slice(0, 16)) {
+      try {
+        const at = await store.thumbAt(id);
+        const changed = Date.parse(by[id].updated_at) || 0;
+        if (at && at >= changed) continue;
+        const row = await store.loadBoard(id);
+        const all = (row && row.scene && row.scene.elements) || [];
+        const live = all.filter(e => e && !e.isDeleted);
+        if (!live.length) continue;
+        // boards inside it show as light cards, the way they look in the app
+        const cardIds = new Set(live.filter(e => e.customData && e.customData.kind === 'board').map(e => e.id));
+        const els = live.map(e => cardIds.has(e.id) ? { ...e, backgroundColor: '#efede8', fillStyle: 'solid', strokeColor: '#161616' }
+          : (e.containerId && cardIds.has(e.containerId)) ? { ...e, strokeColor: '#161616' } : e);
+        const need = [...new Set(els.filter(e => e.type === 'image' && e.fileId).map(e => e.fileId))];
+        const files = need.length ? Object.fromEntries((await store.loadFiles(id, need)).map(f => [f.id, f])) : {};
+        const blob = await exportToBlob({ elements: els, files, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
+          appState: { exportBackground: true, viewBackgroundColor: (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG } });
+        const url = URL.createObjectURL(blob);
+        const bg = (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG;
+        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: url, bg } }));
+        if (store.canEdit) await store.saveThumb(id, blob);
+      } catch (e) { /* one board's picture never blocks the others */ }
+    }
+  }
   function openCard(id) { if (!id) return; save(); go('/b/' + id); }
 
   // ── columns keep themselves stacked ──────────────────────────────────────
@@ -657,6 +694,21 @@ export default function Board({ boardId, commentId }) {
     const t = setTimeout(() => { try { if (api.getSceneElements().length) api.scrollToContent(undefined, { fitToContent: true }); } catch (e) {} }, 60);
     return () => clearTimeout(t);
   }, [api]);
+
+  // ── pictures not on this device yet: fetch, then show each as it lands ──
+  useEffect(() => {
+    if (!api || !R.current.lateFiles) return;
+    const ids = R.current.lateFiles; R.current.lateFiles = null;
+    let dead = false;
+    ids.forEach(id => {
+      store.loadFiles(boardId, [id]).then(fs => {
+        if (dead || !fs.length) return;
+        fs.forEach(f => R.current.uploaded.add(f.id));
+        api.addFiles(fs);
+      }).catch(() => {});
+    });
+    return () => { dead = true; };
+  }, [api, boardId]);
 
   // ── the old Brainstorm Board: photos, and cards pinned since ────────────
   useEffect(() => {
@@ -993,11 +1045,13 @@ export default function Board({ boardId, commentId }) {
     if (isCardUrl(link)) {
       event.preventDefault();
       if (cd.kind === 'link' && cd.url) window.open(cd.url, '_blank', 'noopener,noreferrer');
+      // a to-do list opens out: zoom in until it fills the screen
+      else if (api) { try { api.scrollToContent([element], { fitToViewport: true, viewportZoomFactor: 0.8, animate: true }); } catch (e) {} }
       return;
     }
     const m = cd.boardId || (link.match(/\/boards#\/b\/([\w-]+)/) || [])[1];
     if (m) { event.preventDefault(); save(); go('/b/' + m); }
-  }, [save]);
+  }, [save, api]);
 
   async function rename(t) {
     t = t.trim(); if (!t || !meta || t === meta.title) return;
@@ -1088,6 +1142,7 @@ export default function Board({ boardId, commentId }) {
       </header>
       <input ref={fileInput} type="file" accept="image/*" multiple hidden onChange={e => { addImages([...e.target.files]); e.target.value = ''; }} />
       <div className="canvas">
+        {!initial && !missing && <div className="board-loading">Opening…</div>}
         {initial && (
           <Excalidraw
             excalidrawAPI={setApi}
@@ -1134,7 +1189,7 @@ export default function Board({ boardId, commentId }) {
           if (r.width < 24 || r.height < 16) return null;
           const held = stackOn && stackOn.id === e.id;
           return <div key={e.id} className={'bcard' + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
-            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")' } : null}>{!info.thumb && <span>▦</span>}</div>
+            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}</div>
             <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{info.count != null && <small>{info.count} {info.count === 1 ? 'item' : 'items'}</small>}</div>
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
