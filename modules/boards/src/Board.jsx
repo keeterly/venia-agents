@@ -7,7 +7,7 @@ import {
 import { store, uid, dataURLToBlob } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { go, NewBoard, LEGACY_ID } from './App.jsx';
-import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems } from './elements.js';
+import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems, loadLibrary, saveLibrary } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
 import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf } from './cards.jsx';
@@ -130,6 +130,7 @@ export default function Board({ boardId, commentId, find }) {
           files,
           appState: { ...DEFAULTS, ...(row.scene && row.scene.appState || {}) },
           scrollToContent: true,
+          libraryItems: loadLibrary(),
         });
         // breadcrumb
         const list = await store.listBoards();
@@ -773,6 +774,15 @@ export default function Board({ boardId, commentId, find }) {
   // 100%. Or, coming from a search, on the thing that matched.
   useEffect(() => {
     if (!api) return;
+    // fit these on screen with room round them, but never larger than life
+    const fitView = (els, room) => {
+      const st = api.getAppState();
+      const xs = els.flatMap(e => [e.x, e.x + e.width]), ys = els.flatMap(e => [e.y, e.y + e.height]);
+      const bw = Math.max(1, Math.max(...xs) - Math.min(...xs)), bh = Math.max(1, Math.max(...ys) - Math.min(...ys));
+      const z = Math.min(1, room * Math.min(st.width / bw, st.height / bh));
+      if (z >= 1) { api.updateScene({ appState: { zoom: { value: 1 } } }); api.scrollToContent(els); }
+      else api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: room });
+    };
     const fit = () => {
       try {
         const els = api.getSceneElements(); if (!els.length) return;
@@ -783,15 +793,12 @@ export default function Board({ boardId, commentId, find }) {
             || (e.type === 'embeddable' && cardWords(e).toLowerCase().includes(term)));
           if (hit) {
             const target = hit.containerId ? els.find(e => e.id === hit.containerId) || hit : hit;
-            api.scrollToContent([target], { fitToViewport: true, viewportZoomFactor: 0.35 });
-            if (api.getAppState().zoom.value > 1) api.updateScene({ appState: { zoom: { value: 1 } } });
-            api.scrollToContent([target]);
+            fitView([target], 0.35);
             api.updateScene({ appState: { selectedElementIds: { [target.id]: true } } });
             return;
           }
         }
-        api.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.9 });
-        if (api.getAppState().zoom.value > 1) { api.updateScene({ appState: { zoom: { value: 1 } } }); api.scrollToContent(); }
+        fitView(els, 0.9);
       } catch (e) {}
     };
     const t = setTimeout(fit, 60);
@@ -1319,6 +1326,7 @@ export default function Board({ boardId, commentId, find }) {
             onChange={onChange}
             onPaste={onPaste}
             onLinkOpen={onLinkOpen}
+            onLibraryChange={saveLibrary}
             onPointerUpdate={live.pointerMoved}
             isCollaborating={live.on}
             renderEmbeddable={renderCard}
@@ -1344,8 +1352,8 @@ export default function Board({ boardId, commentId, find }) {
                 <WelcomeScreen.Center.Heading>{meta ? meta.title : 'Board'}</WelcomeScreen.Center.Heading>
                 <div className="welcome-hints">
                   <p>Drop photos anywhere, or paste an image or a link. Hold one picture over another to make a board.</p>
-                  <p>Press N for a note. Draw, write and connect with the tools above.</p>
-                  <p>Select a few things, then Arrange, Group or put them in a Column.</p>
+                  <p>Press N for a note. Press Draw for shapes, arrows and the pen. Library has notes, sections and layouts to drag in.</p>
+                  <p>Select something for Move, Group, Palette and Style; select a few to Arrange them.</p>
                   <p>Click Comment to leave a note for someone. Type @ to mention them.</p>
                 </div>
               </WelcomeScreen.Center>
@@ -1389,7 +1397,7 @@ export default function Board({ boardId, commentId, find }) {
               </span>}
               <button onClick={doFrame} title="Group the selection in a named section"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
               {sel.oneImage && <button onClick={doPalette} title="Pull a colour palette from this picture"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>}
-              {!drawing && <button onClick={() => setDrawing(true)} title="Stroke, fill, text size and layers"><Ico d="M4 20h16 M7 16l9-9 3 3-9 9H7z" />Style</button>}
+              <button className={drawing ? 'on' : ''} onClick={() => setDrawing(d => !d)} title={drawing ? 'Hide the style tools' : 'Stroke, fill, text size and layers'}><Ico d="M4 20h16 M7 16l9-9 3 3-9 9H7z" />{drawing ? 'Hide style' : 'Style'}</button>
               <button onClick={doDelete} title="Delete (you can undo)"><Ico d="M5 7h14 M9 7V4h6v3 M7 7l1 13h8l1-13" /></button>
             </div>
           );
