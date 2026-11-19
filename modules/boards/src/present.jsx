@@ -184,7 +184,9 @@ export function SlidesPanel({ api, title, onClose, onPlay, setStatus, canEdit = 
     const s = shapeFor(api, f, key); if (!s) return;
     saveSlides(api, ids, { [f.id]: { ...s, customData: { size: key } } });
   };
-  const show = (f) => { try { api.updateScene({ appState: { selectedElementIds: { [f.id]: true }, selectedGroupIds: {} } }); api.scrollToContent(f, { fitToViewport: true, viewportZoomFactor: 0.85, animate: true }); } catch (e) {} };
+  // On a phone the panel covers the board, so step out of the way to show it.
+  const narrow = () => typeof window !== 'undefined' && window.innerWidth <= 860;
+  const show = (f) => { if (narrow()) onClose(); try { api.updateScene({ appState: { selectedElementIds: { [f.id]: true }, selectedGroupIds: {} } }); api.scrollToContent(f, { fitToViewport: true, viewportZoomFactor: 0.85, animate: true }); } catch (e) {} };
   const pdf = async () => {
     setBusy(true);
     try { const ok = await printDeck(api, title); if (!ok) setStatus('Add a slide first'); }
@@ -232,12 +234,12 @@ export function SlidesPanel({ api, title, onClose, onPlay, setStatus, canEdit = 
             <div className="pop-label">Pick a shape</div>
             <div className="shape-grid">
               {PRESETS.map(p => (
-                <button key={p.key} onClick={() => { addSlide(api, p.key); setAdding(false); }}>
+                <button key={p.key} onClick={() => { addSlide(api, p.key); setAdding(false); if (narrow()) onClose(); }}>
                   <span className="shape-ic" style={{ aspectRatio: p.w + ' / ' + p.h }} />
                   <b>{p.label}</b><small>{p.hint}</small>
                 </button>
               ))}
-              <button onClick={() => { addSlide(api, null); setAdding(false); }}>
+              <button onClick={() => { addSlide(api, null); setAdding(false); if (narrow()) onClose(); }}>
                 <span className="shape-ic free" /><b>Freeform</b><small>Any size</small>
               </button>
             </div>
