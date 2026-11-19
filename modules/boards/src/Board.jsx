@@ -485,6 +485,7 @@ export default function Board({ boardId, commentId }) {
     return { x, y };
   };
   const addEls = (els, select = true) => {
+    setTools(false);   // on a phone, the Add sheet steps aside once something lands
     api.updateScene({
       elements: [...api.getSceneElementsIncludingDeleted(), ...els],
       appState: select ? { selectedElementIds: Object.fromEntries(els.filter(e => !e.containerId).map(e => [e.id, true])), selectedGroupIds: {} } : undefined,
