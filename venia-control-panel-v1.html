@@ -3495,7 +3495,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '650';
+  const BUILD = '652';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26514,6 +26514,20 @@ window.addEventListener('message', function(e){
     const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
     const styles = ids.map(id => (STATE.styles || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsStyleItem);
     try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
+    return;
+  }
+  // Boards shares this site's sign-in. When it can't find one (a phone that
+  // opened it mid-renewal, Build 652), it asks here, the one place that keeps
+  // the sign-in renewed. Same site only, checked above.
+  if (e.data.type === 'boards:session') {
+    if (!e.source) return;
+    const c = window.__sbClient;
+    const reply = (p) => { try { e.source.postMessage({ source: 'venia-host', type: 'boards:session', payload: p }, location.origin); } catch(_){} };
+    if (!c || !c.auth) { reply(null); return; }
+    c.auth.getSession().then(function(r){
+      const s = r && r.data && r.data.session;
+      reply(s ? { access_token: s.access_token, refresh_token: s.refresh_token } : null);
+    }).catch(function(){ reply(null); });
     return;
   }
   if (e.data.type === 'boards:title' && document.getElementById('cp-screen-boards')?.classList.contains('active')) {
@@ -55651,6 +55665,10 @@ window.veniaModulesRender = async function(){
           }
         } else if (ev === 'SIGNED_OUT' && pushDirty) {
           pauseForSignIn('signed out');
+        }
+        // tell Boards to look at the sign-in again (Build 652)
+        if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') {
+          try { document.querySelectorAll('iframe').forEach(function(f){ if (/\/boards(\b|#|$)/.test(f.getAttribute('src') || '') && f.contentWindow) f.contentWindow.postMessage({ source: 'venia-host', type: 'boards:signed-in' }, location.origin); }); } catch(_){}
         }
       });
     } catch (e) {}

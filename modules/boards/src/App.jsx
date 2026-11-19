@@ -111,6 +111,28 @@ function Home({ fresh = false }) {
   }, [trash]);
   useEffect(() => { load(); tellHost('boards:title', { title: 'Boards' }); document.title = 'Boards · VENIA OS'; }, [load]);
 
+  // Look at the sign-in again when it changes or the app comes back to the
+  // front, so a phone that opened Boards mid-renewal catches up by itself.
+  // (Only here on the list, never under an open board.)
+  const [, setModeTick] = useState(0);
+  const loadRef = useRef(load); loadRef.current = load;
+  useEffect(() => {
+    let checking = false, alive = true;
+    const recheck = async (why) => {
+      if (checking) return;
+      const was = store.mode + ':' + store.email;
+      const stuck = store.mode === 'local' && store.reason !== 'not-set-up';
+      if (!stuck && !(why === 'SIGNED_OUT' && store.mode === 'cloud')) return;
+      checking = true;
+      try { await store.init(); } finally { checking = false; }
+      if (!alive) return;
+      if (store.mode + ':' + store.email !== was) { setModeTick(t => t + 1); setErr(''); loadRef.current(); }
+    };
+    recheck('open');
+    const off = store.onSignInChange(recheck);
+    return () => { alive = false; off(); };
+  }, []);
+
   const byId = useMemo(() => Object.fromEntries((boards || []).map(b => [b.id, b])), [boards]);
   const shown = useMemo(() => {
     if (!boards) return [];
