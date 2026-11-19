@@ -1270,16 +1270,45 @@ export default function Board({ boardId, commentId, find }) {
     const ta = wrapRef.current && wrapRef.current.querySelector('textarea.excalidraw-wysiwyg');
     const f = fmt; if (!ta || !f || f.mode !== 'plain') return;
     const value = ta.value, a = ta.selectionStart, b = ta.selectionEnd, id = f.id;
-    ta.blur();     // the board saves the words as they are
+    // Moving the cursor to a stand-in box, inside the tap itself, makes the
+    // board save the words as they are AND keeps a phone's keyboard up while
+    // the note turns into a styled one. Blurring instead closed the keyboard,
+    // and a phone won't reopen it for a box focused a moment later.
+    const keep = keepKeyboard(ta);
+    if (!keep) ta.blur();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const all = api.getSceneElementsIncludingDeleted();
-      if (!all.some(e => e.id === id && !e.isDeleted)) return;
+      if (!all.some(e => e.id === id && !e.isDeleted)) { dropKeeper(keep); return; }
       const c = convertNotes(all, new Set([id]), () => parasFromText(value));
-      const nid = c.map[id]; if (!nid) return;
+      const nid = c.map[id]; if (!nid) { dropKeeper(keep); return; }
       api.updateScene({ elements: c.elements, appState: { selectedElementIds: { [nid]: true }, selectedGroupIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-      setTimeout(() => openRich(nid, [a, b], CMD[k]), 30);
+      // Hand the cursor straight from the stand-in to the styled note as soon
+      // as it's on screen, with the same words selected and the style applied.
+      let tries = 0;
+      const go = () => {
+        if (focusRichNow(nid, [a, b], CMD[k])) { dropKeeper(keep); return; }
+        if (++tries < 40) { requestAnimationFrame(go); return; }
+        dropKeeper(keep); openRich(nid, [a, b], CMD[k]);
+      };
+      requestAnimationFrame(go);
     }));
   }
+
+  // A tiny invisible box that holds the cursor (and a phone's keyboard) for
+  // the moment between a plain note closing and its styled note opening.
+  function keepKeyboard(near) {
+    try {
+      const r = near.getBoundingClientRect();
+      const k = document.createElement('textarea');
+      k.className = 'kb-keep'; k.setAttribute('aria-hidden', 'true'); k.tabIndex = -1;
+      k.setAttribute('autocapitalize', 'sentences');
+      Object.assign(k.style, { position: 'fixed', left: Math.max(0, r.left) + 'px', top: Math.max(0, r.top) + 'px', width: '1px', height: '1px', opacity: '0', padding: '0', border: '0', fontSize: '16px', zIndex: '-1', pointerEvents: 'none', resize: 'none' });
+      document.body.appendChild(k);
+      k.focus({ preventScroll: true });
+      return k;
+    } catch (e) { return null; }
+  }
+  function dropKeeper(k) { if (k) setTimeout(() => { try { k.remove(); } catch (e) {} }, 0); }
 
   // The bar's buttons with nothing open: the whole of each selected note.
   function styleNotes(k) {
