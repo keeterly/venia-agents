@@ -205,6 +205,13 @@ export const store = {
     return new Set((data || []).map(r => r.id));
   },
 
+  // Pictures already on this device, read from its own store: no network.
+  async cachedFiles(ids) {
+    const out = [];
+    for (const id of ids) { const f = await get('file:' + id, idb); if (f) out.push({ id, ...f }); }
+    return out;
+  },
+
   async loadFiles(boardId, onlyIds = null) {
     const out = [];
     if (this.mode !== 'cloud') {
@@ -240,10 +247,13 @@ export const store = {
 
   // ── thumbnails for the boards grid ───────────────────────────────────────
   async saveThumb(boardId, blob) {
+    await set('thumbAt:' + boardId, Date.now(), idb);
     if (this.mode !== 'cloud') { await set('thumb:' + boardId, await blobToDataURL(blob), idb); return; }
     await sb.storage.from(BUCKET).upload(`${WS}/thumbs/${boardId}.png`, blob, { contentType: 'image/png', upsert: true });
     await set('thumb:' + boardId, await blobToDataURL(blob), idb);
   },
+  // When this device last drew a board's preview (0 if never).
+  async thumbAt(boardId) { return (await get('thumbAt:' + boardId, idb)) || 0; },
   async thumbs(ids) {
     const out = {};
     for (const id of ids) { const t = await get('thumb:' + id, idb); if (t) out[id] = t; }
