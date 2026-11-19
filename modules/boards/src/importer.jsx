@@ -114,3 +114,9 @@ export const groupName = (it, by) => {
   if (by === 'status') return v ? stage(v) : 'No stage';
   return v || (by === 'category' ? 'No category' : 'No delivery');
 };
+// The words on a material's card.
+export const materialCaption = (it) => {
+  const price = Number(it.cost) > 0 ? '$' + (Math.round(Number(it.cost) * 100) / 100).toLocaleString('en-US') + (it.unit ? '/' + it.unit : '') : '';
+  const line2 = [it.content, it.supplier, price].filter(Boolean).join(' · ');
+  return (it.name || 'Untitled material') + (line2 ? '\n' + line2 : '');
+};

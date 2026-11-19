@@ -3574,7 +3574,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '656';
+  const BUILD = '657';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26375,6 +26375,68 @@ function veniaBoardsStyleItem(s){
            category: s.category || '', delivery: s.delivery || s.drop || '', season: s.season || '' };
 }
 window.veniaBoardsStyleItem = veniaBoardsStyleItem;
+function veniaBoardsMaterialItem(m){
+  const photo = /^https:\/\//i.test(String(m.photoUrl || '').trim()) ? String(m.photoUrl).trim() : '';
+  return { materialId: m.id, name: m.name || 'Untitled material', image: photo, type: m.type || '',
+           content: m.content || '', supplier: m.supplier || '', cost: Number(m.costPerUnit) || 0, unit: m.unit || '',
+           colors: m.colors || '', draft: !!m.draft };
+}
+window.veniaBoardsMaterialItem = veniaBoardsMaterialItem;
+// A photo from a board, as an address Product can keep: its own address when
+// it came from the web, otherwise uploaded the way every other photo is.
+function veniaBoardsPhoto(p, key){
+  const src = String(p.source || '').trim();
+  if (/^https:\/\//i.test(src)) return Promise.resolve(src);
+  const d = String(p.image || '');
+  if (!/^data:image\//.test(d) || typeof window.veniaUploadBlob !== 'function') return Promise.resolve('');
+  return fetch(d).then(r => r.blob()).then(blob => new Promise(res => {
+    const t = setTimeout(() => res(''), 30000);
+    window.veniaUploadBlob(key, blob, function(url){ clearTimeout(t); res(url || ''); });
+  })).catch(() => '');
+}
+async function veniaBoardsDraft(kind, p){
+  const name = String(p.name || '').trim().slice(0, 120);
+  if (!name) return { ok: false, message: 'It needs a name.' };
+  const notes = String(p.notes || '').trim().slice(0, 4000);
+  const from = String(p.board || '').trim().slice(0, 120);
+  const now = new Date().toISOString();
+  if (kind === 'material') {
+    if (!STATE.materials) STATE.materials = [];
+    const same = STATE.materials.find(x => String(x.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (same) return { ok: true, existing: true, id: same.id, name: same.name, item: veniaBoardsMaterialItem(same) };
+    const id = 'MAT' + Date.now();
+    const photo = await veniaBoardsPhoto(p, 'board-material-' + id);
+    const m = { id: id, name: name, type: 'Fabric', supplier: '', costPerUnit: 0, unit: 'yd', leadDays: 0, content: '',
+      colors: '', color: '', width: '', moq: '', notes: (from ? 'Draft from the board “' + from + '”.' : 'Draft from a board.') + (notes ? '\n' + notes : ''),
+      photoUrl: photo, lots: [], draft: true, fromBoard: from, createdAt: now };
+    STATE.materials.push(m);
+    save();
+    try { logActivity('Draft material from a board: ' + name); } catch(_){}
+    try { if (STATE.currentPage === 'materials') renderMaterials(); } catch(_){}
+    return { ok: true, id: id, name: name, photo: !!photo, item: veniaBoardsMaterialItem(m) };
+  }
+  // A style: a concept in the newest season, ready to finish in Product.
+  const recent = (STATE.styles || []).slice().sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  const season = (recent.find(x => x.season) || {}).season || '';
+  const genders = {}; (STATE.styles || []).forEach(x => { if (x.gender) genders[x.gender] = (genders[x.gender] || 0) + 1; });
+  const gender = Object.keys(genders).sort((a, b) => genders[b] - genders[a])[0] || 'womens';
+  const n = name.toLowerCase();
+  const cat = /coat|jacket|blazer|vest|parka/.test(n) ? 'Outerwear' : /pant|jean|skirt|short|culotte|trouser/.test(n) ? 'Bottoms'
+    : /dress/.test(n) ? 'Dresses' : /hat|belt|cloche|bag|scarf/.test(n) ? 'Accessories' : 'Tops';
+  const id = 'STY' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const photo = await veniaBoardsPhoto(p, 'board-style-' + id);
+  let code = ''; try { code = genStyleId(season, cat, gender); } catch(_){}
+  const st = { id: id, styleId: code, name: name, family: (typeof styleNameKey === 'function' ? styleNameKey(name) : name), season: season,
+    category: cat, gender: gender, status: 'concept', fabric: '', colors: '', sizes: 'XS,S,M,L,XL', retail: 0, wholesale: 0, cogs: 0,
+    desc: notes, vendor: '', lead: 12, sample: 'Proto', notes: [], photoUrl: photo, draft: true, fromBoard: from, createdAt: now, updatedAt: now };
+  STATE.styles.unshift(st);
+  save();
+  try { buildSkus(); } catch(_){}
+  try { populateStyleSelects(); } catch(_){}
+  try { renderStyles(); } catch(_){}
+  try { logActivity('Draft style from a board: ' + name + (code ? ' (' + code + ')' : '')); } catch(_){}
+  return { ok: true, id: id, name: name, code: code, season: season, photo: !!photo, item: veniaBoardsStyleItem(st) };
+}
 window.veniaSendToBoards = function(payload){
   if (!window.veniaBoardsLinkOn()) { try { showToast('Boards is not switched on for this workspace.'); } catch(e){} return; }
   try { sessionStorage.setItem('boards:import', JSON.stringify(Object.assign({ at: Date.now() }, payload))); }
@@ -26609,6 +26671,41 @@ window.addEventListener('message', function(e){
     const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
     const styles = ids.map(id => (STATE.styles || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsStyleItem);
     try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
+    return;
+  }
+  // Product <-> Boards both ways (Build 657). Still only while both modules
+  // are on, and still through this page: Boards gets plain lists and asks for
+  // drafts; it never reads or writes Product's data itself. A draft is always
+  // a NEW record (or a link to a material with the same name, left as it is),
+  // so nothing already in Product is ever changed from a board.
+  if (e.data.type === 'boards:link') {
+    if (!e.source) return;
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:link', payload: { req: e.data.payload && e.data.payload.req, on: !!window.veniaBoardsLinkOn() } }, location.origin); } catch(_){}
+    return;
+  }
+  if (e.data.type === 'boards:catalog') {
+    if (!e.source) return;
+    const kind = (e.data.payload && e.data.payload.kind) === 'materials' ? 'materials' : 'styles';
+    const on = !!window.veniaBoardsLinkOn();
+    const items = !on ? [] : kind === 'materials'
+      ? (STATE.materials || []).map(veniaBoardsMaterialItem)
+      : (STATE.styles || []).filter(s => s && !s.archived).map(veniaBoardsStyleItem);
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:catalog', payload: { req: e.data.payload && e.data.payload.req, on: on, kind: kind, items: items.slice(0, 2000) } }, location.origin); } catch(_){}
+    return;
+  }
+  if (e.data.type === 'boards:material-info') {
+    if (!window.veniaBoardsLinkOn() || !e.source) return;
+    const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
+    const mats = ids.map(id => (STATE.materials || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsMaterialItem);
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:material-info', payload: { materials: mats, missing: ids.filter(id => !mats.some(x => x.materialId === id)) } }, location.origin); } catch(_){}
+    return;
+  }
+  if (e.data.type === 'boards:create-style' || e.data.type === 'boards:save-material') {
+    if (!e.source) return;
+    const src = e.source, type = e.data.type, p = e.data.payload || {};
+    const reply = (r) => { try { src.postMessage({ source: 'venia-host', type: type, payload: Object.assign({ req: p.req }, r) }, location.origin); } catch(_){} };
+    if (!window.veniaBoardsLinkOn()) { reply({ ok: false, message: 'Product isn’t switched on for this workspace.' }); return; }
+    veniaBoardsDraft(type === 'boards:create-style' ? 'style' : 'material', p).then(reply).catch(function(err){ reply({ ok: false, message: (err && err.message) || 'Couldn’t make the draft' }); });
     return;
   }
   // Boards shares this site's sign-in. When it can't find one (a phone that
