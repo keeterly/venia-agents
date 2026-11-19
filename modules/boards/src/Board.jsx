@@ -14,6 +14,7 @@ import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRic
 import { parasFromText, allHave, setAll } from './rich.js';
 import { flattenCards } from './export.js';
 import { useTouchCanvas } from './touch.js';
+import { SlidesPanel, Presenter, printDeck } from './present.jsx';
 import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
 import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
@@ -102,6 +103,7 @@ export default function Board({ boardId, commentId, find }) {
   const [kids, setKids] = useState([]);   // boards whose parent is this one
   const [status, setStatus] = useState('');
   const [api, setApi] = useState(null);
+  const [presenting, setPresenting] = useState(null);   // slide to start at, or null
   const [sel, setSel] = useState({ count: 0, oneImage: null, busy: false, notes: false });
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
   const [tools, setTools] = useState(false);       // phone: the Add sheet is open
@@ -1813,6 +1815,7 @@ export default function Board({ boardId, commentId, find }) {
         {api && (
           <div className="actions">
             <span className="divider" />
+            <button className={'act' + (panel === 'slides' ? ' on' : '')} onClick={() => setPanel(panel === 'slides' ? null : 'slides')} title="Slides: present the board's sections, or save them as a PDF" aria-label="Slides and present"><Ico d="M3 4h18v12H3z M12 16v4 M8 20h8 M10 8l4 2-4 2z" />Present</button>
             <button className={'act' + (adding ? ' on' : '')} onClick={() => { setAdding(a => !a); setOpenId(null); }} title="Click, then click a spot on the board to comment there"><Ico d="M4 5h16v11H9l-5 4z" />Comment</button>
             <button className={'act' + (panel === 'comments' ? ' on' : '')} onClick={() => setPanel(panel === 'comments' ? null : 'comments')} title="All comments on this board">
               <Ico d="M3 5h12v8H8l-5 3z M9 16h7l5 3v-9h-3" />{openCount ? <span className="count">{openCount}</span> : null}
@@ -1857,6 +1860,8 @@ export default function Board({ boardId, commentId, find }) {
               <MainMenu.Separator />
               <MainMenu.Item icon={<Ico d="M4 5h16v14H4z M4 15l5-5 4 4 3-3 4 4 M15 9h.01" />} onSelect={() => { saveImage(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the image')); }}>Save as image</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
+              <MainMenu.Item icon={<Ico d="M3 4h18v12H3z M12 16v4 M8 20h8 M10 8l4 2-4 2z" />} onSelect={() => setPanel('slides')}>Slides and present</MainMenu.Item>
+              <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printDeck(api, meta && meta.title).then(ok => { if (!ok) setStatus('Add a slide first: open Present, then Add a slide'); }).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Save slides as PDF</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z M16 16l5 5" />} shortcut="Ctrl+F" onSelect={() => setFinding(true)}>Find on this board</MainMenu.Item>
               <MainMenu.Separator />
               <MainMenu.DefaultItems.Help />
@@ -2002,6 +2007,10 @@ export default function Board({ boardId, commentId, find }) {
           people={people} showResolved={showResolved} view={view}
           onAdd={addComment} onReply={(root, body, mentions) => addComment({ body, mentions, thread_id: root.id, element_id: root.element_id, x: root.x, y: root.y })}
           onResolve={resolveThread} onHide={hideComment} />
+        {panel === 'slides' && api && (
+          <SlidesPanel api={api} title={meta && meta.title} setStatus={setStatus} canEdit={store.canEdit} onClose={() => setPanel(null)}
+            onPlay={(i) => setPresenting(i)} />
+        )}
         {panel === 'comments' && api && (
           <CommentsPanel api={api} threads={threads} people={people} showResolved={showResolved} setShowResolved={setShowResolved}
             onClose={() => setPanel(null)}
@@ -2012,6 +2021,7 @@ export default function Board({ boardId, commentId, find }) {
         children={(api ? api.getSceneElements() : []).filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => ({ id: e.customData.boardId, title: (cardInfo[e.customData.boardId] || {}).title || e.customData.title || 'Board' }))}
         count={sel.count} onClose={() => setMoving(false)}
         onPick={(b) => { setMoving(false); moveTo(b.id, selectionNow(), { title: b.title, flyTo: trail.length && b.id === trail[trail.length - 1].id ? backRect() : null }); }} />}
+      {presenting !== null && api && <Presenter api={api} start={presenting} onClose={() => setPresenting(null)} />}
       {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeNewKid} />}
     </div>
   );
