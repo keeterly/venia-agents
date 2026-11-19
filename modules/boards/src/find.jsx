@@ -8,6 +8,7 @@ function wordsOf(e, all) {
   if (e.type === 'embeddable') {
     if (d.kind === 'todo') return { kind: 'To-do', text: [d.title, ...(d.items || []).map(i => i.t)].filter(Boolean).join(' · ') };
     if (d.kind === 'link') return { kind: 'Link', text: cardWords(e) };
+    if (d.kind === 'note' && d.rich) return { kind: 'Note', text: cardWords(e) };
     return null;
   }
   if (e.type === 'frame') return { kind: 'Section', text: e.name || '' };

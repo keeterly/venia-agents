@@ -30,7 +30,9 @@ export function threadsOf(rows) {
 // Where a thread sits on the board right now, in board coordinates.
 export function spotOf(api, c) {
   if (!c.element_id) return { x: c.x, y: c.y };
-  const el = api.getSceneElements().find(e => e.id === c.element_id);
+  // a note that became a styled note (Build 651) keeps its comments
+  const el = api.getSceneElements().find(e => e.id === c.element_id)
+    || api.getSceneElements().find(e => e.customData && e.customData.was === c.element_id);
   return el ? { x: el.x + c.x, y: el.y + c.y } : null;
 }
 
