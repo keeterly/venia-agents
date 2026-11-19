@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useCallback } from
 import {
   Excalidraw, MainMenu, WelcomeScreen, CaptureUpdateAction,
   convertToExcalidrawElements, restoreElements, reconcileElements, getSceneVersion,
-  exportToBlob, viewportCoordsToSceneCoords, newElementWith, FONT_FAMILY,
+  exportToBlob, viewportCoordsToSceneCoords, sceneCoordsToViewportCoords, newElementWith, FONT_FAMILY,
 } from '@excalidraw/excalidraw';
 import { store, uid } from './store.js';
 import { inHost, tellHost } from './host.js';
@@ -42,6 +42,10 @@ export default function Board({ boardId, commentId }) {
   const [api, setApi] = useState(null);
   const [sel, setSel] = useState({ count: 0, oneImage: null });
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
+  const [tools, setTools] = useState(false);       // phone: the Add sheet is open
+  const [dropping, setDropping] = useState(false); // something is being dragged over the board
+  const [stackOn, setStackOn] = useState(null);    // id of the image or board an image is held over
+  const [undoStack, setUndoStack] = useState(null);// { text, undo } after a stack
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
   const [rows, setRows] = useState([]);           // comments, flat
@@ -258,6 +262,105 @@ export default function Board({ boardId, commentId }) {
     catch (e) { setStatus('Couldn\'t remove it: ' + (e.message || e)); }
   }
 
+  // ── one picture onto another makes a board (like apps into a folder) ────
+  // Hold a picture over another picture for a moment and let go: both move
+  // into a new board, and a board card takes their place. Hold it over a
+  // board card instead and it goes into that board. Inside a column, moving
+  // pictures only reorders them, so columns never stack.
+  function inColumn(el, elements) {
+    if (!el.frameId) return false;
+    const f = elements.find(e => e.id === el.frameId);
+    return !!(f && isColumn(f));
+  }
+  function stackTargetFor(me, elements) {
+    if (!me || me.type !== 'image' || me.locked || inColumn(me, elements)) return null;
+    const cx = me.x + me.width / 2, cy = me.y + me.height / 2;
+    const hits = elements.filter(e => !e.isDeleted && e.id !== me.id && !e.locked
+      && (e.type === 'image' || (e.customData && e.customData.kind === 'board'))
+      && cx >= e.x && cx <= e.x + e.width && cy >= e.y && cy <= e.y + e.height
+      && !inColumn(e, elements));
+    return hits.length ? hits[hits.length - 1] : null;   // the one on top
+  }
+  function watchStack(elements, appState, picked) {
+    const st = R.current.stack || (R.current.stack = { target: null, armed: false, me: null, t: null });
+    const dragging = appState.selectedElementsAreBeingDragged;
+    if (dragging) {
+      const me = picked.length === 1 ? picked[0] : null;
+      const t = stackTargetFor(me, elements);
+      if (!t || t.id !== st.target) {
+        clearTimeout(st.t);
+        st.target = t ? t.id : null; st.armed = false; st.me = me ? me.id : null;
+        setStackOn(null);
+        if (t) st.t = setTimeout(() => { if (R.current.stack.target === t.id) { R.current.stack.armed = true; setStackOn(t.id); } }, 450);
+      }
+      return;
+    }
+    if (st.target || st.armed) {
+      const armed = st.armed, target = st.target, meId = st.me;
+      clearTimeout(st.t); st.target = null; st.armed = false; st.me = null;
+      setStackOn(null);
+      if (!armed) return;
+      const me = elements.find(e => e.id === meId && !e.isDeleted);
+      const t = me && stackTargetFor(me, elements);
+      if (t && t.id === target) stackInto(me, t);
+    }
+  }
+  async function stackInto(me, target) {
+    const a = api; if (!a) return;
+    const files = a.getFiles();
+    const fileOf = (el) => files[el.fileId] && { id: el.fileId, dataURL: files[el.fileId].dataURL, mimeType: files[el.fileId].mimeType, created: files[el.fileId].created };
+    const picCopy = (el, x, y) => convertToExcalidrawElements([{ type: 'image', fileId: el.fileId, x, y, width: el.width, height: el.height, customData: el.customData }])[0];
+    const hide = (ids) => a.updateScene({
+      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: true }) : e),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    const unhide = (ids, extraGone = []) => a.updateScene({
+      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: false }) : extraGone.includes(e.id) ? newElementWith(e, { isDeleted: true }) : e),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    try {
+      if (target.type === 'image') {
+        setBusy('Making a board…');
+        const f1 = fileOf(target), f2 = fileOf(me);
+        if (!f1 || !f2) throw new Error('a picture is still loading');
+        const pics = [picCopy(target, 0, 0), picCopy(me, target.width + 24, 0)];
+        const b = await store.createBoard({ title: 'Untitled board', parent_id: boardId,
+          scene: { elements: pics, appState: { viewBackgroundColor: a.getAppState().viewBackgroundColor } } });
+        try { await store.saveFile(b.id, f1); if (f2.id !== f1.id) await store.saveFile(b.id, f2); }
+        catch (e) { try { await store.trash(b.id); } catch (_) {} throw e; }
+        hide([me.id, target.id]);
+        const card = boardCard(target.x, target.y, b);
+        addEls(card);
+        save();
+        setUndoStack({ text: 'Made a board from 2 pictures', undo: async () => {
+          unhide([me.id, target.id], card.map(c => c.id));
+          try { await store.trash(b.id); } catch (_) {}
+          save();
+        } });
+      } else {
+        const id = target.customData.boardId;
+        setBusy('Moving it in…');
+        const f = fileOf(me); if (!f) throw new Error('the picture is still loading');
+        let ok = false;
+        for (let i = 0; i < 3 && !ok; i++) {
+          const row = await store.loadBoard(id);
+          if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
+          const els = (row.scene && row.scene.elements || []).filter(e => !e.isDeleted);
+          const right = els.length ? Math.max(...els.map(e => e.x + (e.width || 0))) + 24 : 0;
+          const top = els.length ? Math.min(...els.map(e => e.y)) : 0;
+          const scene = { ...(row.scene || {}), elements: [...(row.scene && row.scene.elements || []), picCopy(me, right, top)] };
+          await store.saveFile(id, f);
+          const res = await store.saveScene(id, scene, row.rev || 0, { item_count: els.length + 1 });
+          ok = !res.conflict;
+        }
+        if (!ok) throw new Error('someone else is editing that board; try again');
+        hide([me.id]);
+        save();
+        setUndoStack({ text: 'Moved into ' + (cardWords(target) || 'the board'), undo: null });
+      }
+    } catch (e) { setStatus('Couldn\'t do that: ' + (e.message || e)); }
+    finally { setBusy(''); }
+  }
+  useEffect(() => { if (!undoStack) return; const t = setTimeout(() => setUndoStack(null), 8000); return () => clearTimeout(t); }, [undoStack]);
+
   // ── columns keep themselves stacked ──────────────────────────────────────
   const tidyColumns = useCallback(() => {
     const a = api; if (!a) return;
@@ -268,6 +371,7 @@ export default function Board({ boardId, commentId }) {
   const onChange = useCallback((elements, appState) => {
     const ids = Object.keys(appState.selectedElementIds || {}).filter(k => appState.selectedElementIds[k]);
     const picked = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
+    if (store.canEdit) watchStack(elements, appState, picked);
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
     setSel(s => (s.count === picked.length && s.oneImage === oneImage) ? s : { count: picked.length, oneImage });
     // pins follow the canvas and the items they're on
@@ -517,18 +621,86 @@ export default function Board({ boardId, commentId }) {
   // drop several photos at once, where they're dropped
   useEffect(() => {
     const el = wrapRef.current; if (!el || !api || !store.canEdit) return;
+    const carries = (dt) => !!dt && [...(dt.types || [])].some(t => t === 'Files' || t === 'text/uri-list' || t === 'text/html');
     const onDrop = (e) => {
-      const files = [...(e.dataTransfer && e.dataTransfer.files || [])].filter(f => /^image\//.test(f.type));
-      if (!files.length) return;
-      e.preventDefault(); e.stopPropagation();
+      setDropping(false);
+      const dt = e.dataTransfer; if (!dt) return;
+      let files = [...(dt.files || [])].filter(f => /^image\//.test(f.type));
+      // some phones hand pictures over as items rather than files
+      if (!files.length && dt.items) files = [...dt.items].filter(i => i.kind === 'file' && /^image\//.test(i.type)).map(i => i.getAsFile()).filter(Boolean);
       const at = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, api.getAppState());
-      addImages(files, at);
+      if (files.length) { e.preventDefault(); e.stopPropagation(); addImages(files, at); return; }
+      // a picture or page dragged from another tab or app
+      const html = dt.getData('text/html') || '';
+      const src = (html.match(/<img[^>]+src=["']([^"']+)["']/i) || [])[1];
+      const url = src && /^https?:/i.test(src) ? src : (dt.getData('text/uri-list') || '').split(/\r?\n/).find(l => /^https?:/i.test(l)) || '';
+      if (url) { e.preventDefault(); e.stopPropagation(); addFromLink(url); }
     };
-    const onOver = (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) e.preventDefault(); };
+    const onOver = (e) => { if (carries(e.dataTransfer)) { e.preventDefault(); if (!R.current.dropOn) { R.current.dropOn = true; setDropping(true); } } };
+    const onLeave = (e) => { if (!e.relatedTarget || !el.contains(e.relatedTarget)) { R.current.dropOn = false; setDropping(false); } };
+    const onEnd = () => { R.current.dropOn = false; setDropping(false); };
     el.addEventListener('drop', onDrop, true);
     el.addEventListener('dragover', onOver, true);
-    return () => { el.removeEventListener('drop', onDrop, true); el.removeEventListener('dragover', onOver, true); };
+    el.addEventListener('dragleave', onLeave, true);
+    window.addEventListener('dragend', onEnd);
+    window.addEventListener('drop', onEnd);
+    return () => {
+      el.removeEventListener('drop', onDrop, true); el.removeEventListener('dragover', onOver, true);
+      el.removeEventListener('dragleave', onLeave, true); window.removeEventListener('dragend', onEnd); window.removeEventListener('drop', onEnd);
+    };
   }, [api]);
+
+  // Paste a copied picture straight onto the board, like Milanote. Pictures go
+  // through the same path as Photos (shrunk, saved, uploaded); text and links
+  // are left to the usual paste handling below.
+  useEffect(() => {
+    if (!api || !store.canEdit) return;
+    const onPasteEvt = (e) => {
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (api.getAppState().editingTextElement) return;
+      const cd = e.clipboardData; if (!cd) return;
+      let files = [...(cd.files || [])].filter(f => /^image\//.test(f.type));
+      if (!files.length && cd.items) files = [...cd.items].filter(i => i.kind === 'file' && /^image\//.test(i.type)).map(i => i.getAsFile()).filter(Boolean);
+      if (!files.length) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      addImages(files);
+    };
+    window.addEventListener('paste', onPasteEvt, true);
+    return () => window.removeEventListener('paste', onPasteEvt, true);
+  }, [api]);
+
+  // The Paste button (phones have no keyboard shortcut; the browser asks
+  // once, with its own Paste bubble, before it hands the clipboard over).
+  async function pasteButton() {
+    setTools(false);
+    try {
+      if (navigator.clipboard && navigator.clipboard.read) {
+        const items = await navigator.clipboard.read();
+        const blobs = [];
+        let text = '';
+        for (const it of items) {
+          const img = it.types.find(t => /^image\//.test(t));
+          if (img) blobs.push(await it.getType(img));
+          else if (!text && it.types.includes('text/plain')) text = await (await it.getType('text/plain')).text();
+        }
+        if (blobs.length) return addImages(blobs);
+        if (text) return pasteText(text);
+      } else if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text) return pasteText(text);
+      }
+      setStatus('Nothing to paste: copy a picture or a link first');
+    } catch (e) {
+      setStatus(/denied|allow|permission/i.test(String(e && e.message)) ? 'Allow pasting when your browser asks, then try again' : 'Nothing to paste: copy a picture or a link first');
+    }
+  }
+  function pasteText(text) {
+    text = String(text).trim(); if (!text) return;
+    if (isWebUrl(text) || looksLikeImageUrl(text)) return addFromLink(text);
+    const p = spotFor(260, 160);
+    addEls(note(p.x, p.y, text.slice(0, 2000), NOTE_COLOURS[0].hex));
+  }
 
   // N drops a note, unless you're typing
   useEffect(() => {
@@ -575,8 +747,13 @@ export default function Board({ boardId, commentId }) {
 
   return (
     <div className="board" ref={wrapRef}>
-      <header className="bar">
+      <header className={'bar' + (tools ? ' tools-open' : '')}>
         <nav className="crumbs">
+          <button className="back" onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
+            aria-label={'Back to ' + (trail.length ? trail[trail.length - 1].title : 'all boards')}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
+            <span>{trail.length ? trail[trail.length - 1].title : 'Boards'}</span>
+          </button>
           {!inHost && <a className="back-os" href="/">VENIA <span>OS</span></a>}
           <button className="crumb" onClick={() => { save(); go('/'); }}>Boards</button>
           {trail.map(b => <React.Fragment key={b.id}><span className="sep">/</span><button className="crumb" onClick={() => { save(); go('/b/' + b.id); }}>{b.title}</button></React.Fragment>)}
@@ -584,12 +761,13 @@ export default function Board({ boardId, commentId }) {
           {meta && <input className="title" defaultValue={meta.title} readOnly={!store.canEdit} key={meta.id} onBlur={e => rename(e.target.value)} onKeyDown={e => e.key === 'Enter' && e.target.blur()} />}
         </nav>
         {store.canEdit && api && (
-          <div className="actions">
+          <div className="actions edit-actions" onClick={e => { if (e.target.closest('.act.closes')) setTools(false); }}>
             <div className="pop-wrap">
               <button className="act" onClick={() => setPanel(panel === 'note' ? null : 'note')} title="Add a note (N)"><Ico d="M5 4h14v11l-5 5H5z M14 20v-5h5" />Note</button>
               {panel === 'note' && <div className="pop swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => addNote(c.hex)} />)}</div>}
             </div>
-            <button className="act" onClick={() => fileInput.current.click()} title="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" />Photos</button>
+            <button className="act closes" onClick={() => fileInput.current.click()} title="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" />Photos</button>
+            <button className="act" onClick={pasteButton} title="Paste a copied picture or link (or press Ctrl/⌘ V)"><Ico d="M9 4h6v3H9z M7 5H5v16h14V5h-2 M9 12h6 M9 16h4" />Paste</button>
             <div className="pop-wrap">
               <button className="act" onClick={() => setPanel(panel === 'link' ? null : 'link')} title="Add an image or page from a link"><Ico d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />Link</button>
               {panel === 'link' && <LinkPop onAdd={addFromLink} />}
@@ -598,8 +776,8 @@ export default function Board({ boardId, commentId }) {
               <button className="act" onClick={() => setPanel(panel === 'board' ? null : 'board')} title="A board inside this board"><Ico d="M4 4h16v16H4z M8 8h8v8H8z" />Board</button>
               {panel === 'board' && <BoardPop currentId={boardId} onPick={placeBoardCard} onNew={() => setPanel('newboard')} />}
             </div>
-            <button className="act" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
-            <button className="act" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
+            <button className="act closes" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
+            <button className="act closes" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
             <span className="divider" />
             <div className="pop-wrap">
               <button className="act" disabled={sel.count < 2} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
@@ -612,8 +790,16 @@ export default function Board({ boardId, commentId }) {
                 </div>
               )}
             </div>
-            <button className="act" disabled={sel.count < 1} onClick={doFrame} title="Group the selection in a named frame"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
-            <button className="act" disabled={!sel.oneImage} onClick={doPalette} title="Pull a colour palette from the selected image"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>
+            <button className="act closes" disabled={sel.count < 1} onClick={doFrame} title="Group the selection in a named frame"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
+            <button className="act closes" disabled={!sel.oneImage} onClick={doPalette} title="Pull a colour palette from the selected image"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>
+          </div>
+        )}
+        {store.canEdit && api && (
+          <div className="actions phone-only">
+            <button className="act" onClick={() => { setTools(false); fileInput.current.click(); }} aria-label="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" /></button>
+            <button className={'act' + (tools ? ' on' : '')} onClick={() => { setTools(t => !t); setPanel(null); }} aria-label={tools ? 'Close' : 'Add to the board'} aria-expanded={tools}>
+              <Ico d={tools ? 'M6 6l12 12 M18 6L6 18' : 'M12 5v14 M5 12h14'} />
+            </button>
           </div>
         )}
         {api && (
@@ -665,7 +851,7 @@ export default function Board({ boardId, commentId }) {
               <WelcomeScreen.Center>
                 <WelcomeScreen.Center.Heading>{meta ? meta.title : 'Board'}</WelcomeScreen.Center.Heading>
                 <div className="welcome-hints">
-                  <p>Drop photos anywhere, or paste an image or a link.</p>
+                  <p>Drop photos anywhere, or paste an image or a link. Hold one picture over another to make a board.</p>
                   <p>Press N for a note. Draw, write and connect with the tools above.</p>
                   <p>Select a few things, then Arrange, Group or put them in a Column.</p>
                   <p>Click Comment to leave a note for someone. Type @ to mention them.</p>
@@ -674,6 +860,17 @@ export default function Board({ boardId, commentId }) {
             </WelcomeScreen>
           </Excalidraw>
         )}
+        {dropping && <div className="drop-hint"><span>Drop to add to this board</span></div>}
+        {stackOn && api && (() => {
+          const t = api.getSceneElements().find(e => e.id === stackOn); if (!t) return null;
+          const st = api.getAppState();
+          const a = sceneCoordsToViewportCoords({ sceneX: t.x, sceneY: t.y }, st);
+          const z = st.zoom.value;
+          const isBoard = t.customData && t.customData.kind === 'board';
+          return <div className="stack-hint" style={{ left: a.x - st.offsetLeft - 6, top: a.y - st.offsetTop - 6, width: t.width * z + 12, height: t.height * z + 12 }}>
+            <span>{isBoard ? 'Let go to put it in this board' : 'Let go to make a board'}</span></div>;
+        })()}
+        {undoStack && <div className="toast">{undoStack.text}{undoStack.undo && <button onClick={() => { const u = undoStack.undo; setUndoStack(null); u(); }}>Undo</button>}</div>}
         <CommentsLayer api={api} threads={threads} adding={adding} setAdding={setAdding} openId={openId} setOpenId={setOpenId}
           people={people} showResolved={showResolved} view={view}
           onAdd={addComment} onReply={(root, body, mentions) => addComment({ body, mentions, thread_id: root.id, element_id: root.element_id, x: root.x, y: root.y })}
