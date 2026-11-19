@@ -3267,7 +3267,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '618';
+  const BUILD = '619';
   const BUILD_DATE = '2026.11.18';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -64345,6 +64345,8 @@ document.addEventListener('keydown', function(e){
       + '#vci-panel .vci-sub{color:var(--muted,#595959);font-size:12px;margin:0 0 16px}'
       + '.vci-row{border-top:1px solid var(--border,#e0e0e0);padding:14px 0}'
       + '.vci-sum{font-size:14px;margin:0 0 4px}.vci-meta{color:var(--muted,#595959);font-size:11px;margin:0 0 10px}'
+      + '.vci-ticks{margin:0 0 10px}.vci-tickrow{display:flex;gap:8px;align-items:flex-start;padding:6px 0;font-size:13px;line-height:1.4;border-bottom:1px solid var(--border,#e5e5e5);cursor:pointer}'
+      + '.vci-tickrow input{flex:none;width:18px;height:18px;margin-top:1px;accent-color:var(--ink,#111)}'
       + '.vci-btns button{font-size:11px;letter-spacing:.12em;text-transform:uppercase;padding:7px 12px;margin-right:8px;'
       + 'cursor:pointer;border:1px solid var(--ink,#000);background:var(--bg,#fff);color:var(--ink,#000)}'
       + '.vci-btns button.vci-go{background:var(--ink,#000);color:var(--accent-inv,#fff)}'
@@ -64391,6 +64393,20 @@ document.addEventListener('keydown', function(e){
     paintPill();
   }
 
+  // The rows a proposal carries, when it carries a list (Build 619).
+  function inboxSpec(a){
+    return (a && typeof ACTION_LIST !== 'undefined' && ACTION_LIST[a.type]) || null;
+  }
+  function inboxItems(a){
+    var spec = inboxSpec(a);
+    if (!spec || spec.single) return null;
+    var v = a[spec.field];
+    return Array.isArray(v) && v.length ? v : null;
+  }
+  function inboxLabel(a, it, i){
+    var spec = inboxSpec(a);
+    try { return String(spec.label(it) || ''); } catch(e){ return 'item ' + (i + 1); }
+  }
   function render(list){
     if (!list) return;
     if (!rows.length) { list.innerHTML = '<p class="vci-sub">Nothing waiting.</p>'; return; }
@@ -64398,10 +64414,21 @@ document.addEventListener('keydown', function(e){
       var when = '';
       try { when = new Date(r.created_at).toLocaleString(); } catch(e){}
       var type = (r.action && r.action.type) || '';
+      // THE CARD IS THE REVIEW (Build 619). "Review & apply" used to open a
+      // second tick-list inside the card for any proposal with several rows,
+      // and nothing saved until "Apply ticked" was tapped there too. A tap on
+      // the first button read as done, so the proposal sat pending. The rows
+      // are now shown here, ticked, with one button that saves them.
+      var items = inboxItems(r.action);
+      var ticks = items ? items.map(function(it, i){
+        return '<label class="vci-tickrow"><input type="checkbox" class="vci-tick" data-i="' + i + '" checked>'
+          + '<span>' + esc(inboxLabel(r.action, it, i)) + '</span></label>';
+      }).join('') : '';
       return '<div class="vci-row" data-id="' + esc(r.id) + '">'
         + '<p class="vci-sum">' + esc(r.summary || type) + '</p>'
         + '<p class="vci-meta">' + esc(type.replace(/_/g, ' ')) + (when ? ' · ' + esc(when) : '') + '</p>'
-        + '<div class="vci-btns"><button type="button" class="vci-go" data-act="apply">Review &amp; apply</button>'
+        + (ticks ? '<div class="vci-ticks">' + ticks + '</div>' : '')
+        + '<div class="vci-btns"><button type="button" class="vci-go" data-act="apply">' + (items && items.length > 1 ? 'Apply ticked' : 'Apply') + '</button>'
         + '<button type="button" data-act="dismiss">Dismiss</button></div>'
         + '<div class="vci-out"></div></div>';
     }).join('');
@@ -64460,6 +64487,13 @@ document.addEventListener('keydown', function(e){
     // The merge needs to know what the cloud holds before anything is applied
     // on top of it. Until the first pull has landed, wait.
     if (!window.__sbSyncDone) { note('Still syncing with the cloud — try again in a moment', 'info'); return; }
+    // Which rows are ticked on the card (Build 619).
+    var picked = null, listed = inboxItems(row.action);
+    if (listed) {
+      picked = [];
+      el.querySelectorAll('.vci-tick').forEach(function(t){ if (t.checked) picked.push(Number(t.getAttribute('data-i'))); });
+      if (!picked.length) { note('Nothing is ticked, so nothing was applied', 'info'); return; }
+    }
     busy = true;
     if (!(await stillPending(id))) {
       busy = false;
@@ -64479,7 +64513,13 @@ document.addEventListener('keydown', function(e){
         // Approving here IS the review for the money and status verbs, so
         // they are not held for a second tick-list (Build 618).
         var aa = JSON.parse(JSON.stringify(a));
-        if (typeof ACTION_REVIEWED_IN_INBOX !== 'undefined' && ACTION_REVIEWED_IN_INBOX[aa.type]) aa.__reviewed = true;
+        // The card above was the review, ticks and all, so Enigma's own
+        // checklist is not opened a second time (Build 619).
+        var spec = inboxSpec(aa);
+        if (spec && !spec.single && picked && Array.isArray(aa[spec.field])) {
+          aa[spec.field] = picked.map(function(i){ return aa[spec.field][i]; }).filter(function(x){ return x != null; });
+        }
+        aa.__reviewed = true;
         res = agentRunAction('cp', aa, out);
       }
       else ok = false;
