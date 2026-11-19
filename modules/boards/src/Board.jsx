@@ -1148,8 +1148,20 @@ export default function Board({ boardId, commentId, find }) {
       e.preventDefault(); e.stopPropagation();
       doDeleteRef.current();
     };
+    // The canvas's own Delete buttons (the phone's bottom bar, the right-click
+    // menu) go the same way, so they never leave a board without its card.
+    const click = (e) => {
+      const t = e.target; if (!t || !t.closest) return;
+      const hit = t.closest('.excalidraw button[aria-label="Delete"], .excalidraw .context-menu-item.dangerous');
+      if (!hit) return;
+      const st = api.getAppState();
+      if (st.editingLinearElement || !Object.values(st.selectedElementIds || {}).some(Boolean)) return;
+      if (hit.tagName === 'BUTTON') { e.preventDefault(); e.stopPropagation(); }
+      doDeleteRef.current();
+    };
     window.addEventListener('keydown', key, true);
-    return () => window.removeEventListener('keydown', key, true);
+    window.addEventListener('click', click, true);
+    return () => { window.removeEventListener('keydown', key, true); window.removeEventListener('click', click, true); };
   }, [api]);
 
   function doFrame() {
