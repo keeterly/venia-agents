@@ -7,7 +7,7 @@ import {
 import { store, uid, dataURLToBlob } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { go, NewBoard, LEGACY_ID } from './App.jsx';
-import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems } from './elements.js';
+import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems, loadLibrary, saveLibrary } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
 import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf } from './cards.jsx';
@@ -130,6 +130,7 @@ export default function Board({ boardId, commentId, find }) {
           files,
           appState: { ...DEFAULTS, ...(row.scene && row.scene.appState || {}) },
           scrollToContent: true,
+          libraryItems: loadLibrary(),
         });
         // breadcrumb
         const list = await store.listBoards();
@@ -1319,6 +1320,7 @@ export default function Board({ boardId, commentId, find }) {
             onChange={onChange}
             onPaste={onPaste}
             onLinkOpen={onLinkOpen}
+            onLibraryChange={saveLibrary}
             onPointerUpdate={live.pointerMoved}
             isCollaborating={live.on}
             renderEmbeddable={renderCard}
@@ -1389,7 +1391,7 @@ export default function Board({ boardId, commentId, find }) {
               </span>}
               <button onClick={doFrame} title="Group the selection in a named section"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
               {sel.oneImage && <button onClick={doPalette} title="Pull a colour palette from this picture"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>}
-              {!drawing && <button onClick={() => setDrawing(true)} title="Stroke, fill, text size and layers"><Ico d="M4 20h16 M7 16l9-9 3 3-9 9H7z" />Style</button>}
+              <button className={drawing ? 'on' : ''} onClick={() => setDrawing(d => !d)} title={drawing ? 'Hide the style tools' : 'Stroke, fill, text size and layers'}><Ico d="M4 20h16 M7 16l9-9 3 3-9 9H7z" />{drawing ? 'Hide style' : 'Style'}</button>
               <button onClick={doDelete} title="Delete (you can undo)"><Ico d="M5 7h14 M9 7V4h6v3 M7 7l1 13h8l1-13" /></button>
             </div>
           );

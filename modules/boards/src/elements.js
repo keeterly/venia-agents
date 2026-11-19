@@ -51,6 +51,27 @@ export function paletteRow(x, y, colours) {
   return convertToExcalidrawElements(out);
 }
 
+// The Library: VENIA's own pieces, ready to drag onto any board, followed by
+// whatever you've added to it yourself on this device.
+export function builtInLibrary() {
+  const item = (id, name, elements) => ({ id: 'venia-' + id, status: 'published', created: 1, name, elements });
+  return [
+    ...NOTE_COLOURS.map(c => item('note-' + c.name.toLowerCase(), c.name + ' note', note(0, 0, c.name + ' note', c.hex))),
+    item('section', 'Section', convertToExcalidrawElements([frame(0, 0, 520, 380, 'Section')])),
+    item('palette', 'Palette', paletteRow(0, 0, ['#161616', '#5C5852', '#A39E93', '#E3E0D9', '#F7F6F2'])),
+    ...TEMPLATES.filter(t => t.id !== 'blank').map(t => item('tpl-' + t.id, t.name, templateElements(t.id))),
+  ];
+}
+const USER_LIB = 'boards:library';
+export function loadLibrary() {
+  let mine = [];
+  try { mine = JSON.parse(localStorage.getItem(USER_LIB) || '[]'); } catch (e) {}
+  return [...builtInLibrary(), ...(Array.isArray(mine) ? mine : [])];
+}
+export function saveLibrary(items) {
+  try { localStorage.setItem(USER_LIB, JSON.stringify((items || []).filter(i => !String(i.id || '').startsWith('venia-')))); } catch (e) {}
+}
+
 // How many things a person would say are on a board: a palette, a group or a
 // labelled note is one thing; the sections and title a template starts with
 // are the board's layout, not things on it.
