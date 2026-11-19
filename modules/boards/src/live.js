@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from 'react';
 import { reconcileElements, restoreElements, CaptureUpdateAction } from '@excalidraw/excalidraw';
 import { store, nameOf } from './store.js';
 
+const IDLE_MS = 30000;
 const COLOURS = ['#C2410C', '#0F766E', '#7C3AED', '#B45309', '#1D4ED8', '#BE185D', '#4D7C0F'];
 const colourOf = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return COLOURS[h % COLOURS.length]; };
 // Everyone on the board gets their own colour. A hash alone gave Keeter and
@@ -52,7 +53,10 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
         Object.entries(st).forEach(([key, metas]) => {
           const m = metas && metas[0]; if (!m) return;
           keys.add(key); emails.push(m.email);
-          if (key !== myKey) {
+          // Your own other tabs and devices on this board aren't someone else
+          // here: they keep the board level with you, but get no face and no
+          // cursor, or you'd see your own name moving about.
+          if (key !== myKey && m.email !== me.email) {
             list.push({ key, ...m });
             if (!L.current.seen.has(key)) { L.current.seen.add(key); someoneNew = true; }
           }
@@ -74,12 +78,12 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
         if (someoneNew) { clearTimeout(L.current.welcome); L.current.welcome = setTimeout(() => sendAll(), 250 + Math.random() * 500); }
       });
       ch.on('broadcast', { event: 'pointer' }, ({ payload }) => {
-        if (!payload || !payload.key) return;
+        if (!payload || !payload.key || payload.email === me.email) return;
         const col = (payload.email && L.current.colours.get(payload.email)) || payload.color;
         L.current.collaborators.set(payload.key, {
           pointer: { x: payload.x, y: payload.y, tool: 'pointer' }, button: payload.button || 'up',
           username: payload.name, email: payload.email, color: { background: col, stroke: col },
-          selectedElementIds: payload.selected || {}, id: payload.key,
+          selectedElementIds: payload.selected || {}, id: payload.key, at: Date.now(),
         });
         redrawCollaborators();
       });
@@ -97,6 +101,15 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
         } finally { L.current.applying = false; }
       });
       ch.on('broadcast', { event: 'comments' }, () => { if (onCommentsChanged) onCommentsChanged(); });
+      // A cursor that hasn't moved for a while is someone who stepped away;
+      // it goes until they move again, so a still cursor never looks live.
+      L.current.idle = setInterval(() => {
+        let gone = false;
+        for (const [k, c] of [...L.current.collaborators.entries()]) {
+          if (Date.now() - (c.at || 0) > IDLE_MS) { L.current.collaborators.delete(k); gone = true; }
+        }
+        if (gone) redrawCollaborators();
+      }, 5000);
       L.current.myKey = myKey;
       me.key = myKey;
       ch.subscribe(async (status) => {
@@ -112,7 +125,7 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
     })();
     return () => {
       dead = true; setOn(false); setPeople([]);
-      clearTimeout(L.current.timer); clearTimeout(L.current.welcome);
+      clearTimeout(L.current.timer); clearTimeout(L.current.welcome); clearInterval(L.current.idle);
       L.current.seen.clear();
       store.dropChannel(L.current.ch); L.current.ch = null;
       L.current.collaborators.clear();
