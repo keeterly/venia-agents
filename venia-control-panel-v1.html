@@ -3485,7 +3485,134 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
      then, however fast the app itself loaded. Deferred scripts still run in
      order, and still before DOMContentLoaded, which is where the client is now
      built (see sbInit's boot call). -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js" defer></script>
+<!-- OPENING SAFELY (Build 666). On Nov 19 the phone's home-screen app showed
+     a blank OS and sent nothing, while the same address in Safari opened fine.
+     Three things here, none of which touches saved work:
+     1. The sync library is served from this site, pinned to one version, not
+        fetched from a CDN on every open as "@2, whatever is newest". A deferred
+        script that never arrives holds back DOMContentLoaded, and with it the
+        whole start-up: the page shows, nothing on it works, nothing syncs.
+        If our own copy fails, the CDN copy is fetched instead.
+     2. Anything that goes wrong while opening is noted from the first line on.
+     3. Ten seconds after the page arrives, if the app has not started, a panel
+        says so, shows what went wrong, and offers Reload and Repair. Repair
+        clears only the saved app files (the service worker's copy of the shell)
+        and where you last were. Your work, your sign-in and anything not yet
+        synced stay on the device and sync once the app opens. -->
+<script>
+(function(){
+  var errs = window.__bootErrs = [];
+  var stage = window.__bootStage = { start: Date.now(), dcl: false, libFallback: false };
+  function note(m){ try { if (errs.length < 10) errs.push(String(m).slice(0, 240)); } catch(e){} }
+  window.addEventListener('error', function(ev){
+    var t = ev && ev.target;
+    if (t && t !== window && t.getAttribute) {
+      // An element with an empty src (a picture not chosen yet) "fails" to load the page itself: not news.
+      var a = t.getAttribute('src') || t.getAttribute('href') || '';
+      if (a && (t.src || t.href)) note('Could not load ' + String(t.src || t.href).replace(/^https?:\/\//, '').split('?')[0]);
+      return;
+    }
+    var where = ev && ev.filename ? ' (' + String(ev.filename).split('/').pop().split('?')[0] + ':' + ev.lineno + ')' : '';
+    note(((ev && ev.message) || 'Error') + where);
+  }, true);
+  window.addEventListener('unhandledrejection', function(ev){
+    var r = ev && ev.reason; note('Unfinished: ' + ((r && (r.message || r)) || 'unknown'));
+  });
+  document.addEventListener('DOMContentLoaded', function(){ stage.dcl = true; stage.dclAt = Date.now(); });
+  // Our own copy of the sync library failed: fetch the CDN's, pinned to the same version.
+  window.__veniaSbFallback = function(){
+    if (stage.libFallback) return; stage.libFallback = true;
+    note('Could not load the sync library from this site; trying the CDN');
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.1/dist/umd/supabase.js';
+    s.onload = function(){ try { window.dispatchEvent(new Event('venia-sb-lib')); } catch(e){} };
+    document.head.appendChild(s);
+  };
+
+  // ── the ten-second check ──
+  function outsideView(){ return window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN || window.VENIA_PAY || window.VENIA_RECOVERY; }
+  function hasCloud(){ try { return !!(localStorage.getItem('venia-sb-url') && localStorage.getItem('venia-sb-key')); } catch(e){ return false; } }
+  function problem(){
+    if (outsideView()) return null;
+    if (!stage.dcl) return 'The page arrived but never finished loading, so nothing on it started.';
+    if (!window.__veniaBooted) return 'The app started opening and stopped part way.';
+    if (hasCloud() && !window.supabase) return 'The app opened, but the part that syncs with the cloud did not load.';
+    if (hasCloud() && !window.__sbClient) return 'The app opened, but could not connect to the cloud.';
+    return null;
+  }
+  function remember(why){
+    try {
+      var log = JSON.parse(localStorage.getItem('venia_boot_log') || '[]');
+      log.unshift({ at: new Date().toISOString(), build: window.VENIA_BUILD || '', why: why, errs: errs.slice(0, 5),
+                    standalone: !!(navigator.standalone || (window.matchMedia && matchMedia('(display-mode: standalone)').matches)) });
+      localStorage.setItem('venia_boot_log', JSON.stringify(log.slice(0, 5)));
+    } catch(e){}
+  }
+  function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]; }); }
+  function repairedRecently(){ try { return Date.now() - Number(localStorage.getItem('venia_boot_repair') || 0) < 5 * 60 * 1000; } catch(e){ return false; } }
+  function show(why){
+    if (document.getElementById('venia-boot-panel')) return;
+    if (!stage.dcl && !window.supabase) note('Still waiting for the sync library');
+    remember(why);
+    var again = repairedRecently();
+    var p = document.createElement('div');
+    p.id = 'venia-boot-panel';
+    p.setAttribute('role', 'alert');
+    p.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#111;color:#fff;font:14px/1.45 -apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif;padding:18px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -6px 24px rgba(0,0,0,.25);max-height:70vh;overflow:auto';
+    var btn = 'border:1px solid #fff;background:#fff;color:#111;font:600 13px/1 inherit;padding:12px 14px;margin:0 8px 8px 0;border-radius:2px;cursor:pointer';
+    var btn2 = btn.replace('background:#fff;color:#111', 'background:transparent;color:#fff');
+    p.innerHTML = '<div style="font-weight:600;font-size:15px;margin-bottom:4px">VENIA OS didn’t finish opening</div>'
+      + '<div style="opacity:.85;margin-bottom:8px">' + esc(why) + ' Nothing has been lost: your work stays on this device and syncs once the app opens.</div>'
+      + (errs.length ? '<div style="font:12px/1.4 ui-monospace,Menlo,monospace;background:#222;padding:8px 10px;margin-bottom:10px;word-break:break-word">' + errs.slice(0, 3).map(esc).join('<br>') + '</div>'
+                     : '<div style="font-size:12px;opacity:.6;margin-bottom:10px">No error was reported; something it waits for never arrived.</div>')
+      + '<div style="font-size:11px;opacity:.5;margin-bottom:12px">Build ' + esc(window.VENIA_BUILD || '?') + ' · ' + (again ? 'after a repair' : 'first try') + '</div>'
+      + '<button type="button" data-boot="reload" style="' + btn + '">Reload</button>'
+      + '<button type="button" data-boot="repair" style="' + btn2 + '">Repair and reload</button>'
+      + (again ? '<button type="button" data-boot="signin" style="' + btn2 + '">Sign in to sync again</button>' : '')
+      + (window.__veniaBooted ? '<button type="button" data-boot="close" style="' + btn2 + '">Hide</button>' : '')
+      + (again ? '<div style="font-size:12px;opacity:.7;margin-top:6px">Sign in to sync again forgets only this device’s sync sign-in. Your work stays here and syncs after you sign in.</div>' : '');
+    p.addEventListener('click', function(ev){
+      var b = ev.target && ev.target.closest ? ev.target.closest('[data-boot]') : null;
+      if (!b) return;
+      var k = b.getAttribute('data-boot');
+      if (k === 'close') { p.remove(); return; }
+      if (k === 'reload') { location.reload(); return; }
+      b.textContent = 'Working…';
+      if (k === 'repair') repair(); else if (k === 'signin') resetSignIn();
+    });
+    (document.body || document.documentElement).appendChild(p);
+  }
+  function fresh(){ location.replace(location.pathname + '?fresh=' + Date.now()); }
+  // Repair: only copies of the app's own files and where you last were.
+  // Never the workspace (venia-plm-v2), Boards' pictures, sign-in or anything unsynced.
+  function repair(){
+    try { localStorage.setItem('venia_boot_repair', String(Date.now())); } catch(e){}
+    try { localStorage.removeItem('venia_route_v1'); } catch(e){}
+    var jobs = [];
+    try { if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) jobs.push(navigator.serviceWorker.getRegistrations().then(function(rs){ return Promise.all(rs.map(function(r){ return r.unregister(); })); })); } catch(e){}
+    try { if (window.caches && caches.keys) jobs.push(caches.keys().then(function(ks){ return Promise.all(ks.filter(function(k){ return /^venia-shell-/.test(k); }).map(function(k){ return caches.delete(k); })); })); } catch(e){}
+    var done = false; var go = function(){ if (!done) { done = true; fresh(); } };
+    Promise.all(jobs).then(go, go);
+    setTimeout(go, 3000);   // a storage call that itself hangs must not hold the repair
+  }
+  // Second step, offered only after a repair didn't help: forget this device's
+  // sync sign-in (the Supabase session keys) and nothing else.
+  function resetSignIn(){
+    try { Object.keys(localStorage).forEach(function(k){ if (/^sb-.*-auth-token(-code-verifier)?$/.test(k)) localStorage.removeItem(k); }); } catch(e){}
+    try { localStorage.removeItem('venia_boot_repair'); } catch(e){}
+    fresh();
+  }
+  window.veniaBootRepair = repair;
+  function check(){
+    if (document.hidden) { document.addEventListener('visibilitychange', function once(){ if (!document.hidden) { document.removeEventListener('visibilitychange', once); setTimeout(check, 1500); } }); return; }
+    var why = problem();
+    if (why) show(why);
+    else { try { localStorage.removeItem('venia_boot_repair'); } catch(e){} }
+  }
+  setTimeout(check, 10000);
+})();
+</script>
+<script src="/vendor/supabase-js-2.119.1.js" defer onerror="window.__veniaSbFallback &amp;&amp; window.__veniaSbFallback()"></script>
 </head>
 <body>
 
@@ -3609,7 +3736,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '664';
+  const BUILD = '666';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -26971,6 +27098,10 @@ function routeRestore() {
   try { r = JSON.parse(localStorage.getItem(ROUTE_KEY) || 'null'); } catch(e){}
   if (!r || ROUTE_SPACES.indexOf(r.space) < 0) return;
   if (r.space === 'cp') return;            // already the default — nothing to do
+  // Boards and Dr4ft are whole apps of their own, and on Nov 19 a phone that
+  // kept reopening into Boards came up blank. They open on Today now; one tap
+  // takes you back (Build 666).
+  if (r.space === 'boards' || r.space === 'patterncad') return;
   try {
     if (r.space === 'src' || (r.space === 'plm' && (r.page === 'materials' || r.page === 'vendors'))) {
       // Sourcing (Build 659), and Product's old Materials / Vendors routes, which now live there.
@@ -56258,7 +56389,11 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     }
     };
     if (window.supabase) boot();
-    else document.addEventListener('DOMContentLoaded', boot);
+    else document.addEventListener('DOMContentLoaded', function(){
+      if (window.supabase) { boot(); return; }
+      // Our copy of the library failed and the CDN's is on its way (Build 666).
+      window.addEventListener('venia-sb-lib', function once(){ window.removeEventListener('venia-sb-lib', once); if (window.supabase) boot(); });
+    });
   })();
 
 })(); // end Supabase IIFE
