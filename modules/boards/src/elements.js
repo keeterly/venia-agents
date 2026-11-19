@@ -13,15 +13,17 @@ export const NOTE_COLOURS = [
 ];
 
 const SANS = FONT_FAMILY.Helvetica;
+// Big enough to read when a whole layout is on screen (it opens at about half size).
+const NOTE_FS = 22;
 const base = { roughness: 0, strokeWidth: 1, roundness: null, fillStyle: 'solid' };
 const gid = () => 'g' + Math.random().toString(36).slice(2, 10);
 
-export function note(x, y, text = 'New note', colour = NOTE_COLOURS[0].hex, w = 220, h = 160) {
+export function note(x, y, text = 'New note', colour = NOTE_COLOURS[0].hex, w = 240, h = 170) {
   return convertToExcalidrawElements([{
     ...base, type: 'rectangle', x, y, width: w, height: h,
     backgroundColor: colour, strokeColor: colour === '#161616' ? '#161616' : '#d9d3c7',
     customData: { kind: 'note' },
-    label: { text, fontSize: 16, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: readableOn(colour) },
+    label: { text, fontSize: NOTE_FS, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: readableOn(colour) },
   }]);
 }
 
@@ -42,11 +44,11 @@ export function heading(x, y, text, size = 36) {
 
 // Swatches under (or beside) a picture, grouped so they move as one.
 export function paletteRow(x, y, colours) {
-  const g = gid(), S = 64, GAP = 10, out = [];
+  const g = gid(), S = 80, GAP = 12, out = [];
   colours.forEach((hex, i) => {
     const sx = x + i * (S + GAP);
     out.push({ ...base, type: 'rectangle', x: sx, y, width: S, height: S, backgroundColor: hex, strokeColor: '#00000022', groupIds: [g], customData: { kind: 'swatch', hex } });
-    out.push({ type: 'text', x: sx, y: y + S + 6, text: hex.toUpperCase(), fontSize: 11, fontFamily: FONT_FAMILY.Cascadia, strokeColor: '#595959', groupIds: [g] });
+    out.push({ type: 'text', x: sx, y: y + S + 8, text: hex.toUpperCase(), fontSize: 15, fontFamily: FONT_FAMILY.Cascadia, strokeColor: '#595959', groupIds: [g] });
   });
   return convertToExcalidrawElements(out);
 }
@@ -106,40 +108,41 @@ export const TEMPLATES = [
   { id: 'shoot', name: 'Shoot plan', blurb: 'Concept, references, location, casting, shot list.' },
 ];
 
-export function templateElements(id) {
+export function templateElements(id, title) {
+  const head = (fallback) => String(title || '').trim() || fallback;
   if (id === 'moodboard') {
     return convertToExcalidrawElements([
-      { type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Moodboard', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' },
+      { type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: head('Moodboard'), fontSize: 40, fontFamily: SANS, strokeColor: '#111111' },
       frame(0, 0, 760, 560, 'Mood'),
       frame(800, 0, 420, 260, 'Colour'),
       frame(800, 300, 420, 260, 'Material'),
       frame(0, 600, 760, 420, 'Silhouette'),
       frame(800, 600, 420, 420, 'Notes'),
-      { ...base, type: 'rectangle', x: 830 + O, y: 640 + O, width: 360, height: 140, backgroundColor: '#F1ECE2', strokeColor: '#d9d3c7', label: { text: 'What is this collection about, in one line?', fontSize: 16, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } },
+      { ...base, type: 'rectangle', x: 830 + O, y: 640 + O, width: 360, height: 140, backgroundColor: '#F1ECE2', strokeColor: '#d9d3c7', label: { text: 'What is this collection about, in one line?', fontSize: NOTE_FS, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } },
     ]);
   }
   if (id === 'collection') {
     const cats = ['Outerwear', 'Tops', 'Bottoms', 'Dresses', 'Accessories'];
-    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Collection plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
+    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: head('Collection plan'), fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
     cats.forEach((c, i) => {
       out.push(frame(i * 300, 0, 280, 900, c));
-      out.push({ ...base, type: 'rectangle', x: i * 300 + 20 + O, y: 30 + O, width: 240, height: 120, backgroundColor: '#F1ECE2', strokeColor: '#d9d3c7', label: { text: 'Look ' + (i + 1), fontSize: 16, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } });
+      out.push({ ...base, type: 'rectangle', x: i * 300 + 20 + O, y: 30 + O, width: 240, height: 120, backgroundColor: '#F1ECE2', strokeColor: '#d9d3c7', label: { text: 'Look ' + (i + 1), fontSize: NOTE_FS, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } });
     });
     return convertToExcalidrawElements(out);
   }
   if (id === 'brainstorm') {
-    const out = [{ ...base, type: 'ellipse', id: 'core', x: 0, y: 0, width: 280, height: 160, backgroundColor: '#161616', strokeColor: '#161616', label: { text: 'The idea', fontSize: 22, fontFamily: SANS, strokeColor: '#ffffff' } }];
+    const out = [{ ...base, type: 'ellipse', id: 'core', x: 0, y: 0, width: 280, height: 160, backgroundColor: '#161616', strokeColor: '#161616', label: { text: head('The idea'), fontSize: 26, fontFamily: SANS, strokeColor: '#ffffff' } }];
     const spots = [[-420, -220], [420, -220], [-460, 160], [460, 160], [0, 320]];
     spots.forEach(([dx, dy], i) => {
       const id = 'n' + i;
-      out.push({ ...base, type: 'rectangle', id, x: 60 + dx, y: 20 + dy, width: 200, height: 120, backgroundColor: NOTE_COLOURS[i % 4].hex, strokeColor: '#d9d3c7', label: { text: 'Idea', fontSize: 16, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } });
+      out.push({ ...base, type: 'rectangle', id, x: 60 + dx, y: 20 + dy, width: 200, height: 120, backgroundColor: NOTE_COLOURS[i % 4].hex, strokeColor: '#d9d3c7', label: { text: 'Idea', fontSize: NOTE_FS, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } });
       out.push({ type: 'arrow', x: 140, y: 80, strokeColor: '#8a8a8a', roughness: 0, start: { id: 'core' }, end: { id } });
     });
     return convertToExcalidrawElements(out);
   }
   if (id === 'shoot') {
     const names = ['Concept', 'References', 'Location', 'Casting', 'Hair & make-up', 'Shot list'];
-    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Shoot plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
+    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: head('Shoot plan'), fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
     names.forEach((n, i) => out.push(frame((i % 3) * 520, Math.floor(i / 3) * 460, 500, 440, n)));
     return convertToExcalidrawElements(out);
   }

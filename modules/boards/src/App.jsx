@@ -232,8 +232,9 @@ export function NewBoard({ onClose, parentId = null, onCreated }) {
   async function make() {
     setBusy(true);
     try {
-      const elements = templateElements(tpl);
-      const row = await store.createBoard({ title: title.trim() || (tpl === 'blank' ? 'Untitled board' : TEMPLATES.find(t => t.id === tpl).name), parent_id: parentId, scene: { elements, appState: {} } });
+      const name = title.trim() || (tpl === 'blank' ? 'Untitled board' : TEMPLATES.find(t => t.id === tpl).name);
+      const elements = templateElements(tpl, name);
+      const row = await store.createBoard({ title: name, parent_id: parentId, scene: { elements, appState: {} } });
       if (onCreated) onCreated(row); else go('/b/' + row.id);
       onClose();
     } catch (e) { alert('Couldn\'t create the board: ' + (e.message || e)); setBusy(false); }

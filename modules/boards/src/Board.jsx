@@ -29,6 +29,29 @@ async function previewBlob(all, files, bg) {
   return exportToBlob({ elements: els, files: files || {}, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
     appState: { exportBackground: true, viewBackgroundColor: bg || BG } });
 }
+// The whole board as one page, through the browser's print dialog, where
+// "Save as PDF" makes a file to send. No new service or library: it prints a
+// picture of the board in a hidden frame, sized to fit the page.
+async function printBoard(api, title) {
+  const live = api.getSceneElements().filter(e => e && !e.isDeleted);
+  if (!live.length) return;
+  const blob = await exportToBlob({ elements: live, files: api.getFiles() || {}, mimeType: 'image/png', exportPadding: 48,
+    getDimensions: (w, h) => { const k = Math.min(3, 3200 / Math.max(w, h)); return { width: w * k, height: h * k, scale: k }; },
+    appState: { exportBackground: true, viewBackgroundColor: api.getAppState().viewBackgroundColor || BG } });
+  const url = URL.createObjectURL(blob);
+  const f = document.createElement('iframe');
+  f.setAttribute('aria-hidden', 'true');
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden';
+  document.body.appendChild(f);
+  const d = f.contentDocument;
+  const safe = String(title || 'Board').replace(/[<>&]/g, '');
+  d.open();
+  d.write('<!doctype html><html><head><title>' + safe + '</title><style>@page{margin:12mm}html,body{margin:0;height:100%}body{display:flex;flex-direction:column;align-items:center;justify-content:center;font:12px Helvetica,Arial,sans-serif}h1{font-size:14px;font-weight:500;letter-spacing:2px;text-transform:uppercase;margin:0 0 10px;align-self:flex-start}img{max-width:100%;max-height:calc(100vh - 40px);object-fit:contain}</style></head><body><h1>' + safe + '</h1><img></body></html>');
+  d.close();
+  const img = d.querySelector('img');
+  img.onload = () => { setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) {} setTimeout(() => { f.remove(); URL.revokeObjectURL(url); }, 60000); }, 50); };
+  img.src = url;
+}
 // The board you leave draws its own new card picture from what was on screen,
 // so the card you go back to can show it the moment it is ready instead of
 // waiting for the save to land and drawing it again.
@@ -697,7 +720,9 @@ export default function Board({ boardId, commentId, find }) {
     const busy = !!(appState.selectedElementsAreBeingDragged || appState.resizingElement || appState.newElement || appState.editingTextElement || appState.isRotating);
     const notes = picked.length > 0 && picked.every(e => e.customData && e.customData.kind === 'note');
     const units = new Set(picked.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
-    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units) ? s : { count: picked.length, oneImage, busy, notes, units });
+    const tops = picked.filter(e => !e.containerId);
+    const card = tops.length === 1 && tops[0].customData && tops[0].customData.kind === 'board' ? tops[0].customData.boardId || null : null;
+    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units && s.card === card) ? s : { count: picked.length, oneImage, busy, notes, units, card });
     // picking a drawing tool by its key shows the drawing tools, so it's never a hidden mode
     const tool = appState.activeTool && appState.activeTool.type;
     if (tool && !['selection', 'hand', 'laser'].includes(tool) && !R.current.drawingOn) { R.current.drawingOn = true; setDrawing(true); }
@@ -1288,6 +1313,7 @@ export default function Board({ boardId, commentId, find }) {
             </div>
             <button className="act closes" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
             <button className="act closes" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
+            <button className="act closes lib-act" onClick={() => { try { api.toggleSidebar({ name: 'default', tab: 'library' }); } catch (e) {} }} title="Notes, sections and layouts to drag in"><Ico d="M4 5h5v14H4z M10 5h4v14h-4z M15 6l4-1 2 13-4 1z" />Library</button>
             <span className="divider" />
             <button className={'act closes draw-toggle' + (drawing ? ' on' : '')} onClick={() => setDrawing(d => !d)} title={drawing ? 'Hide the drawing tools' : 'Shapes, arrows, pen and text tools'}><Ico d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z M13.9 6.6l3.5 3.5" />{drawing ? 'Hide tools' : 'Draw'}</button>
           </div>
@@ -1305,7 +1331,7 @@ export default function Board({ boardId, commentId, find }) {
             <span className="divider" />
             <button className={'act' + (adding ? ' on' : '')} onClick={() => { setAdding(a => !a); setOpenId(null); }} title="Click, then click a spot on the board to comment there"><Ico d="M4 5h16v11H9l-5 4z" />Comment</button>
             <button className={'act' + (panel === 'comments' ? ' on' : '')} onClick={() => setPanel(panel === 'comments' ? null : 'comments')} title="All comments on this board">
-              <Ico d="M4 6h16 M4 12h16 M4 18h10" />{openCount ? <span className="count">{openCount}</span> : null}
+              <Ico d="M3 5h12v8H8l-5 3z M9 16h7l5 3v-9h-3" />{openCount ? <span className="count">{openCount}</span> : null}
             </button>
           </div>
         )}
@@ -1333,18 +1359,16 @@ export default function Board({ boardId, commentId, find }) {
             viewModeEnabled={!store.canEdit}
             langCode="en"
             name={meta ? meta.title : 'Board'}
-            UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, toggleTheme: false, export: { saveFileToDisk: true } }, tools: { image: true } }}
+            UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, toggleTheme: false, export: { saveFileToDisk: false }, clearCanvas: false, changeViewBackgroundColor: false }, tools: { image: true } }}
             validateEmbeddable={url => (isCardUrl(url) ? true : undefined)}
           >
             <MainMenu>
               <MainMenu.Item onSelect={() => { save(); go('/'); }}>All boards</MainMenu.Item>
               <MainMenu.Separator />
               <MainMenu.DefaultItems.SaveAsImage />
-              <MainMenu.DefaultItems.Export />
+              <MainMenu.Item onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
               <MainMenu.DefaultItems.SearchMenu />
-              <MainMenu.DefaultItems.ChangeCanvasBackground />
               <MainMenu.Separator />
-              <MainMenu.DefaultItems.ClearCanvas />
               <MainMenu.DefaultItems.Help />
             </MainMenu>
             <WelcomeScreen>
@@ -1378,11 +1402,23 @@ export default function Board({ boardId, commentId, find }) {
           const rs = picked.map(e => rectOf(e));
           const L = Math.min(...rs.map(r => r.left)), T = Math.min(...rs.map(r => r.top));
           const Rt = Math.max(...rs.map(r => r.left + r.width)), B = Math.max(...rs.map(r => r.top + r.height));
-          const top = T > 60 ? T - 52 : Math.min(Math.max(B + 12, 8), st.height - 56);
           const left = Math.max(12, Math.min((L + Rt) / 2, st.width - 12));
+          // Above or below, whichever covers less of what's on the board
+          // (section names included). Above wins a tie.
+          const w = (selbarRef.current && selbarRef.current.offsetWidth) || 360;
+          const above = T - 52, below = B + 12;
+          const others = api.getSceneElements().filter(e => !e.isDeleted && !e.containerId && !(st.selectedElementIds && st.selectedElementIds[e.id]))
+            .map(e => { const r = rectOf(e); return e.type === 'frame' ? { left: r.left, top: r.top - 22, width: Math.min(r.width, 200), height: 22 } : r; });
+          const cover = (y) => { const x0 = left - w / 2, x1 = left + w / 2, y1 = y + 40; let a = 0;
+            for (const r of others) { const ox = Math.min(x1, r.left + r.width) - Math.max(x0, r.left), oy = Math.min(y1, r.top + r.height) - Math.max(y, r.top); if (ox > 0 && oy > 0) a += ox * oy; }
+            return a; };
+          const fitsAbove = above > 8, fitsBelow = below + 40 < st.height - 8;
+          const top = fitsAbove && (!fitsBelow || cover(above) <= cover(below)) ? above
+            : fitsBelow ? below : Math.min(Math.max(below, 8), st.height - 56);
           return (
             <div className="selbar" ref={selbarRef} style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
               {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
+              {sel.card && <button className="selbar-open" onClick={() => openCard(sel.card)} title="Open this board (or double-click it)"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open</button>}
               <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
               {sel.units > 1 && <span className="pop-wrap">
                 <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
