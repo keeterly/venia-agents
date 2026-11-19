@@ -4,6 +4,7 @@ import { inHost, tellHost } from './host.js';
 import { TEMPLATES, templateElements, legacyCardElements, boardCard } from './elements.js';
 import Board from './Board.jsx';
 import { NameBox } from './namebox.jsx';
+import { ImportSheet } from './importer.jsx';
 
 export const LEGACY_ID = 'b-brainstorm-board';
 
@@ -11,6 +12,8 @@ function useRoute() {
   const read = () => {
     const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?(?:\/f\/([^/]+))?/);
     if (m) { let find = null; try { find = m[3] ? decodeURIComponent(m[3]) : null; } catch (e) {} return { view: 'board', id: m[1], comment: m[2] || null, find }; }
+    // "#/import/…": another part of VENIA OS sent styles or a photo (Build 650).
+    if (/^#\/import\b/.test(window.location.hash || '')) return { view: 'import', key: window.location.hash };
     // "#/new": VENIA OS's Today asked for a new board straight away.
     return { view: 'home', fresh: /^#\/new\b/.test(window.location.hash || '') };
   };
@@ -30,6 +33,7 @@ function snippet(text, term, title) {
 
 export default function App() {
   const route = useRoute();
+  if (route.view === 'import') return <ImportSheet key={route.key} go={go} />;
   return route.view === 'board'
     ? <Board key={route.id} boardId={route.id} commentId={route.comment} find={route.find} />
     : <Home fresh={route.fresh} />;

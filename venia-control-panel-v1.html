@@ -3495,7 +3495,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '649';
+  const BUILD = '650';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5685,6 +5685,7 @@ Jade Kim, Harper's Bazaar, jade@harpersbazaar.com</textarea>
         <button id="bulk-archive-btn" onclick="bulkArchive()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">⌸ Archive</button>
         <button id="bulk-restore-btn" onclick="bulkRestore()" style="display:none;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↩ Restore</button>
         <button onclick="bulkExport()" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">↓ Export</button>
+        <button id="bulk-boards-btn" onclick="bulkSendToBoards()" title="Put the selected styles on a board, as photo cards, for visual planning" style="display:none;background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:4px 10px;cursor:pointer">▦ Send to Board</button>
         <button onclick="clearBulkSelection()" style="background:none;border:none;color:rgba(255,255,255,.5);font-size:14px;cursor:pointer;margin-left:auto">✕</button>
       </div>
       <div id="styles-check" style="display:none"></div>
@@ -9861,6 +9862,7 @@ function lbPaint(){
         ${many ? `<button onclick="lbStep(-1)" title="Previous (←)" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:13px;padding:4px 10px;cursor:pointer">‹</button>
         <span style="font-size:10px;opacity:.6;font-family:'DM Mono',monospace">${LB_I+1} / ${LB_LIST.length}</span>
         <button onclick="lbStep(1)" title="Next (→)" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:13px;padding:4px 10px;cursor:pointer">›</button>` : ''}
+        ${(typeof window.veniaBoardsLinkOn === 'function' && window.veniaBoardsLinkOn() && /^https:\/\//i.test(String(it.url||''))) ? `<button onclick="lbSendToBoards()" title="Put this photo on a board" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;padding:6px 10px;cursor:pointer">▦ Send to Board</button>` : ''}
         <button onclick="lbClose()" title="Close (Esc)" style="background:none;border:1px solid rgba(255,255,255,.3);color:#fff;font-size:13px;padding:4px 10px;cursor:pointer">✕</button>
       </div>
     </div>`;
@@ -9888,7 +9890,7 @@ function lbOpenStyle(styleId, ev){
   const pool = (rows.length ? rows : [styleId])
     .map(id => (STATE.styles||[]).find(x => x.id === id))
     .filter(x => x && x.photoUrl);
-  LB_LIST = pool.map(x => ({ url: x.photoUrl, name: x.name, sub: [x.styleId, x.fabric].filter(Boolean).join(' · ') }));
+  LB_LIST = pool.map(x => ({ url: x.photoUrl, name: x.name, sub: [x.styleId, x.fabric].filter(Boolean).join(' · '), styleId: x.id }));
   LB_I = Math.max(0, pool.findIndex(x => x.id === styleId));
   if (!LB_LIST.length) return;
   const el = document.createElement('div');
@@ -11552,6 +11554,8 @@ function updateBulkBar() {
   if (!bar) return;
   bulkReconcile();
   const n = BULK_SELECTED.size;
+  const bb = document.getElementById('bulk-boards-btn');
+  if (bb) bb.style.display = (typeof window.veniaBoardsLinkOn === 'function' && window.veniaBoardsLinkOn()) ? '' : 'none';
   if (n > 0) {
     bar.style.display = 'flex';
     if (count) count.textContent = `${n} style${n>1?'s':''} selected`;
@@ -26259,6 +26263,59 @@ window.veniaNewBoard = function(){
   }
   cpGoto('boards');
 };
+// ── CONNECTED MODULES: Product → Boards (Build 650) ──────────────────
+// When a brand has both Product and Brainstorm (Boards), styles and photos can
+// be sent to a board for visual planning. Neither module reads the other's
+// data: the shell hands Boards a small, plain list (name, colourway, price,
+// status, photo address) through this tab's sessionStorage and opens Boards
+// at #/import, where you pick the board and whether the cards stay linked to
+// the style or are a one-time copy. Without either module, no button shows.
+window.veniaBoardsLinkOn = function(){
+  try { return VeniaOS.enabled('brainstorm') && VeniaOS.enabled('product'); } catch(e){ return false; }
+};
+function veniaBoardsStyleItem(s){
+  const photo = /^https:\/\//i.test(String(s.photoUrl || '').trim()) ? String(s.photoUrl).trim() : '';
+  return { styleId: s.id, code: s.styleId || '', name: s.name || 'Untitled style', image: photo,
+           colors: s.colors || '', retail: Number(s.retail) || 0, status: s.status || '',
+           category: s.category || '', delivery: s.delivery || s.drop || '', season: s.season || '' };
+}
+window.veniaBoardsStyleItem = veniaBoardsStyleItem;
+window.veniaSendToBoards = function(payload){
+  if (!window.veniaBoardsLinkOn()) { try { showToast('Boards is not switched on for this workspace.'); } catch(e){} return; }
+  try { sessionStorage.setItem('boards:import', JSON.stringify(Object.assign({ at: Date.now() }, payload))); }
+  catch(e){ try { showToast('Couldn\u2019t hand that to Boards: ' + (e.message || e)); } catch(_){} return; }
+  const scr = document.getElementById('cp-screen-boards');
+  if (!scr) return;
+  const hash = '#/import/' + Date.now().toString(36);
+  let fr = scr.querySelector('iframe');
+  if (!fr) {
+    fr = document.createElement('iframe');
+    fr.title = 'Boards';
+    fr.setAttribute('allow', 'clipboard-read; clipboard-write; fullscreen');
+    fr.src = '/boards' + hash;
+    scr.appendChild(fr);
+  } else {
+    try { fr.contentWindow.location.hash = hash; } catch(e){ fr.src = '/boards' + hash; }
+  }
+  try { if (typeof lbClose === 'function' && document.getElementById('venia-lightbox')) lbClose(); } catch(e){}
+  cpGoto('boards');
+};
+// From the line list: the ticked styles.
+function bulkSendToBoards(){
+  if (!BULK_SELECTED.size) return;
+  const styles = STATE.styles.filter(s => BULK_SELECTED.has(s.id));
+  const seasons = [...new Set(styles.map(s => s.season).filter(Boolean))];
+  window.veniaSendToBoards({ source: 'line', title: (seasons.length === 1 ? seasons[0] + ' ' : '') + 'line list',
+                             items: styles.map(veniaBoardsStyleItem) });
+}
+// From any photo in the viewer.
+function lbSendToBoards(){
+  const it = LB_LIST[LB_I]; if (!it) return;
+  const st = it.styleId ? (STATE.styles || []).find(x => x.id === it.styleId) : null;
+  const item = st ? veniaBoardsStyleItem(st) : { name: it.name || '', sub: it.sub || '', image: it.url };
+  if (!st) item.image = it.url;
+  window.veniaSendToBoards({ source: 'photo', title: it.name || 'Photos', items: [item] });
+}
 // ── MODULE HOST: Pattern CAD (Build 634) ─────────────────────────────
 // VENIA's pattern drafting CAD, built in the private keeterly/venia-pattern-cad;
 // its code reaches only a signed-in member allowed it, through the pattern-cad
@@ -26444,6 +26501,21 @@ document.addEventListener('visibilitychange', function(){ if (!document.hidden) 
 window.addEventListener('message', function(e){
   if (e.origin !== location.origin || !e.data || e.data.source !== 'venia-module') return;
   if (e.data.type === 'boards:mentions-seen') { window.veniaBoardMentions(); return; }
+  // Connected modules (Build 650): only while both Product and Boards are on.
+  if (e.data.type === 'boards:open-style') {
+    if (!window.veniaBoardsLinkOn()) return;
+    const sid = String((e.data.payload && e.data.payload.styleId) || '');
+    if (!sid || !(STATE.styles || []).some(x => x.id === sid)) { try { showToast('That style isn\u2019t in the line list any more.'); } catch(_){} return; }
+    cpGoto('plm'); setTimeout(function(){ openDp(sid); }, 150);
+    return;
+  }
+  if (e.data.type === 'boards:style-info') {
+    if (!window.veniaBoardsLinkOn() || !e.source) return;
+    const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
+    const styles = ids.map(id => (STATE.styles || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsStyleItem);
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
+    return;
+  }
   if (e.data.type === 'boards:title' && document.getElementById('cp-screen-boards')?.classList.contains('active')) {
     const t = String((e.data.payload && e.data.payload.title) || 'Boards').slice(0, 120);
     document.title = t + ' · VENIA OS';
