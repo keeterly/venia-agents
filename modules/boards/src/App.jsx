@@ -6,6 +6,7 @@ import Board from './Board.jsx';
 import { NameBox } from './namebox.jsx';
 import { ImportSheet } from './importer.jsx';
 import { ViewOnly } from './share.jsx';
+import { FROM_BRAINSTORM, syncFromBrainstorm } from './frombrainstorm.js';
 
 // Who sees a board, in a word or two on its card (Build 661).
 function accessTag(b) {
@@ -18,6 +19,7 @@ function accessTag(b) {
 }
 
 export const LEGACY_ID = 'b-brainstorm-board';
+const FROM_IDS = new Set(FROM_BRAINSTORM.map(f => f.id));
 
 function useRoute() {
   const read = () => {
@@ -80,7 +82,8 @@ async function ensureLegacyBoard(boards) {
     title: 'Brainstorm board', parent_id: null,
     scene: { elements, appState: {}, legacyPending: cards.filter(c => c.kind === 'img') },
   };
-  try { await store.createBoard({ ...row, id: LEGACY_ID }); return true; } catch (e) { return false; }
+  // Brainstorm is shared across the brand, so its board starts shared too (Build 663).
+  try { await store.createBoard({ ...row, id: LEGACY_ID, everyone: 'edit' }); return true; } catch (e) { return false; }
 }
 
 function Home({ fresh = false }) {
@@ -119,6 +122,7 @@ function Home({ fresh = false }) {
     try {
       let list = await store.listBoards({ trash });
       if (!trash && await ensureLegacyBoard(list)) list = await store.listBoards();
+      if (!trash && await syncFromBrainstorm(list)) list = await store.listBoards();
       if (stale()) return;
       setBoards(list);
       const th = await store.thumbs(list.map(b => b.id)); if (stale()) return; setThumbs(th);
@@ -156,8 +160,11 @@ function Home({ fresh = false }) {
     const term = q.trim().toLowerCase();
     if (term) return boards.filter(b => (b.title + ' ' + (b.search_text || '')).toLowerCase().includes(term));
     if (trash) return boards;
-    return boards.filter(b => !b.parent_id || !byId[b.parent_id]);
+    return boards.filter(b => (!b.parent_id || !byId[b.parent_id]) && !FROM_IDS.has(b.id));
   }, [boards, q, trash, byId]);
+  // Brainstorm's maps, together above your own boards (Build 663).
+  const fromBrainstorm = useMemo(() => (trash || q.trim() || !boards) ? []
+    : FROM_BRAINSTORM.map(f => byId[f.id] && !byId[f.id].trashed_at ? { ...byId[f.id], blurb: f.blurb } : null).filter(Boolean), [boards, trash, q, byId]);
   const pinned = useMemo(() => (trash || q.trim() || !boards) ? [] : boards.filter(b => pins.has(b.id)), [boards, pins, trash, q]);
 
   async function moveInto(child, parentId) {
@@ -197,6 +204,7 @@ function Home({ fresh = false }) {
               <div className="card-foot">
                 <div className="card-title">{pins.has(b.id) && <span className="pin-mark" title="Pinned">●</span>}{b.title}</div>
                 {q.trim() && (() => { const s = snippet(b.search_text, q.trim(), b.title); return s ? <div className="card-hit">{s}</div> : null; })()}
+                {b.blurb && <div className="card-hit">{b.blurb}</div>}
                 <div className="card-meta">
                   {b.parent_id && byId[b.parent_id] && q ? <>in {byId[b.parent_id].title} · </> : null}
                   {b.item_count || 0} item{b.item_count === 1 ? '' : 's'}
@@ -257,7 +265,12 @@ function Home({ fresh = false }) {
       )}
       {err && <div className="note-bar warn">{err}</div>}
 
-      {boards === null ? <div className="empty">Opening…</div> : shown.length === 0 ? (
+      {fromBrainstorm.length > 0 && (<>
+        <div className="section-label">From Brainstorm <span className="section-sub">Brainstorm's maps, kept here. New goals and notes are added each time Boards opens.</span></div>
+        <div className="grid">{fromBrainstorm.map(b => renderCard(b, 'bs:'))}</div>
+        <div className="section-label">Your boards</div>
+      </>)}
+      {boards === null ? <div className="empty">Opening…</div> : shown.length === 0 && !fromBrainstorm.length ? (
         <div className="empty">
           {trash ? 'Trash is empty.' : q ? 'No board matches that.' : (
             <>
