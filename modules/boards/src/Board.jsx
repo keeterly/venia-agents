@@ -70,6 +70,14 @@ export default function Board({ boardId, commentId, find }) {
   const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
   const [moving, setMoving] = useState(false);     // the Move to… list is open
   const backRef = useRef(null);
+  const selbarRef = useRef(null);
+  // keep the selection bar whole on screen, however near the edge the selection is
+  useLayoutEffect(() => {
+    const b = selbarRef.current; if (!b || !b.parentElement) return;
+    const W = b.parentElement.clientWidth, w = b.offsetWidth, c = parseFloat(b.style.left) || 0;
+    const fixed = Math.max(w / 2 + 8, Math.min(c, W - w / 2 - 8));
+    if (Math.abs(fixed - c) > 0.5) b.style.left = fixed + 'px';
+  });
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
   const [rows, setRows] = useState([]);           // comments, flat
@@ -687,7 +695,8 @@ export default function Board({ boardId, commentId, find }) {
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
     const busy = !!(appState.selectedElementsAreBeingDragged || appState.resizingElement || appState.newElement || appState.editingTextElement || appState.isRotating);
     const notes = picked.length > 0 && picked.every(e => e.customData && e.customData.kind === 'note');
-    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes) ? s : { count: picked.length, oneImage, busy, notes });
+    const units = new Set(picked.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
+    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units) ? s : { count: picked.length, oneImage, busy, notes, units });
     // picking a drawing tool by its key shows the drawing tools, so it's never a hidden mode
     const tool = appState.activeTool && appState.activeTool.type;
     if (tool && !['selection', 'hand', 'laser'].includes(tool) && !R.current.drawingOn) { R.current.drawingOn = true; setDrawing(true); }
@@ -1364,10 +1373,10 @@ export default function Board({ boardId, commentId, find }) {
           const top = T > 60 ? T - 52 : Math.min(Math.max(B + 12, 8), st.height - 56);
           const left = Math.max(12, Math.min((L + Rt) / 2, st.width - 12));
           return (
-            <div className="selbar" style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
+            <div className="selbar" ref={selbarRef} style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
               {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
               <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
-              {sel.count > 1 && <span className="pop-wrap">
+              {sel.units > 1 && <span className="pop-wrap">
                 <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
                 {panel === 'arrange' && (
                   <div className="pop list">
