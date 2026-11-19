@@ -26,7 +26,7 @@ function colourMap(emails) {
   return out;
 }
 
-export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
+export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged, onRemoteElements }) {
   const [people, setPeople] = useState([]);
   const [on, setOn] = useState(false);
   const L = useRef({ ch: null, sent: new Map(), collaborators: new Map(), timer: null, lastPointer: 0, applying: false, seen: new Set(), colours: new Map(), welcome: null });
@@ -94,6 +94,7 @@ export function useLive({ api, boardId, onFilesNeeded, onCommentsChanged }) {
         L.current.applying = true;
         try {
           const merged = reconcileElements(api.getSceneElementsIncludingDeleted(), remote, api.getAppState());
+          if (onRemoteElements) onRemoteElements(merged);
           api.updateScene({ elements: merged, captureUpdate: CaptureUpdateAction.NEVER });
           const have = new Set(Object.keys(api.getFiles()));
           const need = remote.filter(e => e.type === 'image' && e.fileId && !e.isDeleted && !have.has(e.fileId)).map(e => e.fileId);
