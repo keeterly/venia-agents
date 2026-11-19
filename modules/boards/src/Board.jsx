@@ -454,7 +454,7 @@ export default function Board({ boardId, commentId }) {
     const n = picked.length;
     const job = { cloneIds: [], movedBoards: [] };
     setUndoStack({ text: 'Moved ' + (n === 1 ? '1 item' : n + ' items') + ' to ' + title, undo: async () => {
-      setDeleted(goneIds, false); save();
+      setDeleted(goneIds, false); R.current.wantThumb = true; save();
       try {
         if (job.cloneIds.length) await editScene(targetId, list => list.map(e => job.cloneIds.includes(e.id) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e));
         for (const id of job.movedBoards) await store.moveInto(id, boardId, boardCard).catch(() => {});
@@ -492,6 +492,7 @@ export default function Board({ boardId, commentId }) {
         job.movedBoards.push(id);
       }
       setCardInfo(ci => ({ ...ci, [targetId]: { ...(ci[targetId] || {}), count: ((ci[targetId] && ci[targetId].count) || 0) + items.filter(e => !e.containerId).length + job.movedBoards.length } }));
+      R.current.wantThumb = true; // this board's preview should show what's left
       save();
     } catch (e) {
       setDeleted(goneIds, false);
@@ -561,7 +562,8 @@ export default function Board({ boardId, commentId }) {
         ids.forEach(id => {
           const b = by[id];
           next[id] = { ...(ci[id] || {}), title: b ? b.title : (ci[id] && ci[id].title), count: b ? b.item_count : (ci[id] && ci[id].count),
-            thumb: thumbs[id] || (ci[id] && ci[id].thumb) || null, gone: !b && !(ci[id] && ci[id].title) };
+            // an emptied board keeps its last picture on file; show the plain card instead
+            thumb: (b && b.item_count === 0) ? null : (thumbs[id] || (ci[id] && ci[id].thumb) || null), gone: !b && !(ci[id] && ci[id].title) };
         });
         return next;
       });
