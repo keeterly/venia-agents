@@ -82,7 +82,8 @@ async function ensureLegacyBoard(boards) {
     title: 'Brainstorm board', parent_id: null,
     scene: { elements, appState: {}, legacyPending: cards.filter(c => c.kind === 'img') },
   };
-  try { await store.createBoard({ ...row, id: LEGACY_ID }); return true; } catch (e) { return false; }
+  // Brainstorm is shared across the brand, so its board starts shared too (Build 663).
+  try { await store.createBoard({ ...row, id: LEGACY_ID, everyone: 'edit' }); return true; } catch (e) { return false; }
 }
 
 function Home({ fresh = false }) {

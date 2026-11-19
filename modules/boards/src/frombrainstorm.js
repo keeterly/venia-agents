@@ -48,8 +48,10 @@ function goalsPlan(dump) {
 function groupsPlan(dump, map) {
   const byId = new Map(dump.filter(d => d && !isGoal(d)).map(d => [d.id, d]));
   const seen = new Set(), out = [];
-  (map && Array.isArray(map.groups) ? map.groups : []).forEach((g, gi) => {
-    const col = { bs: 'group:' + gi + ':' + String(g.title || 'Notes'), name: String(g.title || 'Notes') };
+  (map && Array.isArray(map.groups) ? map.groups : []).forEach((g) => {
+    // Keyed by the group's name, so Enigma regrouping or reordering doesn't
+    // make a second column; only a renamed group gets a new one.
+    const col = { bs: 'group:' + String(g.title || 'Notes').trim().toLowerCase(), name: String(g.title || 'Notes') };
     (g.ids || []).forEach(id => {
       const d = byId.get(id); if (!d || d.done || seen.has(id)) return;
       seen.add(id);
@@ -57,7 +59,7 @@ function groupsPlan(dump, map) {
     });
   });
   const loose = [...byId.values()].filter(d => !d.done && !seen.has(d.id) && String(d.t || '').trim());
-  loose.forEach(d => out.push({ bs: 'note:' + d.id, column: { bs: 'group:ungrouped', name: 'Not grouped yet' }, text: String(d.t).trim(), colour: d.color || NOTE_COLOURS[0].hex }));
+  loose.forEach(d => out.push({ bs: 'note:' + d.id, column: { bs: 'ungrouped', name: 'Not grouped yet' }, text: String(d.t).trim(), colour: d.color || NOTE_COLOURS[0].hex }));
   return out;
 }
 
