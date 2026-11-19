@@ -97,6 +97,38 @@ is the very same object as the STATE key, so reading through it changes
 nothing. Only reads go through offers: a module still never writes another
 module's keys, and the check counts any direct use that is left.
 
+## Sending work to another module: `VeniaHandoff` (Build 658)
+
+Reading another module's data goes through `VeniaOS.get`. Sending it work goes
+through the handoff layer, `VeniaHandoff` (also `VeniaOS.handoff`):
+
+- **Addresses.** Any record can be named `venia://<kind>/<id>`, with an
+  optional `#part` for where it lands (`venia://style/STY1#techpack`).
+  `VENIA_KINDS` says which module owns each kind. `VeniaHandoff.cardFor(addr)`
+  gives a small card for it (title, picture, Open) when its module is on.
+- **Accept lists.** A module says what it takes and where:
+  `VeniaHandoff.accept({ module, kind, into, label, deliver(pkg) })`.
+  `VeniaHandoff.targets(kind)` lists where a record can go right now, only
+  modules that are on, so Send to menus build themselves.
+- **Sending.** `VeniaHandoff.send({ from, kind, address, version, title,
+  snapshot, into })` checks both ends are on, writes a row to
+  `venia_handoffs` (a link, the version and a copy of what was sent), then
+  hands it to the receiver's `deliver`. A receiver shows it as waiting; it
+  never overwrites anything without a person tapping. The receiver calls
+  `VeniaHandoff.decide(id, 'accepted' | 'declined')`.
+- **The queue.** `venia_handoffs` is additive and append-only: rows are never
+  removed, and after sending only the decision can change (a trigger enforces
+  it). `VeniaHandoff.collect(module)` picks up handoffs sent from another
+  device or a framed module.
+
+The first handoffs:
+
+| From | Kind | Into | How |
+|---|---|---|---|
+| Dr4ft | pattern | a style's tech pack | the frame calls `window.veniaHandoff.send(...)` from `modules/pattern-cad/src/host.js`; the Pattern Card shows "Version N came in from Dr4ft" with Bring in, Not now and Put back |
+| Sales | line sheet | Boards | Edit in Boards: each page becomes an A4 landscape slide with the sheet's grid; linked cards keep prices, colours and sizes in step with Product; Present or Save as PDF gives the finished sheet |
+| Product | style, photo, material | Boards | Send to Board (Build 650), Add from VENIA (Build 657) |
+
 ## Brands and subscriptions
 
 Every brand is a row in `venia_tenants`; VENIA is `main`, the same id the

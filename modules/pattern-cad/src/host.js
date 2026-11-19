@@ -148,16 +148,57 @@
         return ask(tool, args);
       },
     };
+    // 3. SENDING A PATTERN TO VENIA OS (Build 658). The CAD calls
+    //    window.veniaHandoff.targets('pattern') to see where a pattern can go
+    //    (only modules that are on, e.g. [{module:'product', into:'techpack',
+    //    label:'Tech pack'}]) and window.veniaHandoff.send({ pattern, into })
+    //    to send one, where into is { styleId, part: 'techpack' } and pattern
+    //    is { id, name, version, baseSize, sizes, gradeRule, pieces:[{ name,
+    //    component, cut, material, grain, fused, notes }], picture (https),
+    //    files:[names] }. The shell checks and records it; the tech pack shows
+    //    it as waiting until someone brings it in. Nothing in VENIA OS changes
+    //    from here without that tap.
+    var hseq = 0, hwait = {};
+    window.addEventListener('message', function (e) {
+      if (e.origin !== location.origin || e.source !== window.parent || !e.data || e.data.source !== 'venia-os') return;
+      if (e.data.type !== 'pattern-cad:targets' && e.data.type !== 'pattern-cad:handoff') return;
+      var p = e.data.payload || {};
+      var w = hwait[p.id]; if (!w) return;
+      delete hwait[p.id];
+      w(p);
+    });
+    var hask = function (type, payload, wait) {
+      return new Promise(function (resolve) {
+        var id = 'h' + (++hseq);
+        hwait[id] = resolve;
+        setTimeout(function () { if (hwait[id]) { delete hwait[id]; resolve({ ok: false, timeout: true, message: 'VENIA OS didn\'t answer. Try again shortly.' }); } }, wait || 15000);
+        payload.id = id;
+        post(type, payload);
+      });
+    };
+    window.veniaHandoff = {
+      targets: function (kind) { return hask('pattern-cad:targets', { kind: kind || 'pattern' }, 8000).then(function (r) { return (r && r.targets) || []; }); },
+      send: function (o) {
+        o = o || {};
+        return hask('pattern-cad:handoff', { pattern: o.pattern || {}, into: o.into || {} }, 20000);
+      },
+    };
     // Only the style link is offered. 'sample' (Claude drafting a design plan)
     // is not answered here yet, so the CAD uses its on-device reader instead.
     var existing = window.claude;
     window.claude = {
       use: function (name) {
         if (name === 'mcp') return Promise.resolve(mcp);
+        if (name === 'venia-handoff') return Promise.resolve(window.veniaHandoff);
         if (existing && typeof existing.use === 'function') return existing.use(name);
         return Promise.resolve(null);
       },
     };
+  }
+
+  if (!embedded) {
+    var away = function () { return Promise.resolve({ ok: false, message: 'Open Dr4ft inside VENIA OS to send a pattern to a tech pack.' }); };
+    window.veniaHandoff = { targets: function () { return Promise.resolve([]); }, send: away };
   }
 
   // ── 1. styles kept in IndexedDB ──
