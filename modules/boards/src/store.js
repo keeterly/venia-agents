@@ -12,6 +12,7 @@
 // other module's tables and calls no other module's code.
 import { createClient } from '@supabase/supabase-js';
 import { get, set, del, createStore } from 'idb-keyval';
+import { countItems } from './elements.js';
 
 const idb = createStore('venia-boards', 'kv');
 const WS = 'main';
@@ -81,7 +82,7 @@ export const store = {
     const row = {
       id: id || uid('b'), workspace_id: WS, parent_id, title,
       scene: scene || { elements: [], appState: {} },
-      search_text: title, item_count: (scene && scene.elements ? scene.elements.length : 0),
+      search_text: title, item_count: (scene && scene.elements ? countItems(scene.elements) : 0),
       created_by: this.email || null, created_at: now(), updated_by: this.email || null, updated_at: now(), rev: 0,
     };
     if (this.mode === 'cloud') {

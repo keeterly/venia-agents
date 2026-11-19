@@ -51,6 +51,14 @@ export function paletteRow(x, y, colours) {
   return convertToExcalidrawElements(out);
 }
 
+// How many things a person would say are on a board: a palette, a group or a
+// labelled note is one thing; the sections and title a template starts with
+// are the board's layout, not things on it.
+export function countItems(elements) {
+  const live = elements.filter(e => e && !e.isDeleted && !e.containerId && e.type !== 'frame' && !(e.customData && e.customData.kind === 'title'));
+  return new Set(live.map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
+}
+
 // A titled frame around whatever is selected.
 export function frameAround(members, name = 'Group') {
   const [x1, y1, x2, y2] = getCommonBounds(members);
@@ -80,7 +88,7 @@ export const TEMPLATES = [
 export function templateElements(id) {
   if (id === 'moodboard') {
     return convertToExcalidrawElements([
-      { type: 'text', x: 0, y: -90, text: 'Moodboard', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' },
+      { type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Moodboard', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' },
       frame(0, 0, 760, 560, 'Mood'),
       frame(800, 0, 420, 260, 'Colour'),
       frame(800, 300, 420, 260, 'Material'),
@@ -91,7 +99,7 @@ export function templateElements(id) {
   }
   if (id === 'collection') {
     const cats = ['Outerwear', 'Tops', 'Bottoms', 'Dresses', 'Accessories'];
-    const out = [{ type: 'text', x: 0, y: -90, text: 'Collection plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
+    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Collection plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
     cats.forEach((c, i) => {
       out.push(frame(i * 300, 0, 280, 900, c));
       out.push({ ...base, type: 'rectangle', x: i * 300 + 20 + O, y: 30 + O, width: 240, height: 120, backgroundColor: '#F1ECE2', strokeColor: '#d9d3c7', label: { text: 'Look ' + (i + 1), fontSize: 16, fontFamily: SANS, textAlign: 'left', verticalAlign: 'top', strokeColor: '#111111' } });
@@ -110,7 +118,7 @@ export function templateElements(id) {
   }
   if (id === 'shoot') {
     const names = ['Concept', 'References', 'Location', 'Casting', 'Hair & make-up', 'Shot list'];
-    const out = [{ type: 'text', x: 0, y: -90, text: 'Shoot plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
+    const out = [{ type: 'text', customData: { kind: 'title' }, x: 0, y: -90, text: 'Shoot plan', fontSize: 40, fontFamily: SANS, strokeColor: '#111111' }];
     names.forEach((n, i) => out.push(frame((i % 3) * 520, Math.floor(i / 3) * 460, 500, 440, n)));
     return convertToExcalidrawElements(out);
   }

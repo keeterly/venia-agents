@@ -8,8 +8,8 @@ export const LEGACY_ID = 'b-brainstorm-board';
 
 function useRoute() {
   const read = () => {
-    const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?/);
-    if (m) return { view: 'board', id: m[1], comment: m[2] || null };
+    const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?(?:\/f\/([^/]+))?/);
+    if (m) { let find = null; try { find = m[3] ? decodeURIComponent(m[3]) : null; } catch (e) {} return { view: 'board', id: m[1], comment: m[2] || null, find }; }
     // "#/new": VENIA OS's Today asked for a new board straight away.
     return { view: 'home', fresh: /^#\/new\b/.test(window.location.hash || '') };
   };
@@ -19,10 +19,18 @@ function useRoute() {
 }
 export const go = (hash) => { window.location.hash = hash; };
 
+// The words around a search match on a board, so you can see what matched.
+function snippet(text, term, title) {
+  const t = String(text || ''); const body = title && t.startsWith(title) ? t.slice(title.length) : t;
+  const i = body.toLowerCase().indexOf(term.toLowerCase()); if (i < 0) return '';
+  const a = Math.max(0, i - 30), z = Math.min(body.length, i + term.length + 50);
+  return (a > 0 ? '…' : '') + body.slice(a, z).trim() + (z < body.length ? '…' : '');
+}
+
 export default function App() {
   const route = useRoute();
   return route.view === 'board'
-    ? <Board key={route.id} boardId={route.id} commentId={route.comment} />
+    ? <Board key={route.id} boardId={route.id} commentId={route.comment} find={route.find} />
     : <Home fresh={route.fresh} />;
 }
 
@@ -125,7 +133,7 @@ function Home({ fresh = false }) {
   function renderCard(b, prefix) {
     return (
             <div key={prefix + b.id} className={'card' + (overId === b.id && dragId && dragId !== b.id ? ' drop' : '')}
-              onClick={() => !trash && go('/b/' + b.id)}
+              onClick={() => !trash && go('/b/' + b.id + (q.trim() && !(b.title || '').toLowerCase().includes(q.trim().toLowerCase()) ? '/f/' + encodeURIComponent(q.trim()) : ''))}
               draggable={!trash && store.canEdit}
               onDragStart={e => { setDragId(b.id); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', b.id); }}
               onDragEnd={() => { setDragId(null); setOverId(null); }}
@@ -135,6 +143,7 @@ function Home({ fresh = false }) {
               <div className="thumb">{thumbs[b.id] && b.item_count !== 0 ? <img src={thumbs[b.id]} alt="" /> : <span className="thumb-empty">{(b.title || '?').slice(0, 1)}</span>}</div>
               <div className="card-foot">
                 <div className="card-title">{pins.has(b.id) && <span className="pin-mark" title="Pinned">●</span>}{b.title}</div>
+                {q.trim() && (() => { const s = snippet(b.search_text, q.trim(), b.title); return s ? <div className="card-hit">{s}</div> : null; })()}
                 <div className="card-meta">
                   {b.parent_id && byId[b.parent_id] && q ? <>in {byId[b.parent_id].title} · </> : null}
                   {b.item_count || 0} item{b.item_count === 1 ? '' : 's'}
