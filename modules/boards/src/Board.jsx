@@ -14,7 +14,7 @@ import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRic
 import { parasFromText, allHave, setAll, plainOf } from './rich.js';
 import { flattenCards } from './export.js';
 import { useTouchCanvas } from './touch.js';
-import { SlidesPanel, Presenter, printDeck } from './present.jsx';
+import { SlidesPanel, Presenter, printDeck, allSlides } from './present.jsx';
 import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
 import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
@@ -1019,8 +1019,11 @@ export default function Board({ boardId, commentId, find }) {
         const live = api.getSceneElements();
         let x0 = 0, y0 = 0;
         if (live.length) { x0 = Math.max(...live.map(e => e.x + (e.width || 0))) + 160; y0 = Math.min(...live.map(e => e.y)); }
-        const used = live.filter(e => (e.type === 'frame' || e.type === 'magicframe') && e.customData && typeof e.customData.slide === 'number').map(e => e.customData.slide);
-        const firstSlide = used.length ? Math.max(...used) + 1 : 0;
+        // The new pages go after every slide already on the board: number the
+        // existing ones in their current order (as Add slide does), then these.
+        const order = allSlides(live).map(f => f.id);
+        const slideAt = new Map(order.map((id, i) => [id, i]));
+        const firstSlide = order.length;
         const head = String(sheet.name || job.title || 'Line sheet');
         const sub = ['Wholesale line sheet', cur, sheet.delivery ? 'Delivery ' + sheet.delivery : ''].filter(Boolean).join(' · ');
         const add = [], files = [];
@@ -1062,7 +1065,9 @@ export default function Board({ boardId, commentId, find }) {
         }
         if (files.length) api.addFiles(files);
         noteCards(add);
-        api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), ...add], appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+        const kept = api.getSceneElementsIncludingDeleted().map(e => slideAt.has(e.id) && !(e.customData && e.customData.slide === slideAt.get(e.id))
+          ? newElementWith(e, { customData: { ...(e.customData || {}), slide: slideAt.get(e.id) } }) : e);
+        api.updateScene({ elements: [...kept, ...add], appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
         try { api.scrollToContent(add.filter(e => e.type === 'frame'), { fitToViewport: true, viewportZoomFactor: 0.9, animate: true }); } catch (e) {}
         setStatus(failed ? failed + (failed === 1 ? ' photo' : ' photos') + ' couldn’t be loaded, so ' + (failed === 1 ? 'it is' : 'they are') + ' a note'
           : 'Each page is a slide: Present or Save as PDF from Slides' + (job.linked ? '. Prices stay in step with Product' : ''));
