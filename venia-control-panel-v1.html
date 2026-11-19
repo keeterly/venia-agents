@@ -3609,7 +3609,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '661';
+  const BUILD = '662';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -28906,6 +28906,23 @@ function buildTodayFocus() {
     if (!t || t.done) return;
     items.push({ key: 'task|' + t.id, pri: t.pri || 'med', text: t.text, task: t.id });
   });
+  // ONE TASK LIST (Build 662). Brainstorm's quick tasks are the same kind of
+  // thing as these, so they show here too, and Brainstorm shows these. Each
+  // stays in its own list; nothing is copied. Goals and their steps, notes
+  // put off till later, and Brainstorm itself switched off are left out.
+  try {
+    if (!window.VeniaOS || VeniaOS.enabled('brainstorm')) {
+      const td = (function(){ const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); })();
+      (function(){ const l = window.VeniaOS ? VeniaOS.get('brainstorm.dump') : null; return Array.isArray(l) ? l : []; })().forEach(function(d){
+        if (!d || d.done || Array.isArray(d.children)) return;
+        if (d.snooze && d.snooze > td) return;
+        const txt = String(d.t || '').split('\n')[0].trim();
+        if (!txt) return;
+        items.push({ key: 'btask|' + d.id, pri: d.due && d.due <= td ? 'high' : 'med', text: txt, btask: d.id,
+                     meta: d.due ? (d.due < td ? 'overdue' : d.due === td ? 'today' : 'due ' + d.due) : '' });
+      });
+    }
+  } catch(e){}
   const order = { high: 0, med: 1, low: 2 };
   const colMap = {high:'var(--red)', med:'var(--amber)', low:'var(--muted)'};
   // ── TODAY YOU CAN ACT ON (Build 596) ─────────────────────────────
@@ -28932,6 +28949,7 @@ function buildTodayFocus() {
   // Where "Open" goes, by the kind of row (the key prefix), for rows that do
   // not carry their own destination.
   const FOCUS_GO = {
+    btask:  "dumpOpen()",
     pull:   "cpGoto('pr');setTimeout(function(){agNavGo('pr','pulls')},150)",
     buyer:  "cpGoto('sl');setTimeout(function(){agNavSl('buyers')},150)",
     quote:  "cpGoto('sl');setTimeout(function(){agNavSl('quotes')},150)",
@@ -28961,7 +28979,7 @@ function buildTodayFocus() {
       const k = String(i.key).split('|')[0];
       if (k === 'wholesale') i.sig = _day;
       else if (WEEKLY[k]) i.sig = _wk;
-      else if (k === 'task' || k === 'nag') i.sig = '';
+      else if (k === 'task' || k === 'btask' || k === 'nag') i.sig = '';
       else if (k === 'pull' && !/\|draft$/.test(i.key)) {
         const p = (VeniaOS.get('growth.pulls') || []).find(function (x) { return x && 'pull|' + x.id === i.key; });
         i.sig = p ? String(p.returnDate || '') : '';
@@ -28980,7 +28998,7 @@ function buildTodayFocus() {
   const GROUP_OF = { inv:'money', uncat:'money', po:'money', pull:'pulls', sample:'pulls',
     buyer:'outreach', 'buyers-more':'outreach', owed:'outreach', wholesale:'outreach', unreachable:'outreach',
     quote:'outreach', growth:'outreach', agleads:'outreach', tl:'production', cal:'production', gap:'production',
-    fc:'production', gate:'production', mk:'production', del:'orders', task:'mine', nag:'setup' };
+    fc:'production', gate:'production', mk:'production', del:'orders', task:'mine', btask:'mine', nag:'setup' };
   const groupOf = (i) => {
     const k = String(i.key || '').split('|')[0];
     if (k === 'po' && /\|(exf|ms)/.test(String(i.key))) return 'production';
@@ -29160,6 +29178,14 @@ window.todayDone = function(key){
   const i = todayItemByKey(key);
   if (!i) return;
   if (i.task) { todayTaskDone(i.task); return; }
+  if (i.btask) {
+    const d = ((window.VeniaOS && VeniaOS.get('brainstorm.dump')) || []).find(function (x) { return x && x.id === i.btask; });
+    if (d && !d.done) { d.done = true; d.doneAt = new Date().toISOString(); save(); }
+    buildTodayFocus();
+    try { if (window.dumpBadge) window.dumpBadge(); } catch(e){}
+    try { showToast('Done: ' + todayPlain(i.text || '').slice(0, 60), 'success'); } catch(e){}
+    return;
+  }
   if (i.buyer) {
     // Done on a follow-up means it happened: today becomes the last contact,
     // with a line in the buyer's history, which is also what keeps the
@@ -29314,6 +29340,22 @@ window.todayDraftPullDelete = function(id){
 window.todayTaskAdd = function(text){
   const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
   if (!t) return false;
+  // One list (Build 662): with Brainstorm on, a task added here is a
+  // Brainstorm quick task, so it shows in both places and has its tools
+  // (Later, a due date, turn it into a goal). Who added it rides along.
+  try {
+    if ((!window.VeniaOS || VeniaOS.enabled('brainstorm')) && typeof window.dumpCapture === 'function') {
+      const id = window.dumpCapture({ kind: 'task', text: t.slice(0, 200) });
+      if (id) {
+        let by0 = ''; try { by0 = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
+        const d = ((window.VeniaOS && VeniaOS.get('brainstorm.dump')) || []).find(function(x){ return x && x.id === id; });
+        if (d && by0) { d.by = by0; save(); }
+        try { buildTodayFocus(); } catch(e){}
+        try { logActivity('Added to your tasks: ' + t.slice(0, 80)); } catch(e){}
+        return true;
+      }
+    }
+  } catch(e){}
   if (!Array.isArray(STATE.todayTasks)) STATE.todayTasks = [];
   let by = ''; try { by = (typeof veniaWho === 'function' ? veniaWho() : '') || ''; } catch(e){}
   STATE.todayTasks.push({ id: 'tt' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
@@ -64104,7 +64146,8 @@ window.veniaModulesRender = async function(){
           return a.gi - b.gi;
         }).map(function(x){ return x.g; });
       var tasks = open.filter(function(i){ return !isGroup(i); });
-      if (!goals.length && !tasks.length && !done.length){
+      var fromToday = (STATE.todayTasks || []).filter(function(t){ return t && !t.done && !t.deleted && String(t.text || '').trim(); });
+      if (!goals.length && !tasks.length && !done.length && !fromToday.length){
         body = emptyState('🧠', 'Your mind, cleared', 'Type or speak anything above — an idea, a task, a goal.<br>A heading + steps becomes a goal; one line + <span style="color:var(--gold)">✦</span> lets Enigma build one.');
       } else {
         var lbl = function(t, right){ return '<div style="display:flex;align-items:center;justify-content:space-between;margin:2px 0 4px"><div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700">' + t + '</div>' + (right || '') + '</div>'; };
@@ -64147,8 +64190,16 @@ window.veniaModulesRender = async function(){
         };
         h += goals.length ? '<div>' + topGoals.map(function(i){ return goalRowRec(i, 0); }).join('') + '</div>'
           : '<div style="font-size:11.5px;color:var(--muted);padding:4px 0 10px;line-height:1.5">No goals yet — tap <strong style="color:var(--gold)">✦</strong> on a task to have Enigma shape one, or ＋ New goal.</div>';
-        h += lbl('Quick tasks');
-        h += tasks.length ? '<div class="dump-group">' + tasks.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + '</div>'
+        // One list (Build 662): tasks added on Today show here too.
+        var todayRow = function(t){
+          return '<div class="dump-row" data-today-task="' + esc(t.id) + '"><div style="display:flex;gap:10px;align-items:center;padding:12px 2px 12px 29px;border-bottom:1px solid var(--border)">'
+            + '<button onclick="todayTaskDone(\'' + esc(t.id) + '\');dumpTab(\'inbox\')" aria-label="Mark done" title="Mark done" style="width:22px;height:22px;flex-shrink:0;border:1.5px solid var(--ink);border-radius:50%;background:none;cursor:pointer;padding:0"></button>'
+            + '<span style="flex:1;min-width:0;font-size:13.5px;line-height:1.45;word-break:break-word">' + esc(t.text) + '</span>'
+            + '<span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);flex-shrink:0">' + (t.by ? esc(String(t.by).split('@')[0]) : 'Today') + '</span>'
+            + '</div></div>';
+        };
+        h += lbl('Tasks · the same list as Today');
+        h += (tasks.length || fromToday.length) ? '<div class="dump-group">' + tasks.map(function(i){ return '<div class="dump-row" data-id="' + i.id + '">' + row(i) + '</div>'; }).join('') + fromToday.map(todayRow).join('') + '</div>'
           : '<div style="font-size:11.5px;color:var(--muted);padding:4px 0">Nothing loose — capture above.</div>';
         h += '<div style="display:flex;gap:8px;margin-top:20px">'
           + '<button class="btn btn-ghost dump-map-btn" style="flex:1;min-height:46px;border-radius:0" onclick="dumpTab(\'map\')">▦ Canvas</button>'
@@ -64160,7 +64211,7 @@ window.veniaModulesRender = async function(){
             + '<span style="flex:1"></span><span style="font-size:12px;color:var(--muted)">' + (laterOpen ? '▾' : '▸') + '</span></button>';
           if (laterOpen){
             h += '<div class="dump-group">' + later.map(function(i){
-              return '<div style="display:flex;gap:10px;align-items:center;padding:12px 2px;border-bottom:1px solid var(--border)">'
+              return '<div style="display:flex;gap:10px;align-items:center;padding:12px 2px 12px 29px;border-bottom:1px solid var(--border)">'
                 + '<span style="flex:1;min-width:0;font-size:13px;color:var(--muted);line-height:1.45;word-break:break-word">' + esc(i.t) + '</span>'
                 + '<span style="font-size:10px;color:var(--muted);flex-shrink:0">' + esc(fmtDue(i.snooze)) + '</span>'
                 + '<button onclick="dumpWake(\'' + i.id + '\')" class="btn btn-ghost btn-sm" style="border-radius:8px;flex-shrink:0">↺ Now</button>'
