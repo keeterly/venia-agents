@@ -5,12 +5,26 @@ import { TEMPLATES, templateElements, legacyCardElements, boardCard } from './el
 import Board from './Board.jsx';
 import { NameBox } from './namebox.jsx';
 import { ImportSheet } from './importer.jsx';
+import { ViewOnly } from './share.jsx';
+
+// Who sees a board, in a word or two on its card (Build 661).
+function accessTag(b) {
+  if (store.mode !== 'cloud' || !b.everyone) return '';
+  const mine = String(b.owner || b.created_by || '').toLowerCase() === store.email;
+  if (!mine) return b.everyone === 'edit' ? '' : 'Shared with you';
+  if (b.everyone === 'edit') return '';
+  if (b.everyone === 'view') return 'Everyone can view';
+  return b.shared_with ? 'Shared with ' + b.shared_with : 'Private';
+}
 
 export const LEGACY_ID = 'b-brainstorm-board';
 
 function useRoute() {
   const read = () => {
     const m = (window.location.hash || '').match(/^#\/b\/([\w-]+)(?:\/c\/([\w-]+))?(?:\/f\/([^/]+))?/);
+    // "#/v/…": a view-only link someone was sent (Build 661)
+    const v = (window.location.hash || '').match(/^#\/v\/([a-f0-9]{32})\b/);
+    if (v) return { view: 'viewonly', token: v[1] };
     if (m) { let find = null; try { find = m[3] ? decodeURIComponent(m[3]) : null; } catch (e) {} return { view: 'board', id: m[1], comment: m[2] || null, find }; }
     // "#/import/…": another part of VENIA OS sent styles or a photo (Build 650).
     if (/^#\/import\b/.test(window.location.hash || '')) return { view: 'import', key: window.location.hash };
@@ -33,6 +47,7 @@ function snippet(text, term, title) {
 
 export default function App() {
   const route = useRoute();
+  if (route.view === 'viewonly') return <ViewOnly token={route.token} />;
   if (route.view === 'import') return <ImportSheet key={route.key} go={go} />;
   return route.view === 'board'
     ? <Board key={route.id} boardId={route.id} commentId={route.comment} find={route.find} />
@@ -95,6 +110,8 @@ function Home({ fresh = false }) {
 
   // Only the newest load may show: flipping to Trash and back quickly must not
   // leave the slower, older list on screen.
+  // no board is open on the list
+  store.boardRole = null;
   const loadSeq = useRef(0);
   const load = useCallback(async () => {
     const mine = ++loadSeq.current;
@@ -185,6 +202,7 @@ function Home({ fresh = false }) {
                   {b.item_count || 0} item{b.item_count === 1 ? '' : 's'}
                   {childCount(b.id) ? <> · {childCount(b.id)} board{childCount(b.id) > 1 ? 's' : ''} inside</> : null}
                   {' · '}{ago(b.updated_at)}
+                  {accessTag(b) ? <> · <span className="card-access">{accessTag(b)}</span></> : null}
                 </div>
               </div>
               {store.canEdit && <button className="card-menu" onClick={e => { e.stopPropagation(); setMenu(menu === prefix + b.id ? null : prefix + b.id); }} aria-label="Board options">⋯</button>}
