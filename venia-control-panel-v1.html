@@ -3574,7 +3574,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '657';
+  const BUILD = '658';
   const BUILD_DATE = '2026.11.19';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7408,6 +7408,9 @@ const MODULE_MANIFEST = {
     requires: ['core.catalog', 'core.fx', 'core.files', 'core.activity'],
     uses: ['sales.committedDemand', 'growth.pulls', 'growth.brandDocs'],
     provides: ['product.costing', 'product.line', 'product.drops', 'product.techPack'],
+    // Handoffs (Build 658): what this module takes from others, through the core.
+    accepts: ['pattern → a style\'s tech pack (from Dr4ft)'],
+    sends: ['style → Boards'],
     emits: ['product.style.saved', 'product.po.placed'],
     // venia_styles … venia_pom are the pre-module copies the old Supabase
     // integration still writes; they retire in a later stage, not before.
@@ -7431,6 +7434,7 @@ const MODULE_MANIFEST = {
     requires: ['core.catalog', 'core.brand', 'core.mail', 'core.fx', 'core.activity'],
     uses: ['money.cash', 'money.watch', 'growth.coverage', 'product.costing'],
     provides: ['sales.buyers', 'sales.followUps', 'sales.committedDemand', 'sales.receivables'],
+    sends: ['line sheet → Boards (Build 658)'],
     emits: ['sales.quote.sent', 'sales.order.confirmed', 'sales.payment.recorded'],
     tables: ['venia_agents', 'venia_agent_leads', 'venia_agent_sessions'],
     server: ['stripe', 'mail'], edge: ['agent-portal'],
@@ -7452,6 +7456,7 @@ const MODULE_MANIFEST = {
     requires: ['core.assistant', 'core.files'],
     uses: ['product.line', 'money.snapshot', 'sales.buyers', 'growth.pulls'],
     provides: ['brainstorm.capture'],
+    accepts: ['style, photo, material → a board', 'line sheet → a board of A4 slides (Build 658)'],
     emits: ['brainstorm.item.added'],
     // Boards (Build 612) belongs to this module: its own app, hosted in a frame,
     // with its own manifest at modules/boards/module.json. Switching Brainstorm
@@ -7465,7 +7470,9 @@ const MODULE_MANIFEST = {
   settings: {
     tier: 'core', version: '1.0.0',
     requires: [], uses: [], provides: ['core.mail', 'core.google'], emits: [],
-    tables: [], server: [], edge: ['team'], mcp: [],
+    // venia_handoffs (Build 658) is the core's handoff queue; every module
+    // reaches it through VeniaHandoff, never directly.
+    tables: ['venia_handoffs'], server: [], edge: ['team'], mcp: [],
   },
   legacy: {
     // Retires once VENIA_CC_DB is split up; never offered to a subscriber.
@@ -7505,7 +7512,8 @@ const VENIA_APP_MODULES = {
     label: 'Dr4ft', tier: 'addon', version: '0.1.0', entitlement: 'pattern-cad',
     owns: 'pattern drafting, grading, markers, pattern cards and factory files (DXF), with a link to CLO',
     requires: ['core.auth'], uses: ['core.catalog', 'product.line'],
-    provides: [], emits: [], tables: [], server: ['pattern-cad'], edge: [], mcp: [],
+    provides: [], sends: ['pattern → a style\'s tech pack (Build 658)'],
+    emits: [], tables: [], server: ['pattern-cad'], edge: [], mcp: [],
     frames: [{ id: 'patterncad', path: '/pattern-cad', manifest: 'modules/pattern-cad/module.json' }],
   },
 };
@@ -7643,6 +7651,172 @@ const VeniaOS = (function(){
 })();
 window.VeniaOS = VeniaOS;
 window.VENIA_OFFERS = VENIA_OFFERS;
+
+// ── HANDOFFS: how one module sends work to another (Build 658) ─────────────
+// The shared layer from the connected-modules plan. Three parts:
+//   1. ADDRESSES. Every record a module owns can be named the same way,
+//      venia://<kind>/<id>, and the core knows which module owns each kind.
+//   2. SEND AND ACCEPT LISTS. A module says what it accepts and where it puts
+//      it (Product: "a pattern, into a style's tech pack"). Send to menus and
+//      pickers are built from these lists, so no module needs to know another
+//      exists, and a module that is off simply isn't offered.
+//   3. THE QUEUE. Each handoff is also a row in venia_handoffs: a link to the
+//      original, the version sent and a copy of what was sent, so the
+//      receiver keeps working even if the sender is later switched off, and a
+//      handoff sent from another device (or from a module in its own frame)
+//      still arrives. The receiver marks it accepted or declined; nothing is
+//      ever removed.
+// A handoff never overwrites anything by itself: the receiver shows it as
+// waiting, and a person brings it in.
+const VENIA_KINDS = {
+  style:     { module: 'product',    label: 'style' },
+  material:  { module: 'product',    label: 'material' },
+  pattern:   { module: 'patterncad', label: 'pattern' },
+  board:     { module: 'brainstorm', label: 'board' },
+  linesheet: { module: 'sales',      label: 'line sheet' },
+  buyer:     { module: 'sales',      label: 'buyer' },
+  order:     { module: 'sales',      label: 'order' },
+};
+window.VENIA_KINDS = VENIA_KINDS;
+const VeniaHandoff = (function(){
+  const accepts = [];               // { module, kind, into, label, deliver(pkg) }
+  const cards = Object.create(null); // kind -> fn(id) -> { title, sub, image, open }
+  function address(kind, id, part){
+    return 'venia://' + kind + '/' + encodeURIComponent(String(id)) + (part ? '#' + part : '');
+  }
+  function parse(a){
+    const m = /^venia:\/\/([a-z][a-z0-9-]*)\/([^#\s]+)(?:#([A-Za-z0-9_-]+))?$/.exec(String(a || ''));
+    if (!m) return null;
+    let id = m[2]; try { id = decodeURIComponent(id); } catch(e){}
+    return { kind: m[1], id: id, part: m[3] || '' };
+  }
+  // Is a module on for this brand and this person? Dr4ft has its own switch.
+  function moduleOn(id){
+    if (!id) return false;
+    if (id === 'patterncad') return typeof window.veniaPatternCadOn === 'function' ? !!window.veniaPatternCadOn() : true;
+    return VeniaOS.enabled(id);
+  }
+  // The names the database uses for a module.
+  function dbModule(id){ return id === 'patterncad' ? 'pattern-cad' : id; }
+  function shellModule(id){ return id === 'pattern-cad' ? 'patterncad' : id; }
+  function accept(def){
+    if (!def || !def.module || !def.kind || !def.into || typeof def.deliver !== 'function') return;
+    if (accepts.some(a => a.module === def.module && a.kind === def.kind && a.into === def.into)) return;
+    accepts.push(def);
+  }
+  // Where a record of this kind can go right now: only modules that are on.
+  function targets(kind){
+    return accepts.filter(a => a.kind === kind && moduleOn(a.module))
+      .map(a => ({ module: a.module, into: a.into, label: a.label || a.into }));
+  }
+  // A small card for any address, from the module that owns it (if it's on).
+  function card(kind, fn){ if (kind && typeof fn === 'function') cards[kind] = fn; }
+  function cardFor(addr){
+    const p = parse(addr); if (!p) return null;
+    const k = VENIA_KINDS[p.kind]; if (!k || !moduleOn(k.module) || !cards[p.kind]) return null;
+    try { return cards[p.kind](p.id, p) || null; } catch(e){ return null; }
+  }
+  async function me(){
+    try {
+      const sb = window.__sbClient; if (!sb) return '';
+      const s = await sb.auth.getSession();
+      return String((s && s.data && s.data.session && s.data.session.user && s.data.session.user.email) || '').toLowerCase();
+    } catch(e){ return ''; }
+  }
+  function tidy(pkg){
+    // A copy that can be stored: plain data, no functions, a sensible size.
+    let snap = {};
+    try { snap = JSON.parse(JSON.stringify(pkg.snapshot || {})); } catch(e){ snap = {}; }
+    if (JSON.stringify(snap).length > 400000) throw new Error('That is too big to hand over in one go.');
+    return snap;
+  }
+  // Send one record to one place. pkg: { from, kind, address, version, title,
+  // snapshot, into }  (into = where it lands, e.g. venia://style/STY1#techpack)
+  async function send(pkg){
+    pkg = pkg || {};
+    const k = VENIA_KINDS[pkg.kind];
+    if (!k) return { ok: false, message: 'VENIA OS doesn’t know that kind of record.' };
+    if (!parse(pkg.address)) return { ok: false, message: 'That record has no address.' };
+    if (!moduleOn(pkg.from)) return { ok: false, message: 'The module it comes from isn’t switched on.' };
+    const into = parse(pkg.into);
+    const target = into && accepts.find(a => a.kind === pkg.kind && a.into === into.part && moduleOn(a.module)
+      && VENIA_KINDS[into.kind] && VENIA_KINDS[into.kind].module === a.module);
+    if (!target) return { ok: false, message: 'Nothing that’s switched on can take that here.' };
+    let snapshot;
+    try { snapshot = tidy(pkg); } catch(e){ return { ok: false, message: e.message }; }
+    // The receiver can turn it away before anything is recorded (no such style).
+    if (typeof target.check === 'function') {
+      let c = null; try { c = target.check(pkg); } catch(e){ c = { ok: false, message: 'It can’t go there.' }; }
+      if (c && c.ok === false) return c;
+    }
+    const row = { from_module: dbModule(pkg.from), to_module: dbModule(target.module), kind: pkg.kind,
+      address: pkg.address, into_ref: pkg.into, version: pkg.version == null ? null : String(pkg.version).slice(0, 40),
+      title: String(pkg.title || '').slice(0, 200), snapshot: snapshot, status: 'sent',
+      tenant_id: window.VENIA_TENANT || 'main' };
+    // The queue row is the record and the cross-device copy. If it can't be
+    // written (offline), the handoff still lands here, and says so.
+    let id = null, queued = false;
+    try {
+      const sb = window.__sbClient, email = await me();
+      if (sb && email) {
+        row.sent_by = email;
+        const r = await sb.from('venia_handoffs').insert(row).select('id,sent_at').single();
+        if (!r.error && r.data) { id = r.data.id; queued = true; row.sent_at = r.data.sent_at; }
+      }
+    } catch(e){}
+    const delivered = Object.assign({ id: id || ('local-' + Date.now().toString(36)), queued: queued,
+      sentAt: row.sent_at || new Date().toISOString(), sentBy: row.sent_by || '' }, pkg, { snapshot: snapshot });
+    let res;
+    try { res = await target.deliver(delivered); } catch(e){ res = { ok: false, message: (e && e.message) || 'It didn’t arrive.' }; }
+    res = res || { ok: true };
+    // Recorded but not taken: close it in the queue, so it isn't offered again.
+    if (!res.ok && queued) decide(id, 'declined');
+    try { VeniaOS.emit('handoff:sent', { kind: pkg.kind, address: pkg.address, into: pkg.into, ok: !!res.ok }); } catch(e){}
+    return Object.assign({ id: delivered.id, queued: queued }, res);
+  }
+  // The receiver's answer. Local handoffs (never queued) have nothing to mark.
+  async function decide(id, status){
+    if (!id || String(id).indexOf('local-') === 0) return true;
+    if (status !== 'accepted' && status !== 'declined') return false;
+    try {
+      const sb = window.__sbClient, email = await me();
+      if (!sb || !email) return false;
+      const r = await sb.from('venia_handoffs').update({ status: status, decided_by: email, decided_at: new Date().toISOString() })
+        .eq('id', id).eq('status', 'sent');
+      return !r.error;
+    } catch(e){ return false; }
+  }
+  // Handoffs still waiting for a module, newest first (another device, or a
+  // module in its own frame, may have sent them). Each is offered to the
+  // module's own deliver(), which knows whether it already has it.
+  async function collect(moduleId){
+    if (!moduleOn(moduleId)) return 0;
+    try {
+      const sb = window.__sbClient; if (!sb) return 0;
+      const r = await sb.from('venia_handoffs').select('id,from_module,to_module,kind,address,into_ref,version,title,snapshot,sent_by,sent_at')
+        .eq('tenant_id', window.VENIA_TENANT || 'main').eq('to_module', dbModule(moduleId)).eq('status', 'sent')
+        .order('sent_at', { ascending: true }).limit(50);
+      if (r.error || !r.data) return 0;
+      let n = 0;
+      for (const h of r.data) {
+        const into = parse(h.into_ref);
+        const a = into && accepts.find(x => x.module === moduleId && x.kind === h.kind && x.into === into.part);
+        if (!a) continue;
+        try {
+          const res = await a.deliver({ id: h.id, queued: true, from: shellModule(h.from_module), kind: h.kind, address: h.address,
+            into: h.into_ref, version: h.version, title: h.title, snapshot: h.snapshot || {}, sentBy: h.sent_by, sentAt: h.sent_at, collected: true });
+          if (res && res.ok && !res.already) n++;
+        } catch(e){}
+      }
+      return n;
+    } catch(e){ return 0; }
+  }
+  return { address: address, parse: parse, accept: accept, targets: targets, card: card, cardFor: cardFor,
+           send: send, decide: decide, collect: collect, moduleOn: moduleOn,
+           accepts: function(){ return accepts.map(a => ({ module: a.module, kind: a.kind, into: a.into, label: a.label })); } };
+})();
+window.VeniaHandoff = VeniaHandoff;
+VeniaOS.handoff = VeniaHandoff;
 // Which module rows a person may WRITE.
 //
 // `roles` is window.VENIA_MY_ROLES — what they HOLD — and not
@@ -19507,8 +19681,9 @@ function renderTechPackWork(s) {
 
   <!-- PATTERN CARD (patternmaker depth — collapsed by default) -->
   <div class="tps" data-sec="pat">
-    ${secHead('pat','⑥ Pattern Card','<span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:400">Patternmaker</span>')}
+    ${secHead('pat','⑥ Pattern Card', s.patternIncoming ? '<span style="font-size:10px;color:#000;letter-spacing:1px;text-transform:uppercase;font-weight:700">● New version from Dr4ft</span>' : '<span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;font-weight:400">Patternmaker</span>')}
     ${secBody('pat')}
+      ${tpPatternLinkHTML(s)}
 
       <!-- Pattern meta -->
       <div class="tpg" style="margin-bottom:12px">
@@ -20261,6 +20436,159 @@ function tpAddPiece(styleId, component='Shell', matKey=null) {
   syncPatternToBOM(styleId);
   renderTechPack(styleId);
 }
+
+// ── PATTERNS INTO TECH PACKS (Build 658) ───────────────────────────────────
+// Product accepts a pattern from Dr4ft into a style's tech pack, through the
+// handoff layer. It arrives WAITING on the Pattern Card ("Version 3 came in
+// from Dr4ft"); nothing on the card changes until someone taps Bring in.
+// Bringing it in fills base size, grade rule, pattern version and the piece
+// list from the pattern, keeps each piece's material where the name and part
+// match, and keeps what was there before so one tap puts it back.
+const TP_PART_NAMES = ['Shell','Lining','Interlining','Facing','Underlining','Interfacing'];
+function tpPatternClean(snap){
+  snap = snap || {};
+  const txt = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n || 120);
+  const pieces = (Array.isArray(snap.pieces) ? snap.pieces : []).slice(0, 300).map(p => {
+    p = p || {};
+    const comp = TP_PART_NAMES.find(c => c.toLowerCase() === String(p.component || p.part || '').trim().toLowerCase()) || 'Shell';
+    return { name: txt(p.name, 80), component: comp, cut: txt(p.cut == null ? '' : p.cut, 12),
+      material: txt(p.material || p.fabric, 80), grain: txt(p.grain, 40), fused: !!p.fused, notes: txt(p.notes, 300) };
+  });
+  const pic = String(snap.picture || '').trim();
+  return { id: txt(snap.id, 80), name: txt(snap.name, 120), version: txt(snap.version, 40), baseSize: txt(snap.baseSize, 30),
+    sizes: Array.isArray(snap.sizes) ? snap.sizes.map(x => txt(x, 12)).filter(Boolean).join(',') : txt(snap.sizes, 120),
+    gradeRule: txt(snap.gradeRule, 80), pieces: pieces,
+    picture: /^https:\/\//i.test(pic) ? pic.slice(0, 1000) : '',
+    files: (Array.isArray(snap.files) ? snap.files : []).slice(0, 10).map(f => txt(f && (f.name || f), 80)).filter(Boolean) };
+}
+VeniaHandoff.accept({
+  module: 'product', kind: 'pattern', into: 'techpack', label: 'Tech pack',
+  check: function(pkg){
+    const into = VeniaHandoff.parse(pkg.into);
+    return into && (STATE.styles || []).some(x => x.id === into.id) ? { ok: true } : { ok: false, message: 'That style isn’t in the line list.' };
+  },
+  deliver: async function(pkg){
+    const into = VeniaHandoff.parse(pkg.into);
+    const s = into && (STATE.styles || []).find(x => x.id === into.id);
+    if (!s) return { ok: false, message: 'That style isn’t in the line list.' };
+    const snap = tpPatternClean(pkg.snapshot);
+    const ver = String(pkg.version == null ? snap.version : pkg.version);
+    if (s.patternIncoming && s.patternIncoming.id === pkg.id) return { ok: true, already: true };
+    if (s.patternLink && s.patternLink.handoffId === pkg.id) return { ok: true, already: true };
+    // An older one still waiting is replaced by the newer one.
+    const older = s.patternIncoming && s.patternIncoming.id;
+    s.patternIncoming = { id: pkg.id, address: pkg.address, version: ver, title: String(pkg.title || snap.name || 'Pattern').slice(0, 120),
+      from: pkg.from || 'patterncad', sentAt: pkg.sentAt || new Date().toISOString(), sentBy: pkg.sentBy || '', snapshot: snap };
+    s.updatedAt = new Date().toISOString();
+    save();
+    if (older && older !== pkg.id) VeniaHandoff.decide(older, 'declined');
+    try { logActivity('Pattern ' + s.patternIncoming.title + ' v' + ver + ' sent to the tech pack of ' + (s.name || s.styleId)); } catch(e){}
+    try { if (TP_STYLE_ID === s.id && document.getElementById('page-techpack')?.classList.contains('active')) renderTechPack(s.id); } catch(e){}
+    if (!pkg.collected) { try { toast('Pattern waiting on the ' + (s.name || 'style') + ' tech pack'); } catch(e){} }
+    return { ok: true, styleName: s.name || '', styleCode: s.styleId || '' };
+  },
+});
+VeniaHandoff.card('style', function(id){
+  const s = (VeniaOS.get('core.catalog') || []).find(x => x.id === id || x.styleId === id);
+  if (!s) return null;
+  return { title: s.name || 'Untitled style', sub: [s.styleId, s.season, s.status].filter(Boolean).join(' · '),
+    image: /^https:\/\//i.test(String(s.photoUrl || '')) ? s.photoUrl : '',
+    open: function(){ cpGoto('plm'); setTimeout(function(){ try { openDp(s.id); } catch(e){} }, 150); } };
+});
+// The waiting pattern, or where the card's pattern came from, at the top of
+// the Pattern Card.
+function tpPatternLinkHTML(s){
+  const e = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const day = (t) => { const d = new Date(t); return isNaN(d) ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
+  const inc = s.patternIncoming, link = s.patternLink;
+  let out = '';
+  if (inc) {
+    const sn = inc.snapshot || {};
+    const n = (sn.pieces || []).length, had = (s.patternPieceList || []).length;
+    out += `<div style="margin-bottom:14px;padding:12px 14px;border:1px solid #000;background:#fff">
+      <div style="font-size:12px;color:#000"><strong>Version ${e(inc.version)} of ${e(inc.title)}</strong> came in from Dr4ft${inc.sentAt ? ' on ' + e(day(inc.sentAt)) : ''}.</div>
+      <div style="font-size:11px;color:#555;margin-top:4px">${n} piece${n === 1 ? '' : 's'}${sn.baseSize ? ' · base size ' + e(sn.baseSize) : ''}${sn.gradeRule ? ' · ' + e(sn.gradeRule) : ''}${sn.sizes ? ' · sizes ' + e(sn.sizes) : ''}. Bringing it in replaces the ${had} piece${had === 1 ? '' : 's'} on this card; nothing changes until you do.</div>
+      <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="tpPatternBringIn('${e(s.id)}')">Bring in</button>
+        <button class="btn btn-ghost btn-sm" onclick="tpPatternDecline('${e(s.id)}')">Not now</button>
+      </div></div>`;
+  }
+  if (link) {
+    out += `<div style="margin-bottom:14px;padding:8px 11px;background:#fafafa;border:1px solid #eee;font-size:10.5px;color:#555;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span>From Dr4ft: <strong style="color:#000">${e(link.title)}</strong>, version ${e(link.version)}${link.at ? ', brought in ' + e(day(link.at)) : ''}</span>
+      ${(typeof window.veniaPatternCadOn === 'function' && window.veniaPatternCadOn()) ? `<button class="btn btn-ghost btn-sm" onclick="veniaOpenPatternCad()">Open Dr4ft</button>` : ''}
+      ${s.patternBefore ? `<button class="btn btn-ghost btn-sm" onclick="tpPatternUndo('${e(s.id)}')" title="Put back the pattern card as it was before this was brought in">Put back</button>` : ''}
+    </div>`;
+  }
+  return out;
+}
+window.tpPatternBringIn = function(styleId){
+  const s = (STATE.styles || []).find(x => x.id === styleId); if (!s || !s.patternIncoming) return;
+  const inc = s.patternIncoming, sn = inc.snapshot || {};
+  const had = (s.patternPieceList || []).length;
+  if (had && !confirm('Bring in version ' + inc.version + ' of ' + inc.title + '?\n\nIts ' + (sn.pieces || []).length + ' pieces replace the ' + had
+    + ' on this card, and its base size and grade rule fill in. Materials stay on pieces with the same name and part. You can put it back afterwards.')) return;
+  const now = new Date().toISOString();
+  s.patternBefore = { at: now, baseSize: s.baseSize || '', gradeRule: s.gradeRule || '', patternVer: s.patternVer || '',
+    patternLoc: s.patternLoc || '', patternPieceList: JSON.parse(JSON.stringify(s.patternPieceList || [])),
+    patternLink: s.patternLink ? JSON.parse(JSON.stringify(s.patternLink)) : null };
+  const old = s.patternPieceList || [];
+  const mats = VeniaOS.get('product.materials') || [];
+  s.patternPieceList = (sn.pieces || []).map(p => {
+    const same = old.find(o => String(o.name || '').trim().toLowerCase() === p.name.toLowerCase() && o.component === p.component);
+    const byName = !same && p.material ? mats.find(m => String(m.name || '').trim().toLowerCase() === p.material.toLowerCase()) : null;
+    return { name: p.name, component: p.component, cut: p.cut || '2', grain: p.grain || 'Straight grain',
+      matId: same ? (same.matId || null) : (byName ? byName.id : null),
+      fabric: same ? (same.fabric || '') : (byName ? byName.name : p.material),
+      lotNo: same ? (same.lotNo || null) : null,
+      notes: [p.fused ? 'Fused' : '', p.notes].filter(Boolean).join('. ') };
+  });
+  if (sn.baseSize) s.baseSize = sn.baseSize;
+  if (sn.gradeRule) s.gradeRule = sn.gradeRule;
+  s.patternVer = 'Dr4ft v' + inc.version;
+  if (!s.patternLoc) s.patternLoc = 'Dr4ft: ' + inc.title;
+  s.patternLink = { address: inc.address, version: inc.version, title: inc.title, handoffId: inc.id, at: now,
+    sentAt: inc.sentAt, picture: sn.picture || '', files: sn.files || [] };
+  delete s.patternIncoming;
+  s.updatedAt = now;
+  try { syncPatternToBOM(s.id); } catch(e){}
+  save();
+  VeniaHandoff.decide(inc.id, 'accepted');
+  try { logActivity('Brought in ' + inc.title + ' v' + inc.version + ' on the ' + (s.name || s.styleId) + ' tech pack'); } catch(e){}
+  renderTechPack(s.id);
+  toast('Pattern brought in. Put back undoes it.');
+};
+window.tpPatternDecline = function(styleId){
+  const s = (STATE.styles || []).find(x => x.id === styleId); if (!s || !s.patternIncoming) return;
+  const id = s.patternIncoming.id;
+  delete s.patternIncoming;
+  s.updatedAt = new Date().toISOString();
+  save();
+  VeniaHandoff.decide(id, 'declined');
+  renderTechPack(s.id);
+};
+window.tpPatternUndo = function(styleId){
+  const s = (STATE.styles || []).find(x => x.id === styleId); if (!s || !s.patternBefore) return;
+  if (!confirm('Put the Pattern Card back as it was before ' + ((s.patternLink && s.patternLink.title) || 'the pattern') + ' was brought in?')) return;
+  const b = s.patternBefore;
+  s.baseSize = b.baseSize; s.gradeRule = b.gradeRule; s.patternVer = b.patternVer; s.patternLoc = b.patternLoc;
+  s.patternPieceList = b.patternPieceList || [];
+  if (b.patternLink) s.patternLink = b.patternLink; else delete s.patternLink;
+  delete s.patternBefore;
+  s.updatedAt = new Date().toISOString();
+  try { syncPatternToBOM(s.id); } catch(e){}
+  save();
+  try { logActivity('Put back the Pattern Card on ' + (s.name || s.styleId)); } catch(e){}
+  renderTechPack(s.id);
+};
+// Patterns sent while this device was away (or from Dr4ft in its own frame,
+// or another device) wait in the queue; pick them up once signed in, and
+// again whenever the page comes back.
+function tpCollectPatterns(){
+  try { if (window.__sbClient && VeniaOS.enabled('product')) VeniaHandoff.collect('product'); } catch(e){}
+}
+setTimeout(tpCollectPatterns, 6000);
+document.addEventListener('visibilitychange', function(){ if (!document.hidden) tpCollectPatterns(); });
 
 function tpReassignMat(styleId, oldMatKey, newMatId) {
   // Reassign all pieces that had oldMatKey to the new material
@@ -26372,7 +26700,9 @@ function veniaBoardsStyleItem(s){
   const photo = /^https:\/\//i.test(String(s.photoUrl || '').trim()) ? String(s.photoUrl).trim() : '';
   return { styleId: s.id, code: s.styleId || '', name: s.name || 'Untitled style', image: photo,
            colors: s.colors || '', retail: Number(s.retail) || 0, status: s.status || '',
-           category: s.category || '', delivery: s.delivery || s.drop || '', season: s.season || '' };
+           category: s.category || '', delivery: s.delivery || s.drop || '', season: s.season || '',
+           // For line-sheet boards (Build 658): the selling price and the run. Never a cost.
+           wholesale: Number(s.wholesale) || 0, sizes: Array.isArray(s.sizes) ? s.sizes.join(',') : String(s.sizes || '') };
 }
 window.veniaBoardsStyleItem = veniaBoardsStyleItem;
 function veniaBoardsMaterialItem(m){
@@ -26564,6 +26894,32 @@ window.addEventListener('message', function(e){
   }
   if (e.data.type === 'pattern-cad:storage-error') {
     try { if (typeof showToast === 'function') showToast('Dr4ft could not save on this device. Download a backup from its File menu.'); } catch(err){}
+    return;
+  }
+  // Handoffs from Dr4ft (Build 658): the frame asks where a pattern can go,
+  // then sends one. It goes through the core's handoff layer like any other
+  // module, so it lands only in a module that is on and accepts patterns, is
+  // recorded in the queue, and waits on the tech pack until someone brings it in.
+  const reply = (type, payload) => { try { fr.contentWindow.postMessage({ source: 'venia-os', type: type, payload: payload }, location.origin); } catch(err){} };
+  if (e.data.type === 'pattern-cad:targets') {
+    const q = e.data.payload || {};
+    reply('pattern-cad:targets', { id: q.id, targets: window.veniaPatternCadOn() ? VeniaHandoff.targets(String(q.kind || 'pattern')) : [] });
+    return;
+  }
+  if (e.data.type === 'pattern-cad:handoff') {
+    const q = e.data.payload || {};
+    const done = (r) => reply('pattern-cad:handoff', Object.assign({ id: q.id }, r));
+    if (!window.veniaPatternCadOn()) { done({ ok: false, message: 'Dr4ft isn’t switched on for you here.' }); return; }
+    const pat = q.pattern || {};
+    const want = String((q.into && q.into.styleId) || '').trim();
+    const st = want && (VeniaOS.get('core.catalog') || []).find(x => x.id === want || String(x.styleId || '') === want);
+    if (!st) { done({ ok: false, message: 'Pick a VENIA OS style to send it to.' }); return; }
+    if (!String(pat.id || '').trim()) { done({ ok: false, message: 'Save the pattern first, so it has a name to link to.' }); return; }
+    VeniaHandoff.send({ from: 'patterncad', kind: 'pattern', address: VeniaHandoff.address('pattern', String(pat.id).trim()),
+      version: pat.version, title: pat.name || 'Pattern', snapshot: pat,
+      into: VeniaHandoff.address('style', st.id, String((q.into && q.into.part) || 'techpack')) })
+      .then(done).catch(function(err){ done({ ok: false, message: (err && err.message) || 'It didn’t arrive.' }); });
+    return;
   }
 });
 
@@ -26658,6 +27014,14 @@ document.addEventListener('visibilitychange', function(){ if (!document.hidden) 
 window.addEventListener('message', function(e){
   if (e.origin !== location.origin || !e.data || e.data.source !== 'venia-module') return;
   if (e.data.type === 'boards:mentions-seen') { window.veniaBoardMentions(); return; }
+  // A line sheet made into a board (Build 658): Sales keeps the link, so the
+  // sheet can open its board again. Only a board id and a title cross over.
+  if (e.data.type === 'boards:linesheet-board') {
+    if (!window.veniaBoardsLinkOn() || typeof window.slLinesheetBoardSaved !== 'function') return;
+    const p = e.data.payload || {};
+    window.slLinesheetBoardSaved(String(p.key || ''), String(p.boardId || ''), String(p.title || ''));
+    return;
+  }
   // Connected modules (Build 650): only while both Product and Boards are on.
   if (e.data.type === 'boards:open-style') {
     if (!window.veniaBoardsLinkOn()) return;
@@ -41484,6 +41848,60 @@ window.slOrderReset = function(){
   slOrderRender();
 };
 
+// ── A LINE SHEET, EDITED IN BOARDS (Build 658) ─────────────────────────────
+// Build the sheet here as always, then "Edit in Boards": each page becomes an
+// A4 landscape slide on a board, with the sheet's own grid, and each style a
+// card with its photo, name, code, colours, sizes and prices. The live sheet
+// arrives linked (prices stay in step with Product); a frozen sheet arrives as
+// a copy, at the prices it was frozen with. Present or Save as PDF on the
+// board gives the finished sheet. Only while Sales, Product and Boards are on;
+// Sales keeps the board's id so the sheet can open it again.
+function slLsBoardKey(sheetId){ return sheetId ? 'sheet:' + sheetId : 'season:' + (SL_LS_SEASON || 'all'); }
+function slLsBoardOf(key){ const m = (VeniaOS.get('sales.prefs') || {}).linesheetBoards || {}; return m[key] || null; }
+function slLsBoardsOn(){ return typeof window.veniaBoardsLinkOn === 'function' && window.veniaBoardsLinkOn() && VeniaOS.enabled('sales'); }
+window.slLinesheetBoardSaved = function(key, boardId, title){
+  if (!/^(sheet|season):[^\s]{1,120}$/.test(key) || !/^[A-Za-z0-9_-]{1,80}$/.test(boardId)) return;
+  if (!STATE.slPrefs) STATE.slPrefs = {};
+  const m = STATE.slPrefs.linesheetBoards = STATE.slPrefs.linesheetBoards || {};
+  m[key] = { boardId: boardId, title: String(title || '').slice(0, 120), at: new Date().toISOString() };
+  save();
+  try { logActivity('Line sheet made into a board' + (title ? ': ' + title : '')); } catch(e){}
+};
+window.slEditInBoards = function(sheetId){
+  if (!slLsBoardsOn()) { showToast('Boards is not switched on for this workspace.'); return; }
+  const grid = (typeof slVlsGrid === 'function') ? (slVlsGrid(SL_VLS.perPage, SL_VLS.cols) || {}) : {};
+  const https = (u) => /^https:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '';
+  let items, sheet;
+  if (sheetId) {
+    const l = (STATE.slLinesheets || []).find(x => x.id === sheetId); if (!l) return;
+    items = (l.styles || []).map(r => ({ styleId: r.styleId || '', code: r.code || '', name: r.name || '', image: https(r.photo),
+      colors: r.colors || '', sizes: Array.isArray(r.sizes) ? r.sizes.join(',') : String(r.sizes || ''), wholesale: Number(r.wholesale) || 0,
+      retail: Number(r.retail) || 0, category: r.category || '', season: r.season || '' }));
+    sheet = { key: slLsBoardKey(sheetId), name: l.name || 'Line sheet', season: l.season || '', currency: l.currency || 'USD',
+      delivery: l.delivery || '', frozen: true, perPage: SL_VLS.perPage, cols: grid.cols || 0 };
+  } else {
+    const season = (SL_LS_SEASON && SL_LS_SEASON !== 'all') ? SL_LS_SEASON : '';
+    const cal = season ? ((VeniaOS.get('core.seasonCal') || {})[season] || {}) : {};
+    items = slLsStyles().map(veniaBoardsStyleItem);
+    sheet = { key: slLsBoardKey(null), name: (season || 'All seasons') + ' line sheet', season: season, currency: 'USD',
+      delivery: cal.deliveryStart ? cal.deliveryStart + (cal.deliveryEnd ? ' to ' + cal.deliveryEnd : '') : '',
+      frozen: false, perPage: SL_VLS.perPage, cols: grid.cols || 0 };
+  }
+  if (!items.length) { showToast('No styles on this sheet yet'); return; }
+  window.veniaSendToBoards({ source: 'linesheet', layout: 'linesheet', title: sheet.name, sheet: sheet, linkedDefault: !sheet.frozen, items: items });
+};
+window.slOpenLinesheetBoard = function(sheetId){
+  const b = slLsBoardOf(slLsBoardKey(sheetId));
+  if (b && typeof window.veniaOpenBoards === 'function') window.veniaOpenBoards(b.boardId);
+};
+function slLsBoardButtons(sheetId, cls){
+  if (!slLsBoardsOn()) return '';
+  const b = slLsBoardOf(slLsBoardKey(sheetId));
+  const arg = sheetId ? "'" + String(sheetId).replace(/[^A-Za-z0-9_.-]/g, '') + "'" : 'null';
+  return `<button class="ag-btn ag-btn-ghost ${cls || 'ag-btn-sm'}" onclick="slEditInBoards(${arg})" title="Each page becomes an A4 landscape slide on a board, to edit freely and present or save as a PDF">&#x25A6; Edit in Boards</button>`
+    + (b ? `<button class="ag-btn ag-btn-ghost ${cls || 'ag-btn-sm'}" onclick="slOpenLinesheetBoard(${arg})" title="Open the board made from this sheet${b.title ? ': ' + slEsc(b.title) : ''}">Open board</button>` : '');
+}
+
 function agBuildLineSheetsSection() {
   if (!STATE.slLinesheets) STATE.slLinesheets = [];
   const seasons = (typeof rpSeasons === 'function') ? rpSeasons() : [];
@@ -41528,6 +41946,7 @@ function agBuildLineSheetsSection() {
             <div style="display:flex;gap:6px;flex-wrap:wrap">
               <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slPrintLinesheetSnap('${l.id}')">Print</button>
               <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="slLinesheetOrderForm('${l.id}')">Order form</button>
+              ${slLsBoardButtons(l.id)}
               <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slDeleteLinesheet('${l.id}')" title="Delete snapshot">✕</button>
             </div>
           </div>`).join('')}
@@ -41541,6 +41960,7 @@ function agBuildLineSheetsSection() {
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slOrderOpen()" title="Arrange the categories, and the pieces inside one — every export reads it">&#x21C5; Running order</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slLsOpen()" title="One row per style, every number in one table — choose which prices it carries">&#x21D3; Export list</button>
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slVlsOpen()" title="Landscape, photo first, a few styles per page">&#x25A6; Export visual</button>
+        ${slLsBoardButtons(null)}
         <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="slFreezeLinesheet()" title="Snapshot this sheet — versioned, immutable, order forms come from it">❄ Freeze</button>
         <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="agentSend('sl','Generate a full wholesale line sheet for ${slEsc(seasonLabel)}. For each style include: style number, name, description, wholesale price, retail price, available colors, sizes, and estimated delivery date. Format it clearly for a wholesale buyer. VENIA voice.')">&#x25C8; Generate with Agent</button>
       </div>

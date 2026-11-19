@@ -21,7 +21,7 @@ import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './co
 import { nameOf } from './store.js';
 import { FindPanel } from './find.jsx';
 import { NameBox } from './namebox.jsx';
-import { pendingKey, styleCaption, groupName, materialCaption } from './importer.jsx';
+import { pendingKey, styleCaption, groupName, materialCaption, lineSheetCaption } from './importer.jsx';
 import { useProductLink, ProductPicker } from './product.jsx';
 
 const BG = '#F7F6F2';
@@ -920,6 +920,7 @@ export default function Board({ boardId, commentId, find }) {
   // into sections. Linked ones keep the record's id and update when the board
   // opens. Used by Send to Board (from Product) and Add from VENIA (from here).
   function placeJob(job) {
+    if (job.layout === 'linesheet') { placeLineSheet(job); return; }
     (async () => {
       const items = job.items.slice(0, 300);
       setBusy(items.length > 1 ? `Adding ${items.length} to the board…` : 'Adding it to the board…');
@@ -985,6 +986,92 @@ export default function Board({ boardId, commentId, find }) {
     })();
   }
 
+  // A line sheet from Sales (Build 658): each page of the sheet becomes an A4
+  // landscape section, set up as a slide (so Present and Save as PDF give the
+  // finished sheet), with the sheet's name at the top, its styles in the
+  // sheet's own grid and the page number at the foot. Each style is a photo
+  // with its name, code, colours, sizes and prices under it; linked ones stay
+  // in step with Product. Pages land to the right of anything already here.
+  function placeLineSheet(job) {
+    (async () => {
+      const items = job.items.slice(0, 300);
+      const sheet = job.sheet || {};
+      const cur = sheet.currency || 'USD';
+      const per = Math.max(1, Math.min(12, Number(sheet.perPage) || 3));
+      const cols = Math.max(1, Math.min(per, Number(sheet.cols) || (per <= 4 ? per : Math.ceil(per / 2))));
+      const rows = Math.ceil(per / cols);
+      const pageCount = Math.ceil(items.length / per);
+      setBusy(`Making ${pageCount === 1 ? 'one page' : pageCount + ' pages'}…`);
+      try {
+        const pics = new Array(items.length).fill(null);
+        let next = 0;
+        await Promise.all([0, 1, 2, 3].map(async () => {
+          while (next < items.length) {
+            const i = next++; const it = items[i];
+            if (!it.image) continue;
+            try { const blob = await fetchImage(it.image); if (blob) pics[i] = await prepareImage(blob); } catch (e) {}
+          }
+        }));
+        const W = 1123, H = 794, M = 40, HEAD = 64, FOOT = 28, G = 24, CAP = 92;
+        const CW = (W - M * 2 - (cols - 1) * G) / cols;
+        const CH = (H - M * 2 - HEAD - FOOT - (rows - 1) * G) / rows;
+        const IH = Math.max(80, CH - CAP - 8);
+        const live = api.getSceneElements();
+        let x0 = 0, y0 = 0;
+        if (live.length) { x0 = Math.max(...live.map(e => e.x + (e.width || 0))) + 160; y0 = Math.min(...live.map(e => e.y)); }
+        const used = live.filter(e => (e.type === 'frame' || e.type === 'magicframe') && e.customData && typeof e.customData.slide === 'number').map(e => e.customData.slide);
+        const firstSlide = used.length ? Math.max(...used) + 1 : 0;
+        const head = String(sheet.name || job.title || 'Line sheet');
+        const sub = ['Wholesale line sheet', cur, sheet.delivery ? 'Delivery ' + sheet.delivery : ''].filter(Boolean).join(' · ');
+        const add = [], files = [];
+        let failed = 0;
+        for (let pg = 0; pg < pageCount; pg++) {
+          const fx = x0 + pg * (W + 80), fy = y0;
+          const [frame] = convertToExcalidrawElements([{ type: 'frame', x: fx || 0.5, y: fy || 0.5, width: W, height: H, name: head + ' · page ' + (pg + 1), children: [] }]);
+          frame.customData = { size: 'a4l', slide: firstSlide + pg, linesheet: sheet.key || undefined };
+          add.push(frame);
+          const fid = { frameId: frame.id };
+          const [t1] = convertToExcalidrawElements([{ type: 'text', x: fx + M, y: fy + M - 8, text: head, fontSize: 26, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#111111', customData: { kind: 'linesheet-head' } }]);
+          const [t2] = convertToExcalidrawElements([{ type: 'text', x: fx + M, y: fy + M + 26, text: sub, fontSize: 14, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#6f6a62', customData: { kind: 'linesheet-head' } }]);
+          const [t3] = convertToExcalidrawElements([{ type: 'text', x: fx + W - M - 60, y: fy + H - M + 4, text: (pg + 1) + ' / ' + pageCount, fontSize: 13, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#6f6a62', customData: { kind: 'linesheet-foot' } }]);
+          add.push({ ...t1, ...fid }, { ...t2, ...fid }, { ...t3, ...fid });
+          items.slice(pg * per, pg * per + per).forEach((it, k) => {
+            const i = pg * per + k;
+            const cx = fx + M + (k % cols) * (CW + G), cy = fy + M + HEAD + Math.floor(k / cols) * (CH + G);
+            const tag = { styleId: it.styleId || undefined, linked: !!(job.linked && it.styleId) || undefined };
+            const words = lineSheetCaption(it, cur);
+            const g = 'g' + Math.random().toString(36).slice(2, 10);
+            const img = pics[i];
+            if (img) {
+              const id = uid('f');
+              files.push({ id, dataURL: img.dataURL, mimeType: img.mimeType, created: Date.now() });
+              const sc = Math.min(CW / img.width, IH / img.height);
+              const w = Math.round(img.width * sc), h = Math.round(img.height * sc);
+              const [pic] = convertToExcalidrawElements([{ type: 'image', fileId: id, x: cx + (CW - w) / 2, y: cy + (IH - h), width: w, height: h,
+                customData: { kind: 'style', source: it.image, ...tag } }]);
+              add.push({ ...pic, groupIds: [g], ...fid });
+            } else {
+              if (it.image) failed++;
+              const els = note(cx, cy, 'No photo yet', NOTE_COLOURS[1].hex, CW, IH);
+              add.push(...els.map(e => ({ ...e, ...fid, groupIds: [g] })));
+            }
+            const [cap] = convertToExcalidrawElements([{ type: 'text', x: cx, y: cy + IH + 10, text: words,
+              fontSize: 15, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#111111', customData: { kind: 'linesheet-caption', cur, ...tag } }]);
+            if (cap.text) add.push({ ...cap, groupIds: [g], ...fid });
+          });
+        }
+        if (files.length) api.addFiles(files);
+        noteCards(add);
+        api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), ...add], appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+        try { api.scrollToContent(add.filter(e => e.type === 'frame'), { fitToViewport: true, viewportZoomFactor: 0.9, animate: true }); } catch (e) {}
+        setStatus(failed ? failed + (failed === 1 ? ' photo' : ' photos') + ' couldn’t be loaded, so ' + (failed === 1 ? 'it is' : 'they are') + ' a note'
+          : 'Each page is a slide: Present or Save as PDF from Slides' + (job.linked ? '. Prices stay in step with Product' : ''));
+        save();
+      } catch (e) { setStatus('Couldn’t make all the pages: ' + (e.message || e)); }
+      finally { setBusy(''); }
+    })();
+  }
+
   // Linked style cards ask VENIA OS for the style as it is now, and take its
   // name, colourway, price and stage. Nothing else on the card changes, and the
   // line list is never changed from here.
@@ -1000,9 +1087,10 @@ export default function Board({ boardId, commentId, find }) {
       let changed = false;
       const next = all.map(e => {
         if (e.isDeleted || e.type !== 'text') return e;
-        const sid = (e.customData && e.customData.linked && e.customData.kind === 'style-caption' && e.customData.styleId) || (e.containerId && linkedRect.get(e.containerId));
+        const lsCap = e.customData && e.customData.linked && e.customData.kind === 'linesheet-caption' && e.customData.styleId;
+        const sid = lsCap || (e.customData && e.customData.linked && e.customData.kind === 'style-caption' && e.customData.styleId) || (e.containerId && linkedRect.get(e.containerId));
         const st = sid && by[sid]; if (!st) return e;
-        const t = styleCaption(st);
+        const t = lsCap ? lineSheetCaption({ ...st, code: st.code }, e.customData.cur) : styleCaption(st);
         if (e.originalText === t || e.text === t) return e;
         changed = true;
         return newElementWith(e, { text: t, originalText: t });
