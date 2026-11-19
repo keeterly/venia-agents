@@ -66,6 +66,17 @@ shell and the frame talk only by `postMessage` with `source: 'venia-module'`.
 Its tables carry `workspace_id` (the brand) and check access through one SQL
 helper, so they can follow the core's per-brand rules.
 
+### Pattern CAD (Build 633)
+
+The pattern drafting CAD is a frame of Product (`modules/pattern-cad`) with
+its own brand switch, `pattern-cad` in `venia_entitlements`, so it can be sold
+on its own; it also needs Product on. Its code lives in its own private
+repository, `keeterly/venia-pattern-cad`, and never in this one: the
+`pattern-cad` function serves it, at the commit pinned by
+`modules/pattern-cad/scripts/sync.mjs`, only to a signed-in Product member. It keeps its styles on the device in IndexedDB, never in the shell's
+localStorage, and reads styles from the shell (no costs) for its style link.
+Handing patterns to Tech Pack waits on the shared hand-off contract.
+
 ## Reaching another module: `VeniaOS`
 
 ```js
