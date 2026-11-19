@@ -143,13 +143,14 @@ function RichNote({ el, api, canEdit }) {
   const [editing, setEditing] = useState(null);   // null, or how to start: { range, then }
   const bg = el.backgroundColor || '#F1ECE2';
   const parasKey = JSON.stringify(d.paras || []);
-  const wasEditing = useRef(false);
+  const shown = useRef(null);     // the words the box shows now
+  const pending = useRef(null);   // words just saved, until the board catches up
 
-  // shown words follow the saved ones, except while you type (and just after,
-  // when the editor already shows what is being saved)
+  // shown words follow the saved ones, except while you type
   useLayoutEffect(() => {
-    const just = wasEditing.current && !editing; wasEditing.current = !!editing;
-    if (!editing && !just && box.current) box.current.innerHTML = htmlOf(d.paras);
+    if (editing || !box.current) return;
+    if (pending.current) { if (parasKey !== pending.current) return; pending.current = null; }
+    if (shown.current !== parasKey) { box.current.innerHTML = htmlOf(d.paras); shown.current = parasKey; }
   }, [parasKey, !!editing]);
 
   // the note grows to fit its words, as a plain note does
@@ -181,18 +182,22 @@ function RichNote({ el, api, canEdit }) {
   }, [editing]);
 
   const save = (how) => {
-    if (!api || !box.current) return;
+    if (!api || !box.current) return null;
     const paras = parasFromDom(box.current);
     const cur = api.getSceneElementsIncludingDeleted().find(e => e.id === el.id);
-    if (!cur || cur.isDeleted) return;
+    if (!cur || cur.isDeleted) return null;
     const need = Math.max(cur.height, Math.ceil(box.current.offsetHeight));
     const same = JSON.stringify(paras) === JSON.stringify(cur.customData.paras || []);
-    if (same && need === cur.height) return;
+    if (same && need === cur.height) return paras;
     const next = newElementWith(cur, { height: need, ...(same ? {} : { customData: { ...cur.customData, paras, text: plainOf(paras) } }) });
     api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => e.id === el.id ? next : e), captureUpdate: how });
+    return paras;
   };
   const done = () => {
-    save(CaptureUpdateAction.IMMEDIATELY);
+    const paras = save(CaptureUpdateAction.IMMEDIATELY);
+    // show exactly what was saved (the browser's own editing leaves extra
+    // empty lines and wrappers behind)
+    if (paras && box.current) { box.current.innerHTML = htmlOf(paras); shown.current = pending.current = JSON.stringify(paras); }
     setEditing(null);
     window.dispatchEvent(new CustomEvent(RICH_EDITING, { detail: { id: null, was: el.id } }));
   };
