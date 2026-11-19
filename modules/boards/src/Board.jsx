@@ -4,7 +4,7 @@ import {
   convertToExcalidrawElements, restoreElements, reconcileElements, getSceneVersion,
   exportToBlob, viewportCoordsToSceneCoords, sceneCoordsToViewportCoords, newElementWith, FONT_FAMILY,
 } from '@excalidraw/excalidraw';
-import { store, uid } from './store.js';
+import { store, uid, dataURLToBlob } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { go, NewBoard, LEGACY_ID } from './App.jsx';
 import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements } from './elements.js';
@@ -44,8 +44,12 @@ export default function Board({ boardId, commentId }) {
   const [panel, setPanel] = useState(null);       // 'note' | 'arrange' | 'board' | 'link'
   const [tools, setTools] = useState(false);       // phone: the Add sheet is open
   const [dropping, setDropping] = useState(false); // something is being dragged over the board
-  const [stackOn, setStackOn] = useState(null);    // id of the image or board an image is held over
+  const [stackOn, setStackOn] = useState(null);    // { id, armed }: what a picture is held over
   const [undoStack, setUndoStack] = useState(null);// { text, undo } after a stack
+  const [ghosts, setGhosts] = useState(null);      // pictures flying into a new board card
+  const [cardInfo, setCardInfo] = useState({});    // board id -> { title, count, thumb }
+  const [naming, setNaming] = useState(null);      // a board just made: name it, or undo
+  const [drawing, setDrawing] = useState(false);   // phone: the drawing tools are showing
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
   const [rows, setRows] = useState([]);           // comments, flat
@@ -69,7 +73,10 @@ export default function Board({ boardId, commentId }) {
         const files = await store.loadFiles(boardId);
         R.current.rev = row.rev || 0;
         (await store.knownFileIds(boardId)).forEach(id => R.current.uploaded.add(id));
-        const elements = restoreElements(row.scene && row.scene.elements || [], null);
+        // Board cards open with a double tap, not a link: a link made the
+        // browser's link editor pop up on every tap.
+        const raw = (row.scene && row.scene.elements || []).map(e => (e && e.customData && e.customData.kind === 'board' && e.link) ? { ...e, link: null } : e);
+        const elements = restoreElements(raw, null);
         R.current.savedVersion = getSceneVersion(elements);
         R.current.thumbVersion = R.current.savedVersion;
         R.current.legacyPending = (row.scene && row.scene.legacyPending) || [];
@@ -290,8 +297,14 @@ export default function Board({ boardId, commentId }) {
       if (!t || t.id !== st.target) {
         clearTimeout(st.t);
         st.target = t ? t.id : null; st.armed = false; st.me = me ? me.id : null;
-        setStackOn(null);
-        if (t) st.t = setTimeout(() => { if (R.current.stack.target === t.id) { R.current.stack.armed = true; setStackOn(t.id); } }, 450);
+        // A soft outline straight away, so you can see what you're over;
+        // it firms up (and grows a touch) once you've held there a moment.
+        setStackOn(t ? { id: t.id, armed: false } : null);
+        if (t) st.t = setTimeout(() => {
+          if (R.current.stack.target !== t.id) return;
+          R.current.stack.armed = true; setStackOn({ id: t.id, armed: true });
+          try { navigator.vibrate && navigator.vibrate(12); } catch (e) {}
+        }, 300);
       }
       return;
     }
@@ -305,61 +318,157 @@ export default function Board({ boardId, commentId }) {
       if (t && t.id === target) stackInto(me, t);
     }
   }
+
+  // Where a scene rectangle sits on screen, inside the canvas.
+  function rectOf(el, a = api) {
+    const st = a.getAppState();
+    const p = sceneCoordsToViewportCoords({ sceneX: el.x, sceneY: el.y }, st);
+    const z = st.zoom.value;
+    return { left: p.x - st.offsetLeft, top: p.y - st.offsetTop, width: el.width * z, height: el.height * z };
+  }
+  // The pictures fly into the card, so it's clear where they went.
+  function flyInto(pics, card) {
+    const to = rectOf(card);
+    const gs = pics.map((p, i) => ({ key: p.el.id + i, src: p.src, from: rectOf(p.el), to }));
+    setGhosts({ items: gs, go: false });
+    requestAnimationFrame(() => requestAnimationFrame(() => setGhosts(g => g && { ...g, go: true })));
+    setTimeout(() => setGhosts(null), 520);
+  }
+
   async function stackInto(me, target) {
     const a = api; if (!a) return;
     const files = a.getFiles();
     const fileOf = (el) => files[el.fileId] && { id: el.fileId, dataURL: files[el.fileId].dataURL, mimeType: files[el.fileId].mimeType, created: files[el.fileId].created };
     const picCopy = (el, x, y) => convertToExcalidrawElements([{ type: 'image', fileId: el.fileId, x, y, width: el.width, height: el.height, customData: el.customData }])[0];
-    const hide = (ids) => a.updateScene({
-      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: true }) : e),
+    const setDeleted = (ids, deleted) => a.updateScene({
+      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: deleted }) : e),
       captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-    const unhide = (ids, extraGone = []) => a.updateScene({
-      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: false }) : extraGone.includes(e.id) ? newElementWith(e, { isDeleted: true }) : e),
-      captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-    try {
-      if (target.type === 'image') {
-        setBusy('Making a board…');
-        const f1 = fileOf(target), f2 = fileOf(me);
-        if (!f1 || !f2) throw new Error('a picture is still loading');
+    if (target.type === 'image') {
+      const f1 = fileOf(target), f2 = fileOf(me);
+      if (!f1 || !f2) { setStatus('A picture is still loading; try again in a moment'); return; }
+      // Everything you see happens at once; the saving follows behind it.
+      const b = { id: uid('b'), title: 'Untitled board' };
+      const card = boardCard(target.x, target.y, b);
+      const thumbUrl = await collage([f1, f2]);
+      setCardInfo(ci => ({ ...ci, [b.id]: { title: b.title, count: 2, thumb: thumbUrl } }));
+      flyInto([{ el: target, src: f1.dataURL }, { el: me, src: f2.dataURL }], card[0]);
+      setDeleted([me.id, target.id], true);
+      addEls(card);
+      const job = { cancelled: false, made: false };
+      setNaming({ id: b.id, cardId: card[0].id, title: b.title, undo: () => {
+        job.cancelled = true;
+        setDeleted([me.id, target.id], false);
+        setDeleted(card.map(c => c.id), true);
+        if (job.made) store.trash(b.id).catch(() => {});
+        save();
+      } });
+      try {
         const pics = [picCopy(target, 0, 0), picCopy(me, target.width + 24, 0)];
-        const b = await store.createBoard({ title: 'Untitled board', parent_id: boardId,
+        await store.createBoard({ id: b.id, title: b.title, parent_id: boardId,
           scene: { elements: pics, appState: { viewBackgroundColor: a.getAppState().viewBackgroundColor } } });
-        try { await store.saveFile(b.id, f1); if (f2.id !== f1.id) await store.saveFile(b.id, f2); }
-        catch (e) { try { await store.trash(b.id); } catch (_) {} throw e; }
-        hide([me.id, target.id]);
-        const card = boardCard(target.x, target.y, b);
-        addEls(card);
+        try {
+          await store.saveFile(b.id, f1); if (f2.id !== f1.id) await store.saveFile(b.id, f2);
+          if (thumbUrl) await store.saveThumb(b.id, dataURLToBlob(thumbUrl));
+        } catch (e) { try { await store.trash(b.id); } catch (_) {} throw e; }
+        job.made = true;
+        // Undone while it was still saving: put the new board straight in Trash.
+        if (job.cancelled) { await store.trash(b.id).catch(() => {}); return; }
         save();
-        setUndoStack({ text: 'Made a board from 2 pictures', undo: async () => {
-          unhide([me.id, target.id], card.map(c => c.id));
-          try { await store.trash(b.id); } catch (_) {}
-          save();
-        } });
-      } else {
-        const id = target.customData.boardId;
-        setBusy('Moving it in…');
-        const f = fileOf(me); if (!f) throw new Error('the picture is still loading');
-        let ok = false;
-        for (let i = 0; i < 3 && !ok; i++) {
-          const row = await store.loadBoard(id);
-          if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
-          const els = (row.scene && row.scene.elements || []).filter(e => !e.isDeleted);
-          const right = els.length ? Math.max(...els.map(e => e.x + (e.width || 0))) + 24 : 0;
-          const top = els.length ? Math.min(...els.map(e => e.y)) : 0;
-          const scene = { ...(row.scene || {}), elements: [...(row.scene && row.scene.elements || []), picCopy(me, right, top)] };
-          await store.saveFile(id, f);
-          const res = await store.saveScene(id, scene, row.rev || 0, { item_count: els.length + 1 });
-          ok = !res.conflict;
-        }
-        if (!ok) throw new Error('someone else is editing that board; try again');
-        hide([me.id]);
-        save();
-        setUndoStack({ text: 'Moved into ' + (cardWords(target) || 'the board'), undo: null });
+      } catch (e) {
+        setNaming(null);
+        if (job.cancelled) return;
+        setDeleted([me.id, target.id], false);
+        setDeleted(card.map(c => c.id), true);
+        setStatus('Couldn\'t make the board: ' + (e.message || e));
       }
-    } catch (e) { setStatus('Couldn\'t do that: ' + (e.message || e)); }
-    finally { setBusy(''); }
+      return;
+    }
+    // into a board that's already here
+    const id = target.customData.boardId;
+    const f = fileOf(me); if (!f) { setStatus('The picture is still loading; try again in a moment'); return; }
+    flyInto([{ el: me, src: f.dataURL }], target);
+    setDeleted([me.id], true);
+    const title = (cardInfo[id] && cardInfo[id].title) || 'the board';
+    setUndoStack({ text: 'Moved into ' + title, undo: null });
+    try {
+      let ok = false, count = 0;
+      for (let i = 0; i < 3 && !ok; i++) {
+        const row = await store.loadBoard(id);
+        if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
+        const els = (row.scene && row.scene.elements || []).filter(e => !e.isDeleted);
+        const right = els.length ? Math.max(...els.map(e => e.x + (e.width || 0))) + 24 : 0;
+        const top = els.length ? Math.min(...els.map(e => e.y)) : 0;
+        const scene = { ...(row.scene || {}), elements: [...(row.scene && row.scene.elements || []), picCopy(me, right, top)] };
+        await store.saveFile(id, f);
+        count = els.length + 1;
+        const res = await store.saveScene(id, scene, row.rev || 0, { item_count: count });
+        ok = !res.conflict;
+      }
+      if (!ok) throw new Error('someone else is editing that board; try again');
+      setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), count } }));
+      save();
+    } catch (e) {
+      setDeleted([me.id], false);
+      setUndoStack(null);
+      setStatus('Couldn\'t move it in: ' + (e.message || e));
+    }
   }
-  useEffect(() => { if (!undoStack) return; const t = setTimeout(() => setUndoStack(null), 8000); return () => clearTimeout(t); }, [undoStack]);
+  useEffect(() => { if (!undoStack) return; const t = setTimeout(() => setUndoStack(null), 6000); return () => clearTimeout(t); }, [undoStack]);
+
+  // A small square collage of up to four pictures, for a board card.
+  async function collage(fs) {
+    try {
+      const S = 360, imgs = await Promise.all(fs.slice(0, 4).map(f => new Promise((res) => {
+        const i = new Image(); i.onload = () => res(i); i.onerror = () => res(null); i.src = f.dataURL; })));
+      const ok = imgs.filter(Boolean); if (!ok.length) return null;
+      const c = document.createElement('canvas'); c.width = S; c.height = Math.round(S * 0.625);
+      const g = c.getContext('2d'); g.fillStyle = '#efede8'; g.fillRect(0, 0, c.width, c.height);
+      const cells = ok.length === 1 ? [[0, 0, c.width, c.height]]
+        : ok.length === 2 ? [[0, 0, c.width / 2 - 1, c.height], [c.width / 2 + 1, 0, c.width / 2 - 1, c.height]]
+        : ok.length === 3 ? [[0, 0, c.width / 2 - 1, c.height], [c.width / 2 + 1, 0, c.width / 2 - 1, c.height / 2 - 1], [c.width / 2 + 1, c.height / 2 + 1, c.width / 2 - 1, c.height / 2 - 1]]
+        : [[0, 0, c.width / 2 - 1, c.height / 2 - 1], [c.width / 2 + 1, 0, c.width / 2 - 1, c.height / 2 - 1], [0, c.height / 2 + 1, c.width / 2 - 1, c.height / 2 - 1], [c.width / 2 + 1, c.height / 2 + 1, c.width / 2 - 1, c.height / 2 - 1]];
+      ok.forEach((im, k) => {
+        const [x, y, w, h] = cells[k];
+        const r = Math.max(w / im.width, h / im.height);
+        const sw = w / r, sh = h / r;
+        g.drawImage(im, (im.width - sw) / 2, (im.height - sh) / 2, sw, sh, x, y, w, h);
+      });
+      return c.toDataURL('image/jpeg', 0.85);
+    } catch (e) { return null; }
+  }
+
+  async function nameBoard(n, title) {
+    title = String(title || '').trim() || 'Untitled board';
+    setNaming(null);
+    setCardInfo(ci => ({ ...ci, [n.id]: { ...(ci[n.id] || {}), title } }));
+    // the card's own label, for anyone without the picture preview
+    const a = api;
+    if (a) a.updateScene({
+      elements: a.getSceneElementsIncludingDeleted().map(e => e.containerId === n.cardId && e.type === 'text'
+        ? newElementWith(e, { text: '▦  ' + title, originalText: '▦  ' + title }) : e),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    try { await store.rename(n.id, title); } catch (e) { setStatus('Couldn\'t rename it: ' + (e.message || e)); }
+    save();
+  }
+
+  // ── board cards: a picture of what's inside, a name and a count ─────────
+  const loadCardInfo = useCallback(async (ids) => {
+    if (!ids.length) return;
+    try {
+      const [list, thumbs] = await Promise.all([store.listBoards(), store.thumbs(ids)]);
+      const by = Object.fromEntries(list.map(b => [b.id, b]));
+      setCardInfo(ci => {
+        const next = { ...ci };
+        ids.forEach(id => {
+          const b = by[id];
+          next[id] = { ...(ci[id] || {}), title: b ? b.title : (ci[id] && ci[id].title), count: b ? b.item_count : (ci[id] && ci[id].count),
+            thumb: thumbs[id] || (ci[id] && ci[id].thumb) || null, gone: !b && !(ci[id] && ci[id].title) };
+        });
+        return next;
+      });
+    } catch (e) {}
+  }, []);
+  function openCard(id) { if (!id) return; save(); go('/b/' + id); }
 
   // ── columns keep themselves stacked ──────────────────────────────────────
   const tidyColumns = useCallback(() => {
@@ -372,6 +481,10 @@ export default function Board({ boardId, commentId }) {
     const ids = Object.keys(appState.selectedElementIds || {}).filter(k => appState.selectedElementIds[k]);
     const picked = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
     if (store.canEdit) watchStack(elements, appState, picked);
+    const cardIds = elements.filter(e => !e.isDeleted && e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => e.customData.boardId);
+    const ck = cardIds.join(',');
+    if (ck !== R.current.cardKey) { R.current.cardKey = ck; const fresh = cardIds.filter(id => !R.current.cardSeen || !R.current.cardSeen.has(id));
+      R.current.cardSeen = new Set(cardIds); if (fresh.length) loadCardInfo(fresh); }
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
     setSel(s => (s.count === picked.length && s.oneImage === oneImage) ? s : { count: picked.length, oneImage });
     // pins follow the canvas and the items they're on
@@ -703,6 +816,34 @@ export default function Board({ boardId, commentId }) {
     addEls(note(p.x, p.y, text.slice(0, 2000), NOTE_COLOURS[0].hex));
   }
 
+  // Double tap (or double click) a board card to open it.
+  useEffect(() => {
+    const el = wrapRef.current; if (!el || !api) return;
+    const cardAt = (e) => {
+      const p = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, api.getAppState());
+      const hits = api.getSceneElements().filter(x => x.customData && x.customData.kind === 'board'
+        && p.x >= x.x && p.x <= x.x + x.width && p.y >= x.y && p.y <= x.y + x.height);
+      return hits.length ? hits[hits.length - 1] : null;
+    };
+    const down = (e) => {
+      if (e.button > 0 || !e.target || !e.target.closest('.excalidraw canvas, .bcard')) return;
+      const c = cardAt(e);
+      const last = R.current.lastTap;
+      const now = Date.now();
+      if (c && last && last.id === c.id && now - last.t < 380 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 30) {
+        R.current.lastTap = null;
+        e.preventDefault(); e.stopPropagation();
+        openCard(c.customData.boardId);
+        return;
+      }
+      R.current.lastTap = c ? { id: c.id, t: now, x: e.clientX, y: e.clientY } : null;
+    };
+    const dbl = (e) => { const c = cardAt(e); if (c) { e.preventDefault(); e.stopPropagation(); } };
+    el.addEventListener('pointerdown', down, true);
+    el.addEventListener('dblclick', dbl, true);
+    return () => { el.removeEventListener('pointerdown', down, true); el.removeEventListener('dblclick', dbl, true); };
+  }, [api]);
+
   // N drops a note, unless you're typing
   useEffect(() => {
     if (!api || !store.canEdit) return;
@@ -747,7 +888,7 @@ export default function Board({ boardId, commentId }) {
   if (missing) return <div className="empty">This board isn't here any more. <button className="link" onClick={() => go('/')}>Back to Boards</button></div>;
 
   return (
-    <div className="board" ref={wrapRef}>
+    <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef}>
       <header className={'bar' + (tools ? ' tools-open' : '')}>
         <nav className="crumbs">
           <button className="back" onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
@@ -792,6 +933,7 @@ export default function Board({ boardId, commentId }) {
               )}
             </div>
             <button className="act closes" disabled={sel.count < 1} onClick={doFrame} title="Group the selection in a named frame"><Ico d="M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4" />Group</button>
+            <button className={'act closes phone-draw' + (drawing ? ' on' : '')} onClick={() => setDrawing(d => !d)} title="Show the drawing tools"><Ico d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z M13.9 6.6l3.5 3.5" />{drawing ? 'Hide tools' : 'Draw'}</button>
             <button className="act closes" disabled={!sel.oneImage} onClick={doPalette} title="Pull a colour palette from the selected image"><Ico d="M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.6 0-1.3-1-1.4-1-2.6 0-1 .8-1.8 1.8-1.8H17a4 4 0 0 0 4-4C21 6.5 17 3 12 3z M7.5 11.5h.01 M10 7.5h.01 M14.5 7.5h.01" />Palette</button>
           </div>
         )}
@@ -862,15 +1004,36 @@ export default function Board({ boardId, commentId }) {
           </Excalidraw>
         )}
         {dropping && <div className="drop-hint"><span>Drop to add to this board</span></div>}
+        {api && <div className="bcards">{api.getSceneElements().filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => {
+          const r = rectOf(e); const info = cardInfo[e.customData.boardId] || {};
+          if (r.width < 24 || r.height < 16) return null;
+          const held = stackOn && stackOn.id === e.id;
+          return <div key={e.id} className={'bcard' + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
+            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")' } : null}>{!info.thumb && <span>▦</span>}</div>
+            <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{info.count != null && <small>{info.count} {info.count === 1 ? 'item' : 'items'}</small>}</div>
+            {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
+          </div>;
+        })}</div>}
         {stackOn && api && (() => {
-          const t = api.getSceneElements().find(e => e.id === stackOn); if (!t) return null;
-          const st = api.getAppState();
-          const a = sceneCoordsToViewportCoords({ sceneX: t.x, sceneY: t.y }, st);
-          const z = st.zoom.value;
-          const isBoard = t.customData && t.customData.kind === 'board';
-          return <div className="stack-hint" style={{ left: a.x - st.offsetLeft - 6, top: a.y - st.offsetTop - 6, width: t.width * z + 12, height: t.height * z + 12 }}>
-            <span>{isBoard ? 'Let go to put it in this board' : 'Let go to make a board'}</span></div>;
+          const t = api.getSceneElements().find(e => e.id === stackOn.id);
+          if (!t || (t.customData && t.customData.kind === 'board')) return null;
+          const r = rectOf(t);
+          return <div className={'stack-hint' + (stackOn.armed ? ' armed' : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
+            {stackOn.armed && <span>Let go to make a board</span>}</div>;
         })()}
+        {ghosts && <div className="ghosts">{ghosts.items.map(g => {
+          const r = ghosts.go ? { left: g.to.left + g.to.width * 0.2, top: g.to.top + g.to.height * 0.15, width: g.to.width * 0.6, height: g.to.height * 0.6 } : g.from;
+          return <img key={g.key} alt="" src={g.src} style={{ left: r.left, top: r.top, width: r.width, height: r.height, opacity: ghosts.go ? 0 : 1 }} />;
+        })}</div>}
+        {naming && (
+          <div className="name-bar">
+            <span className="name-bar-k">New board</span>
+            <input autoFocus defaultValue="" placeholder="Name it" maxLength={120}
+              onKeyDown={e => { if (e.key === 'Enter') nameBoard(naming, e.target.value); if (e.key === 'Escape') setNaming(null); }} id="name-bar-input" />
+            <button className="solid sm" onClick={() => nameBoard(naming, document.getElementById('name-bar-input').value)}>Done</button>
+            <button className="link quiet" onClick={() => { const u = naming.undo; setNaming(null); u(); }}>Undo</button>
+          </div>
+        )}
         {undoStack && <div className="toast">{undoStack.text}{undoStack.undo && <button onClick={() => { const u = undoStack.undo; setUndoStack(null); u(); }}>Undo</button>}</div>}
         <CommentsLayer api={api} threads={threads} adding={adding} setAdding={setAdding} openId={openId} setOpenId={setOpenId}
           people={people} showResolved={showResolved} view={view}

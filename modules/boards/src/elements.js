@@ -31,8 +31,7 @@ export function boardCard(x, y, board) {
   return convertToExcalidrawElements([{
     ...base, type: 'rectangle', x, y, width: 240, height: 150,
     backgroundColor: '#161616', strokeColor: '#161616',
-    link: `/boards#/b/${board.id}`,
-    customData: { kind: 'board', boardId: board.id },
+    customData: { kind: 'board', boardId: board.id, title: board.title },
     label: { text: '▦  ' + board.title, fontSize: 18, fontFamily: SANS, textAlign: 'left', verticalAlign: 'bottom', strokeColor: '#ffffff' },
   }]);
 }
