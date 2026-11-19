@@ -483,6 +483,30 @@ export const store = {
     const i = all.findIndex(c => c.id === id); if (i >= 0) all[i] = { ...all[i], ...patch };
     await set('comments:' + boardId, all, idb);
   },
+  // A comment thread follows the item it's pinned to when that item moves to
+  // another board (Build 664): the first comment and its replies change
+  // board, and the pin points at the item's new id there.
+  async moveThread(fromId, toId, rootId, elementId) {
+    if (this.mode === 'cloud') {
+      const a = await sb.from('venia_board_comments').update({ board_id: toId, element_id: elementId }).eq('id', rootId).eq('board_id', fromId);
+      if (a.error) throw a.error;
+      const b = await sb.from('venia_board_comments').update({ board_id: toId }).eq('thread_id', rootId).eq('board_id', fromId);
+      if (b.error) throw b.error;
+      return;
+    }
+    const from = (await get('comments:' + fromId, idb)) || [];
+    const to = (await get('comments:' + toId, idb)) || [];
+    const go = from.filter(c => c.id === rootId || c.thread_id === rootId);
+    if (!go.length) return;
+    await set('comments:' + fromId, from.filter(c => !go.includes(c)), idb);
+    await set('comments:' + toId, [...to, ...go.map(c => ({ ...c, board_id: toId, element_id: c.id === rootId ? elementId : c.element_id }))], idb);
+  },
+  // What I can do on another board, without changing the open board's mode.
+  async roleFor(id) {
+    if (this.mode !== 'cloud') return 'owner';
+    const { data, error } = await sb.rpc('venia_board_role', { bid: id });
+    return error ? null : (data || null);
+  },
   resolveComment(boardId, id, yes = true) { return this.patchComment(boardId, id, yes ? { resolved_at: now(), resolved_by: this.email || null } : { resolved_at: null, resolved_by: null }); },
   hideComment(boardId, id) { return this.patchComment(boardId, id, { hidden_at: now() }); },
   async markMentionsSeen(boardId) {

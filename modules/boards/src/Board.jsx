@@ -408,6 +408,25 @@ export default function Board({ boardId, commentId, find }) {
       && !inColumn(e, elements));
     return hits.length ? hits[hits.length - 1] : null;   // the one on top
   }
+  // Build 664: anything (a note, a list, a link or style card, a shape, a
+  // drawing, a section, a group, several things at once) goes into a board
+  // when it's held over that board's card. A single picture still uses its
+  // middle, so a picture over a picture still makes a board; everything else
+  // goes by where the pointer or finger is.
+  function dropTargetFor(picked, elements) {
+    const live = (picked || []).filter(e => e && !e.isDeleted && !e.locked);
+    if (!live.length || !api) return null;
+    if (live.length === 1 && live[0].type === 'image') { const t = stackTargetFor(live[0], elements); if (t) return t; }
+    const p = R.current.ptr; if (!p) return null;
+    const ids = new Set(live.map(e => e.id));
+    const sp = viewportCoordsToSceneCoords({ clientX: p.x, clientY: p.y }, api.getAppState());
+    const hits = elements.filter(e => !e.isDeleted && !e.locked && !ids.has(e.id)
+      && e.customData && e.customData.kind === 'board' && e.customData.boardId
+      && sp.x >= e.x && sp.x <= e.x + e.width && sp.y >= e.y && sp.y <= e.y + e.height
+      // reordering inside a column never drops into a card in that column
+      && !(e.frameId && inColumn(e, elements) && live.some(m => m.frameId === e.frameId)));
+    return hits.length ? hits[hits.length - 1] : null;
+  }
   function overBack() {
     const b = backRef.current, p = R.current.ptr;
     if (!b || !p || !trail.length) return false;
@@ -432,11 +451,10 @@ export default function Board({ boardId, commentId, find }) {
       return;
     }
     if (dragging) {
-      const me = picked.length === 1 ? picked[0] : null;
-      const t = stackTargetFor(me, elements);
+      const t = dropTargetFor(picked, elements);
       if (!t || t.id !== st.target) {
         clearTimeout(st.t);
-        st.target = t ? t.id : null; st.armed = false; st.me = me ? me.id : null;
+        st.target = t ? t.id : null; st.armed = false; st.me = picked.map(e => e.id);
         // A soft outline straight away, so you can see what you're over;
         // it firms up (and grows a touch) once you've held there a moment.
         setStackOn(t ? { id: t.id, armed: false } : null);
@@ -453,9 +471,12 @@ export default function Board({ boardId, commentId, find }) {
       clearTimeout(st.t); st.target = null; st.armed = false; st.me = null;
       setStackOn(null);
       if (!armed) return;
-      const me = elements.find(e => e.id === meId && !e.isDeleted);
-      const t = me && stackTargetFor(me, elements);
-      if (t && t.id === target) stackInto(me, t);
+      const keep = new Set(meId || []);
+      const mine = elements.filter(e => keep.has(e.id) && !e.isDeleted);
+      const t = mine.length ? dropTargetFor(mine, elements) : null;
+      if (!t || t.id !== target) return;
+      if (t.type === 'image' && mine.length === 1) stackInto(mine[0], t);
+      else if (t.customData && t.customData.kind === 'board') moveTo(t.customData.boardId, mine, { flyTo: rectOf(t) });
     }
   }
 
@@ -549,9 +570,19 @@ export default function Board({ boardId, commentId, find }) {
     // a board's own card can't go inside that board
     picked = picked.filter(e => !(e.customData && e.customData.kind === 'board' && e.customData.boardId === targetId));
     if (!picked.length) return;
+    // Sharing (Build 661): only into a board you can edit.
+    const role = await store.roleFor(targetId);
+    if (role !== 'owner' && role !== 'edit') {
+      setStatus(role === 'view' ? 'You can only view that board, so nothing moved' : 'That board isn\u2019t shared with you, so nothing moved');
+      return;
+    }
     const all = a.getSceneElements();
     const set = new Set(picked.map(e => e.id));
-    all.forEach(e => { if (e.containerId && set.has(e.containerId)) set.add(e.id); });
+    // with them: words inside shapes, and everything inside a section or column
+    for (let grew = true; grew;) {
+      grew = false;
+      all.forEach(e => { if (!set.has(e.id) && ((e.containerId && set.has(e.containerId)) || (e.frameId && set.has(e.frameId)))) { set.add(e.id); grew = true; } });
+    }
     const els = all.filter(e => set.has(e.id));
     const cards = els.filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId);
     const cardIds = new Set(cards.map(c => c.id));
@@ -561,7 +592,9 @@ export default function Board({ boardId, commentId, find }) {
     if (need.some(id => !files[id])) { setStatus('A picture is still loading; try again in a moment'); return; }
     const title = opts.title || (cardInfo[targetId] && cardInfo[targetId].title) || (trail.find(t => t.id === targetId) || {}).title || 'the board';
     // what you see happens at once
-    const pics = items.filter(e => e.type === 'image' && files[e.fileId]).slice(0, 6).map(e => ({ el: e, src: files[e.fileId].dataURL }));
+    // pictures fly in as themselves; notes, cards and shapes as a light outline
+    const pics = items.filter(e => !e.containerId && !(e.frameId && set.has(e.frameId))).slice(0, 6)
+      .map(e => ({ el: e, src: e.type === 'image' && files[e.fileId] ? files[e.fileId].dataURL : null }));
     if (pics.length && opts.flyTo) flyTo(pics, opts.flyTo);
     const goneIds = els.map(e => e.id);
     const setDeleted = (ids, deleted) => a.updateScene({
@@ -569,10 +602,13 @@ export default function Board({ boardId, commentId, find }) {
       captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     setDeleted(goneIds, true);
     const n = picked.length;
-    const job = { cloneIds: [], movedBoards: [] };
+    const job = { cloneIds: [], movedBoards: [], threads: [] };
     setUndoStack({ text: 'Moved ' + (n === 1 ? '1 item' : n + ' items') + ' to ' + title, undo: async () => {
       setDeleted(goneIds, false); R.current.wantThumb = true; save();
       try {
+        // comments come back with their items
+        for (const c of job.threads) await store.moveThread(targetId, boardId, c.id, c.element_id).catch(() => {});
+        if (job.threads.length) { loadComments(); live.commentsChanged(); }
         if (job.cloneIds.length) await editScene(targetId, list => list.map(e => job.cloneIds.includes(e.id) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e));
         // the card is already back on this board; don't let a save still on its way make a second one
         for (const id of job.movedBoards) await store.moveInto(id, boardId, boardCard, { addCard: false }).catch(() => {});
@@ -602,6 +638,11 @@ export default function Board({ boardId, commentId, find }) {
           job.cloneIds = copies.map(c => c.id);
           return [...list, ...copies];
         });
+        // Comments pinned to what moved go with it (Build 664).
+        for (const c of rows.filter(r => !r.thread_id && r.element_id && map.has(r.element_id))) {
+          try { await store.moveThread(boardId, targetId, c.id, map.get(c.element_id)); job.threads.push(c); } catch (e) { /* the comment stays here */ }
+        }
+        if (job.threads.length) { loadComments(); live.commentsChanged(); }
       }
       for (const c of cards) {
         const id = c.customData.boardId;
@@ -2047,7 +2088,7 @@ export default function Board({ boardId, commentId, find }) {
               <WelcomeScreen.Center>
                 <WelcomeScreen.Center.Heading>{meta ? meta.title : 'Board'}</WelcomeScreen.Center.Heading>
                 <div className="welcome-hints">
-                  <p>Drop photos anywhere, or paste an image or a link. Hold one picture over another to make a board.</p>
+                  <p>Drop photos anywhere, or paste an image or a link. Hold one picture over another to make a board, or hold anything over a board to put it inside.</p>
                   <p>Press N for a note. Press Draw for shapes, arrows and the pen. Library has notes, sections and layouts to drag in.</p>
                   <p>Select something for Move, Group, Palette and Style; select a few to Arrange them.</p>
                   <p>Click Comment to leave a note for someone. Type @ to mention them.</p>
@@ -2165,7 +2206,8 @@ export default function Board({ boardId, commentId, find }) {
         {backHot && trail.length > 0 && <div className="back-hint"><span>Let go to move up to {trail[trail.length - 1].title}</span></div>}
         {ghosts && <div className="ghosts">{ghosts.items.map(g => {
           const r = ghosts.go ? { left: g.to.left + g.to.width * 0.2, top: g.to.top + g.to.height * 0.15, width: g.to.width * 0.6, height: g.to.height * 0.6 } : g.from;
-          return <img key={g.key} alt="" src={g.src} style={{ left: r.left, top: r.top, width: r.width, height: r.height, opacity: ghosts.go ? 0 : 1 }} />;
+          const st = { left: r.left, top: r.top, width: r.width, height: r.height, opacity: ghosts.go ? 0 : 1 };
+          return g.src ? <img key={g.key} alt="" src={g.src} style={st} /> : <div key={g.key} className="ghost-box" style={st} />;
         })}</div>}
         {naming && (
           <div className="name-bar">
