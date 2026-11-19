@@ -166,21 +166,15 @@ function RichNote({ el, api, canEdit }) {
 
   useEffect(() => {
     if (!canEdit) return;
-    const on = (e) => { if (e.detail && e.detail.id === el.id) setEditing({ range: e.detail.range, then: e.detail.then }); };
+    const on = (e) => { if (e.detail && e.detail.id === el.id) setEditing({ range: e.detail.range, then: e.detail.then, ready: e.detail.ready }); };
     window.addEventListener(RICH_EDIT, on);
     return () => window.removeEventListener(RICH_EDIT, on);
   }, [el.id, canEdit]);
 
   useEffect(() => {
     const ed = box.current; if (!editing || !ed) return;
-    try { document.execCommand('styleWithCSS', false, false); document.execCommand('defaultParagraphSeparator', false, 'div'); } catch (e) {}
-    ed.focus();
-    const s = window.getSelection();
-    const r = document.createRange();
-    if (editing.range) { r.setStart(...pointAt(ed, editing.range[0])); r.setEnd(...pointAt(ed, editing.range[1])); }
-    else { r.selectNodeContents(ed); r.collapse(false); }
-    s.removeAllRanges(); s.addRange(r);
-    if (editing.then) { try { document.execCommand(editing.then); } catch (e) {} }
+    // already focused and placed by focusRichNow (a tap on a phone): keep it
+    if (!(editing.ready && document.activeElement === ed)) startTyping(ed, editing.range, editing.then);
     window.dispatchEvent(new CustomEvent(RICH_EDITING, { detail: { id: el.id } }));
   }, [editing]);
 
@@ -207,7 +201,7 @@ function RichNote({ el, api, canEdit }) {
 
   return (
     <div className={'card-rich' + (editing ? ' editing' : '')} style={{ background: bg, color: readableOn(bg) }}>
-      <div ref={box} className="rich-words" contentEditable={!!editing} suppressContentEditableWarning spellCheck={!!editing}
+      <div ref={box} className="rich-words" data-note={el.id} contentEditable={!!editing} suppressContentEditableWarning spellCheck={!!editing}
         onPointerDown={e => { if (editing) e.stopPropagation(); }}
         onInput={() => { if (box.current && box.current.offsetHeight > el.height + 1) grow(api, el.id, Math.ceil(box.current.offsetHeight), CaptureUpdateAction.EVENTUALLY); }}
         onBlur={() => { if (editing) done(); }}
@@ -229,6 +223,33 @@ function RichNote({ el, api, canEdit }) {
         }} />
     </div>
   );
+}
+
+// Put the cursor in a styled note: the words in range selected (or the end),
+// then one style switched on if asked.
+function startTyping(ed, range, then) {
+  try { document.execCommand('styleWithCSS', false, false); document.execCommand('defaultParagraphSeparator', false, 'div'); } catch (e) {}
+  ed.focus();
+  const s = window.getSelection();
+  const r = document.createRange();
+  if (range) { r.setStart(...pointAt(ed, range[0])); r.setEnd(...pointAt(ed, range[1])); }
+  else { r.selectNodeContents(ed); r.collapse(false); }
+  s.removeAllRanges(); s.addRange(r);
+  if (then) { try { document.execCommand(then); } catch (e) {} }
+}
+
+// Open a styled note for typing right now, inside the tap that asked for it.
+// Phones only show the keyboard for a box focused during the tap itself, not
+// a moment later, so this focuses the note before anything re-renders, then
+// tells the note it is open. Returns false if the note isn't on screen.
+export function focusRichNow(id, range, then) {
+  const ed = typeof document !== 'undefined' && document.querySelector('.rich-words[data-note="' + String(id).replace(/"/g, '') + '"]');
+  if (!ed) return false;
+  ed.contentEditable = 'true';
+  ed.closest('.card-rich') && ed.closest('.card-rich').classList.add('editing');
+  startTyping(ed, range, then);
+  window.dispatchEvent(new CustomEvent(RICH_EDIT, { detail: { id, ready: true } }));
+  return true;
 }
 
 function grow(api, id, height, how) {
