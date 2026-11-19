@@ -774,6 +774,15 @@ export default function Board({ boardId, commentId, find }) {
   // 100%. Or, coming from a search, on the thing that matched.
   useEffect(() => {
     if (!api) return;
+    // fit these on screen with room round them, but never larger than life
+    const fitView = (els, room) => {
+      const st = api.getAppState();
+      const xs = els.flatMap(e => [e.x, e.x + e.width]), ys = els.flatMap(e => [e.y, e.y + e.height]);
+      const bw = Math.max(1, Math.max(...xs) - Math.min(...xs)), bh = Math.max(1, Math.max(...ys) - Math.min(...ys));
+      const z = Math.min(1, room * Math.min(st.width / bw, st.height / bh));
+      if (z >= 1) { api.updateScene({ appState: { zoom: { value: 1 } } }); api.scrollToContent(els); }
+      else api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: room });
+    };
     const fit = () => {
       try {
         const els = api.getSceneElements(); if (!els.length) return;
@@ -784,15 +793,12 @@ export default function Board({ boardId, commentId, find }) {
             || (e.type === 'embeddable' && cardWords(e).toLowerCase().includes(term)));
           if (hit) {
             const target = hit.containerId ? els.find(e => e.id === hit.containerId) || hit : hit;
-            api.scrollToContent([target], { fitToViewport: true, viewportZoomFactor: 0.35 });
-            if (api.getAppState().zoom.value > 1) api.updateScene({ appState: { zoom: { value: 1 } } });
-            api.scrollToContent([target]);
+            fitView([target], 0.35);
             api.updateScene({ appState: { selectedElementIds: { [target.id]: true } } });
             return;
           }
         }
-        api.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.9 });
-        if (api.getAppState().zoom.value > 1) { api.updateScene({ appState: { zoom: { value: 1 } } }); api.scrollToContent(); }
+        fitView(els, 0.9);
       } catch (e) {}
     };
     const t = setTimeout(fit, 60);
