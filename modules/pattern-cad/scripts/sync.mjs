@@ -64,7 +64,7 @@ fs.writeFileSync(path.join(out, 'index.html'), `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Pattern CAD · VENIA OS</title>
+<title>Dr4ft · VENIA OS</title>
 <link rel="icon" href="/icons/icon-192.png">
 ${fonts ? fonts[0] : ''}
 <!-- The CAD itself (keeterly/venia-pattern-cad @ ${commit}) is loaded by host.js

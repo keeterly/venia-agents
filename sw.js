@@ -2,7 +2,7 @@
    Offline app-shell caching. API calls pass straight through; the one thing
    it reads on the way is whether a workspace save was refused (see THE WINDOW
    THAT CANNOT SAVE, below). It never caches, changes or holds back a write. */
-const CACHE = 'venia-shell-v634';
+const CACHE = 'venia-shell-v635';
 // The last build that fixed SAVING. Bump this (to that build's number) only in
 // a build that fixes how changes reach the cloud. An open page on an older
 // build asks the waiting worker for it, and a page whose saves are failing
@@ -199,7 +199,7 @@ self.addEventListener('fetch', (e) => {
     // A module's page (Boards, Build 612) is its own document. It must never be
     // filed as the OS shell, or the next offline open would show the module
     // instead of VENIA OS. It keeps its own cache entry.
-    const isModule = url.pathname === '/boards' || url.pathname === '/pattern-cad' || url.pathname.startsWith('/modules/');
+    const isModule = url.pathname === '/boards' || url.pathname === '/pattern-cad' || url.pathname === '/dr4ft' || url.pathname.startsWith('/modules/');
     const shellKey = isBrainstorm ? '/brainstorm.html' : isModule ? url.pathname : '/venia-control-panel-v1.html';
     // Fetch with redirect:'follow' (fresh Request) so a Netlify .html pretty-URL
     // 301 can't surface as an unusable opaqueredirect for the navigation.
