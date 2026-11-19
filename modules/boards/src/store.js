@@ -78,8 +78,12 @@ export const store = {
   mode: 'local',          // 'cloud' | 'local'
   reason: '',             // why local: 'signed-out' | 'not-set-up' | 'offline'
   email: '',
-  role: 'owner',          // owner | editor | viewer
-  get canEdit() { return this.role !== 'viewer'; },
+  role: 'owner',          // owner | editor | viewer   (Boards as a whole)
+  // What I can do on the board that's open: 'owner' | 'edit' | 'view', or
+  // null on the boards list (Build 660). The database decides; this only
+  // keeps the screen in step with it.
+  boardRole: null,
+  get canEdit() { return this.role !== 'viewer' && this.boardRole !== 'view'; },
 
   // Which account Boards saves to. VENIA OS and Boards share one sign-in on
   // this site, but Boards used to look only once, as it opened: if that look
@@ -138,19 +142,22 @@ export const store = {
   async listBoards({ trash = false } = {}) {
     if (this.mode === 'cloud') {
       let q = sb.from('venia_boards')
-        .select('id,parent_id,title,search_text,item_count,cover_file,updated_at,updated_by,trashed_at,sort')
+        .select('id,parent_id,title,search_text,item_count,cover_file,updated_at,updated_by,trashed_at,sort,owner,everyone,created_by')
         .eq('workspace_id', WS);
       q = trash ? q.not('trashed_at', 'is', null) : q.is('trashed_at', null);
       const { data, error } = await q.order('updated_at', { ascending: false });
       if (error) throw error;
-      return data || [];
+      // how many named people each board is shared with (Build 660)
+      const sh = await sb.from('venia_board_shares').select('board_id');
+      const n = {}; (sh.data || []).forEach(r => { n[r.board_id] = (n[r.board_id] || 0) + 1; });
+      return (data || []).map(b => ({ ...b, shared_with: n[b.id] || 0 }));
     }
     const all = (await get('boards', idb)) || [];
     return all.filter(b => trash ? !!b.trashed_at : !b.trashed_at)
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
   },
 
-  async createBoard({ id = null, title = 'Untitled board', parent_id = null, scene = null } = {}) {
+  async createBoard({ id = null, title = 'Untitled board', parent_id = null, scene = null, everyone = null } = {}) {
     const row = {
       id: id || uid('b'), workspace_id: WS, parent_id, title,
       scene: scene || { elements: [], appState: {} },
@@ -158,9 +165,23 @@ export const store = {
       created_by: this.email || null, created_at: now(), updated_by: this.email || null, updated_at: now(), rev: 0,
     };
     if (this.mode === 'cloud') {
-      const { error } = await sb.from('venia_boards').insert(row);
+      // Sharing (Build 660): a new board starts private to whoever makes it.
+      // One made inside another board starts shared the way that board is,
+      // so the people working on the outer board see what's made in it.
+      let shares = [];
+      let who = everyone;
+      if (!who && parent_id) {
+        const { data: p } = await sb.from('venia_boards').select('everyone').eq('id', parent_id).maybeSingle();
+        if (p && p.everyone) {
+          who = p.everyone;
+          const { data: sh } = await sb.from('venia_board_shares').select('email,role').eq('board_id', parent_id);
+          shares = (sh || []).filter(x => x.email !== this.email);
+        }
+      }
+      const { error } = await sb.from('venia_boards').insert({ ...row, owner: this.email || '', everyone: who || 'none' });
       if (error) throw error;
-      return row;
+      if (shares.length) await sb.from('venia_board_shares').insert(shares.map(x => ({ board_id: row.id, email: x.email, role: x.role })));
+      return { ...row, owner: this.email || '', everyone: who || 'none' };
     }
     const all = (await get('boards', idb)) || [];
     const { scene: sc, ...meta } = row;
@@ -168,6 +189,70 @@ export const store = {
     await set('boards', all, idb);
     await set('scene:' + row.id, sc, idb);
     return row;
+  },
+
+  // ── sharing (Build 660) ──────────────────────────────────────────────────
+  // What I can do on this board. Asked as a board opens; the answer also
+  // decides whether the board opens in view-only mode.
+  async roleOn(id) {
+    if (this.mode !== 'cloud') { this.boardRole = 'owner'; return 'owner'; }
+    const { data, error } = await sb.rpc('venia_board_role', { bid: id });
+    this.boardRole = error ? null : (data || null);
+    return this.boardRole;
+  },
+  // Who sees a board: everyone's setting, the named people, and (for the
+  // owner) its view links.
+  async sharing(id) {
+    if (this.mode !== 'cloud') return null;
+    const [b, sh, ln] = await Promise.all([
+      sb.from('venia_boards').select('owner,created_by,everyone').eq('id', id).maybeSingle(),
+      sb.from('venia_board_shares').select('email,role,created_at').eq('board_id', id).order('created_at'),
+      sb.from('venia_board_links').select('token,created_at,expires_at,revoked_at').eq('board_id', id).is('revoked_at', null).order('created_at', { ascending: false }),
+    ]);
+    if (b.error) throw b.error;
+    const row = b.data || {};
+    return {
+      owner: String(row.owner || row.created_by || '').toLowerCase(),
+      everyone: row.everyone || 'edit',
+      people: sh.data || [],
+      links: (ln.data || []).filter(l => !l.expires_at || Date.parse(l.expires_at) > Date.now()),
+    };
+  },
+  async setEveryone(id, everyone) {
+    const { error } = await sb.from('venia_boards').update({ everyone }).eq('id', id);
+    if (error) throw error;
+  },
+  async sharePerson(id, email, role) {
+    email = String(email || '').trim().toLowerCase();
+    const { error } = await sb.from('venia_board_shares').upsert({ board_id: id, email, role }, { onConflict: 'board_id,email' });
+    if (error) throw error;
+  },
+  async unsharePerson(id, email) {
+    const { error } = await sb.from('venia_board_shares').delete().eq('board_id', id).eq('email', email);
+    if (error) throw error;
+  },
+  async makeViewLink(id, days) {
+    const expires_at = days ? new Date(Date.now() + days * 86400000).toISOString() : null;
+    const { data, error } = await sb.from('venia_board_links').insert({ board_id: id, expires_at }).select('token,created_at,expires_at').single();
+    if (error) throw error;
+    return data;
+  },
+  async turnOffViewLink(token) {
+    const { error } = await sb.from('venia_board_links').update({ revoked_at: now() }).eq('token', token);
+    if (error) throw error;
+  },
+  viewLinkUrl(token) {
+    return location.origin + '/boards#/v/' + token;
+  },
+  // A view link opened by anyone, signed in or not: read through the
+  // board-view function, never from the tables.
+  async openViewLink(token) {
+    const url = (localStorage.getItem('venia-sb-url') || DEFAULT_URL) + '/functions/v1/board-view';
+    const key = localStorage.getItem('venia-sb-key') || DEFAULT_KEY;
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: key, Authorization: 'Bearer ' + key }, body: JSON.stringify({ token }) });
+    if (r.status === 404) return { gone: true };
+    if (!r.ok) throw new Error('unavailable');
+    return r.json();
   },
 
   async patchBoard(id, patch) {

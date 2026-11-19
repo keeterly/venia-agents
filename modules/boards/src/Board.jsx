@@ -23,6 +23,7 @@ import { FindPanel } from './find.jsx';
 import { NameBox } from './namebox.jsx';
 import { pendingKey, styleCaption, groupName, materialCaption, lineSheetCaption } from './importer.jsx';
 import { useProductLink, ProductPicker } from './product.jsx';
+import { SharePanel } from './share.jsx';
 
 const BG = '#F7F6F2';
 
@@ -165,9 +166,11 @@ export default function Board({ boardId, commentId, find }) {
     let dead = false;
     (async () => {
       try {
+        // Sharing (Build 660): what I can do here decides view-only or not.
+        const myRole = await store.roleOn(boardId);
         const row = await store.loadBoard(boardId);
         if (dead) return;
-        if (!row) { setMissing(true); return; }
+        if (!row) { setMissing(store.mode === 'cloud' && !myRole ? 'unshared' : true); return; }
         // Open at once with the pictures this device already has; the rest
         // arrive one by one. Only pictures still on the board are fetched,
         // never ones that were deleted or moved away.
@@ -1938,7 +1941,7 @@ export default function Board({ boardId, commentId, find }) {
 
   const renderCard = React.useMemo(() => makeRenderCard(() => api, store.canEdit), [api]);
 
-  if (missing) return <div className="empty">This board isn't here any more. <button className="link" onClick={() => go('/')}>Back to Boards</button></div>;
+  if (missing) return <div className="empty">{missing === 'unshared' ? 'This board hasn\u2019t been shared with you, or it isn\u2019t here any more. Ask whoever made it to share it.' : 'This board isn\u2019t here any more.'} <button className="link" onClick={() => go('/')}>Back to Boards</button></div>;
 
   return (
     <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef} style={api ? { '--fz': Math.max(0.55, Math.min(1, api.getAppState().zoom.value * 1.6)) } : null}>
@@ -1988,6 +1991,7 @@ export default function Board({ boardId, commentId, find }) {
           <div className="actions">
             <span className="divider" />
             <button className={'act' + (panel === 'slides' ? ' on' : '')} onClick={() => setPanel(panel === 'slides' ? null : 'slides')} title="Slides: present the board's sections, or save them as a PDF" aria-label="Slides and present"><Ico d="M3 4h18v12H3z M12 16v4 M8 20h8 M10 8l4 2-4 2z" />Present</button>
+            {store.mode === 'cloud' && <button className={'act' + (panel === 'share' ? ' on' : '')} onClick={() => setPanel(panel === 'share' ? null : 'share')} title="Choose who can see or edit this board, or make a view-only link" aria-label="Share"><Ico d="M16 8a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M6 15a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M16 22a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M8.6 13.5l4.8 2.9 M13.4 6.6l-4.8 2.9" />Share</button>}
             <button className={'act' + (adding ? ' on' : '')} onClick={() => { setAdding(a => !a); setOpenId(null); }} title="Click, then click a spot on the board to comment there"><Ico d="M4 5h16v11H9l-5 4z" />Comment</button>
             <button className={'act' + (panel === 'comments' ? ' on' : '')} onClick={() => setPanel(panel === 'comments' ? null : 'comments')} title="All comments on this board">
               <Ico d="M3 5h12v8H8l-5 3z M9 16h7l5 3v-9h-3" />{openCount ? <span className="count">{openCount}</span> : null}
@@ -2035,6 +2039,7 @@ export default function Board({ boardId, commentId, find }) {
               <MainMenu.Item icon={<Ico d="M3 4h18v12H3z M12 16v4 M8 20h8 M10 8l4 2-4 2z" />} onSelect={() => setPanel('slides')}>Slides and present</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printDeck(api, meta && meta.title).then(ok => { if (!ok) setStatus('Add a slide first: open Present, then Add a slide'); }).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Save slides as PDF</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z M16 16l5 5" />} shortcut="Ctrl+F" onSelect={() => setFinding(true)}>Find on this board</MainMenu.Item>
+              {store.mode === 'cloud' && <MainMenu.Item icon={<Ico d="M16 8a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M6 15a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M16 22a3 3 0 1 0 0-6a3 3 0 0 0 0 6z M8.6 13.5l4.8 2.9 M13.4 6.6l-4.8 2.9" />} onSelect={() => setPanel('share')}>Share</MainMenu.Item>}
               <MainMenu.Separator />
               <MainMenu.DefaultItems.Help />
             </MainMenu>
@@ -2181,6 +2186,9 @@ export default function Board({ boardId, commentId, find }) {
           people={people} showResolved={showResolved} view={view}
           onAdd={addComment} onReply={(root, body, mentions) => addComment({ body, mentions, thread_id: root.id, element_id: root.element_id, x: root.x, y: root.y })}
           onResolve={resolveThread} onHide={hideComment} />
+        {panel === 'share' && meta && (
+          <SharePanel boardId={boardId} title={meta.title} onClose={() => setPanel(null)} />
+        )}
         {panel === 'slides' && api && (
           <SlidesPanel api={api} title={meta && meta.title} setStatus={setStatus} canEdit={store.canEdit} onClose={() => setPanel(null)}
             onPlay={(i) => setPresenting(i)} />
