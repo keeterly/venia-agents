@@ -1,4 +1,4 @@
-// Pattern CAD (Build 633): hands the CAD's code to a signed-in Product member,
+// Pattern CAD (Build 634): hands the CAD's code to a signed-in Product member,
 // and to nobody else.
 //
 // The CAD is built in keeterly/venia-pattern-cad, which is PRIVATE, and this

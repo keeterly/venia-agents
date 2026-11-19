@@ -66,7 +66,7 @@ shell and the frame talk only by `postMessage` with `source: 'venia-module'`.
 Its tables carry `workspace_id` (the brand) and check access through one SQL
 helper, so they can follow the core's per-brand rules.
 
-### Pattern CAD (Build 633)
+### Pattern CAD (Build 634)
 
 The pattern drafting CAD is a frame of Product (`modules/pattern-cad`) with
 its own brand switch, `pattern-cad` in `venia_entitlements`, so it can be sold
