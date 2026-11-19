@@ -441,6 +441,16 @@ export const store = {
     return cards.map(c => c.kind === 'goal' ? { ...c, goalTitle: goals[c.goalId] || '' } : c);
   },
 
+  // Brainstorm's goals, notes and Enigma's grouping, read only, for the
+  // boards made from them (Build 663). Boards never writes Brainstorm's data.
+  async brainstormData() {
+    if (this.mode !== 'cloud') return null;
+    const { data, error } = await sb.from('venia_module_data').select('dump:data->dump, dumpMap:data->dumpMap')
+      .eq('workspace_id', WS).eq('module', 'brainstorm').maybeSingle();
+    if (error || !data) return null;
+    return { dump: Array.isArray(data.dump) ? data.dump : [], dumpMap: data.dumpMap || null };
+  },
+
   // ── comments and @ mentions ──────────────────────────────────────────────
   // A comment sits on a spot on the board, or on one item (then x, y is its
   // offset from that item). Replies carry thread_id. Nothing is ever removed
