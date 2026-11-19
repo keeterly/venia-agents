@@ -93,6 +93,7 @@ export default function Board({ boardId, commentId, find }) {
   const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
   const [moving, setMoving] = useState(false);     // the Move to… list is open
   const backRef = useRef(null);
+  const doDeleteRef = useRef(() => {});
   const selbarRef = useRef(null);
   // keep the selection bar whole on screen, however near the edge the selection is
   useLayoutEffect(() => {
@@ -1075,12 +1076,48 @@ export default function Board({ boardId, commentId, find }) {
     const gone = all.filter(e => ids.has(e.id) && !e.isDeleted);
     if (!gone.length) return;
     const n = gone.filter(e => !e.containerId).length;
+    // A board made inside this one goes to Trash with its card (restorable
+    // there, and Undo here brings both back). A linked board that lives
+    // elsewhere only loses its card. A board still shown by another card stays.
+    const kept = new Set(all.filter(e => !e.isDeleted && !ids.has(e.id) && e.customData && e.customData.kind === 'board').map(e => e.customData.boardId));
+    const binned = [...new Set(gone.filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => e.customData.boardId))]
+      .map(id => kids.find(b => b.id === id)).filter(b => b && !kept.has(b.id));
     api.updateScene({ elements: all.map(e => ids.has(e.id) && !e.isDeleted ? newElementWith(e, { isDeleted: true }) : e), appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    if (binned.length) {
+      setKids(k => k.filter(b => !binned.some(x => x.id === b.id)));
+      binned.forEach(b => store.trash(b.id).catch(() => setStatus('Couldn\u2019t move \u201c' + (b.title || 'Untitled board') + '\u201d to Trash')));
+    }
     const back = new Set(gone.map(e => e.id));
-    setUndoStack({ text: n === 1 ? 'Deleted' : 'Deleted ' + n + ' things', undo: () => {
+    const text = binned.length === 1 && n === 1 ? 'Moved \u201c' + (binned[0].title || 'Untitled board') + '\u201d to Trash'
+      : binned.length ? 'Deleted ' + n + ' things; ' + binned.length + (binned.length === 1 ? ' board' : ' boards') + ' moved to Trash'
+      : n === 1 ? 'Deleted' : 'Deleted ' + n + ' things';
+    setUndoStack({ text, undo: () => {
       api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => back.has(e.id) && e.isDeleted ? newElementWith(e, { isDeleted: false }) : e), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      if (binned.length) {
+        setKids(k => [...k, ...binned.filter(b => !k.some(x => x.id === b.id))]);
+        binned.forEach(b => store.restore(b.id).catch(() => {}));
+      }
     } });
   }
+  doDeleteRef.current = doDelete;
+  // Backspace and Delete do exactly what the bin button does, so a board
+  // inside this one is never left behind with no card.
+  useEffect(() => {
+    if (!api || !store.canEdit) return;
+    const key = (e) => {
+      if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.closest('input, textarea, select, [contenteditable="true"], .pop, .side-panel'))) return;
+      const st = api.getAppState();
+      if (st.editingTextElement || st.newElement || st.openDialog) return;
+      if (!Object.values(st.selectedElementIds || {}).some(Boolean)) return;
+      e.preventDefault(); e.stopPropagation();
+      doDeleteRef.current();
+    };
+    window.addEventListener('keydown', key, true);
+    return () => window.removeEventListener('keydown', key, true);
+  }, [api]);
 
   function doFrame() {
     const st = api.getAppState();
