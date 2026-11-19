@@ -237,12 +237,16 @@ function Home({ fresh = false }) {
       <header className="home-head">
         <div className="home-brand">
           {!inHost && <a className="back-os" href="/">VENIA <span>OS</span></a>}
-          <h1>Boards</h1>
+          {/* on a phone, the shared VENIA OS header: the name, its main action beside it (Build 670) */}
+          <div className="home-title">
+            <h1>Boards</h1>
+            {!trash && store.canEdit && <button className="solid home-new" onClick={() => setCreating(true)}>New board</button>}
+          </div>
         </div>
         <div className="home-tools">
           <input className="search" placeholder="Search boards and what's on them" value={q} onChange={e => setQ(e.target.value)} />
           <button className={'ghost' + (trash ? ' on' : '')} onClick={() => setTrash(t => !t)}>{trash ? 'Back to boards' : 'Trash'}</button>
-          {!trash && store.canEdit && <button className="solid" onClick={() => setCreating(true)}>New board</button>}
+          {!trash && store.canEdit && <button className="solid tools-new" onClick={() => setCreating(true)}>New board</button>}
         </div>
       </header>
 
