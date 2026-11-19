@@ -1671,6 +1671,8 @@ export default function Board({ boardId, commentId, find }) {
     if (isCardUrl(link)) {
       event.preventDefault();
       if (cd.kind === 'link' && cd.url) window.open(cd.url, '_blank', 'noopener,noreferrer');
+      // a styled note's corner button opens it for typing
+      else if (cd.kind === 'note' && cd.rich && store.canEdit) window.dispatchEvent(new CustomEvent(RICH_EDIT, { detail: { id: element.id } }));
       // a to-do list opens out: zoom in until it fills the screen
       else if (api) { try { api.scrollToContent([element], { fitToViewport: true, viewportZoomFactor: 0.8, animate: true }); } catch (e) {} }
       return;
