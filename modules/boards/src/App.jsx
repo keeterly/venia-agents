@@ -3,6 +3,7 @@ import { store } from './store.js';
 import { inHost, tellHost } from './host.js';
 import { TEMPLATES, templateElements, legacyCardElements, boardCard } from './elements.js';
 import Board from './Board.jsx';
+import { NameBox } from './namebox.jsx';
 
 export const LEGACY_ID = 'b-brainstorm-board';
 
@@ -77,6 +78,8 @@ function Home({ fresh = false }) {
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [asking, setAsking] = useState(null);       // the name box: { title, initial, done }
+  const askName = (title, initial) => new Promise(done => setAsking({ title, initial, done }));
 
   // Opened as "#/new": show the New board sheet, then tidy the address so a
   // reload or Back doesn't ask again.
@@ -125,7 +128,7 @@ function Home({ fresh = false }) {
   async function act(kind, b) {
     setMenu(null);
     try {
-      if (kind === 'rename') { const t = window.prompt('Rename board', b.title); if (t && t.trim()) await store.rename(b.id, t.trim()); }
+      if (kind === 'rename') { const t = await askName('Rename board', b.title); if (t && t.trim() && t.trim() !== b.title) await store.rename(b.id, t.trim()); }
       if (kind === 'trash') await store.trash(b.id);
       if (kind === 'restore') await store.restore(b.id);
       if (kind === 'purge') { if (window.confirm(`Delete "${b.title}" for good? Its images go too. This can't be undone.`)) await store.purge(b.id); }
@@ -230,6 +233,7 @@ function Home({ fresh = false }) {
         </>
       )}
       {creating && <NewBoard onClose={() => setCreating(false)} />}
+      {asking && <NameBox title={asking.title} initial={asking.initial} onDone={v => { const d = asking.done; setAsking(null); d(v); }} />}
       {moving && <MoveInto board={moving} boards={boards || []} onPick={pid => moveInto(moving, pid)} onClose={() => setMoving(null)} />}
       {dragId && <div className="drag-hint">Drop it on a board to put it inside</div>}
     </div>

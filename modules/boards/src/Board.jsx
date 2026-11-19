@@ -15,6 +15,8 @@ import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
 import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
 import { nameOf } from './store.js';
+import { FindPanel } from './find.jsx';
+import { NameBox } from './namebox.jsx';
 
 const BG = '#F7F6F2';
 
@@ -85,6 +87,9 @@ export default function Board({ boardId, commentId, find }) {
   const [tools, setTools] = useState(false);       // phone: the Add sheet is open
   const [dropping, setDropping] = useState(false); // something is being dragged over the board
   const [stackOn, setStackOn] = useState(null);    // { id, armed }: what a picture is held over
+  const [asking, setAsking] = useState(null);       // { title, initial, done } for the name box
+  const askName = (title, initial) => new Promise(done => setAsking({ title, initial, done }));
+  const [finding, setFinding] = useState(false);   // the Find panel
   const [undoStack, setUndoStack] = useState(null);// { text, undo } after a stack
   const [ghosts, setGhosts] = useState(null);      // pictures flying into a new board card
   const [cardInfo, setCardInfo] = useState({});    // board id -> { title, count, thumb }
@@ -1059,13 +1064,13 @@ export default function Board({ boardId, commentId, find }) {
   }
 
   // A column: wraps what's selected, or starts empty in the middle.
-  function addColumn() {
+  async function addColumn() {
+    const name = await askName('Name this column', 'Column'); if (name === null) return;
     const st = api.getAppState();
     const units = selectionUnits(api.getSceneElementsIncludingDeleted(), st.selectedElementIds);
     const members = units.flatMap(u => u.members).filter(m => m.type !== 'frame');
     let col;
     if (members.length) {
-      const name = window.prompt('Name this column', 'Column'); if (name === null) return;
       const [x1, y1] = [Math.min(...members.map(m => m.x)), Math.min(...members.map(m => m.y))];
       col = { ...newColumn(x1 - 16, y1 - 16, name || 'Column') };
       const ids = new Set(members.map(m => m.id));
@@ -1073,7 +1078,7 @@ export default function Board({ boardId, commentId, find }) {
       api.updateScene({ elements: [col, ...rest], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
     } else {
       const p = spotFor(300, 120, null);
-      col = newColumn(p.x, p.y, 'Column');
+      col = newColumn(p.x, p.y, name || 'Column');
       api.updateScene({ elements: [col, ...api.getSceneElementsIncludingDeleted()], appState: { selectedElementIds: { [col.id]: true } }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
       setStatus('Drag notes, photos and cards into the column');
     }
@@ -1164,12 +1169,12 @@ export default function Board({ boardId, commentId, find }) {
     return () => { window.removeEventListener('keydown', key, true); window.removeEventListener('click', click, true); };
   }, [api]);
 
-  function doFrame() {
+  async function doFrame() {
     const st = api.getAppState();
     const units = selectionUnits(api.getSceneElementsIncludingDeleted(), st.selectedElementIds);
     const members = units.flatMap(u => u.members);
     if (!members.length) return;
-    const name = window.prompt('Name this group', 'Group');
+    const name = await askName('Name this group', 'Group');
     if (name === null) return;
     const [f] = frameAround(members, name || 'Group');
     const others = api.getSceneElementsIncludingDeleted().map(e => members.some(m => m.id === e.id) ? newElementWith(e, { frameId: f.id }) : e);
@@ -1389,6 +1394,19 @@ export default function Board({ boardId, commentId, find }) {
     return () => window.removeEventListener('keydown', k);
   }, [api]);
 
+  // Ctrl/Cmd+F opens Find on this board, which also looks in to-dos, link
+  // cards and board names (the canvas's own search sees drawn text only).
+  useEffect(() => {
+    if (!api) return;
+    const k = (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey || (e.key !== 'f' && e.key !== 'F')) return;
+      e.preventDefault(); e.stopPropagation();
+      setFinding(true);
+    };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  }, [api]);
+
   const onPaste = useCallback((data) => {
     const text = (data && data.text || '').trim();
     if (api && store.canEdit && (looksLikeImageUrl(text) || isWebUrl(text))) { addFromLink(text); return false; }
@@ -1513,7 +1531,7 @@ export default function Board({ boardId, commentId, find }) {
               <MainMenu.Separator />
               <MainMenu.DefaultItems.SaveAsImage />
               <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
-              <MainMenu.DefaultItems.SearchMenu />
+              <MainMenu.Item icon={<Ico d="M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z M16 16l5 5" />} shortcut="Ctrl+F" onSelect={() => setFinding(true)}>Find on this board</MainMenu.Item>
               <MainMenu.Separator />
               <MainMenu.DefaultItems.Help />
             </MainMenu>
@@ -1612,6 +1630,8 @@ export default function Board({ boardId, commentId, find }) {
         {hiddenKids.length > 0 && !undoStack && <div className="toast kids-toast">
           {hiddenKids.length === 1 ? '“' + (hiddenKids[0].title || 'Untitled board') + '” is inside this board but its card isn’t showing' : hiddenKids.length + ' boards inside this one aren’t showing'}
           <button onClick={showKids}>Show {hiddenKids.length === 1 ? 'it' : 'them'}</button></div>}
+        {finding && api && <FindPanel api={api} onClose={() => setFinding(false)} />}
+        {asking && <NameBox title={asking.title} initial={asking.initial} onDone={v => { const d = asking.done; setAsking(null); d(v); }} />}
         {undoStack && <div className="toast">{undoStack.text}{undoStack.undo && <button onClick={() => { const u = undoStack.undo; setUndoStack(null); u(); }}>Undo</button>}</div>}
         <CommentsLayer api={api} threads={threads} adding={adding} setAdding={setAdding} openId={openId} setOpenId={setOpenId}
           people={people} showResolved={showResolved} view={view}
