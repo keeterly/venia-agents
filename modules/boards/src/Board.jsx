@@ -17,6 +17,7 @@ import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './co
 import { nameOf } from './store.js';
 import { FindPanel } from './find.jsx';
 import { NameBox } from './namebox.jsx';
+import { pendingKey, styleCaption, groupName } from './importer.jsx';
 
 const BG = '#F7F6F2';
 
@@ -756,7 +757,9 @@ export default function Board({ boardId, commentId, find }) {
     const units = new Set(picked.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
     const tops = picked.filter(e => !e.containerId);
     const card = tops.length === 1 && tops[0].customData && tops[0].customData.kind === 'board' ? tops[0].customData.boardId || null : null;
-    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units && s.card === card) ? s : { count: picked.length, oneImage, busy, notes, units, card });
+    const styleIds = [...new Set(picked.map(e => e.customData && e.customData.styleId).filter(Boolean))];
+    const style = units === 1 && styleIds.length === 1 ? styleIds[0] : null;
+    setSel(s => (s.count === picked.length && s.oneImage === oneImage && s.busy === busy && s.notes === notes && s.units === units && s.card === card && s.style === style) ? s : { count: picked.length, oneImage, busy, notes, units, card, style });
     // picking a drawing tool by its key shows the drawing tools, so it's never a hidden mode
     const tool = appState.activeTool && appState.activeTool.type;
     if (tool && !['selection', 'hand', 'laser'].includes(tool) && !R.current.drawingOn) { R.current.drawingOn = true; setDrawing(true); }
@@ -863,6 +866,109 @@ export default function Board({ boardId, commentId, find }) {
     const t = setTimeout(fit, 60);
     return () => clearTimeout(t);
   }, [api]);
+
+  // ── styles and photos sent from the line list (Build 650) ──────────────
+  // VENIA OS hands them over in this tab's sessionStorage; each style lands as
+  // a photo with its name, colourway, price and stage under it, grouped into
+  // sections. Linked cards keep the style's id and update when the board opens.
+  useEffect(() => {
+    if (!api || !initial || !store.canEdit) return;
+    let job = null;
+    try { job = JSON.parse(sessionStorage.getItem(pendingKey(boardId)) || 'null'); sessionStorage.removeItem(pendingKey(boardId)); } catch (e) {}
+    if (!job || !Array.isArray(job.items) || !job.items.length) return;
+    (async () => {
+      const items = job.items.slice(0, 300);
+      setBusy(items.length > 1 ? `Adding ${items.length} to the board…` : 'Adding it to the board…');
+      try {
+        // the photos, four at a time
+        const pics = new Array(items.length).fill(null);
+        let next = 0;
+        await Promise.all([0, 1, 2, 3].map(async () => {
+          while (next < items.length) {
+            const i = next++; const it = items[i];
+            if (!it.image) continue;
+            try { const blob = await fetchImage(it.image); if (blob) pics[i] = await prepareImage(blob); } catch (e) {}
+          }
+        }));
+        const CW = 260, IH = 320, CAP = 64, G = 28, P = 32, COLS = 4;
+        const groups = new Map();
+        items.forEach((it, i) => { const k = groupName(it, job.groupBy || 'none'); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(i); });
+        const live = api.getSceneElements();
+        let x0 = 0, y0 = 0;
+        if (live.length) { x0 = Math.max(...live.map(e => e.x + (e.width || 0))) + 160; y0 = Math.min(...live.map(e => e.y)); }
+        const add = [], files = [];
+        let failed = 0;
+        let sx = x0;
+        for (const [name, idx] of groups) {
+          const cols = Math.min(COLS, idx.length), rows = Math.ceil(idx.length / cols);
+          const fw = P * 2 + cols * CW + (cols - 1) * G, fh = P * 2 + rows * (IH + CAP) + (rows - 1) * G;
+          let frame = null;
+          if (name) { [frame] = convertToExcalidrawElements([{ type: 'frame', x: sx || 0.5, y: y0 || 0.5, width: fw, height: fh, name, children: [] }]); add.push(frame); }
+          idx.forEach((i, k) => {
+            const it = items[i];
+            const cx = sx + P + (k % cols) * (CW + G), cy = y0 + P + Math.floor(k / cols) * (IH + CAP + G);
+            const tag = { styleId: it.styleId || undefined, linked: !!(job.linked && it.styleId) || undefined };
+            const g = 'g' + Math.random().toString(36).slice(2, 10);
+            const fid = frame ? { frameId: frame.id } : {};
+            const img = pics[i];
+            if (img) {
+              const id = uid('f');
+              files.push({ id, dataURL: img.dataURL, mimeType: img.mimeType, created: Date.now() });
+              const sc = Math.min(CW / img.width, IH / img.height);
+              const w = Math.round(img.width * sc), h = Math.round(img.height * sc);
+              const [pic] = convertToExcalidrawElements([{ type: 'image', fileId: id, x: cx + (CW - w) / 2, y: cy + (IH - h), width: w, height: h,
+                customData: { kind: 'style', source: it.image, ...tag } }]);
+              const [cap] = convertToExcalidrawElements([{ type: 'text', x: cx, y: cy + IH + 12, text: it.styleId ? styleCaption(it) : (it.name || ''),
+                fontSize: 18, fontFamily: FONT_FAMILY.Helvetica, strokeColor: '#111111', customData: { kind: 'style-caption', ...tag } }]);
+              add.push({ ...pic, groupIds: [g], ...fid }, ...(cap.text ? [{ ...cap, groupIds: [g], ...fid }] : []));
+            } else {
+              if (it.image) failed++;
+              const els = note(cx, cy + IH - 170, it.styleId ? styleCaption(it) : (it.name || 'Photo'), NOTE_COLOURS[1].hex, CW, 170);
+              add.push(...els.map(e => ({ ...e, ...fid, ...(e.type === 'rectangle' ? { customData: { ...(e.customData || {}), ...tag } } : {}) })));
+            }
+          });
+          sx += fw + 80;
+        }
+        if (files.length) api.addFiles(files);
+        noteCards(add);
+        api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), ...add], appState: { selectedElementIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+        try { api.scrollToContent(add.filter(e => !e.containerId), { fitToViewport: true, viewportZoomFactor: 0.9, animate: true }); } catch (e) {}
+        setStatus(failed ? failed + (failed === 1 ? ' photo' : ' photos') + ' couldn\u2019t be loaded, so ' + (failed === 1 ? 'it is' : 'they are') + ' a note' : (job.linked ? 'Added. The cards stay in step with the line list' : 'Added'));
+        save();
+      } catch (e) { setStatus('Couldn\u2019t add them all: ' + (e.message || e)); }
+      finally { setBusy(''); }
+    })();
+  }, [api, initial]);
+
+  // Linked style cards ask VENIA OS for the style as it is now, and take its
+  // name, colourway, price and stage. Nothing else on the card changes, and the
+  // line list is never changed from here.
+  useEffect(() => {
+    if (!api || !initial || !inHost || !store.canEdit) return;
+    const ids = [...new Set(api.getSceneElements().filter(e => e.customData && e.customData.linked && e.customData.styleId).map(e => e.customData.styleId))];
+    if (!ids.length) return;
+    const got = (ev) => {
+      if (ev.origin !== window.location.origin || !ev.data || ev.data.source !== 'venia-host' || ev.data.type !== 'boards:style-info') return;
+      const by = Object.fromEntries(((ev.data.payload && ev.data.payload.styles) || []).map(x => [x.styleId, x]));
+      const all = api.getSceneElementsIncludingDeleted();
+      const linkedRect = new Map(all.filter(e => !e.isDeleted && e.type === 'rectangle' && e.customData && e.customData.linked && e.customData.styleId).map(e => [e.id, e.customData.styleId]));
+      let changed = false;
+      const next = all.map(e => {
+        if (e.isDeleted || e.type !== 'text') return e;
+        const sid = (e.customData && e.customData.linked && e.customData.kind === 'style-caption' && e.customData.styleId) || (e.containerId && linkedRect.get(e.containerId));
+        const st = sid && by[sid]; if (!st) return e;
+        const t = styleCaption(st);
+        if (e.originalText === t || e.text === t) return e;
+        changed = true;
+        return newElementWith(e, { text: t, originalText: t });
+      });
+      if (changed) { api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.EVENTUALLY }); setStatus('Updated from the line list'); }
+    };
+    window.addEventListener('message', got);
+    tellHost('boards:style-info', { ids });
+    const t = setTimeout(() => window.removeEventListener('message', got), 8000);
+    return () => { clearTimeout(t); window.removeEventListener('message', got); };
+  }, [api, initial]);
 
   // ── pictures not on this device yet: fetch, then show each as it lands ──
   useEffect(() => {
@@ -1587,6 +1693,7 @@ export default function Board({ boardId, commentId, find }) {
               {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
               {sel.card && <button className="selbar-open" onClick={() => openCard(sel.card)} title="Open this board (or double-click it)"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open</button>}
               {sel.card && <button onClick={copyLink} title="Copy a link to this board: paste it on any board to show the same board there (copy or duplicate makes a separate board)"><Ico d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />Copy link</button>}
+              {sel.style && inHost && <button className="selbar-open" onClick={() => tellHost('boards:open-style', { styleId: sel.style })} title="Open this style in the line list"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open style</button>}
               <button onClick={() => setMoving(true)} title="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
               {sel.units > 1 && <span className="pop-wrap">
                 <button className={panel === 'arrange' ? 'on' : ''} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
