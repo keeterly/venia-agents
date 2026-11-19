@@ -121,7 +121,7 @@ export default function Board({ boardId, commentId, find }) {
   const [cardInfo, setCardInfo] = useState({});    // board id -> { title, count, thumb }
   const [naming, setNaming] = useState(null);      // a board just made: name it, or undo
   const [drawing, setDrawing] = useState(false);   // the drawing tools are showing (hidden until you ask)
-  const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
+  const [backHot, setBackHot] = useState(null);    // the board above (or in the path) something is held over
   const [moving, setMoving] = useState(false);     // the Move to… list is open
   const [fmt, setFmt] = useState(null);            // a note open for typing: { id, mode: 'plain' | 'rich' }
   const [fmtOn, setFmtOn] = useState({});          // which styles the cursor is in (styled notes)
@@ -438,16 +438,17 @@ export default function Board({ boardId, commentId, find }) {
     const dragging = appState.selectedElementsAreBeingDragged;
     // Held over the back arrow: it lights up, and letting go moves the
     // selection up to the board above.
+    // Build 664: any board in the path along the top works the same way.
     if (dragging) {
-      const hot = overBack();
-      if (hot !== !!R.current.backHot) { R.current.backHot = hot; setBackHot(hot); if (hot) { try { navigator.vibrate && navigator.vibrate(12); } catch (e) {} } }
+      const hot = overBack() ? (trail[trail.length - 1] || {}).id || null : crumbUnder();
+      if (hot !== (R.current.backHot || null)) { R.current.backHot = hot; setBackHot(hot); if (hot) { try { navigator.vibrate && navigator.vibrate(12); } catch (e) {} } }
       if (hot) { R.current.backPicked = picked.map(e => e.id); if (st.target) { clearTimeout(st.t); st.target = null; st.armed = false; setStackOn(null); } return; }
     } else if (R.current.backHot) {
-      R.current.backHot = false; setBackHot(false);
-      const parent = trail[trail.length - 1];
+      const to = trail.find(t => t.id === R.current.backHot);
+      R.current.backHot = null; setBackHot(null);
       const ids = R.current.backPicked || [];
       const sel = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
-      if (parent && sel.length) moveTo(parent.id, sel, { title: parent.title, flyTo: backRect() });
+      if (to && sel.length) moveTo(to.id, sel, { title: to.title, flyTo: crumbRect(to.id) || backRect() });
       return;
     }
     if (dragging) {
@@ -481,6 +482,22 @@ export default function Board({ boardId, commentId, find }) {
   }
 
   // The back arrow's spot, inside the canvas's own coordinates.
+  // The board in the path along the top that the pointer is over, if any.
+  function crumbUnder() {
+    const p = R.current.ptr, w = wrapRef.current; if (!p || !w) return null;
+    for (const el of w.querySelectorAll('[data-drop-board]')) {
+      const r = el.getBoundingClientRect();
+      if (r.width && p.x >= r.left - 6 && p.x <= r.right + 6 && p.y >= r.top - 6 && p.y <= r.bottom + 6) return el.getAttribute('data-drop-board');
+    }
+    return null;
+  }
+  function crumbRect(id) {
+    const w = wrapRef.current, c = w && w.querySelector('.canvas');
+    const el = w && [...w.querySelectorAll('[data-drop-board]')].find(x => x.getAttribute('data-drop-board') === id);
+    if (!el || !c || !el.getBoundingClientRect().width) return null;
+    const r = el.getBoundingClientRect(), cr = c.getBoundingClientRect();
+    return { left: r.left - cr.left, top: r.top - cr.top, width: r.width, height: r.height };
+  }
   function backRect() {
     const b = backRef.current, c = wrapRef.current && wrapRef.current.querySelector('.canvas');
     if (!b || !c) return null;
@@ -1988,14 +2005,14 @@ export default function Board({ boardId, commentId, find }) {
     <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef} style={api ? { '--fz': Math.max(0.55, Math.min(1, api.getAppState().zoom.value * 1.6)) } : null}>
       <header className={'bar' + (tools ? ' tools-open' : '')}>
         <nav className="crumbs">
-          <button ref={backRef} className={'back' + (backHot ? ' hot' : '')} onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
+          <button ref={backRef} className={'back' + (backHot && trail.length && backHot === trail[trail.length - 1].id ? ' hot' : '')} onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
             aria-label={'Back to ' + (trail.length ? trail[trail.length - 1].title : 'all boards')}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
             <span>{trail.length ? trail[trail.length - 1].title : 'Boards'}</span>
           </button>
           {!inHost && <a className="back-os" href="/">VENIA <span>OS</span></a>}
           <button className="crumb" onClick={() => { save(); go('/'); }}>Boards</button>
-          {trail.map(b => <React.Fragment key={b.id}><span className="sep">/</span><button className="crumb" onClick={() => { save(); go('/b/' + b.id); }}>{b.title}</button></React.Fragment>)}
+          {trail.map(b => <React.Fragment key={b.id}><span className="sep">/</span><button className={'crumb' + (backHot === b.id ? ' hot' : '')} data-drop-board={b.id} onClick={() => { save(); go('/b/' + b.id); }}>{b.title}</button></React.Fragment>)}
           <span className="sep">/</span>
           {meta && <input className="title" defaultValue={meta.title} readOnly={!store.canEdit} key={meta.id} onBlur={e => rename(e.target.value)} onKeyDown={e => e.key === 'Enter' && e.target.blur()} />}
         </nav>
@@ -2203,7 +2220,7 @@ export default function Board({ boardId, commentId, find }) {
           return <div className={'stack-hint' + (stackOn.armed ? ' armed' : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
             {stackOn.armed && <span>Let go to make a board</span>}</div>;
         })()}
-        {backHot && trail.length > 0 && <div className="back-hint"><span>Let go to move up to {trail[trail.length - 1].title}</span></div>}
+        {backHot && trail.some(t => t.id === backHot) && <div className="back-hint"><span>Let go to move it to {trail.find(t => t.id === backHot).title}</span></div>}
         {ghosts && <div className="ghosts">{ghosts.items.map(g => {
           const r = ghosts.go ? { left: g.to.left + g.to.width * 0.2, top: g.to.top + g.to.height * 0.15, width: g.to.width * 0.6, height: g.to.height * 0.6 } : g.from;
           const st = { left: r.left, top: r.top, width: r.width, height: r.height, opacity: ghosts.go ? 0 : 1 };
