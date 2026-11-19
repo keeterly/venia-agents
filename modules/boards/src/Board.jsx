@@ -13,6 +13,7 @@ import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn
 import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRich, richFrom, focusRichNow, RICH_EDIT, RICH_EDITING } from './cards.jsx';
 import { parasFromText, allHave, setAll } from './rich.js';
 import { flattenCards } from './export.js';
+import { useTouchCanvas } from './touch.js';
 import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
 import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
@@ -150,6 +151,8 @@ export default function Board({ boardId, commentId, find }) {
     if (!drawing && api) { try { const t = api.getAppState().activeTool; if (t && !['selection', 'hand'].includes(t.type)) api.setActiveTool({ type: 'selection' }); } catch (e) {} }
   }, [drawing, api]);
   const wrapRef = useRef(null);
+  // fingers: one drags the board, two pinch, hold and drag selects (Build 656)
+  useTouchCanvas(api, wrapRef);
   const fileInput = useRef(null);
 
   // ── load ─────────────────────────────────────────────────────────────────
@@ -1843,6 +1846,17 @@ export default function Board({ boardId, commentId, find }) {
           </Excalidraw>
         )}
         {dropping && <div className="drop-hint"><span>Drop to add to this board</span></div>}
+        {api && !fmt && (
+          // phones: the things you reach for most, at the bottom where a thumb is
+          <div className="phone-fab" onPointerDown={e => e.stopPropagation()}>
+            <button aria-label="Show the whole board" title="Show the whole board" onClick={() => {
+              const els = api.getSceneElements().filter(e => !e.isDeleted);
+              if (els.length) { try { api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: 0.9, animate: true }); } catch (e) {} }
+            }}><Ico d="M4 9V4h5 M15 4h5v5 M20 15v5h-5 M9 20H4v-5" /></button>
+            {store.canEdit && <button aria-label="Add photos" title="Add photos" onClick={() => fileInput.current && fileInput.current.click()}><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" /></button>}
+            {store.canEdit && <button className="fab-main" aria-label="Add a note" title="Add a note" onClick={() => addNote()}><Ico d="M12 5v14 M5 12h14" /></button>}
+          </div>
+        )}
         {api && <div className="bcards">{api.getSceneElements().filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => {
           const r = rectOf(e); const info = cardInfo[e.customData.boardId] || {};
           if (r.width < 24 || r.height < 16) return null;
