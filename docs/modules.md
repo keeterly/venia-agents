@@ -66,7 +66,10 @@ shell and the frame talk only by `postMessage` with `source: 'venia-module'`.
 Its tables carry `workspace_id` (the brand) and check access through one SQL
 helper, so they can follow the core's per-brand rules.
 
-### Pattern CAD (Build 634)
+### Pattern CAD, shown as Dr4ft (Build 634; renamed Build 635)
+
+Since Build 635 VENIA OS shows this module as **Dr4ft** everywhere a person sees it (top bar, phone menu, Go to, Settings → Modules, page titles, sign-in messages). Its ids are unchanged (`pattern-cad`, `patterncad`, `/pattern-cad`, the `pattern-cad` switch and function), so nothing stored moves. `/dr4ft` opens it too.
+
 
 Pattern CAD is its own add-on module, an app in its own frame
 (`modules/pattern-cad`). Because it keeps no STATE keys it is listed in

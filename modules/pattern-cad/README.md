@@ -1,4 +1,6 @@
-# Pattern CAD module
+# Dr4ft (pattern CAD) module
+
+Shown in VENIA OS as **Dr4ft** (Build 635). Internally it is still `pattern-cad` / `patterncad` (paths, switch, function), so nothing stored changes.
 
 VENIA's pattern drafting CAD, its own module in VENIA OS (top bar on desktop,
 Spaces in the phone menu), hosted at `/pattern-cad`. The CAD is built in its own private repository,

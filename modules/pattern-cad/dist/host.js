@@ -1,4 +1,4 @@
-// VENIA Pattern CAD — host loader (runs in the frame before the CAD itself).
+// Dr4ft (VENIA's pattern CAD) — host loader (runs in the frame before the CAD itself).
 //
 // The CAD is built in its own private repository (keeterly/venia-pattern-cad).
 // None of its code is in this public repository: this loader fetches it from
@@ -90,7 +90,7 @@
 
   function start() {
     accessToken().then(function (token) {
-      if (!token) { gate('Sign in to VENIA OS to open Pattern CAD.', 'Open VENIA OS', '/'); return; }
+      if (!token) { gate('Sign in to VENIA OS to open Dr4ft.', 'Open VENIA OS', '/'); return; }
       return Promise.all([part('app.css', token), part('app.js', token)]).then(function (got) {
         var st = document.createElement('style'); st.textContent = got[0]; document.head.appendChild(st);
         var url = URL.createObjectURL(new Blob([got[1]], { type: 'text/javascript' }));
@@ -103,15 +103,15 @@
           part('page', token).then(function (t) { window.__vpcSource = t; }, function () {});
           post('pattern-cad:ready', { embedded: embedded });
         };
-        s.onerror = function () { gate('Pattern CAD didn\'t start. Try again.', 'Reload'); };
+        s.onerror = function () { gate('Dr4ft didn\'t start. Try again.', 'Reload'); };
         document.body.appendChild(s);
       });
     }).catch(function (e) {
       var st = e && e.status;
-      if (st === 401) gate('Sign in to VENIA OS again to open Pattern CAD.', 'Open VENIA OS', '/');
-      else if (st === 403) gate('Pattern CAD isn\'t open to you here. It needs Product, with Pattern CAD switched on.');
-      else if (st === 503) gate('Pattern CAD isn\'t connected yet: its GitHub key still needs adding in Netlify.');
-      else gate('Pattern CAD didn\'t load. Check the connection and try again.', 'Reload');
+      if (st === 401) gate('Sign in to VENIA OS again to open Dr4ft.', 'Open VENIA OS', '/');
+      else if (st === 403) gate('Dr4ft isn\'t open to you here. Ask for access to Dr4ft or Product, and check it is switched on in Settings › Modules.');
+      else if (st === 503) gate('Dr4ft isn\'t connected yet: its GitHub key still needs adding in Netlify.');
+      else gate('Dr4ft didn\'t load. Check the connection and try again.', 'Reload');
     });
   }
 
