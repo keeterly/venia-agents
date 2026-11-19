@@ -580,18 +580,24 @@ export default function Board({ boardId, commentId }) {
       // The board you just came back from may still be saving: look again once
       // it has had time to land, and once more a little later.
       let left = null; try { left = sessionStorage.getItem('boards:left'); sessionStorage.removeItem('boards:left'); } catch (e) {}
-      setTimeout(() => freshenPreviews(ids, left), 1500);
-      if (left && ids.includes(left)) setTimeout(() => freshenPreviews([left], left), 6000);
+      const back = left && ids.includes(left);
+      // the card you came back from shows it is catching up until its last look
+      if (back) setCardInfo(ci => ({ ...ci, [left]: { ...(ci[left] || {}), updating: true } }));
+      setTimeout(() => freshenPreviews(ids, left, back), 1500);
+      if (back) setTimeout(() => freshenPreviews([left], left, false), 6000);
     } catch (e) {}
   }, []);
 
   // A board card shows a picture of what's on that board, scaled to fill the
   // card. The picture is redrawn here whenever that board has changed since
   // this device last drew it, so it never lags behind what's inside.
-  async function freshenPreviews(ids, left) {
+  async function freshenPreviews(ids, left, keepLeft) {
+    const updating = (id, on) => setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), updating: on } }));
     let by = {};
-    try { by = Object.fromEntries((await store.listBoards()).map(b => [b.id, b])); } catch (e) { return; }
+    try { by = Object.fromEntries((await store.listBoards()).map(b => [b.id, b])); }
+    catch (e) { if (left && !keepLeft) updating(left, false); return; }
     for (const id of ids.slice(0, 16)) {
+      let drawing = false;
       try {
         const b = by[id]; if (!b) continue;
         // the count always follows what's saved now
@@ -600,6 +606,7 @@ export default function Board({ boardId, commentId }) {
         const at = await store.thumbAt(id);
         const changed = Date.parse(b.updated_at) || 0;
         if (id !== left && at && at >= changed) continue;
+        drawing = true; updating(id, true);
         const row = await store.loadBoard(id);
         const all = (row && row.scene && row.scene.elements) || [];
         const live = all.filter(e => e && !e.isDeleted);
@@ -617,6 +624,10 @@ export default function Board({ boardId, commentId }) {
         setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: url, bg } }));
         if (store.canEdit) await store.saveThumb(id, blob);
       } catch (e) { /* one board's picture never blocks the others */ }
+      finally {
+        // the board you came back from keeps its animation until the last look
+        if ((drawing || id === left) && !(id === left && keepLeft)) updating(id, false);
+      }
     }
   }
   function openCard(id) { if (!id) return; save(); go('/b/' + id); }
@@ -1201,7 +1212,7 @@ export default function Board({ boardId, commentId }) {
           if (r.width < 24 || r.height < 16) return null;
           const held = stackOn && stackOn.id === e.id;
           return <div key={e.id} className={'bcard' + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
-            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}</div>
+            <div className={'bcard-img' + (info.updating ? ' updating' : '')} style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}{info.updating && <i className="bcard-loading" aria-label="Updating" />}</div>
             <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{info.count != null && <small>{info.count} {info.count === 1 ? 'item' : 'items'}</small>}</div>
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
