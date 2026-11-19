@@ -68,13 +68,14 @@ helper, so they can follow the core's per-brand rules.
 
 ### Pattern CAD (Build 634)
 
-The pattern drafting CAD is a frame of Product (`modules/pattern-cad`) with
-its own brand switch, `pattern-cad` in `venia_entitlements`, so it can be sold
-on its own; it also needs Product on. Its code lives in its own private
-repository, `keeterly/venia-pattern-cad`, and never in this one: the
-`pattern-cad` function serves it, at the commit pinned by
-`modules/pattern-cad/scripts/sync.mjs`, only to a signed-in Product member. It keeps its styles on the device in IndexedDB, never in the shell's
-localStorage, and reads styles from the shell (no costs) for its style link.
+Pattern CAD is its own add-on module, an app in its own frame
+(`modules/pattern-cad`). Because it keeps no STATE keys it is listed in
+`VENIA_APP_MODULES`, not `MODULES`, so it never gets a `venia_module_data` row.
+It has its own brand switch, `pattern-cad` in `venia_entitlements`, and does
+not need Product; it reads Product's styles only while Product is on. Its code
+lives in its own private repository, `keeterly/venia-pattern-cad`, and never in
+this one: the `pattern-cad` function serves it, at the commit pinned by
+`modules/pattern-cad/scripts/sync.mjs`, only to a signed-in person allowed it.
 Handing patterns to Tech Pack waits on the shared hand-off contract.
 
 ## Reaching another module: `VeniaOS`

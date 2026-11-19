@@ -63,14 +63,18 @@ async function rpc(name, token, body) {
   try { return await r.json(); } catch (_) { return null; }
 }
 
-// Product readable in VENIA (founders always), and Pattern CAD not switched off.
+// Pattern CAD is its own module. Who may open it: a founder, anyone holding a
+// 'pattern-cad' grant, or (until that grant is handed out) anyone who can read
+// Product, since that is who drafts patterns today. And never while the brand
+// has Pattern CAD switched off.
 async function mayOpen(token) {
   if (!token || !anonKey()) return false;
-  const [canProduct, entitled] = await Promise.all([
+  const [canProduct, ownRole, entitled] = await Promise.all([
     rpc('venia_can', token, { t: 'main', m: 'product', action: 'read' }),
+    rpc('venia_module_role', token, { m: 'pattern-cad' }),
     rpc('venia_entitled', token, { t: 'main', m: 'pattern-cad' }),
   ]);
-  return canProduct === true && entitled !== false;
+  return (canProduct === true || (typeof ownRole === 'string' && ownRole.length > 0)) && entitled !== false;
 }
 
 const TYPES = { 'app.js': 'text/javascript; charset=utf-8', 'app.css': 'text/css; charset=utf-8', page: 'text/html; charset=utf-8' };
