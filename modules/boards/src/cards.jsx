@@ -44,14 +44,17 @@ export function linkCard(x, y, info) {
 // words. Notes only become one when you style something in them.
 export const isRich = (el) => !!(el && el.type === 'embeddable' && el.customData && el.customData.kind === 'note' && el.customData.rich);
 
-// Turn a plain note into one that can style words, in place: the same id,
-// spot, size, group and section, so arrows, comments and undo still find it.
+// A styled note made from a plain one: the same spot, size, colour, group
+// and section. It is a new element (so Undo simply brings the plain note
+// back) that remembers the old one's id, so comments pinned to it stay.
 export function richFrom(rect, paras) {
-  const [r] = restoreElements([{ ...rect, type: 'embeddable', link: cardLink('note', rect.id),
+  const id = uid('n');
+  const { index, ...rest } = rect;
+  const [r] = restoreElements([{ ...rest, id, type: 'embeddable', link: cardLink('note', id), isDeleted: false,
     boundElements: (rect.boundElements || []).filter(b => b.type !== 'text'),
-    customData: { ...(rect.customData || {}), kind: 'note', rich: true, paras, text: plainOf(paras) },
+    customData: { ...(rect.customData || {}), kind: 'note', rich: true, paras, text: plainOf(paras), was: (rect.customData && rect.customData.was) || rect.id },
     height: Math.max(rect.height, heightFor(paras, rect.width)) }], null);
-  return newElementWith(r, {});
+  return r;
 }
 
 // Words on cards, for search.

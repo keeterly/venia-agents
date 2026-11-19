@@ -1240,16 +1240,25 @@ export default function Board({ boardId, commentId, find }) {
   const CMD = { b: 'bold', i: 'italic', u: 'underline', s: 'strikeThrough' };
   const openRich = (id, range, then) => window.dispatchEvent(new CustomEvent(RICH_EDIT, { detail: { id, range, then } }));
 
-  // Make plain notes styled ones (same id, same spot). Returns the new scene.
+  // Make plain notes styled ones, each in its old one's place (arrows follow).
+  // Returns the new scene and { oldId: newId }.
   function convertNotes(all, ids, parasOf) {
-    const gone = new Set();
-    const next = all.map(e => {
-      if (!ids.has(e.id) || e.isDeleted || e.type !== 'rectangle' || !e.customData || e.customData.kind !== 'note') return e;
+    const gone = new Set(), map = {};
+    const next = [];
+    for (const e of all) {
+      if (!ids.has(e.id) || e.isDeleted || e.type !== 'rectangle' || !e.customData || e.customData.kind !== 'note') { next.push(e); continue; }
       const t = all.find(x => x.containerId === e.id && x.type === 'text' && !x.isDeleted);
       if (t) gone.add(t.id);
-      return richFrom(e, parasOf(e, t));
-    });
-    return next.map(e => gone.has(e.id) ? newElementWith(e, { isDeleted: true }) : e);
+      const r = richFrom(e, parasOf(e, t));
+      map[e.id] = r.id;
+      next.push(newElementWith(e, { isDeleted: true }), r);
+    }
+    const bind = (b) => (b && map[b.elementId] ? { ...b, elementId: map[b.elementId] } : b);
+    return { map, elements: next.map(e => {
+      if (gone.has(e.id)) return newElementWith(e, { isDeleted: true });
+      if ((e.startBinding && map[e.startBinding.elementId]) || (e.endBinding && map[e.endBinding.elementId])) return newElementWith(e, { startBinding: bind(e.startBinding), endBinding: bind(e.endBinding) });
+      return e;
+    }) };
   }
 
   // While typing in a plain note: keep its words, style what's selected, and
@@ -1262,8 +1271,10 @@ export default function Board({ boardId, commentId, find }) {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const all = api.getSceneElementsIncludingDeleted();
       if (!all.some(e => e.id === id && !e.isDeleted)) return;
-      api.updateScene({ elements: convertNotes(all, new Set([id]), () => parasFromText(value)), captureUpdate: CaptureUpdateAction.IMMEDIATELY });
-      setTimeout(() => openRich(id, [a, b], CMD[k]), 30);
+      const c = convertNotes(all, new Set([id]), () => parasFromText(value));
+      const nid = c.map[id]; if (!nid) return;
+      api.updateScene({ elements: c.elements, appState: { selectedElementIds: { [nid]: true }, selectedGroupIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      setTimeout(() => openRich(nid, [a, b], CMD[k]), 30);
     }));
   }
 
@@ -1281,9 +1292,11 @@ export default function Board({ boardId, commentId, find }) {
     };
     const on = !picked.every(e => isRich(e) && allHave(parasOf(e), k));
     const styled = new Set(picked.filter(isRich).map(e => e.id));
-    const next = convertNotes(all, new Set(picked.filter(e => !isRich(e)).map(e => e.id)), (e) => setAll(parasOf(e), k, on))
-      .map(e => styled.has(e.id) ? newElementWith(e, { customData: { ...e.customData, paras: setAll(parasOf(e), k, on) } }) : e);
-    api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    const c = convertNotes(all, new Set(picked.filter(e => !isRich(e)).map(e => e.id)), (e) => setAll(parasOf(e), k, on));
+    const next = c.elements.map(e => styled.has(e.id) ? newElementWith(e, { customData: { ...e.customData, paras: setAll(parasOf(e), k, on) } }) : e);
+    // keep the same notes selected, under their new ids
+    const selIds = {}; Object.keys(st.selectedElementIds || {}).forEach(x => { if (st.selectedElementIds[x]) selIds[c.map[x] || x] = true; });
+    api.updateScene({ elements: next, appState: { selectedElementIds: selIds }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
   }
 
   // Aa on a phone: open the selected note for typing, where its bar has B I U S.
