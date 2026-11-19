@@ -1366,7 +1366,7 @@ export default function Board({ boardId, commentId, find }) {
               <MainMenu.Item onSelect={() => { save(); go('/'); }}>All boards</MainMenu.Item>
               <MainMenu.Separator />
               <MainMenu.DefaultItems.SaveAsImage />
-              <MainMenu.Item onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
+              <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
               <MainMenu.DefaultItems.SearchMenu />
               <MainMenu.Separator />
               <MainMenu.DefaultItems.Help />
