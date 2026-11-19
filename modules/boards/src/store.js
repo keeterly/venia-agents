@@ -364,7 +364,7 @@ export const store = {
   // The board's parent changes, and its card moves with it: a card appears on
   // the new parent (to the right of what's there) and leaves the old one, so
   // you always reach a board by opening the board that holds it.
-  async moveInto(id, parentId, makeCard) {
+  async moveInto(id, parentId, makeCard, { addCard = true } = {}) {
     const all = await this.listBoards();
     const me = all.find(b => b.id === id); if (!me) return;
     if (parentId) {
@@ -390,7 +390,8 @@ export const store = {
       hit.forEach(e => (e.boundElements || []).forEach(b => ids.add(b.id)));
       return els.map(e => ids.has(e.id) || (e.containerId && ids.has(e.containerId)) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e);
     });
-    if (parentId) await edit(parentId, els => {
+    // addCard false: the caller already has the card on that board (an Undo).
+    if (parentId && addCard) await edit(parentId, els => {
       const live = els.filter(e => !e.isDeleted);
       if (live.some(e => e.customData && e.customData.kind === 'board' && e.customData.boardId === id)) return null;
       let x = 0, y = 0;
@@ -404,11 +405,14 @@ export const store = {
   // it copied too. Cards that only link to a board elsewhere stay links.
   // Nothing about the original is changed.
   async copyBoard(srcId, { parent_id = null, title = null, seen = new Set() } = {}) {
-    if (seen.has(srcId) || seen.size > 100) return null;
+    if (seen.has(srcId) || seen.size > 200) return null;
     seen.add(srcId);
     const src = await this.loadBoard(srcId);
     if (!src || src.trashed_at) return null;
     const newId = uid('b');
+    // A copy pasted inside the board it copies (or inside one of its boards)
+    // must not be copied again as one of the originals' boards.
+    seen.add(newId);
     const name = title || src.title || 'Untitled board';
     const srcScene = src.scene || { elements: [], appState: {} };
     const live = (srcScene.elements || []).filter(e => e && !e.isDeleted);
@@ -464,11 +468,16 @@ export const store = {
     const idMap = {};
     for (const b of all.filter(x => !x.trashed_at && !x.uploaded)) {
       const scene = (await get('scene:' + b.id, idb)) || { elements: [], appState: {} };
-      const row = await this.createBoard({ title: b.title, parent_id: null, scene });
+      // Same id in the cloud, so cards for boards inside it still open them,
+      // and a second run can't make a second copy.
+      let row;
+      try { row = await this.createBoard({ id: b.id, title: b.title, parent_id: null, scene }); }
+      catch (e) { if (!/duplicate|conflict|23505/i.test(String((e.code || '') + ' ' + (e.message || e)))) throw e; row = { id: b.id }; }
       idMap[b.id] = row.id;
       const ids = (await get('files:' + b.id, idb)) || [];
       for (const fid of ids) { const f = await get('file:' + fid, idb); if (f) await this.saveFile(row.id, { id: fid, ...f }); }
       b.uploaded = row.id;
+      await set('boards', all, idb);   // remembered board by board
       if (onStep) onStep(b.title);
     }
     for (const b of all) if (b.parent_id && idMap[b.parent_id] && idMap[b.id]) await this.move(idMap[b.id], idMap[b.parent_id]);

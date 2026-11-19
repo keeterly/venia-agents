@@ -87,9 +87,15 @@ export function MentionBox({ people, placeholder, onSend, autoFocus, busy }) {
     setV(next); setQ(null);
     setTimeout(() => { el.focus(); el.selectionStart = el.selectionEnd = before.length; }, 0);
   }
-  function send() {
-    const body = v.trim(); if (!body || busy) return;
-    onSend(body, mentionsIn(body, people)); setV(''); setQ(null);
+  // The words stay in the box until they're really sent.
+  const [sending, setSending] = useState(false);
+  async function send() {
+    const body = v.trim(); if (!body || busy || sending) return;
+    setSending(true);
+    let ok = true;
+    try { ok = (await onSend(body, mentionsIn(body, people))) !== false; } catch (e) { ok = false; }
+    setSending(false);
+    if (ok) { setV(''); setQ(null); }
   }
   return (
     <div className="mention-box">
@@ -107,7 +113,7 @@ export function MentionBox({ people, placeholder, onSend, autoFocus, busy }) {
           {sugg.map((p, i) => <button key={p.email} className={i === hi ? 'on' : ''} onMouseDown={e => { e.preventDefault(); pick(p); }}><b>{p.name}</b><small>{p.email}</small></button>)}
         </div>
       )}
-      <div className="mention-foot"><button className="solid sm" disabled={!v.trim() || busy} onClick={send}>Send</button></div>
+      <div className="mention-foot"><button className="solid sm" disabled={!v.trim() || busy || sending} onClick={send}>{sending ? 'Sending…' : 'Send'}</button></div>
     </div>
   );
 }
@@ -149,6 +155,16 @@ export function CommentsLayer({ api, threads, adding, setAdding, openId, setOpen
     const v = sceneCoordsToViewportCoords({ sceneX: p.x, sceneY: p.y }, st);
     return { left: v.x - st.offsetLeft, top: v.y - st.offsetTop };
   };
+  // Beside the pin, but always on screen: on a phone the box would otherwise
+  // open off the right edge with its Send button out of reach.
+  const within = (pos) => {
+    const W = (layer.current && layer.current.clientWidth) || st.width || window.innerWidth;
+    const H = (layer.current && layer.current.clientHeight) || st.height || window.innerHeight;
+    const bw = Math.min(300, W - 40);
+    let left = pos.left + 22;
+    if (left + bw > W - 8) left = pos.left - bw - 8 >= 8 ? pos.left - bw - 8 : Math.max(8, W - bw - 8);
+    return { left, top: Math.max(8, Math.min(pos.top - 6, H - 240)) };
+  };
   function place(e) {
     if (!adding || draft) return;
     const p = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, st);
@@ -172,7 +188,7 @@ export function CommentsLayer({ api, threads, adding, setAdding, openId, setOpen
               {n}
             </button>
             {open && (
-              <div className="pop-at" style={{ left: pos.left + 22, top: pos.top - 6 }}>
+              <div className="pop-at" style={within(pos)}>
                 <Thread t={t} people={people} canResolve={store.canEdit || t.root.author === (store.email || 'you')}
                   onReply={onReply} onResolve={onResolve} onHide={onHide} onClose={() => setOpenId(null)} />
               </div>
@@ -185,12 +201,14 @@ export function CommentsLayer({ api, threads, adding, setAdding, openId, setOpen
         return (
           <>
             <span className="pin draft" style={pos}>+</span>
-            <div className="pop-at" style={{ left: pos.left + 22, top: pos.top - 6 }} onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()}>
+            <div className="pop-at" style={within(pos)} onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()}>
               <div className="thread">
                 <div className="thread-head"><span>New comment</span><button className="x" onClick={() => { setDraft(null); setAdding(false); }} aria-label="Cancel">×</button></div>
                 <MentionBox autoFocus people={people} onSend={async (body, mentions) => {
-                  const d = draft; setDraft(null); setAdding(false);
-                  await onAdd({ body, mentions, element_id: d.element_id || null, x: d.element_id ? d.ox : d.x, y: d.element_id ? d.oy : d.y });
+                  const d = draft;
+                  const ok = await onAdd({ body, mentions, element_id: d.element_id || null, x: d.element_id ? d.ox : d.x, y: d.element_id ? d.oy : d.y });
+                  if (ok !== false) { setDraft(null); setAdding(false); }
+                  return ok;
                 }} />
               </div>
             </div>
