@@ -121,7 +121,7 @@ through the handoff layer, `VeniaHandoff` (also `VeniaOS.handoff`):
   it). `VeniaHandoff.collect(module)` picks up handoffs sent from another
   device or a framed module.
 
-The first handoffs:
+The first handoffs (the full Dr4ft contract is in [handoffs-dr4ft.md](handoffs-dr4ft.md)):
 
 | From | Kind | Into | How |
 |---|---|---|---|
