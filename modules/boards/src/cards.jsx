@@ -5,7 +5,7 @@
 // with the board like anything else. Their content lives in customData, so it
 // saves, syncs and searches with the scene. The link points back at Boards
 // itself and is never loaded: it only marks the element as one of ours.
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { convertToExcalidrawElements, newElementWith, restoreElements, CaptureUpdateAction } from '@excalidraw/excalidraw';
 import { uid } from './store.js';
 
@@ -21,8 +21,9 @@ function embeddable(x, y, w, h, kind, data) {
   return restoreElements([{ ...r, type: 'embeddable', link: cardLink(kind, r.id), customData: { kind, ...data } }], null);
 }
 
-export const TODO_W = 280;
-const todoHeight = (items) => 58 + Math.max(1, items.length) * 30 + 40;
+// Text about the size of a note's, so a list reads at the same zoom.
+export const TODO_W = 320;
+const todoHeight = (items) => 66 + Math.max(1, items.length) * 40 + 50;
 
 export function todoCard(x, y, title = 'To do', items = []) {
   const list = items.length ? items : [{ id: uid('t'), t: '', done: false }];
@@ -68,6 +69,15 @@ function TodoCard({ el, api, canEdit }) {
   const [draft, setDraft] = useState('');
   const save = (nextItems, title = d.title) => patchCard(api, el, { items: nextItems, title }, todoHeight(nextItems));
   const done = items.filter(i => i.done && i.t).length, total = items.filter(i => i.t).length;
+  // A list made before the text grew is made taller once, so nothing is cut off.
+  useEffect(() => {
+    if (!api || !canEdit) return;
+    const need = todoHeight(items);
+    if (el.height + 1 >= need) return;
+    const cur = api.getSceneElementsIncludingDeleted().find(e => e.id === el.id);
+    if (!cur || cur.isDeleted) return;
+    api.updateScene({ elements: api.getSceneElementsIncludingDeleted().map(e => e.id === el.id ? newElementWith(e, { height: need }) : e), captureUpdate: CaptureUpdateAction.NEVER });
+  }, [el.id, el.height, items.length]);
   return (
     <div className="card-todo">
       <div className="todo-head">
