@@ -17,6 +17,22 @@ import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './co
 import { nameOf } from './store.js';
 
 const BG = '#F7F6F2';
+
+// A board card's picture. Boards inside it show as light cards, the way they
+// look in the app. Used for every card picture so they all look the same.
+async function previewBlob(all, files, bg) {
+  const live = all.filter(e => e && !e.isDeleted);
+  if (!live.length) return null;
+  const cardIds = new Set(live.filter(e => e.customData && e.customData.kind === 'board').map(e => e.id));
+  const els = live.map(e => cardIds.has(e.id) ? { ...e, backgroundColor: '#efede8', fillStyle: 'solid', strokeColor: '#161616' }
+    : (e.containerId && cardIds.has(e.containerId)) ? { ...e, strokeColor: '#161616' } : e);
+  return exportToBlob({ elements: els, files: files || {}, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
+    appState: { exportBackground: true, viewBackgroundColor: bg || BG } });
+}
+// The board you leave draws its own new card picture from what was on screen,
+// so the card you go back to can show it the moment it is ready instead of
+// waiting for the save to land and drawing it again.
+const leaving = new Map();
 const DEFAULTS = {
   viewBackgroundColor: BG,
   currentItemRoughness: 0,
@@ -90,8 +106,10 @@ export default function Board({ boardId, commentId }) {
         const elements = restoreElements(raw, null);
         R.current.savedVersion = getSceneVersion(elements);
         R.current.thumbVersion = R.current.savedVersion;
+        R.current.openVersion = R.current.savedVersion;
         R.current.legacyPending = (row.scene && row.scene.legacyPending) || [];
         R.current.bg = (row.scene && row.scene.appState && row.scene.appState.viewBackgroundColor) || BG;
+        R.current.openBg = R.current.bg;
         setMeta(row);
         setInitial({
           elements,
@@ -579,25 +597,47 @@ export default function Board({ boardId, commentId }) {
       });
       // The board you just came back from may still be saving: look again once
       // it has had time to land, and once more a little later.
-      let left = null; try { left = sessionStorage.getItem('boards:left'); sessionStorage.removeItem('boards:left'); } catch (e) {}
+      let left = null, changed = false;
+      try {
+        const raw = sessionStorage.getItem('boards:left'); sessionStorage.removeItem('boards:left');
+        if (raw) { try { const o = JSON.parse(raw); left = o.id; changed = !!o.changed; } catch (e) { left = raw; changed = true; } }
+      } catch (e) {}
       const back = left && ids.includes(left);
-      // the card you came back from shows it is catching up until its last look
-      if (back) setCardInfo(ci => ({ ...ci, [left]: { ...(ci[left] || {}), updating: true } }));
-      setTimeout(() => freshenPreviews(ids, left, back), 1500);
-      if (back) setTimeout(() => freshenPreviews([left], left, false), 6000);
+      const handed = left ? leaving.get(left) : null; if (left) leaving.delete(left);
+      if (back && changed) {
+        // The card you came back from animates only while its new picture is
+        // being drawn, and stops the moment it shows.
+        setCardInfo(ci => ({ ...ci, [left]: { ...(ci[left] || {}), updating: true } }));
+        const done = (blob, bg, count) => {
+          setCardInfo(ci => ({ ...ci, [left]: { ...(ci[left] || {}),
+            ...(blob ? { thumb: URL.createObjectURL(blob), bg } : {}), ...(count === 0 ? { thumb: null } : count != null ? { count } : {}), updating: false } }));
+          if (blob && store.canEdit) store.saveThumb(left, blob).catch(() => {});
+        };
+        if (handed) Promise.race([handed.p, new Promise(r => setTimeout(() => r(undefined), 4000))])
+          .then(blob => blob === undefined ? freshenPreviews([left], left, true) : done(blob, handed.bg, handed.count));
+        else freshenPreviews([left], left, true);
+      }
+      // Then quietly check every card against what's saved, once the save has
+      // had time to land and once more a little later.
+      // A picture handed over on the way out is already the newest one, so only
+      // redraw it again if what's saved turns out newer; without one, redraw it.
+      const force = back && changed && !handed ? left : null;
+      setTimeout(() => freshenPreviews(ids, force), 1500);
+      if (back && changed) setTimeout(() => freshenPreviews([left], force), 6000);
     } catch (e) {}
   }, []);
 
   // A board card shows a picture of what's on that board, scaled to fill the
   // card. The picture is redrawn here whenever that board has changed since
   // this device last drew it, so it never lags behind what's inside.
-  async function freshenPreviews(ids, left, keepLeft) {
-    const updating = (id, on) => setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), updating: on } }));
+  // `left` is redrawn whatever its stamp says (its save may land after the
+  // stamp). `animate` shows the loading animation on it until its picture is in.
+  async function freshenPreviews(ids, left, animate) {
+    const stop = (id) => setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), updating: false } }));
     let by = {};
     try { by = Object.fromEntries((await store.listBoards()).map(b => [b.id, b])); }
-    catch (e) { if (left && !keepLeft) updating(left, false); return; }
+    catch (e) { if (animate && left) stop(left); return; }
     for (const id of ids.slice(0, 16)) {
-      let drawing = false;
       try {
         const b = by[id]; if (!b) continue;
         // the count always follows what's saved now
@@ -606,28 +646,17 @@ export default function Board({ boardId, commentId }) {
         const at = await store.thumbAt(id);
         const changed = Date.parse(b.updated_at) || 0;
         if (id !== left && at && at >= changed) continue;
-        drawing = true; updating(id, true);
         const row = await store.loadBoard(id);
         const all = (row && row.scene && row.scene.elements) || [];
-        const live = all.filter(e => e && !e.isDeleted);
-        if (!live.length) continue;
-        // boards inside it show as light cards, the way they look in the app
-        const cardIds = new Set(live.filter(e => e.customData && e.customData.kind === 'board').map(e => e.id));
-        const els = live.map(e => cardIds.has(e.id) ? { ...e, backgroundColor: '#efede8', fillStyle: 'solid', strokeColor: '#161616' }
-          : (e.containerId && cardIds.has(e.containerId)) ? { ...e, strokeColor: '#161616' } : e);
-        const need = [...new Set(els.filter(e => e.type === 'image' && e.fileId).map(e => e.fileId))];
+        const need = [...new Set(all.filter(e => e && !e.isDeleted && e.type === 'image' && e.fileId).map(e => e.fileId))];
         const files = need.length ? Object.fromEntries((await store.loadFiles(id, need)).map(f => [f.id, f])) : {};
-        const blob = await exportToBlob({ elements: els, files, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
-          appState: { exportBackground: true, viewBackgroundColor: (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG } });
-        const url = URL.createObjectURL(blob);
         const bg = (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG;
-        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: url, bg } }));
+        const blob = await previewBlob(all, files, bg);
+        if (!blob) continue;
+        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: URL.createObjectURL(blob), bg, updating: false } }));
         if (store.canEdit) await store.saveThumb(id, blob);
       } catch (e) { /* one board's picture never blocks the others */ }
-      finally {
-        // the board you came back from keeps its animation until the last look
-        if ((drawing || id === left) && !(id === left && keepLeft)) updating(id, false);
-      }
+      finally { if (animate && id === left) stop(id); }
     }
   }
   function openCard(id) { if (!id) return; save(); go('/b/' + id); }
@@ -706,8 +735,15 @@ export default function Board({ boardId, commentId }) {
     let snap = null;
     try { if (a && store.canEdit) snap = sf(a); } catch (e) {}
     R.current.dead = true;
-    // tell the board you go back to that this one may have just changed
-    try { sessionStorage.setItem('boards:left', boardId); } catch (e) {}
+    // Tell the board you go back to which one you left, and whether anything
+    // on it changed while you were here. Only a changed board gets the loading
+    // animation, and its new picture is drawn right now from this copy.
+    const changed = !!(snap && R.current.openVersion != null && (snap.version !== R.current.openVersion || snap.scene.appState.viewBackgroundColor !== R.current.openBg));
+    if (changed) {
+      const p = previewBlob(snap.scene.elements, snap.files, snap.scene.appState.viewBackgroundColor).catch(() => null);
+      leaving.set(boardId, { p, bg: snap.scene.appState.viewBackgroundColor, count: snap.extra.item_count });
+    }
+    try { sessionStorage.setItem('boards:left', JSON.stringify({ id: boardId, changed })); } catch (e) {}
     if (snap) { sv(snap); th(snap); }
   }, []);
 
