@@ -10,7 +10,9 @@ import { go, NewBoard, LEGACY_ID } from './App.jsx';
 import { NOTE_COLOURS, note, boardCard, paletteRow, frameAround, legacyCardElements, countItems, loadLibrary, saveLibrary } from './elements.js';
 import { arrange, selectionUnits } from './layout.js';
 import { prepareImage, fetchImage, looksLikeImageUrl, extractPalette, readableOn } from './images.js';
-import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf } from './cards.jsx';
+import { todoCard, linkCard, cardWords, isCardUrl, makeRenderCard, hostOf, isRich, richFrom, RICH_EDIT, RICH_EDITING } from './cards.jsx';
+import { parasFromText, allHave, setAll } from './rich.js';
+import { flattenCards } from './export.js';
 import { newColumn, isColumn, restack } from './columns.js';
 import { useLive } from './live.js';
 import { CommentsLayer, CommentsPanel, threadsOf, spotOf, focusSpot } from './comments.jsx';
@@ -29,7 +31,8 @@ async function previewBlob(all, files, bg) {
   const cardIds = new Set(live.filter(e => e.customData && e.customData.kind === 'board').map(e => e.id));
   const els = live.map(e => cardIds.has(e.id) ? { ...e, backgroundColor: '#efede8', fillStyle: 'solid', strokeColor: '#161616' }
     : (e.containerId && cardIds.has(e.containerId)) ? { ...e, strokeColor: '#161616' } : e);
-  return exportToBlob({ elements: els, files: files || {}, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
+  const flat = flattenCards(els, files, 1.5);
+  return exportToBlob({ elements: flat.elements, files: flat.files, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
     appState: { exportBackground: true, viewBackgroundColor: bg || BG } });
 }
 // The whole board as one page, through the browser's print dialog, where
@@ -38,7 +41,8 @@ async function previewBlob(all, files, bg) {
 async function printBoard(api, title) {
   const live = api.getSceneElements().filter(e => e && !e.isDeleted);
   if (!live.length) return;
-  const blob = await exportToBlob({ elements: live, files: api.getFiles() || {}, mimeType: 'image/png', exportPadding: 48,
+  const flat = flattenCards(live, api.getFiles(), 3);
+  const blob = await exportToBlob({ elements: flat.elements, files: flat.files, mimeType: 'image/png', exportPadding: 48,
     getDimensions: (w, h) => { const k = Math.min(3, 3200 / Math.max(w, h)); return { width: w * k, height: h * k, scale: k }; },
     appState: { exportBackground: true, viewBackgroundColor: api.getAppState().viewBackgroundColor || BG } });
   const url = URL.createObjectURL(blob);
@@ -54,6 +58,20 @@ async function printBoard(api, title) {
   const img = d.querySelector('img');
   img.onload = () => { setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch (e) {} setTimeout(() => { f.remove(); URL.revokeObjectURL(url); }, 60000); }, 50); };
   img.src = url;
+}
+// Save as image: a PNG of the whole board, styled notes and lists included.
+async function saveImage(api, title) {
+  const live = api.getSceneElements().filter(e => e && !e.isDeleted);
+  if (!live.length) return;
+  const flat = flattenCards(live, api.getFiles(), 2);
+  const blob = await exportToBlob({ elements: flat.elements, files: flat.files, mimeType: 'image/png', exportPadding: 32,
+    getDimensions: (w, h) => { const k = Math.min(2, 6000 / Math.max(w, h)); return { width: w * k, height: h * k, scale: k }; },
+    appState: { exportBackground: true, viewBackgroundColor: api.getAppState().viewBackgroundColor || BG } });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = (String(title || 'Board').replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'Board') + '.png';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 // The board you leave draws its own new card picture from what was on screen,
 // so the card you go back to can show it the moment it is ready instead of
@@ -98,6 +116,8 @@ export default function Board({ boardId, commentId, find }) {
   const [drawing, setDrawing] = useState(false);   // the drawing tools are showing (hidden until you ask)
   const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
   const [moving, setMoving] = useState(false);     // the Move to… list is open
+  const [fmt, setFmt] = useState(null);            // a note open for typing: { id, mode: 'plain' | 'rich' }
+  const [fmtOn, setFmtOn] = useState({});          // which styles the cursor is in (styled notes)
   const backRef = useRef(null);
   const doDeleteRef = useRef(() => {});
   const copyCardsRef = useRef(() => {});
@@ -753,6 +773,11 @@ export default function Board({ boardId, commentId, find }) {
       R.current.cardSeen = new Set(cardIds); if (fresh.length) loadCardInfo(fresh); }
     const oneImage = picked.length === 1 && picked[0].type === 'image' ? picked[0] : null;
     const busy = !!(appState.selectedElementsAreBeingDragged || appState.resizingElement || appState.newElement || appState.editingTextElement || appState.isRotating);
+    // typing in a plain note shows the B I U S bar over it
+    const et = appState.editingTextElement;
+    const box = et && et.containerId ? elements.find(e => e.id === et.containerId) : null;
+    const plainId = box && !box.isDeleted && box.type === 'rectangle' && box.customData && box.customData.kind === 'note' ? box.id : null;
+    setFmt(f => plainId ? (f && f.id === plainId && f.mode === 'plain' ? f : { id: plainId, mode: 'plain' }) : (f && f.mode === 'plain' ? null : f));
     const notes = picked.length > 0 && picked.every(e => e.customData && e.customData.kind === 'note');
     const units = new Set(picked.filter(e => !e.containerId).map(e => e.groupIds && e.groupIds.length ? 'g' + e.groupIds[e.groupIds.length - 1] : e.id)).size;
     const tops = picked.filter(e => !e.containerId);
@@ -1209,6 +1234,96 @@ export default function Board({ boardId, commentId, find }) {
     api.updateScene({ elements: next, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
   }
 
+  // ── bold, italic, underline, strikethrough ─────────────────────────────
+  // A note becomes a styled note the first time something in it is styled;
+  // until then it stays exactly as it was.
+  const CMD = { b: 'bold', i: 'italic', u: 'underline', s: 'strikeThrough' };
+  const openRich = (id, range, then) => window.dispatchEvent(new CustomEvent(RICH_EDIT, { detail: { id, range, then } }));
+
+  // Make plain notes styled ones, each in its old one's place (arrows follow).
+  // Returns the new scene and { oldId: newId }.
+  function convertNotes(all, ids, parasOf) {
+    const gone = new Set(), map = {};
+    const next = [];
+    for (const e of all) {
+      if (!ids.has(e.id) || e.isDeleted || e.type !== 'rectangle' || !e.customData || e.customData.kind !== 'note') { next.push(e); continue; }
+      const t = all.find(x => x.containerId === e.id && x.type === 'text' && !x.isDeleted);
+      if (t) gone.add(t.id);
+      const r = richFrom(e, parasOf(e, t));
+      map[e.id] = r.id;
+      next.push(newElementWith(e, { isDeleted: true }), r);
+    }
+    const bind = (b) => (b && map[b.elementId] ? { ...b, elementId: map[b.elementId] } : b);
+    return { map, elements: next.map(e => {
+      if (gone.has(e.id)) return newElementWith(e, { isDeleted: true });
+      if ((e.startBinding && map[e.startBinding.elementId]) || (e.endBinding && map[e.endBinding.elementId])) return newElementWith(e, { startBinding: bind(e.startBinding), endBinding: bind(e.endBinding) });
+      return e;
+    }) };
+  }
+
+  // While typing in a plain note: keep its words, style what's selected, and
+  // carry on typing in the styled note.
+  function styleWhileTyping(k) {
+    const ta = wrapRef.current && wrapRef.current.querySelector('textarea.excalidraw-wysiwyg');
+    const f = fmt; if (!ta || !f || f.mode !== 'plain') return;
+    const value = ta.value, a = ta.selectionStart, b = ta.selectionEnd, id = f.id;
+    ta.blur();     // the board saves the words as they are
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const all = api.getSceneElementsIncludingDeleted();
+      if (!all.some(e => e.id === id && !e.isDeleted)) return;
+      const c = convertNotes(all, new Set([id]), () => parasFromText(value));
+      const nid = c.map[id]; if (!nid) return;
+      api.updateScene({ elements: c.elements, appState: { selectedElementIds: { [nid]: true }, selectedGroupIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      setTimeout(() => openRich(nid, [a, b], CMD[k]), 30);
+    }));
+  }
+
+  // The bar's buttons with nothing open: the whole of each selected note.
+  function styleNotes(k) {
+    const st = api.getAppState();
+    const ids = new Set(Object.keys(st.selectedElementIds || {}).filter(x => st.selectedElementIds[x]));
+    const all = api.getSceneElementsIncludingDeleted();
+    const picked = all.filter(e => ids.has(e.id) && !e.isDeleted && e.customData && e.customData.kind === 'note');
+    if (!picked.length) return;
+    const parasOf = (e) => {
+      if (isRich(e)) return e.customData.paras || [[]];
+      const t = all.find(x => x.containerId === e.id && x.type === 'text' && !x.isDeleted);
+      return parasFromText(t ? (t.originalText != null ? t.originalText : t.text) : '');
+    };
+    const on = !picked.every(e => isRich(e) && allHave(parasOf(e), k));
+    const styled = new Set(picked.filter(isRich).map(e => e.id));
+    const c = convertNotes(all, new Set(picked.filter(e => !isRich(e)).map(e => e.id)), (e) => setAll(parasOf(e), k, on));
+    const next = c.elements.map(e => styled.has(e.id) ? newElementWith(e, { customData: { ...e.customData, paras: setAll(parasOf(e), k, on) } }) : e);
+    // keep the same notes selected, under their new ids
+    const selIds = {}; Object.keys(st.selectedElementIds || {}).forEach(x => { if (st.selectedElementIds[x]) selIds[c.map[x] || x] = true; });
+    api.updateScene({ elements: next, appState: { selectedElementIds: selIds }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+  }
+
+  // Aa on a phone: open the selected note for typing, where its bar has B I U S.
+  function typeInNote() {
+    const st = api.getAppState();
+    const n = api.getSceneElements().find(e => st.selectedElementIds && st.selectedElementIds[e.id] && e.customData && e.customData.kind === 'note');
+    if (!n) return;
+    if (isRich(n)) openRich(n.id); else editNote(n);
+  }
+
+  // A button on the bar over an open note
+  function fmtPress(k) {
+    if (!fmt) return;
+    if (fmt.mode === 'plain') { styleWhileTyping(k); return; }
+    try { document.execCommand(CMD[k]); } catch (e) {}
+    readFmtOn();
+  }
+  function fmtDone() {
+    if (fmt && fmt.mode === 'plain') { const ta = wrapRef.current && wrapRef.current.querySelector('textarea.excalidraw-wysiwyg'); if (ta) ta.blur(); }
+    else if (document.activeElement && document.activeElement.isContentEditable) document.activeElement.blur();
+  }
+  const readFmtOn = () => {
+    const q = (c) => { try { return document.queryCommandState(c); } catch (e) { return false; } };
+    const next = { b: q('bold'), i: q('italic'), u: q('underline'), s: q('strikeThrough') };
+    setFmtOn(o => (o.b === next.b && o.i === next.i && o.u === next.u && o.s === next.s) ? o : next);
+  };
+
   // Delete what's selected, with an Undo. A section takes what's in it along.
   function doDelete() {
     const st = api.getAppState();
@@ -1463,10 +1578,12 @@ export default function Board({ boardId, commentId, find }) {
     const el = wrapRef.current; if (!el || !api) return;
     const cardAt = (e) => {
       const p = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, api.getAppState());
-      const hits = api.getSceneElements().filter(x => x.customData && x.customData.kind === 'board'
+      const hits = api.getSceneElements().filter(x => x.customData && (x.customData.kind === 'board' || (store.canEdit && isRich(x)))
         && p.x >= x.x && p.x <= x.x + x.width && p.y >= x.y && p.y <= x.y + x.height);
       return hits.length ? hits[hits.length - 1] : null;
     };
+    // a board card opens the board; a styled note opens for typing
+    const open = (c) => { if (isRich(c)) openRich(c.id); else openCard(c.customData.boardId); };
     const down = (e) => {
       if (e.button > 0 || !e.target || !e.target.closest('.excalidraw canvas, .bcard')) return;
       const c = cardAt(e);
@@ -1475,12 +1592,12 @@ export default function Board({ boardId, commentId, find }) {
       if (c && last && last.id === c.id && now - last.t < 380 && Math.hypot(e.clientX - last.x, e.clientY - last.y) < 30) {
         R.current.lastTap = null;
         e.preventDefault(); e.stopPropagation();
-        openCard(c.customData.boardId);
+        open(c);
         return;
       }
       R.current.lastTap = c ? { id: c.id, t: now, x: e.clientX, y: e.clientY } : null;
     };
-    const dbl = (e) => { const c = cardAt(e); if (c) { e.preventDefault(); e.stopPropagation(); } };
+    const dbl = (e) => { const c = cardAt(e); if (c && !(e.target && e.target.isContentEditable)) { e.preventDefault(); e.stopPropagation(); } };
     el.addEventListener('pointerdown', down, true);
     el.addEventListener('dblclick', dbl, true);
     return () => { el.removeEventListener('pointerdown', down, true); el.removeEventListener('dblclick', dbl, true); };
@@ -1498,6 +1615,47 @@ export default function Board({ boardId, commentId, find }) {
     };
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
+  }, [api]);
+
+  // A styled note open for typing: show the bar over it, and keep the bar's
+  // buttons lit for the words the cursor is in.
+  useEffect(() => {
+    const on = (e) => { const id = e.detail && e.detail.id; setFmt(f => id ? { id, mode: 'rich' } : (f && f.mode === 'rich' ? null : f)); if (id) readFmtOn(); else setFmtOn({}); };
+    const sc = () => { const a = document.activeElement; if (a && a.isContentEditable && a.closest('.card-rich')) readFmtOn(); };
+    window.addEventListener(RICH_EDITING, on);
+    document.addEventListener('selectionchange', sc);
+    return () => { window.removeEventListener(RICH_EDITING, on); document.removeEventListener('selectionchange', sc); };
+  }, []);
+
+  // Cmd/Ctrl+B, I, U and Shift+X while typing in a plain note; Enter on a
+  // selected styled note opens it for typing.
+  const fmtRef = useRef(null); fmtRef.current = { fmt, styleWhileTyping };
+  useEffect(() => {
+    if (!api || !store.canEdit) return;
+    const k = (e) => {
+      const t = e.target;
+      if (t && t.tagName === 'TEXTAREA' && t.classList.contains('excalidraw-wysiwyg') && (e.metaKey || e.ctrlKey) && !e.altKey) {
+        const f = fmtRef.current.fmt; if (!f || f.mode !== 'plain') return;
+        const key = e.key.toLowerCase();
+        const which = !e.shiftKey && (key === 'b' || key === 'i' || key === 'u') ? key : (e.shiftKey && (key === 'x' || key === 's') ? 's' : null);
+        if (!which) return;
+        e.preventDefault(); e.stopPropagation();
+        fmtRef.current.styleWhileTyping(which);
+        return;
+      }
+      if (e.key !== 'Enter' || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat) return;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable || t.closest('button'))) return;
+      const st = api.getAppState();
+      if (st.editingTextElement || st.openDialog || document.querySelector('.modal-wrap')) return;
+      const ids = Object.keys(st.selectedElementIds || {}).filter(x => st.selectedElementIds[x]);
+      if (ids.length !== 1) return;
+      const el = api.getSceneElements().find(x => x.id === ids[0]);
+      if (!isRich(el)) return;
+      e.preventDefault(); e.stopPropagation();
+      openRich(el.id);
+    };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
   }, [api]);
 
   // Ctrl/Cmd+F opens Find on this board, which also looks in to-dos, link
@@ -1526,6 +1684,8 @@ export default function Board({ boardId, commentId, find }) {
     if (isCardUrl(link)) {
       event.preventDefault();
       if (cd.kind === 'link' && cd.url) window.open(cd.url, '_blank', 'noopener,noreferrer');
+      // a styled note's corner button opens it for typing
+      else if (cd.kind === 'note' && cd.rich && store.canEdit) window.dispatchEvent(new CustomEvent(RICH_EDIT, { detail: { id: element.id } }));
       // a to-do list opens out: zoom in until it fills the screen
       else if (api) { try { api.scrollToContent([element], { fitToViewport: true, viewportZoomFactor: 0.8, animate: true }); } catch (e) {} }
       return;
@@ -1635,7 +1795,7 @@ export default function Board({ boardId, commentId, find }) {
             <MainMenu>
               <MainMenu.Item onSelect={() => { save(); go('/'); }}>All boards</MainMenu.Item>
               <MainMenu.Separator />
-              <MainMenu.DefaultItems.SaveAsImage />
+              <MainMenu.Item icon={<Ico d="M4 5h16v14H4z M4 15l5-5 4 4 3-3 4 4 M15 9h.01" />} onSelect={() => { saveImage(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the image')); }}>Save as image</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M7 8V3h10v5 M7 17H4V8h16v9h-3 M7 14h10v7H7z" />} onSelect={() => { printBoard(api, meta && meta.title).catch(() => setStatus('Couldn\u2019t make the PDF')); }}>Print or save as PDF</MainMenu.Item>
               <MainMenu.Item icon={<Ico d="M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14z M16 16l5 5" />} shortcut="Ctrl+F" onSelect={() => setFinding(true)}>Find on this board</MainMenu.Item>
               <MainMenu.Separator />
@@ -1667,7 +1827,27 @@ export default function Board({ boardId, commentId, find }) {
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
         })}</div>}
-        {store.canEdit && api && sel.count > 0 && !sel.busy && !moving && !stackOn && !backHot && (() => {
+        {store.canEdit && api && fmt && (() => {
+          // the bar over a note you're typing in: style the words you've selected
+          const n = api.getSceneElements().find(e => e.id === fmt.id);
+          if (!n) return null;
+          const st = api.getAppState();
+          const r = rectOf(n);
+          const left = Math.max(110, Math.min(r.left + r.width / 2, st.width - 110));
+          const top = r.top - 52 > 8 ? r.top - 52 : Math.min(r.top + r.height + 12, st.height - 56);
+          const B = (k, label, tip, cls) => <button key={k} className={cls + (fmtOn[k] ? ' on' : '')} title={tip}
+            onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onMouseDown={e => e.preventDefault()} onClick={() => fmtPress(k)}>{label}</button>;
+          return (
+            <div className="selbar fmtbar" style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
+              {B('b', 'B', 'Bold (Ctrl+B)', 'fmtk fmt-b')}
+              {B('i', 'I', 'Italic (Ctrl+I)', 'fmtk fmt-i')}
+              {B('u', 'U', 'Underline (Ctrl+U)', 'fmtk fmt-u')}
+              {B('s', 'S', 'Strikethrough (Ctrl+Shift+X)', 'fmtk fmt-s')}
+              <button className="fmt-done" onPointerDown={e => { e.preventDefault(); e.stopPropagation(); }} onMouseDown={e => e.preventDefault()} onClick={fmtDone}>Done</button>
+            </div>
+          );
+        })()}
+        {store.canEdit && api && sel.count > 0 && !sel.busy && !fmt && !moving && !stackOn && !backHot && (() => {
           const st = api.getAppState();
           const picked = api.getSceneElements().filter(e => st.selectedElementIds && st.selectedElementIds[e.id] && !e.containerId);
           if (!picked.length) return null;
@@ -1691,6 +1871,13 @@ export default function Board({ boardId, commentId, find }) {
           return (
             <div className="selbar" ref={selbarRef} style={{ left, top }} onPointerDown={e => e.stopPropagation()}>
               {sel.notes && <span className="selbar-swatches">{NOTE_COLOURS.map(c => <button key={c.hex} title={c.name} style={{ background: c.hex }} onClick={() => recolourNotes(c.hex)} />)}</span>}
+              {sel.notes && <span className="selbar-fmt" title="Style the whole note. Double-click a note to style single words.">
+                <button className="fmtk fmt-b" onClick={() => styleNotes('b')} title="Bold, the whole note">B</button>
+                <button className="fmtk fmt-i" onClick={() => styleNotes('i')} title="Italic, the whole note">I</button>
+                <button className="fmtk fmt-u" onClick={() => styleNotes('u')} title="Underline, the whole note">U</button>
+                <button className="fmtk fmt-s" onClick={() => styleNotes('s')} title="Strikethrough, the whole note">S</button>
+              </span>}
+              {sel.notes && sel.units === 1 && <button className="fmtk fmt-aa" onClick={typeInNote} title="Type in this note, and style any word">Aa</button>}
               {sel.card && <button className="selbar-open" onClick={() => openCard(sel.card)} title="Open this board (or double-click it)"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open</button>}
               {sel.card && <button onClick={copyLink} title="Copy a link to this board: paste it on any board to show the same board there (copy or duplicate makes a separate board)"><Ico d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />Copy link</button>}
               {sel.style && inHost && <button className="selbar-open" onClick={() => tellHost('boards:open-style', { styleId: sel.style })} title="Open this style in the line list"><Ico d="M14 4h6v6 M20 4l-9 9 M18 14v6H4V6h6" />Open style</button>}
