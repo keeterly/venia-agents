@@ -26611,6 +26611,20 @@ window.addEventListener('message', function(e){
     try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
     return;
   }
+  // Boards shares this site's sign-in. When it can't find one (a phone that
+  // opened it mid-renewal, Build 652), it asks here, the one place that keeps
+  // the sign-in renewed. Same site only, checked above.
+  if (e.data.type === 'boards:session') {
+    if (!e.source) return;
+    const c = window.__sbClient;
+    const reply = (p) => { try { e.source.postMessage({ source: 'venia-host', type: 'boards:session', payload: p }, location.origin); } catch(_){} };
+    if (!c || !c.auth) { reply(null); return; }
+    c.auth.getSession().then(function(r){
+      const s = r && r.data && r.data.session;
+      reply(s ? { access_token: s.access_token, refresh_token: s.refresh_token } : null);
+    }).catch(function(){ reply(null); });
+    return;
+  }
   if (e.data.type === 'boards:title' && document.getElementById('cp-screen-boards')?.classList.contains('active')) {
     const t = String((e.data.payload && e.data.payload.title) || 'Boards').slice(0, 120);
     document.title = t + ' · VENIA OS';
@@ -55886,6 +55900,10 @@ window.veniaModulesRender = async function(){
         } else if (ev === 'SIGNED_OUT' && pushDirty) {
           pauseForSignIn('signed out');
         }
+        // tell Boards to look at the sign-in again (Build 652)
+        if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') {
+          try { document.querySelectorAll('iframe').forEach(function(f){ if (/\/boards(\b|#|$)/.test(f.getAttribute('src') || '') && f.contentWindow) f.contentWindow.postMessage({ source: 'venia-host', type: 'boards:signed-in' }, location.origin); }); } catch(_){}
+        }
       });
     } catch (e) {}
   }
@@ -58333,7 +58351,10 @@ window.veniaModulesRender = async function(){
 
   window.veniaSignOut = async function(){
     var c = sb();
-    try { if (c && c.auth) await c.auth.signOut(); } catch(e){}
+    // This device only (Build 652). supabase-js signs out every device by
+    // default, so one sign-out (on a laptop, or a test browser) quietly
+    // signed the phone out too, and Boards there fell back to "this device".
+    try { if (c && c.auth) await c.auth.signOut({ scope: 'local' }); } catch(e){}
     window.veniaAuthUser = null; render();
     try { veniaAccountPaint(); } catch(e){}
     showToast('Signed out','info');
