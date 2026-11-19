@@ -577,19 +577,29 @@ export default function Board({ boardId, commentId }) {
         });
         return next;
       });
-      setTimeout(() => freshenPreviews(ids.filter(id => by[id] && by[id].item_count > 0), by), 2500);
+      // The board you just came back from may still be saving: look again once
+      // it has had time to land, and once more a little later.
+      let left = null; try { left = sessionStorage.getItem('boards:left'); sessionStorage.removeItem('boards:left'); } catch (e) {}
+      setTimeout(() => freshenPreviews(ids, left), 1500);
+      if (left && ids.includes(left)) setTimeout(() => freshenPreviews([left], left), 6000);
     } catch (e) {}
   }, []);
 
   // A board card shows a picture of what's on that board, scaled to fill the
   // card. The picture is redrawn here whenever that board has changed since
   // this device last drew it, so it never lags behind what's inside.
-  async function freshenPreviews(ids, by) {
+  async function freshenPreviews(ids, left) {
+    let by = {};
+    try { by = Object.fromEntries((await store.listBoards()).map(b => [b.id, b])); } catch (e) { return; }
     for (const id of ids.slice(0, 16)) {
       try {
+        const b = by[id]; if (!b) continue;
+        // the count always follows what's saved now
+        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), title: b.title, count: b.item_count, ...(b.item_count === 0 ? { thumb: null } : {}) } }));
+        if (!(b.item_count > 0)) continue;
         const at = await store.thumbAt(id);
-        const changed = Date.parse(by[id].updated_at) || 0;
-        if (at && at >= changed) continue;
+        const changed = Date.parse(b.updated_at) || 0;
+        if (id !== left && at && at >= changed) continue;
         const row = await store.loadBoard(id);
         const all = (row && row.scene && row.scene.elements) || [];
         const live = all.filter(e => e && !e.isDeleted);
@@ -685,6 +695,8 @@ export default function Board({ boardId, commentId }) {
     let snap = null;
     try { if (a && store.canEdit) snap = sf(a); } catch (e) {}
     R.current.dead = true;
+    // tell the board you go back to that this one may have just changed
+    try { sessionStorage.setItem('boards:left', boardId); } catch (e) {}
     if (snap) { sv(snap); th(snap); }
   }, []);
 
