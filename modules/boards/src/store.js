@@ -27,6 +27,53 @@ const now = () => new Date().toISOString();
 
 let sb = null;
 
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+// Is a sign-in kept on this device at all (renewed or not)?
+function storedSignIn() {
+  try { return Object.keys(localStorage).some(k => /^sb-.*-auth-token$/.test(k) && localStorage.getItem(k)); } catch (e) { return false; }
+}
+// VENIA OS around this frame lends its sign-in when Boards can't find one.
+function askHostForSession() {
+  if (!inHostFrame()) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const done = (v) => { window.removeEventListener('message', on); clearTimeout(t); resolve(v); };
+    const on = (e) => {
+      if (e.origin !== location.origin || !e.data || e.data.source !== 'venia-host' || e.data.type !== 'boards:session') return;
+      done(e.data.payload || null);
+    };
+    const t = setTimeout(() => done(null), 4000);
+    window.addEventListener('message', on);
+    try { window.parent.postMessage({ source: 'venia-module', module: 'brainstorm.boards', type: 'boards:session' }, location.origin); } catch (e) { done(null); }
+  });
+}
+function inHostFrame() { try { return window.self !== window.top; } catch (e) { return true; } }
+async function findUser() {
+  // A sign-in that's mid-renewal can come back empty or with an error for a
+  // moment; give it a few tries before believing it.
+  const look = async () => {
+    let res = null;
+    try { res = await sb.auth.getSession(); } catch (e) { res = { error: e }; }
+    return { user: res && res.data && res.data.session && res.data.session.user, error: res && res.error };
+  };
+  let r = await look();
+  if (r.user) return r.user;
+  // VENIA OS around us is the one that renews the sign-in; borrow its.
+  const lent = await askHostForSession();
+  if (lent && lent.access_token && lent.refresh_token) {
+    try {
+      const s = await sb.auth.setSession({ access_token: lent.access_token, refresh_token: lent.refresh_token });
+      const user = s && s.data && s.data.session && s.data.session.user;
+      if (user) return user;
+    } catch (e) {}
+  }
+  for (let i = 1; i <= 3 && (r.error || storedSignIn()); i++) {
+    await wait(700 * i);
+    r = await look();
+    if (r.user) return r.user;
+  }
+  return null;
+}
+
 export const store = {
   mode: 'local',          // 'cloud' | 'local'
   reason: '',             // why local: 'signed-out' | 'not-set-up' | 'offline'
@@ -34,14 +81,22 @@ export const store = {
   role: 'owner',          // owner | editor | viewer
   get canEdit() { return this.role !== 'viewer'; },
 
+  // Which account Boards saves to. VENIA OS and Boards share one sign-in on
+  // this site, but Boards used to look only once, as it opened: if that look
+  // came while the phone was waking up (the sign-in still being renewed, or
+  // the network not back yet), Boards decided "signed out" and kept saying so
+  // even though VENIA OS was signed in (Build 652). Now it waits for the
+  // renewal, asks VENIA OS for its sign-in when it can't find one, and looks
+  // again whenever the sign-in changes or the app comes back to the front.
   async init() {
     try {
-      const url = localStorage.getItem('venia-sb-url') || DEFAULT_URL;
-      const key = localStorage.getItem('venia-sb-key') || DEFAULT_KEY;
-      sb = createClient(url, key);
-      const { data } = await sb.auth.getSession();
-      const user = data && data.session && data.session.user;
-      if (!user) { this.mode = 'local'; this.reason = 'signed-out'; return this; }
+      if (!sb) {
+        const url = localStorage.getItem('venia-sb-url') || DEFAULT_URL;
+        const key = localStorage.getItem('venia-sb-key') || DEFAULT_KEY;
+        sb = createClient(url, key);
+      }
+      const user = await findUser();
+      if (!user) { this.mode = 'local'; this.reason = navigator.onLine === false ? 'offline' : 'signed-out'; return this; }
       this.email = String(user.email || '').toLowerCase();
       const probe = await sb.from('venia_boards').select('id').limit(1);
       if (probe.error) {
@@ -50,7 +105,7 @@ export const store = {
         this.reason = (c === '42P01' || c === 'PGRST205' || /does not exist|schema cache/i.test(probe.error.message || '')) ? 'not-set-up' : 'offline';
         return this;
       }
-      this.mode = 'cloud';
+      this.mode = 'cloud'; this.reason = '';
       if (FOUNDERS.includes(this.email)) this.role = 'owner';
       else {
         const r = await sb.from('venia_members').select('role').eq('email', this.email).eq('module', 'brainstorm').maybeSingle();
@@ -60,6 +115,23 @@ export const store = {
       this.mode = 'local'; this.reason = 'offline';
     }
     return this;
+  },
+
+  // Call back when Boards should look at the sign-in again: VENIA OS signed
+  // in or renewed it, or the app came back to the front.
+  onSignInChange(cb) {
+    const subs = [];
+    try {
+      if (sb) { const r = sb.auth.onAuthStateChange((ev) => { if (ev === 'SIGNED_IN' || ev === 'TOKEN_REFRESHED' || ev === 'SIGNED_OUT') setTimeout(() => cb(ev), 0); });
+        subs.push(() => r.data.subscription.unsubscribe()); }
+    } catch (e) {}
+    const vis = () => { if (!document.hidden) cb('visible'); };
+    const on = (e) => { if (e.origin === location.origin && e.data && e.data.source === 'venia-host' && e.data.type === 'boards:signed-in') cb('host'); };
+    document.addEventListener('visibilitychange', vis);
+    window.addEventListener('online', vis);
+    window.addEventListener('message', on);
+    subs.push(() => { document.removeEventListener('visibilitychange', vis); window.removeEventListener('online', vis); window.removeEventListener('message', on); });
+    return () => subs.forEach(f => f());
   },
 
   // ── boards ───────────────────────────────────────────────────────────────
