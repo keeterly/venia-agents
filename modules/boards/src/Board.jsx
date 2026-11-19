@@ -50,6 +50,9 @@ export default function Board({ boardId, commentId }) {
   const [cardInfo, setCardInfo] = useState({});    // board id -> { title, count, thumb }
   const [naming, setNaming] = useState(null);      // a board just made: name it, or undo
   const [drawing, setDrawing] = useState(false);   // phone: the drawing tools are showing
+  const [backHot, setBackHot] = useState(false);   // something is held over the back arrow
+  const [moving, setMoving] = useState(false);     // the Move to… list is open
+  const backRef = useRef(null);
   const [busy, setBusy] = useState('');
   const [missing, setMissing] = useState(false);
   const [rows, setRows] = useState([]);           // comments, flat
@@ -288,9 +291,29 @@ export default function Board({ boardId, commentId }) {
       && !inColumn(e, elements));
     return hits.length ? hits[hits.length - 1] : null;   // the one on top
   }
+  function overBack() {
+    const b = backRef.current, p = R.current.ptr;
+    if (!b || !p || !trail.length) return false;
+    const r = b.getBoundingClientRect();
+    return p.x >= r.left - 8 && p.x <= r.right + 8 && p.y >= r.top - 8 && p.y <= r.bottom + 8;
+  }
   function watchStack(elements, appState, picked) {
     const st = R.current.stack || (R.current.stack = { target: null, armed: false, me: null, t: null });
     const dragging = appState.selectedElementsAreBeingDragged;
+    // Held over the back arrow: it lights up, and letting go moves the
+    // selection up to the board above.
+    if (dragging) {
+      const hot = overBack();
+      if (hot !== !!R.current.backHot) { R.current.backHot = hot; setBackHot(hot); if (hot) { try { navigator.vibrate && navigator.vibrate(12); } catch (e) {} } }
+      if (hot) { R.current.backPicked = picked.map(e => e.id); if (st.target) { clearTimeout(st.t); st.target = null; st.armed = false; setStackOn(null); } return; }
+    } else if (R.current.backHot) {
+      R.current.backHot = false; setBackHot(false);
+      const parent = trail[trail.length - 1];
+      const ids = R.current.backPicked || [];
+      const sel = elements.filter(e => ids.includes(e.id) && !e.isDeleted);
+      if (parent && sel.length) moveTo(parent.id, sel, { title: parent.title, flyTo: backRect() });
+      return;
+    }
     if (dragging) {
       const me = picked.length === 1 ? picked[0] : null;
       const t = stackTargetFor(me, elements);
@@ -319,6 +342,13 @@ export default function Board({ boardId, commentId }) {
     }
   }
 
+  // The back arrow's spot, inside the canvas's own coordinates.
+  function backRect() {
+    const b = backRef.current, c = wrapRef.current && wrapRef.current.querySelector('.canvas');
+    if (!b || !c) return null;
+    const r = b.getBoundingClientRect(), cr = c.getBoundingClientRect();
+    return { left: r.left - cr.left, top: r.top - cr.top, width: r.width, height: r.height };
+  }
   // Where a scene rectangle sits on screen, inside the canvas.
   function rectOf(el, a = api) {
     const st = a.getAppState();
@@ -327,8 +357,8 @@ export default function Board({ boardId, commentId }) {
     return { left: p.x - st.offsetLeft, top: p.y - st.offsetTop, width: el.width * z, height: el.height * z };
   }
   // The pictures fly into the card, so it's clear where they went.
-  function flyInto(pics, card) {
-    const to = rectOf(card);
+  function flyInto(pics, card) { flyTo(pics, rectOf(card)); }
+  function flyTo(pics, to) {
     const gs = pics.map((p, i) => ({ key: p.el.id + i, src: p.src, from: rectOf(p.el), to }));
     setGhosts({ items: gs, go: false });
     requestAnimationFrame(() => requestAnimationFrame(() => setGhosts(g => g && { ...g, go: true })));
@@ -384,34 +414,104 @@ export default function Board({ boardId, commentId }) {
       return;
     }
     // into a board that's already here
-    const id = target.customData.boardId;
-    const f = fileOf(me); if (!f) { setStatus('The picture is still loading; try again in a moment'); return; }
-    flyInto([{ el: me, src: f.dataURL }], target);
-    setDeleted([me.id], true);
-    const title = (cardInfo[id] && cardInfo[id].title) || 'the board';
-    setUndoStack({ text: 'Moved into ' + title, undo: null });
+    moveTo(target.customData.boardId, [me], { flyTo: rectOf(target) });
+  }
+
+  // ── move things to another board ─────────────────────────────────────────
+  // The selection (with any text inside shapes) is copied into the other
+  // board with fresh ids, its pictures go with it, and it leaves this board.
+  // Board cards move as boards (the board itself changes parent). Undo puts
+  // everything back.
+  function selectionNow() {
+    const a = api; if (!a) return [];
+    const ids = a.getAppState().selectedElementIds || {};
+    return a.getSceneElements().filter(e => ids[e.id]);
+  }
+  async function moveTo(targetId, picked, opts = {}) {
+    const a = api; if (!a || !targetId || targetId === boardId) return;
+    // a board's own card can't go inside that board
+    picked = picked.filter(e => !(e.customData && e.customData.kind === 'board' && e.customData.boardId === targetId));
+    if (!picked.length) return;
+    const all = a.getSceneElements();
+    const set = new Set(picked.map(e => e.id));
+    all.forEach(e => { if (e.containerId && set.has(e.containerId)) set.add(e.id); });
+    const els = all.filter(e => set.has(e.id));
+    const cards = els.filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId);
+    const cardIds = new Set(cards.map(c => c.id));
+    const items = els.filter(e => !cardIds.has(e.id) && !(e.containerId && cardIds.has(e.containerId)));
+    const files = a.getFiles();
+    const need = [...new Set(items.filter(e => e.type === 'image' && e.fileId).map(e => e.fileId))];
+    if (need.some(id => !files[id])) { setStatus('A picture is still loading; try again in a moment'); return; }
+    const title = opts.title || (cardInfo[targetId] && cardInfo[targetId].title) || (trail.find(t => t.id === targetId) || {}).title || 'the board';
+    // what you see happens at once
+    const pics = items.filter(e => e.type === 'image' && files[e.fileId]).slice(0, 6).map(e => ({ el: e, src: files[e.fileId].dataURL }));
+    if (pics.length && opts.flyTo) flyTo(pics, opts.flyTo);
+    const goneIds = els.map(e => e.id);
+    const setDeleted = (ids, deleted) => a.updateScene({
+      elements: a.getSceneElementsIncludingDeleted().map(e => ids.includes(e.id) ? newElementWith(e, { isDeleted: deleted }) : e),
+      captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+    setDeleted(goneIds, true);
+    const n = picked.length;
+    const job = { cloneIds: [], movedBoards: [] };
+    setUndoStack({ text: 'Moved ' + (n === 1 ? '1 item' : n + ' items') + ' to ' + title, undo: async () => {
+      setDeleted(goneIds, false); R.current.wantThumb = true; save();
+      try {
+        if (job.cloneIds.length) await editScene(targetId, list => list.map(e => job.cloneIds.includes(e.id) ? { ...e, isDeleted: true, version: (e.version || 1) + 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now() } : e));
+        for (const id of job.movedBoards) await store.moveInto(id, boardId, boardCard).catch(() => {});
+      } catch (e) { setStatus('Couldn\'t undo it all: ' + (e.message || e)); }
+    } });
     try {
-      let ok = false, count = 0;
-      for (let i = 0; i < 3 && !ok; i++) {
-        const row = await store.loadBoard(id);
-        if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
-        const els = (row.scene && row.scene.elements || []).filter(e => !e.isDeleted);
-        const right = els.length ? Math.max(...els.map(e => e.x + (e.width || 0))) + 24 : 0;
-        const top = els.length ? Math.min(...els.map(e => e.y)) : 0;
-        const scene = { ...(row.scene || {}), elements: [...(row.scene && row.scene.elements || []), picCopy(me, right, top)] };
-        await store.saveFile(id, f);
-        count = els.length + 1;
-        const res = await store.saveScene(id, scene, row.rev || 0, { item_count: count });
-        ok = !res.conflict;
+      if (items.length) {
+        for (const id of need) await store.saveFile(targetId, { id, dataURL: files[id].dataURL, mimeType: files[id].mimeType, created: files[id].created });
+        const map = new Map(), gmap = new Map();
+        const nid = (id) => { if (!map.has(id)) map.set(id, uid('e')); return map.get(id); };
+        items.forEach(e => nid(e.id));
+        const minX = Math.min(...items.map(e => e.x)), minY = Math.min(...items.map(e => e.y));
+        await editScene(targetId, list => {
+          const live = list.filter(e => !e.isDeleted);
+          const x0 = live.length ? Math.max(...live.map(e => e.x + (e.width || 0))) + 48 : 0;
+          const y0 = live.length ? Math.min(...live.map(e => e.y)) : 0;
+          const copies = items.map(e => ({
+            ...e, id: map.get(e.id), x: e.x - minX + x0, y: e.y - minY + y0,
+            groupIds: (e.groupIds || []).map(g => { if (!gmap.has(g)) gmap.set(g, uid('g')); return gmap.get(g); }),
+            containerId: e.containerId && map.has(e.containerId) ? map.get(e.containerId) : null,
+            boundElements: e.boundElements ? e.boundElements.filter(b => map.has(b.id)).map(b => ({ ...b, id: map.get(b.id) })) : null,
+            frameId: e.frameId && map.has(e.frameId) ? map.get(e.frameId) : null,
+            startBinding: e.startBinding && map.has(e.startBinding.elementId) ? { ...e.startBinding, elementId: map.get(e.startBinding.elementId) } : null,
+            endBinding: e.endBinding && map.has(e.endBinding.elementId) ? { ...e.endBinding, elementId: map.get(e.endBinding.elementId) } : null,
+            version: 1, versionNonce: Math.floor(Math.random() * 2 ** 31), updated: Date.now(), isDeleted: false,
+          }));
+          job.cloneIds = copies.map(c => c.id);
+          return [...list, ...copies];
+        });
       }
-      if (!ok) throw new Error('someone else is editing that board; try again');
-      setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), count } }));
+      for (const c of cards) {
+        const id = c.customData.boardId;
+        if (id === targetId) continue;
+        await store.moveInto(id, targetId, boardCard);
+        job.movedBoards.push(id);
+      }
+      setCardInfo(ci => ({ ...ci, [targetId]: { ...(ci[targetId] || {}), count: ((ci[targetId] && ci[targetId].count) || 0) + items.filter(e => !e.containerId).length + job.movedBoards.length } }));
+      R.current.wantThumb = true; // this board's preview should show what's left
       save();
     } catch (e) {
-      setDeleted([me.id], false);
+      setDeleted(goneIds, false);
       setUndoStack(null);
-      setStatus('Couldn\'t move it in: ' + (e.message || e));
+      setStatus('Couldn\'t move it: ' + (e.message || e));
     }
+  }
+  // Change another board's scene safely (it may be open somewhere else).
+  async function editScene(id, fn) {
+    for (let i = 0; i < 3; i++) {
+      const row = await store.loadBoard(id);
+      if (!row || row.trashed_at) throw new Error('that board isn\'t here any more');
+      const scene = row.scene || { elements: [], appState: {} };
+      const next = fn(scene.elements || []);
+      const count = next.filter(e => !e.isDeleted && !e.containerId).length;
+      const res = await store.saveScene(id, { ...scene, elements: next }, row.rev || 0, { item_count: count });
+      if (!res.conflict) return;
+    }
+    throw new Error('someone else is editing that board; try again');
   }
   useEffect(() => { if (!undoStack) return; const t = setTimeout(() => setUndoStack(null), 6000); return () => clearTimeout(t); }, [undoStack]);
 
@@ -462,7 +562,8 @@ export default function Board({ boardId, commentId }) {
         ids.forEach(id => {
           const b = by[id];
           next[id] = { ...(ci[id] || {}), title: b ? b.title : (ci[id] && ci[id].title), count: b ? b.item_count : (ci[id] && ci[id].count),
-            thumb: thumbs[id] || (ci[id] && ci[id].thumb) || null, gone: !b && !(ci[id] && ci[id].title) };
+            // an emptied board keeps its last picture on file; show the plain card instead
+            thumb: (b && b.item_count === 0) ? null : (thumbs[id] || (ci[id] && ci[id].thumb) || null), gone: !b && !(ci[id] && ci[id].title) };
         });
         return next;
       });
@@ -816,6 +917,12 @@ export default function Board({ boardId, commentId }) {
     addEls(note(p.x, p.y, text.slice(0, 2000), NOTE_COLOURS[0].hex));
   }
 
+  useEffect(() => {
+    const mv = (e) => { R.current.ptr = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('pointermove', mv, true);
+    return () => window.removeEventListener('pointermove', mv, true);
+  }, []);
+
   // Double tap (or double click) a board card to open it.
   useEffect(() => {
     const el = wrapRef.current; if (!el || !api) return;
@@ -891,7 +998,7 @@ export default function Board({ boardId, commentId }) {
     <div className={'board' + (drawing ? ' drawing' : '')} ref={wrapRef}>
       <header className={'bar' + (tools ? ' tools-open' : '')}>
         <nav className="crumbs">
-          <button className="back" onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
+          <button ref={backRef} className={'back' + (backHot ? ' hot' : '')} onClick={() => { save(); go(trail.length ? '/b/' + trail[trail.length - 1].id : '/'); }}
             aria-label={'Back to ' + (trail.length ? trail[trail.length - 1].title : 'all boards')}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7" /></svg>
             <span>{trail.length ? trail[trail.length - 1].title : 'Boards'}</span>
@@ -921,6 +1028,7 @@ export default function Board({ boardId, commentId }) {
             <button className="act closes" onClick={addTodo} title="A checklist"><Ico d="M4 6l2 2 3-3 M4 13l2 2 3-3 M12 7h8 M12 14h8 M12 20h8 M4 20h2" />To-do</button>
             <button className="act closes" onClick={addColumn} title="A column that keeps what you drop in it stacked (wraps the selection)"><Ico d="M6 3h12v18H6z M9 7h6 M9 11h6 M9 15h6" />Column</button>
             <span className="divider" />
+            <button className="act closes" disabled={sel.count < 1} onClick={() => setMoving(true)} title="Move what's selected to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" />Move</button>
             <div className="pop-wrap">
               <button className="act" disabled={sel.count < 2} onClick={() => setPanel(panel === 'arrange' ? null : 'arrange')} title="Tidy the selection"><Ico d="M4 4h7v7H4z M13 4h7v4h-7z M13 10h7v10h-7z M4 13h7v7H4z" />Arrange</button>
               {panel === 'arrange' && (
@@ -939,6 +1047,7 @@ export default function Board({ boardId, commentId }) {
         )}
         {store.canEdit && api && (
           <div className="actions phone-only">
+            {sel.count > 0 && <button className="act" onClick={() => { setTools(false); setMoving(true); }} aria-label="Move to another board"><Ico d="M4 7h7l2 2h7v10H4z M12 14h6 M15 11l3 3-3 3" /></button>}
             <button className="act" onClick={() => { setTools(false); fileInput.current.click(); }} aria-label="Add photos"><Ico d="M4 6h16v12H4z M4 15l4-4 4 4 3-3 5 5" /></button>
             <button className={'act' + (tools ? ' on' : '')} onClick={() => { setTools(t => !t); setPanel(null); }} aria-label={tools ? 'Close' : 'Add to the board'} aria-expanded={tools}>
               <Ico d={tools ? 'M6 6l12 12 M18 6L6 18' : 'M12 5v14 M5 12h14'} />
@@ -1021,6 +1130,7 @@ export default function Board({ boardId, commentId }) {
           return <div className={'stack-hint' + (stackOn.armed ? ' armed' : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
             {stackOn.armed && <span>Let go to make a board</span>}</div>;
         })()}
+        {backHot && trail.length > 0 && <div className="back-hint"><span>Let go to move up to {trail[trail.length - 1].title}</span></div>}
         {ghosts && <div className="ghosts">{ghosts.items.map(g => {
           const r = ghosts.go ? { left: g.to.left + g.to.width * 0.2, top: g.to.top + g.to.height * 0.15, width: g.to.width * 0.6, height: g.to.height * 0.6 } : g.from;
           return <img key={g.key} alt="" src={g.src} style={{ left: r.left, top: r.top, width: r.width, height: r.height, opacity: ghosts.go ? 0 : 1 }} />;
@@ -1045,7 +1155,35 @@ export default function Board({ boardId, commentId }) {
             onPick={t => { const s = spotOf(api, t.root); if (s) focusSpot(api, s); if (t.root.resolved_at) setShowResolved(true); setOpenId(t.root.id); }} />
         )}
       </div>
+      {moving && <MovePicker currentId={boardId} parent={trail[trail.length - 1] || null}
+        children={(api ? api.getSceneElements() : []).filter(e => e.customData && e.customData.kind === 'board' && e.customData.boardId).map(e => ({ id: e.customData.boardId, title: (cardInfo[e.customData.boardId] || {}).title || e.customData.title || 'Board' }))}
+        count={sel.count} onClose={() => setMoving(false)}
+        onPick={(b) => { setMoving(false); moveTo(b.id, selectionNow(), { title: b.title, flyTo: trail.length && b.id === trail[trail.length - 1].id ? backRect() : null }); }} />}
       {panel === 'newboard' && <NewBoard parentId={boardId} onClose={() => setPanel(null)} onCreated={placeBoardCard} />}
+    </div>
+  );
+}
+
+function MovePicker({ currentId, parent, children, count, onClose, onPick }) {
+  const [all, setAll] = useState(null);
+  const [q, setQ] = useState('');
+  useEffect(() => { store.listBoards().then(setAll).catch(() => setAll([])); }, []);
+  const kids = children.filter((c, i, arr) => arr.findIndex(x => x.id === c.id) === i);
+  const skip = new Set([currentId, ...(parent ? [parent.id] : []), ...kids.map(k => k.id)]);
+  const rest = (all || []).filter(b => !skip.has(b.id) && (!q || String(b.title || '').toLowerCase().includes(q.toLowerCase())));
+  return (
+    <div className="modal-wrap" onClick={onClose}>
+      <div className="modal move-modal" onClick={e => e.stopPropagation()}>
+        <h2>Move {count === 1 ? '1 item' : count + ' items'} to…</h2>
+        <div className="pick-list">
+          {parent && <button className="up" onClick={() => onPick(parent)}><span>↑ {parent.title}</span><small>the board above this one</small></button>}
+          {kids.map(k => <button key={k.id} onClick={() => onPick(k)}><span>{k.title}</span><small>on this board</small></button>)}
+          {(all || []).length > 8 && <input className="move-search" placeholder="Find a board" value={q} onChange={e => setQ(e.target.value)} />}
+          {all === null ? <div className="side-empty">Loading boards…</div>
+            : rest.map(b => <button key={b.id} onClick={() => onPick(b)}><span>{b.title}</span><small>{b.item_count != null ? b.item_count + ' items' : ''}</small></button>)}
+        </div>
+        <div className="modal-foot"><button className="link" onClick={onClose}>Cancel</button></div>
+      </div>
     </div>
   );
 }

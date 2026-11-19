@@ -132,7 +132,7 @@ function Home({ fresh = false }) {
               onDragOver={e => { if (dragId && dragId !== b.id) { e.preventDefault(); setOverId(b.id); } }}
               onDragLeave={() => setOverId(o => o === b.id ? null : o)}
               onDrop={e => { e.preventDefault(); const c = byId[dragId]; if (c) moveInto(c, b.id); }}>
-              <div className="thumb">{thumbs[b.id] ? <img src={thumbs[b.id]} alt="" /> : <span className="thumb-empty">{(b.title || '?').slice(0, 1)}</span>}</div>
+              <div className="thumb">{thumbs[b.id] && b.item_count !== 0 ? <img src={thumbs[b.id]} alt="" /> : <span className="thumb-empty">{(b.title || '?').slice(0, 1)}</span>}</div>
               <div className="card-foot">
                 <div className="card-title">{pins.has(b.id) && <span className="pin-mark" title="Pinned">●</span>}{b.title}</div>
                 <div className="card-meta">
