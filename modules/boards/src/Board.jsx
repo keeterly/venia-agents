@@ -601,9 +601,10 @@ export default function Board({ boardId, commentId }) {
         const need = [...new Set(els.filter(e => e.type === 'image' && e.fileId).map(e => e.fileId))];
         const files = need.length ? Object.fromEntries((await store.loadFiles(id, need)).map(f => [f.id, f])) : {};
         const blob = await exportToBlob({ elements: els, files, mimeType: 'image/png', maxWidthOrHeight: 720, exportPadding: 16,
-          appState: { exportBackground: true, viewBackgroundColor: (row.scene.appState && row.scene.appState.viewBackgroundColor) || '#f7f5f1' } });
+          appState: { exportBackground: true, viewBackgroundColor: (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG } });
         const url = URL.createObjectURL(blob);
-        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: url } }));
+        const bg = (row.scene.appState && row.scene.appState.viewBackgroundColor) || BG;
+        setCardInfo(ci => ({ ...ci, [id]: { ...(ci[id] || {}), thumb: url, bg } }));
         if (store.canEdit) await store.saveThumb(id, blob);
       } catch (e) { /* one board's picture never blocks the others */ }
     }
@@ -1188,7 +1189,7 @@ export default function Board({ boardId, commentId }) {
           if (r.width < 24 || r.height < 16) return null;
           const held = stackOn && stackOn.id === e.id;
           return <div key={e.id} className={'bcard' + (held ? (stackOn.armed ? ' armed' : ' near') : '')} style={{ left: r.left, top: r.top, width: r.width, height: r.height }}>
-            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")' } : null}>{!info.thumb && <span>▦</span>}</div>
+            <div className="bcard-img" style={info.thumb ? { backgroundImage: 'url("' + info.thumb.replace(/"/g, '%22') + '")', backgroundColor: (info.bg || BG) } : null}>{!info.thumb && <span>▦</span>}</div>
             <div className="bcard-foot"><b>{info.title || (e.customData && e.customData.title) || 'Board'}</b>{info.count != null && <small>{info.count} {info.count === 1 ? 'item' : 'items'}</small>}</div>
             {held && <div className="bcard-drop">{stackOn.armed ? 'Let go to put it in' : ''}</div>}
           </div>;
