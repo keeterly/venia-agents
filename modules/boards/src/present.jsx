@@ -65,24 +65,28 @@ function shapeFor(api, frame, key) {
   return { width: Math.round(w), height: Math.round(h) };
 }
 
-// Where a new slide goes: to the right of the last slide, or of everything.
-function spotForNew(api, w) {
+// Where a new slide goes: in the row of slides, past the right edge of
+// everything on the board, so it never lands on top of anything.
+function spotForNew(api) {
   const live = api.getSceneElements();
-  const slides = allSlides(live);
-  if (slides.length) { const last = slides[slides.length - 1]; return { x: last.x + last.width + 80, y: last.y }; }
   if (!live.length) { const st = api.getAppState(); const z = st.zoom.value; return { x: -st.scrollX + 80 / z, y: -st.scrollY + 80 / z }; }
   const [, y1, x2] = getCommonBounds(live);
-  return { x: x2 + 160, y: y1 };
+  const slides = allSlides(live);
+  return { x: x2 + 120, y: slides.length ? Math.min(...slides.map(f => f.y)) : y1 };
 }
 
 export function addSlide(api, key) {
   const p = presetOf(key) || { w: 1000, h: 640 };
   const live = api.getSceneElements();
-  const n = allSlides(live).length + 1;
-  const at = spotForNew(api, p.w);
+  const n = shownSlides(live).length + 1;
+  const at = spotForNew(api);
   const [f] = convertToExcalidrawElements([{ type: 'frame', x: at.x || 0.5, y: at.y || 0.5, width: p.w, height: p.h, name: 'Slide ' + n, children: [] }]);
-  const frame = { ...f, customData: { size: presetOf(key) ? key : undefined, slide: n - 1 } };
-  api.updateScene({ elements: [...api.getSceneElementsIncludingDeleted(), frame], appState: { selectedElementIds: { [frame.id]: true }, selectedGroupIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+  // The new slide goes last; the others keep the order they show in now.
+  const order = new Map(allSlides(live).map((x, i) => [x.id, i]));
+  const frame = { ...f, customData: { size: presetOf(key) ? key : undefined, slide: order.size } };
+  const rest = api.getSceneElementsIncludingDeleted().map(e => order.has(e.id) && !(e.customData && e.customData.slide === order.get(e.id))
+    ? newElementWith(e, { customData: { ...(e.customData || {}), slide: order.get(e.id) } }) : e);
+  api.updateScene({ elements: [...rest, frame], appState: { selectedElementIds: { [frame.id]: true }, selectedGroupIds: {} }, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
   try { api.scrollToContent(frame, { fitToViewport: true, viewportZoomFactor: 0.8, animate: true }); } catch (e) {}
   return frame;
 }
