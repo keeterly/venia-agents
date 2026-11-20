@@ -3129,6 +3129,10 @@ body:has(.overlay.open) #sk-launch{ display:none !important; }
   .soc-ig::-webkit-scrollbar{display:none}
   .soc-ig > *{flex-shrink:0}
   .soc-ig .soc-bar-sp{display:none}
+  /* Build 701: a row that asks you to act wraps instead of scrolling, so the
+     reason and the Reconnect button are both in view. */
+  .soc-ig.soc-ig-act{flex-wrap:wrap;overflow:visible;mask-image:none;-webkit-mask-image:none}
+  .soc-ig.soc-ig-act .soc-bar-sp{display:block;flex:1}
 }
 .soc-plan-h{font-family:'Archivo',Helvetica,Arial,sans-serif;font-size:12px;letter-spacing:1.4px;
   text-transform:uppercase;color:var(--ink);margin-right:2px}
@@ -4361,7 +4365,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '714';
+  const BUILD = '715';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -43040,7 +43044,7 @@ function socPlanRow(f){
     + (function(){
         // The live count when connected, the migrated count otherwise. Same
         // rule as the grid below, so the strip and the tiles never disagree.
-        const live = (SOC_IG && SOC_IG.connected && SOC_LIVE) ? (SOC_LIVE.items || []) : null;
+        const live = socLiveItems();
         return live
           ? '<span class="soc-plan-f"><b>' + live.length + '</b> published</span>'
           : '<span class="soc-plan-f"><b>' + f.published.length + '</b> published</span>';
@@ -43091,7 +43095,7 @@ function socBar(f){
     + '</div>';
 }
 function socFeedView(f){
-  const live = (SOC_IG && SOC_IG.connected && SOC_LIVE) ? (SOC_LIVE.items || []) : null;
+  const live = socLiveItems();
   if (!f.planned.length && !f.published.length && !(live && live.length)) {
     return '<div class="soc-empty">Nothing in the feed yet.<br>'
       + 'Use <b>+ New Post</b> to place one, or <b>Import</b> to bring style photography in as assets first.'
@@ -43413,6 +43417,15 @@ window.socRender = socRender;
 // is asked for again next time.
 let SOC_LIVE = null;          // { at, items, username } for this page visit only
 let SOC_IG = null;            // last known connection status
+// Build 701: what the grid shows below the published line. Only a working
+// connection speaks for the account; an expired one used to blank the grid
+// (an empty list counted as "Instagram says nothing is published").
+function socLiveItems(){
+  if (!SOC_IG || !SOC_IG.connected || SOC_IG.expired || !SOC_LIVE || SOC_LIVE.expired) return null;
+  if (SOC_LIVE.error && !(SOC_LIVE.items || []).length) return null;
+  return SOC_LIVE.items || [];
+}
+window.socLiveItems = socLiveItems;
 function socIgReady(){
   const c = window.__sbClient;
   if (!c) throw new Error('Not signed in to the cloud — Settings → Security.');
@@ -43440,8 +43453,9 @@ window.socIgStatus = async function(quiet){
 // attempt, so this cannot be replayed and there is nothing secret in the URL.
 window.socIgConnect = async function(){
   let j;
-  try { j = await socIgCall({ action: 'authurl' }); }
+  try { socToast('Opening Instagram…'); j = await socIgCall({ action: 'authurl' }); }
   catch (e) {
+    if (/not signed in|founders only/i.test(String(e.message))) { socToast(socIgWhy(e.message)); return; }
     // A server with no app configured names the pieces, and says so on the row
     // rather than in a toast that is gone before the founder reaches the
     // dashboard they need it in.
@@ -43502,11 +43516,15 @@ window.socIgLanding = function(){
 };
 window.socIgRefresh = async function(quiet){
   if (!SOC_IG || !SOC_IG.connected) return null;
+  // Build 701: an expired token cannot be read or renewed; Refresh would only
+  // repeat the same refusal. Say what to do instead.
+  if (SOC_IG.expired) { if (!quiet) socToast('The Instagram connection has expired. Tap Reconnect.'); return null; }
   try {
     const j = await socIgCall({ action: 'feed', limit: 24 });
     // An error WITH items is not a failure; an error with none is.
     SOC_LIVE = { at: Date.now(), items: j.items || [], username: j.username || '',
                  error: j.error || '', expired: !!j.expired };
+    if (j.expired && SOC_IG) SOC_IG.expired = true;
     if (j.error && !(j.items || []).length && !quiet) socToast(j.error);
   } catch (e) { SOC_LIVE = { at: Date.now(), items: [], error: String(e.message) }; if (!quiet) socFail(e); }
   if (!quiet) socRender();
@@ -43525,7 +43543,7 @@ function socIgAuto(){
   if (SOC_IG !== null) return;
   SOC_IG = { connected: false, checking: true };
   socIgStatus(true).then(function(){
-    if (SOC_IG && SOC_IG.connected) return socIgRefresh(true).then(socRender);
+    if (SOC_IG && SOC_IG.connected && !SOC_IG.expired) return socIgRefresh(true).then(socRender);
     socRender();
   });
 }
@@ -43548,7 +43566,17 @@ function socLiveTile(m){
 function socIgRow(){
   const g = SOC_IG || {};
   if (g.checking) return '';
+  const warn = 'font-size:10px;letter-spacing:.2px;color:var(--gold,#8a6a1f);text-transform:none;line-height:1.5';
   if (!g.connected) {
+    // Build 701: when the app could not even ask (signed out, or not a
+    // founder), say that, rather than offering a Connect that would fail.
+    if (g.unavailable) {
+      return '<div class="soc-ig soc-ig-act">'
+        + '<span class="soc-plan-f">Instagram</span>'
+        + '<span style="' + warn + '">' + esc(socIgWhy(g.unavailable)) + '</span>'
+        + '<span class="soc-bar-sp"></span>'
+        + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgRecheck()">Try again</button></div>';
+    }
     return '<div class="soc-ig">'
       + '<span class="soc-plan-f">Instagram</span>'
       + '<span class="soc-plan-f" style="color:var(--muted)">not connected</span>'
@@ -43564,21 +43592,49 @@ function socIgRow(){
             + ' under Supabase → Project Settings → Edge Functions → Secrets.</div>'
           : '');
   }
+  // Build 701: an expired connection gets one obvious way back. Before, it
+  // showed Instagram's error with Refresh and Disconnect, and neither helped.
+  if (g.expired || (SOC_LIVE && SOC_LIVE.expired)) {
+    return '<div class="soc-ig soc-ig-act">'
+      + '<span class="soc-plan-f"><b>@' + esc(g.username || 'instagram') + '</b></span>'
+      + '<span style="' + warn + '">Connection expired'
+      + (g.expiresAt ? ' on ' + esc(socFmtDay(String(g.expiresAt).slice(0, 10))) : '') + '</span>'
+      + '<span class="soc-bar-sp"></span>'
+      + '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="socIgConnect()">Reconnect</button></div>'
+      + '<div style="font-size:10px;line-height:1.7;color:var(--muted);margin:-4px 0 10px">'
+      + 'Instagram asks you to approve VENIA OS again, then brings you back here. '
+      + 'From now on it renews itself every day, so this should not happen again.</div>';
+  }
   const live = SOC_LIVE || {};
   const stale = live.at ? Math.round((Date.now() - live.at) / 60000) : null;
+  const days = (typeof g.daysLeft === 'number') ? g.daysLeft : null;
   return '<div class="soc-ig">'
     + '<span class="soc-plan-f"><b>@' + esc(g.username || 'instagram') + '</b></span>'
-    + (live.error ? '<span style="font-size:10px;letter-spacing:.2px;color:var(--gold,#8a6a1f);'
-         + 'text-transform:none;line-height:1.5">' + esc(live.error.slice(0, 90)) + '</span>'
+    + (live.error ? '<span style="' + warn + '">' + esc(live.error.slice(0, 90)) + '</span>'
        : '<span class="soc-plan-f">' + (live.items ? live.items.length : 0) + ' live'
          + (stale !== null ? ' · ' + (stale < 1 ? 'just now' : stale + 'm ago') : '') + '</span>')
-    // A connection with days left is a connection about to stop working.
-    + (g.daysLeft !== null && g.daysLeft <= 10
-        ? '<span class="soc-plan-f" style="color:var(--gold,#8a6a1f)">token ' + g.daysLeft + 'd left</span>' : '')
+    // Renewal is automatic now; this only shows if it keeps failing, which is
+    // the one case where the founder has something to do before the date.
+    + (days !== null && days <= 10
+        ? '<span class="soc-plan-f" style="color:var(--gold,#8a6a1f)">expires in ' + days + 'd</span>' : '')
     + '<span class="soc-bar-sp"></span>'
+    + (days !== null && days <= 10
+        ? '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="socIgConnect()">Reconnect</button>' : '')
     + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgRefresh()">Refresh</button>'
-    + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgDisconnect()">Disconnect</button></div>';
+    + '<button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="socIgDisconnect()">Disconnect</button></div>'
+    + (days !== null && days <= 10 && g.lastError
+        ? '<div style="font-size:10px;line-height:1.7;color:var(--gold,#8a6a1f);margin:-4px 0 10px">'
+          + 'Automatic renewal is failing (' + esc(String(g.lastError).slice(0, 90)) + '). '
+          + 'Reconnect before it expires.</div>' : '');
 }
+// Build 701: the sentence for a check that never reached Instagram.
+function socIgWhy(m){
+  const t = String(m || '');
+  if (/not signed in/i.test(t)) return 'Sign in to your VENIA account to see Instagram (Settings → Security).';
+  if (/founders only/i.test(t)) return 'Only Keeter or Christine can connect Instagram.';
+  return 'Could not check Instagram just now: ' + t.slice(0, 80);
+}
+window.socIgRecheck = function(){ SOC_IG = null; SOC_LIVE = null; socRender(); };
 
 // ── INTERACTION ───────────────────────────────────────────────────────────
 // Three ways to do the same thing, because a phone, a mouse and a keyboard do
