@@ -1,5 +1,11 @@
 import webpush from 'web-push';
 import { VENIA_ORIGINS } from './_shared/origins.js';
+import { MODEL, replyText, emptyReason } from './_shared/anthropic-reply.js';
+
+// The same ceiling claude.js settled on for Opus 5: its adaptive thinking
+// counts against max_tokens, so the budget has to hold the thinking AND the
+// answer. Each round of a paused server-tool turn gets its own budget.
+const CHAT_MAX_TOKENS = 16384;
 
 // CFO CHAT, CLOUD-SIDE. A streaming reply over a flaky phone connection dies
 // mid-generation and surfaces as 504s / "no connection" — so when the direct
@@ -191,9 +197,9 @@ export default async (req) => {
     return out;
   };
   const attempt = async (tools) => {
-    const body = { model: 'claude-opus-5', max_tokens: 16384, system: sysBlocks, messages: msgs.slice() };
+    const body = { model: MODEL, max_tokens: CHAT_MAX_TOKENS, system: sysBlocks, messages: msgs.slice() };
     body.tools = (tools || []).concat([VENIA_ACTION_TOOL]);
-    let text = '', sources = [], rounds = 0, actionJson = '';
+    let text = '', sources = [], rounds = 0, actionJson = '', last = null;
     const errs = [];
     while (rounds++ < 4) {
       const r = await post(body);
@@ -203,8 +209,9 @@ export default async (req) => {
         throw new Error(d);
       }
       const data = await r.json();
+      last = data;
       const blocks = data.content || [];
-      text += (text ? '\n' : '') + blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      text += (text ? '\n' : '') + replyText(data);
       sources = sources.concat(sourcesOf(blocks));
       searchErrors(blocks).forEach((c) => { if (errs.indexOf(c) < 0) errs.push(c); });
       const tb = blocks.filter((b) => b && b.type === 'tool_use' && b.name === 'venia_action')[0];
@@ -217,7 +224,9 @@ export default async (req) => {
     }
     text = text.trim();
     // A turn that is nothing but a save is a complete turn, not an empty reply.
-    if (!text && !actionJson) throw new Error('empty reply');
+    // And when there is neither, say why — out of room or declined — rather
+    // than a bare "empty reply" nobody can act on.
+    if (!text && !actionJson) throw new Error(emptyReason(last, CHAT_MAX_TOKENS));
     // Say which wall, in the reply, so the founder is not relying on the model's
     // reading of an error block it was never given the vocabulary for.
     if (errs.length) {
