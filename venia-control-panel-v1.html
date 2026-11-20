@@ -4204,7 +4204,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '690';
+  const BUILD = '691';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6596,6 +6596,8 @@ window.veniaYmd = veniaYmd;
         <button class="pill" onclick="filterMat('Label',this)">Label</button>
         <button class="pill" onclick="filterMat('Packaging',this)">Packaging</button>
         <button class="pill" onclick="filterMat('Hardware',this)">Hardware</button>
+        <!-- Build 691: materials whose supplier is not linked to one on file. -->
+        <button class="pill" id="mat-unlinked-pill" onclick="filterMat('unlinked',this)" title="Materials whose supplier is blank or typed, not linked to a supplier on file" style="display:none">No supplier linked</button>
       </div>
       <div class="mat-grid" id="mat-grid"></div>
     </div>
@@ -6611,6 +6613,8 @@ window.veniaYmd = veniaYmd;
         <button class="pill" onclick="filterVendor('Trim Supplier',this)">Trims</button>
         <button class="pill" onclick="filterVendor('Label',this)">Labels</button>
         <button class="pill" onclick="filterVendor('Agent',this)">Agents</button>
+        <!-- Build 691: archived suppliers, restorable; never deleted. -->
+        <button class="pill" id="vendor-arch-pill" onclick="filterVendor('archived',this)" title="Archived suppliers: hidden from the list and the pickers, restorable any time">Archived</button>
         <button class="btn btn-ghost btn-sm" style="margin-left:auto;white-space:nowrap" onclick="plmSourceVendors()" title="Enigma scouts real factories and suppliers and files them here">✦ Source suppliers</button>
       </div>
       <div class="vendor-grid" id="vendor-grid"></div>
@@ -7294,7 +7298,9 @@ window.veniaYmd = veniaYmd;
           <div class="fg"><label class="fl" for="mm-type">Type *</label>
             <select class="fs" id="mm-type"><option>Fabric</option><option>Lining</option><option>Trim</option><option>Label</option><option>Packaging</option><option>Hardware</option><option>Thread</option></select>
           </div>
-          <div class="fg"><label class="fl" for="mm-supplier">Supplier</label><input class="fi" id="mm-supplier" placeholder="Mill or supplier name" list="venia-vendor-names" onfocus="veniaVendorNames()" autocomplete="off"><datalist id="venia-vendor-names"></datalist></div>
+          <div class="fg"><label class="fl" for="mm-supplier">Supplier</label><input class="fi" id="mm-supplier" placeholder="Mill or supplier name" list="venia-vendor-names" onfocus="veniaVendorNames()" oninput="mmSupLinkPaint()" autocomplete="off"><datalist id="venia-vendor-names"></datalist>
+            <!-- Build 691: link the material to a supplier on file. -->
+            <div id="mm-sup-link" style="font-size:10.5px;color:var(--muted);line-height:1.6;margin-top:5px"></div></div>
           <div class="fg"><label class="fl" for="mm-sourcing">Sourcing</label>
             <select class="fs" id="mm-sourcing" onchange="mmSourcingHint()">
               <option value="">— Not set —</option>
@@ -7959,6 +7965,20 @@ const CATALOG_STYLE_FIELDS = [
   // Where this style sits in the running order of its category — same reason.
   'lsRank',
 ];
+// WHAT STAYS OUT OF BRAND'S OWN ROW (Build 691). The Brand library also
+// holds what Money files there (the weekly money brief, the CFO's financial
+// plan) and Product's season retros (sell-through and margin). The Brand row
+// is readable by every teammate, so these stay in the growth row only, where
+// they always were; the founders and anyone with Growth still see them, and
+// moduleBrandFold never reads their absence from the Brand row as a delete.
+// The same test is in the migration (20261120b_venia_brand_row.sql).
+function brandRowPrivateDoc(d){
+  if (!d || typeof d !== 'object') return false;
+  if (d.from === 'money' || d.from === 'product') return true;
+  if (d.kind === 'retro') return true;
+  return /^(Money brief — |Financial plan — )/.test(String(d.title || ''));
+}
+window.brandRowPrivateDoc = brandRowPrivateDoc;
 const MODULES = {
   home: {
     label: 'Today', space: 'cp', nav: true, core: true,
@@ -8136,6 +8156,35 @@ const MODULES = {
       return part;
     },
   },
+  // ── BRAND'S OWN ROW (Build 691): a mirror, not a module ──────────────────
+  // Brand is core (Build 682) but its keys ride in the growth row, and RLS
+  // hands that row only to people with a Growth grant, so a teammate with
+  // Product or Money could not see or file brand docs. This row carries a
+  // COPY of Brand's keys (growth's coreKeys / coreLs) that anyone with any
+  // grant may read. It owns no STATE key: moduleOfKey('brTone') is still
+  // 'growth', the growth row keeps being written with the same keys (so
+  // devices on 690 and earlier keep working), and this row is only written
+  // once a pull has SEEN it, i.e. once its database update (migration
+  // 20261120b_venia_brand_row.sql) has been applied and copied the keys in.
+  // Before that the app behaves exactly as 690. moduleBrandFold() decides,
+  // key by key, which copy wins when the two rows disagree.
+  brand: {
+    label: 'Brand', space: null, nav: false, mirror: 'growth',
+    owns: 'brand voice, the tone library, the brand library and the brand watch (a copy of Brand’s part of the Growth row that every teammate can read)',
+    keys: [], ls: [],
+    // Who may write it: founders, and anyone who can write growth, product
+    // or money (they file brand docs). Mirrors the migration's policy.
+    writers: ['growth', 'product', 'money'],
+    project(snap){
+      const g = MODULES.growth, part = {};
+      (g.coreKeys || []).forEach(k => { if (snap[k] !== undefined) part[k] = snap[k]; });
+      if (Array.isArray(part.brandDocs)) part.brandDocs = part.brandDocs.filter(d => !brandRowPrivateDoc(d));
+      const ls = {};
+      (g.coreLs || []).forEach(k => { if (snap._ls && snap._ls[k] != null) ls[k] = snap._ls[k]; });
+      if (Object.keys(ls).length) part._ls = ls;
+      return part;
+    },
+  },
 };
 window.MODULES = MODULES;
 const MODULE_IDS = Object.keys(MODULES);
@@ -8219,7 +8268,7 @@ const MODULE_MANIFEST = {
       social: { label: 'Social', tier: 'addon', entitlement: 'growth-social', spaces: ['mk'],
                 owns: 'Social Command (the posting plan), the Writer and the Launch Machine' },
       brand:  { label: 'Brand',  tier: 'core',  entitlement: null,           spaces: ['br'],
-                owns: 'voice, the tone library, the brand library, competitor watch and brand settings (data in the Growth row for now)' },
+                owns: 'voice, the tone library, the brand library, competitor watch and brand settings (kept in the Growth row, and from Build 691 also in its own Brand row that every teammate can read)' },
     },
     requires: ['core.catalog', 'core.brand', 'core.mail', 'core.activity'],
     uses: ['sales.buyers'],
@@ -8290,13 +8339,21 @@ const MODULE_MANIFEST = {
     requires: [], uses: [], provides: ['core.catalog'], emits: [],
     tables: [], server: [], edge: [], mcp: [],
   },
+  brand: {
+    // Build 691: Brand's own row, a readable copy of its part of growth.
+    // core.brand.* stay offers of the keys growth owns; this only says
+    // where else they are kept.
+    tier: 'core', version: '1.0.0',
+    requires: [], uses: [], provides: [], emits: [],
+    tables: [], server: [], edge: [], mcp: [],
+  },
 };
 // The core services every module may require, and where each lives today.
 // Several still sit inside a module's STATE keys; they move behind
 // VeniaOS.get() first and into core storage later, so nothing is lost on the way.
 const CORE_SERVICES = {
   'core.catalog':   'the sellable line, cost stripped (catalog projection of Product styles)',
-  'core.brand':     'brand voice, tone, guidelines and references: the Brand page, core since Build 682 (its data still rides in the Growth row: brTone, brPrefs, brandDocs)',
+  'core.brand':     'brand voice, tone, guidelines and references: the Brand page, core since Build 682 (its data rides in the Growth row — brTone, brPrefs, brandDocs — and from Build 691 is copied to its own Brand row that every teammate can read)',
   'core.mail':      'sending as VENIA and the Gmail connection (today in Settings)',
   'core.google':    'Google sign-in and Drive (today in Settings)',
   'core.fx':        'the season currency rates (today in Sales: fxRates)',
@@ -8657,6 +8714,10 @@ VeniaOS.handoff = VeniaHandoff;
 function moduleWritable(id, roles){
   const r = (roles === undefined) ? window.VENIA_MY_ROLES : roles;
   if (!r) return true;
+  // Build 691: a mirror row (Brand) is written by anyone who can write one of
+  // the modules listed as its writers, the same rule as its RLS policy.
+  const w = MODULES[id] && MODULES[id].writers;
+  if (w) return w.some(x => r[x] === 'owner' || r[x] === 'editor');
   const m = MODULES[id].projection || id;
   return r[m] === 'owner' || r[m] === 'editor';
 }
@@ -8715,8 +8776,13 @@ function moduleSplit(snap){
 //
 // The assembler trusted the TABLE. It has to trust the REGISTRY.
 function moduleKnown(r){ return !!(r && r.module && MODULES[r.module]); }
-function moduleAssemble(rows){
+function moduleAssemble(rows, base, brandCtx){
   rows = (rows || []).filter(moduleKnown);
+  // Build 691: Brand's row is a COPY of keys the growth row also carries, so
+  // it never takes part in the last-row-wins pass below; moduleBrandFold
+  // settles it against the growth row afterwards, key by key.
+  const brandRow = rows.find(r => r && r.module === 'brand' && r.data) || null;
+  rows = rows.filter(r => !(r && r.module === 'brand'));
   // Meta belongs to the snapshot, not to any one module: take it from whichever
   // row was written last so "who changed this" survives the round trip.
   let snap = { _schemaVersion: 2 }, newest = 0, ls = null;
@@ -8746,8 +8812,160 @@ function moduleAssemble(rows){
     if (t >= newest) { newest = t; if (d._who) snap._who = d._who; }
   });
   if (ls) snap._ls = ls;
+  if (brandRow) {
+    try { moduleBrandFold(snap, rows.find(r => r && r.module === 'growth' && r.data) || null, brandRow, base || null, brandCtx || null); }
+    catch(e){ try { console.warn('[sync] brand row not folded', e); } catch(_){} }
+  }
   return snap;
 }
+// WHICH COPY OF BRAND WINS (Build 691).
+//
+// Brand's keys live in two rows: growth (written by everyone who can write
+// growth, including every device still on 690, which knows nothing of the
+// brand row) and brand (written by 691 devices, including teammates who
+// cannot write growth). Either row can therefore hold an OLD copy for a
+// while: a 690 device rewrites growth with whatever Brand it last saw, and a
+// 691 device that merely reads does not push. So "which row matches the base"
+// is not a safe test: the stale row is the one that looks unchanged.
+//
+// What is safe is asking each ROW whether it moved. Every pull keeps a small
+// fingerprint of both rows' Brand values as they were seen (per settings
+// field, per brand doc), in this tab's sessionStorage beside the sync base.
+// Then, for each field or doc where the rows disagree:
+//   - only one row moved since it was last seen: that row's value wins;
+//   - neither moved (an old disagreement still waiting for a push): the
+//     value this device last agreed on (the sync base) stands;
+//   - both moved, or nothing was seen yet (a fresh tab): the brand row when
+//     it is marked _brandAhead (written by someone who could not write
+//     growth), otherwise the growth row, as on 690; two edits of one doc go
+//     to the newer one.
+// Nothing here deletes: a doc only one row has is kept (deletes travel as
+// tombstones, as everywhere else in the sync), unless it is tombstoned.
+// The Brand row never carries Money's and Product's filings
+// (brandRowPrivateDoc); the growth row's copies of those are kept as they are.
+function veniaBrandHash(v){
+  const s = _mStr(v);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36) + ':' + s.length;
+}
+function veniaBrandPrint(v){
+  // { h: whole, f: {field: hash} } for settings objects, { h, r: {id: hash} }
+  // for the library, { h } for anything else.
+  const out = { h: veniaBrandHash(v) };
+  if (Array.isArray(v)) { out.r = {}; v.forEach(d => { if (d && d.id != null) out.r[d.id] = veniaBrandHash(d); }); }
+  else if (v && typeof v === 'object') { out.f = {}; Object.keys(v).forEach(f => { out.f[f] = veniaBrandHash(v[f]); }); }
+  return out;
+}
+// One disagreement. x = growth's, y = brand's; hx / hy = their fingerprints
+// when last seen (undefined: never seen); b = the sync base's value.
+function veniaBrandPick(x, y, hx, hy, b, ahead, recs){
+  if (_mEq(x, y)) return x;
+  const xCh = hx === undefined ? null : veniaBrandHash(x) !== hx;
+  const yCh = hy === undefined ? null : veniaBrandHash(y) !== hy;
+  if (xCh === true && yCh === false) return x;
+  if (yCh === true && xCh === false) return y;
+  if (xCh === false && yCh === false && b !== undefined) {
+    if (_mEq(b, x)) return x;
+    if (_mEq(b, y)) return y;
+  }
+  if (recs && x && y) return _mNewer(x, y);
+  return ahead ? y : x;
+}
+// The fingerprint a field (or doc) had when last seen; "absent" when the
+// row was seen without it, undefined when the row was never seen.
+function veniaBrandSeenOf(s, part, id){
+  if (!s) return undefined;
+  const m = s[part];
+  return m && Object.prototype.hasOwnProperty.call(m, id) ? m[id] : veniaBrandHash(undefined);
+}
+function moduleBrandFold(snap, growthRow, brandRow, base, ctx){
+  const G = MODULES.growth || {};
+  const g = (growthRow && growthRow.data) || null, b = brandRow.data || {};
+  const ahead = !!b._brandAhead;
+  const seen = (ctx && ctx.seen) || null;
+  const next = { g: {}, b: {} };
+  const prevTombs = _MERGE_TOMBS;
+  _MERGE_TOMBS = Object.assign({}, (base && base._tomb) || {}, snap._tomb || {},
+                               ((typeof STATE !== 'undefined' && STATE && STATE._tomb) || {}));
+  const pub = d => !brandRowPrivateDoc(d);
+  try {
+    (G.coreKeys || []).forEach(k => {
+      const bv = b[k];
+      let gv = g ? g[k] : undefined;
+      // The library is compared on its shareable part only.
+      const gCmp = (k === 'brandDocs' && Array.isArray(gv)) ? gv.filter(pub) : gv;
+      if (g && gv !== undefined) next.g[k] = veniaBrandPrint(gCmp);
+      if (bv !== undefined) next.b[k] = veniaBrandPrint(bv);
+      if (bv === undefined) return;                      // the brand row lacks it: growth's stands
+      if (gv === undefined) { snap[k] = bv; return; }    // no growth row (or key): the brand row's
+      if (_mEq(gCmp, bv)) return;                        // they agree: growth's (private docs and all)
+      const sg = seen && seen.g && seen.g[k], sb = seen && seen.b && seen.b[k];
+      const bs = base ? base[k] : undefined;
+      if (k === 'brandDocs' && Array.isArray(gv) && Array.isArray(bv)) {
+        snap[k] = moduleBrandDocsFold(gv, bv, sg, sb, bs, ahead);
+        return;
+      }
+      const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+      if (isObj(gCmp) && isObj(bv)) {
+        const out = {}, fields = Object.create(null);
+        Object.keys(gCmp).forEach(f => { fields[f] = 1; });
+        Object.keys(bv).forEach(f => { fields[f] = 1; });
+        Object.keys(fields).forEach(f => {
+          const v = veniaBrandPick(gCmp[f], bv[f], veniaBrandSeenOf(sg, 'f', f), veniaBrandSeenOf(sb, 'f', f),
+                                   isObj(bs) ? bs[f] : undefined, ahead, false);
+          if (v !== undefined) out[f] = v;
+        });
+        snap[k] = out;
+        return;
+      }
+      snap[k] = veniaBrandPick(gCmp, bv, sg && sg.h, sb && sb.h, bs, ahead, false);
+    });
+    (G.coreLs || []).forEach(k => {
+      const bv = b._ls ? b._ls[k] : undefined;
+      const gv = g && g._ls ? g._ls[k] : undefined;
+      if (g && gv != null) next.g['_ls:' + k] = { h: veniaBrandHash(gv) };
+      if (bv != null) next.b['_ls:' + k] = { h: veniaBrandHash(bv) };
+      if (bv == null) return;
+      snap._ls = snap._ls || {};
+      if (gv == null || gv === bv) { snap._ls[k] = bv; return; }
+      const sg = seen && seen.g && seen.g['_ls:' + k], sb = seen && seen.b && seen.b['_ls:' + k];
+      snap._ls[k] = veniaBrandPick(gv, bv, sg && sg.h, sb && sb.h, base && base._ls ? base._ls[k] : undefined, ahead, false);
+    });
+  } finally { _MERGE_TOMBS = prevTombs; }
+  if (ctx) ctx.next = next;
+  return snap;
+}
+window.moduleBrandFold = moduleBrandFold;
+// The library, doc by doc. gv is growth's whole list (private docs included);
+// only its shareable part is weighed against the brand row's.
+function moduleBrandDocsFold(gv, bv, sg, sb, bs, ahead){
+  const pub = d => !brandRowPrivateDoc(d);
+  const G = Object.create(null), B = Object.create(null), BS = Object.create(null);
+  gv.forEach(d => { if (d && d.id != null && pub(d)) G[d.id] = d; });
+  bv.forEach(d => { if (d && d.id != null) B[d.id] = d; });
+  (Array.isArray(bs) ? bs : []).forEach(d => { if (d && d.id != null) BS[d.id] = d; });
+  const pick = Object.create(null);
+  Object.keys(G).concat(Object.keys(B)).forEach(id => {
+    if (id in pick) return;
+    if (_tombed(id)) { pick[id] = null; return; }
+    const x = G[id], y = B[id];
+    if (x && !y) { pick[id] = x; return; }               // absence is not a delete
+    if (y && !x) { pick[id] = y; return; }
+    pick[id] = veniaBrandPick(x, y, veniaBrandSeenOf(sg, 'r', id), veniaBrandSeenOf(sb, 'r', id), BS[id], ahead, true);
+  });
+  // Growth's order, its private docs untouched; docs only the brand row has
+  // go first, the way the library adds new ones.
+  const out = [], placed = Object.create(null);
+  gv.forEach(d => {
+    if (!d || d.id == null || !pub(d)) { out.push(d); return; }
+    placed[d.id] = 1;
+    if (pick[d.id]) out.push(pick[d.id]);
+  });
+  const fresh = bv.filter(d => d && (d.id == null ? !gv.some(x => _mEq(x, d)) : (!placed[d.id] && pick[d.id])));
+  return fresh.map(d => d.id != null ? pick[d.id] : d).concat(out);
+}
+window.moduleBrandDocsFold = moduleBrandDocsFold;
 // A switched-off module's row, as the cloud holds it, with only the core data
 // it carries (MODULES[id].coreKeys / coreLs) taken from this device. Used by
 // the push when a brand has the module off but the core page that keeps its
@@ -10296,7 +10514,7 @@ window.seasonRetroSave = function(season){
   const title = season + ' Retro';
   const existing = VeniaOS.get('core.brand.docs').find(x => x.title === title);
   if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
-  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title, kind: 'retro', body,
+  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title, kind: 'retro', from: 'product', body,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   save();
   try { logActivity('Season retro saved: ' + season); } catch(e){}
@@ -14006,10 +14224,30 @@ function removePomPoint(styleId, idx) {
 //  MATERIALS
 // ═══════════════════════════════════════════════
 let matFilter = 'all';
+// ── A MATERIAL'S SUPPLIER, LINKED OR NOT (Build 691) ─────────────────────
+// A material names its supplier as text; it is LINKED when it also carries
+// the id of a supplier on file (vendorId, Build 681), so a rename follows it
+// and Sourcing can count what a supplier makes. Typed names that match no
+// supplier, and blank ones, are not linked. Nothing here changes a record:
+// linking happens in the material's own panel, and saves with it.
+function matVendorOf(m){
+  if (!m) return null;
+  const vs = STATE.vendors || [];
+  if (m.vendorId) { const v = vs.find(x => x && x.id === m.vendorId); if (v) return v; }
+  return null;
+}
+function matLinked(m){ return !!matVendorOf(m); }
+window.matLinked = matLinked;
+function matUnlinkedCount(){ return (STATE.materials || []).filter(m => m && !matLinked(m)).length; }
+window.matUnlinkedCount = matUnlinkedCount;
 function renderMaterials(filter) {
   if (filter !== undefined) matFilter = filter;
+  const nUnl = matUnlinkedCount();
+  const unlPill = document.getElementById('mat-unlinked-pill');
+  if (unlPill) { unlPill.textContent = 'No supplier linked' + (nUnl ? ' (' + nUnl + ')' : ''); unlPill.style.display = (nUnl || matFilter === 'unlinked') ? '' : 'none'; }
   let list = [...STATE.materials];
-  if (matFilter !== 'all') list = list.filter(m => m.type === matFilter);
+  if (matFilter === 'unlinked') list = list.filter(m => !matLinked(m));
+  else if (matFilter !== 'all') list = list.filter(m => m.type === matFilter);
   const colors = { Fabric:'#4a7fb5', Lining:'#6a9fb5', Trim:'#8b6bb5', Label:'#4a9b6f', Packaging:'#c08b3a', Hardware:'#b94040', Thread:'#4a9b9b' };
   document.getElementById('mat-grid').innerHTML = list.map(m => {
     const lots = m.lots||[];
@@ -14026,7 +14264,7 @@ function renderMaterials(filter) {
         : matSwatchBlock(m, colors[m.type]||'#555')}
       <div class="mat-name">${m.name}</div>
       <div class="mat-type">${m.type}</div>
-      <div class="mat-detail">Supplier: <span>${m.supplier||'—'}</span></div>
+      <div class="mat-detail">Supplier: <span>${m.supplier||'—'}</span>${matLinked(m) ? '' : ` <span style="font-size:10px;color:var(--muted)" title="Not linked to a supplier on file. Open the material to link it.">· not linked</span>`}</div>
       ${matSourcing(m) ? `<div class="mat-detail"><span class="b-tag" title="${esc(matSourcing(m).hint)}" style="${matIsVendorManaged(m)?'border-color:var(--border-mid);color:var(--muted)':'border-color:var(--ink);color:var(--ink);font-weight:700'}">${matSourcing(m).short}</span></div>` : ''}
       <div class="mat-detail">Cost: <span style="color:${cost>0?'var(--gold)':'var(--muted)'}">${cost>0 ? '$'+cost.toFixed(2)+(unit?' / '+unit:'') : '—'}</span></div>
       <div class="mat-detail">Lead: <span>${m.leadDays>0 ? m.leadDays+' days' : '—'}</span></div>
@@ -14223,6 +14461,8 @@ function swatchColor(colorStr, fallback) {
 function filterMat(type, el) {
   document.querySelectorAll('#page-materials .pill').forEach(b=>b.classList.remove('active'));
   if (el) el.classList.add('active');
+  // Build 691: on a phone the pill row scrolls; keep the chosen one in view.
+  try { if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch(e){}
   renderMaterials(type);
 }
 
@@ -14287,21 +14527,62 @@ function vendorLastActivity(v){
   });
   return last;
 }
+// ── ARCHIVED SUPPLIERS (Build 691) ───────────────────────────────────────
+// The same convention as an archived style: status 'archived' plus the day
+// it was archived, restorable any time, never deleted. An archived supplier
+// leaves the Suppliers grid and the lists you pick a new supplier from; every
+// style, material, PO and BOM line that already names it keeps the name.
+function vendorArchived(v){ return !!(v && v.status === 'archived'); }
+window.vendorArchived = vendorArchived;
+// Suppliers to offer for a NEW choice. `keep` (an id or a name) stays in the
+// list even when archived, so a picker never loses the value it already holds.
+function vendorsLive(keep){
+  const k = String(keep == null ? '' : keep).trim().toLowerCase();
+  return (STATE.vendors || []).filter(v => v && (!vendorArchived(v)
+    || (k && (String(v.id) .toLowerCase() === k || String(v.name || '').trim().toLowerCase() === k))));
+}
+window.vendorsLive = vendorsLive;
+window.vendorArchive = function(id){
+  const v = (STATE.vendors || []).find(x => x.id === id); if (!v || vendorArchived(v)) return;
+  v.status = 'archived';
+  v.archivedAt = new Date().toISOString().split('T')[0];
+  v.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Sourcing: archived supplier ' + (v.name || id)); } catch(e){}
+  toast((v.name || 'Supplier') + ' archived. Find it under Archived to restore it.');
+  renderVendors();
+};
+window.vendorRestore = function(id){
+  const v = (STATE.vendors || []).find(x => x.id === id); if (!v || !vendorArchived(v)) return;
+  delete v.status; delete v.archivedAt;
+  v.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity('Sourcing: restored supplier ' + (v.name || id)); } catch(e){}
+  toast((v.name || 'Supplier') + ' restored');
+  renderVendors();
+};
 function renderVendors(filter) {
   if (filter !== undefined) vendorFilter = filter;
+  const nArch = (STATE.vendors || []).filter(vendorArchived).length;
+  const archPill = document.getElementById('vendor-arch-pill');
+  if (archPill) archPill.textContent = 'Archived' + (nArch ? ' (' + nArch + ')' : '');
   let list = [...STATE.vendors];
+  if (vendorFilter === 'archived') list = list.filter(vendorArchived);
+  else list = list.filter(v => !vendorArchived(v));
   if (vendorFilter === 'Domestic' || vendorFilter === 'Import') {
     const want = vendorFilter === 'Domestic' ? 'Domestic' : 'International';
     list = list.filter(v => vendorRegion(v) === want);
-  } else if (vendorFilter !== 'all') {
+  } else if (vendorFilter !== 'all' && vendorFilter !== 'archived') {
     list = list.filter(v => v.type === vendorFilter);
   }
   const typeColors = { Factory:'var(--gold)', 'Fabric Supplier':'var(--blue)', 'Trim Supplier':'var(--purple)', Label:'var(--green)', Agent:'var(--amber)', Logistics:'var(--teal)' };
   document.getElementById('vendor-grid').innerHTML = list.map(v => {
     const assignedStyles = STATE.styles.filter(s => s.vendor === v.name && s.status !== 'archived');
     const activeStyles = assignedStyles.filter(s => ['development','production','sms'].includes(s.status));
+    const arch = vendorArchived(v);
     return `
-    <div class="vendor-card">
+    <div class="vendor-card"${arch ? ' style="opacity:.78"' : ''}>
+      ${arch ? `<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:6px">Archived${v.archivedAt ? ' ' + esc(v.archivedAt) : ''}</div>` : ''}
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;cursor:pointer" onclick="openVendorModal('${v.id}')">
         <div class="vendor-name">${v.name}</div>
         <span style="color:${typeColors[v.type]||'var(--soft)'};font-size:16px">${v.rating||''}</span>
@@ -14343,16 +14624,23 @@ function renderVendors(filter) {
       ${v.notes?`<div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:10px">${v.notes}</div>`:''}
       <div style="margin-top:10px;display:flex;gap:6px">
         <button class="btn btn-ghost btn-sm" style="flex:1" onclick="openVendorModal('${v.id}')">Edit</button>
-        ${activeStyles.length ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="generatePO('${v.id}')">Purchase Order</button>` : ''}
+        ${activeStyles.length && !arch ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="generatePO('${v.id}')">Purchase Order</button>` : ''}
+        ${arch
+          ? `<button class="btn btn-ghost btn-sm" style="flex:1" onclick="vendorRestore('${v.id}')" title="Back on the Suppliers list and in the pickers">Restore</button>`
+          : `<button class="btn btn-ghost btn-sm" style="flex:1;color:var(--muted)" onclick="vendorArchive('${v.id}')" title="Hide it from the Suppliers list and the pickers. Nothing is deleted; styles, materials and POs keep its name.">Archive</button>`}
       </div>
     </div>`;
   }).join('');
-  if (!list.length) document.getElementById('vendor-grid').innerHTML = '<div class="empty" style="grid-column:1/-1"><div class="empty-icon">◎</div><div class="empty-text">No suppliers here — <b>+ Add supplier</b>, or ask Enigma to source factories and mills that fit VENIA.</div></div>';
+  if (!list.length) document.getElementById('vendor-grid').innerHTML = vendorFilter === 'archived'
+    ? '<div class="empty" style="grid-column:1/-1"><div class="empty-icon">◎</div><div class="empty-text">No archived suppliers. Archive one from its card to take it off the list without deleting it.</div></div>'
+    : '<div class="empty" style="grid-column:1/-1"><div class="empty-icon">◎</div><div class="empty-text">No suppliers here — <b>+ Add supplier</b>, or ask Enigma to source factories and mills that fit VENIA.</div></div>';
 }
 
 function filterVendor(type, el) {
   document.querySelectorAll('#page-vendors .pill').forEach(b=>b.classList.remove('active'));
   if (el) el.classList.add('active');
+  // Build 691: on a phone the pill row scrolls; keep the chosen one in view.
+  try { if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch(e){}
   renderVendors(type);
 }
 
@@ -16281,8 +16569,43 @@ function openMatModal(id=null) {
     mmRenderLots([]);
   }
   mmColorChips();
+  try { mmSupLinkPaint(); } catch(e){}
   openModal('mat-modal');
 }
+// The line under Supplier in the material panel (Build 691): linked, will
+// link on save, or a picker of suppliers on file. Picking one only fills the
+// Supplier field with that supplier's name; saveMaterial (Build 681) then
+// stamps its id when the material is saved. Cancel and nothing changes.
+window.mmSupLinkPaint = function(){
+  const box = document.getElementById('mm-sup-link'); if (!box) return;
+  const inp = document.getElementById('mm-supplier'); if (!inp) return;
+  const typed = String(inp.value || '').trim();
+  const vs = STATE.vendors || [];
+  const hit = typed ? vs.find(v => v && String(v.name || '').trim().toLowerCase() === typed.toLowerCase()) : null;
+  const id = (document.getElementById('mm-id') || {}).value || '';
+  const m = id ? (STATE.materials || []).find(x => x.id === id) : null;
+  if (hit) {
+    const was = m && m.vendorId === hit.id;
+    box.innerHTML = '<span style="color:var(--green)">✓</span> ' + (was ? 'Linked to ' : 'Links to ') + escHtml(hit.name)
+      + (hit.type ? ' · ' + escHtml(hit.type) : '') + (vendorArchived(hit) ? ' (archived)' : '') + (was ? '' : ' when you save.');
+    return;
+  }
+  const opts = vendorsLive().filter(v => v && String(v.name || '').trim())
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .map(v => '<option value="' + escHtml(v.id) + '">' + escHtml(v.name) + (v.type ? ' · ' + escHtml(v.type) : '') + '</option>').join('');
+  box.innerHTML = (typed ? '“' + escHtml(typed) + '” is not a supplier on file.' : 'No supplier linked.')
+    + (opts
+      ? ' <select class="fs" id="mm-sup-pick" aria-label="Link to a supplier" style="display:inline-block;width:auto;max-width:100%;font-size:16px;min-height:34px;margin-top:4px" onchange="mmSupLinkPick(this.value)">'
+        + '<option value="">Link to a supplier…</option>' + opts + '</select>'
+      : ' Add the supplier under Sourcing → Suppliers to link it.');
+};
+window.mmSupLinkPick = function(vid){
+  if (!vid) return;
+  const v = (STATE.vendors || []).find(x => x && x.id === vid); if (!v) return;
+  const inp = document.getElementById('mm-supplier'); if (!inp) return;
+  inp.value = v.name || '';
+  mmSupLinkPaint();
+};
 
 // Render lot rows inside the modal
 function mmRenderLots(lots) {
@@ -16523,7 +16846,8 @@ function mmSetColorHex(name, hex){
 // file (Sourcing), so a material or style links to one instead of free text.
 window.veniaVendorNames = function(){
   const dl = document.getElementById('venia-vendor-names'); if (!dl) return;
-  dl.innerHTML = (STATE.vendors || []).filter(v => v && v.name).map(v => '<option value="' + escHtml(String(v.name)) + '">' + escHtml(String(v.type || '')) + '</option>').join('');
+  // Build 691: archived suppliers are not offered for a new choice.
+  dl.innerHTML = vendorsLive().filter(v => v && v.name).map(v => '<option value="' + escHtml(String(v.name)) + '">' + escHtml(String(v.type || '')) + '</option>').join('');
 };
 function saveMaterial() {
   const name = document.getElementById('mm-name').value.trim();
@@ -16578,6 +16902,9 @@ function saveMaterial() {
     data.id = 'MAT'+Date.now();
     data.lots = MM_LOTS;
     MM_LOTS = [];
+    // Build 691: a new material named after a supplier on file is linked to
+    // it straight away, as an edit already was (Build 681).
+    try { const _v = (STATE.vendors||[]).find(v => String(v.name||'').trim() && String(v.name||'').trim().toLowerCase() === String(data.supplier||'').trim().toLowerCase()); if (_v) data.vendorId = _v.id; } catch(e){}
     STATE.materials.push(data);
     toast(name+' added');
   }
@@ -16776,11 +17103,37 @@ window.vendorLinkMigrate = vendorLinkMigrate;
       + (acts ? '<span class="src-acts">' + acts + '</span>' : '')
       + '</div>';
   }
+  // Build 691: hidden asks (quotes, samples) could be hidden and never seen
+  // again. They are kept (hidden:true); this lists them and puts one back.
+  let showHidden = false;
+  function hiddenBlock(){
+    const hid = list().filter(function(a){ return a && a.hidden; });
+    if (!hid.length) return '';
+    hid.sort(function(a, b){ return String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')); });
+    return '<div class="src-hidden" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">'
+      + '<button type="button" class="ag-btn ag-btn-ghost ag-btn-sm" onclick="srcAskShowHidden()">'
+      + (showHidden ? 'Hide the hidden ones' : 'Show hidden (' + hid.length + ')') + '</button>'
+      + (showHidden ? '<div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">' + hid.map(function(a){
+          return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:12px;padding:8px 10px;background:var(--bg-off)">'
+            + '<span class="src-k">' + esc(KIND[a.kind] || 'Sample') + '</span>'
+            + '<span style="flex:1;min-width:140px">' + esc(nameOf(a)) + (a.supplier ? ' <span style="color:var(--muted)">· ' + esc(a.supplier) + '</span>' : '') + '</span>'
+            + '<button type="button" class="ag-btn ag-btn-ghost ag-btn-sm" onclick="srcAskRestore(\'' + esc(a.id) + '\')">Restore</button>'
+            + '</div>';
+        }).join('') + '</div>' : '')
+      + '</div>';
+  }
+  window.srcAskShowHidden = function(){ showHidden = !showHidden; window.srcRenderAsks(); };
+  window.srcAskRestore = function(id){
+    const a = list().find(function(x){ return x && x.id === id; }); if (!a || !a.hidden) return;
+    delete a.hidden; a.updatedAt = new Date().toISOString();
+    try { toast('Back on Samples and quotes'); } catch(e){}
+    saved();
+  };
   window.srcRenderAsks = function(){
     const box = document.getElementById('src-asks'); if (!box) return;
     const all = live();
     if (!all.length) {
-      box.innerHTML = '<div class="src-empty">Nothing asked yet. Use <b>+ Ask a supplier</b> to follow a swatch, sample or price quote from the ask to your decision.</div>';
+      box.innerHTML = '<div class="src-empty">Nothing asked yet. Use <b>+ Ask a supplier</b> to follow a swatch, sample or price quote from the ask to your decision.</div>' + hiddenBlock();
       brief(); navBadge(); return;
     }
     const cutoff = (function(){ const d = new Date(); d.setDate(d.getDate() - 30); return d.toISOString().slice(0, 10); })();
@@ -16798,7 +17151,7 @@ window.vendorLinkMigrate = vendorLinkMigrate;
         + (rows.length ? rows.map(card).join('') : '<div class="src-none">Nothing here</div>')
         + (c[0] === 'decided' && older ? '<div class="src-m">' + older + ' decided earlier</div>' : '')
         + '</section>';
-    }).join('') + '</div>';
+    }).join('') + '</div>' + hiddenBlock();
     brief(); navBadge();
   };
   function saved(){
@@ -16854,7 +17207,7 @@ window.vendorLinkMigrate = vendorLinkMigrate;
     const sel = document.getElementById('sa-mat');
     if (sel) sel.innerHTML = '<option value="">Not in Materials yet</option>' + mats.map(function(m){ return '<option value="' + esc(m.id) + '">' + esc(m.name) + (m.supplier ? ' · ' + esc(m.supplier) : '') + '</option>'; }).join('');
     const dl = document.getElementById('sa-sup-list');
-    if (dl) dl.innerHTML = (STATE.vendors || []).map(function(v){ return '<option value="' + esc(v.name) + '"></option>'; }).join('');
+    if (dl) dl.innerHTML = vendorsLive().map(function(v){ return '<option value="' + esc(v.name) + '"></option>'; }).join('');
     const set = function(k, v){ const el = document.getElementById(k); if (el) el.value = v == null ? '' : v; };
     set('sa-id', a ? a.id : '');
     set('sa-kind', a ? a.kind : 'swatch');
@@ -19091,7 +19444,7 @@ window.poOpenModal = function(id){
   const cur = (po&&po.currency)||'USD';
   const fld='width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:11px';
   const lbl='font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
-  const factories = (STATE.vendors||[]).map(v=>`<option value="${slEsc(v.name)}"></option>`).join('');
+  const factories = vendorsLive(po && po.vendor).map(v=>`<option value="${slEsc(v.name)}"></option>`).join('');
   const curOpts = Object.keys(SL_CURRENCIES).map(c=>`<option value="${c}" ${cur===c?'selected':''}>${c} ${SL_CURRENCIES[c]}</option>`).join('');
   const stOpts = Object.entries(PO_STATUSES).map(([k,v])=>`<option value="${k}" ${(po?po.status:'draft')===k?'selected':''}>${v}</option>`).join('');
   const { dep, bal } = po ? poAmounts(po) : { dep:0, bal:0 };
@@ -19874,8 +20227,8 @@ function rsRender(id){
   const sizes = rsSizesFor(s);
   const units = d.qty || 0;
   const missing = rsMissing(Object.assign({}, d, { units }));
-  const factories = (STATE.vendors||[]).filter(v => !v.type || /factory|manufactur|atelier/i.test(v.type));
-  const others = (STATE.vendors||[]);
+  const factories = vendorsLive(d.vendorId || d.vendor).filter(v => !v.type || /factory|manufactur|atelier/i.test(v.type));
+  const others = vendorsLive(d.dyeHouse);
   const factoryOpts = `<option value="">— pick a factory —</option>` + factories.map(v =>
     `<option value="${slEsc(v.id)}" ${d.vendorId===v.id || (!d.vendorId && d.vendor && d.vendor===v.name)?'selected':''}>${slEsc(v.name)}${v.country?' · '+slEsc(v.country):''}</option>`).join('');
   const dyeOpts = `<option value="" ${!d.dyeHouse?'selected':''}>— decide —</option>`
@@ -24159,6 +24512,13 @@ window.tpImportPdf = async function(file, driveDoc){
 
 // One button, two kinds of file. Which one it is decides how it is read; the
 // preview and the merge are the same either way.
+// Build 691: every Drive picker follows the Build 690 rule. A workspace that
+// has connected Google goes on exactly as before; one that never has gets no
+// consent screen of its own, just the one Google card in Settings.
+function driveGoogleReady(what){
+  return typeof window.veniaGoogleReady !== 'function' || window.veniaGoogleReady('drive.file', what);
+}
+window.driveGoogleReady = driveGoogleReady;
 window.tpImportPickAny = async function(){
   const how = prompt('Import tech packs from:\n\n1 — Google Drive, one pack (Sheet or PDF)\n2 — a PDF on this device\n3 — Google Drive, several packs at once (open the season folder and select them all)\n4 — several PDFs on this device\n\nType 1, 2, 3 or 4:', '3');
   if (how === null) return;
@@ -24171,6 +24531,7 @@ window.tpImportPickAny = async function(){
     inp.click();
     return;
   }
+  if (!driveGoogleReady('Importing a tech pack from Drive')) return;
   let doc;
   try { doc = await drivePick({ packs: true }); }
   catch(e){ showToast('Could not open the picker — ' + (e.message||e), 'error'); return; }
@@ -24185,6 +24546,7 @@ window.tpImportPickAny = async function(){
 };
 
 window.tpImportPick = async function(){
+  if (!driveGoogleReady('Importing a tech pack from Drive')) return;
   let doc;
   try {
     doc = await drivePick({ sheets: true });
@@ -24476,6 +24838,7 @@ window.tpImportBulk = async function(source){
       inp.click();
     });
   } else {
+    if (!driveGoogleReady('Importing tech packs from Drive')) return;
     let docs;
     try { docs = await drivePick({ packs: true, multi: true }); }
     catch(e){ showToast('Could not open the picker — ' + (e.message||e), 'error'); return; }
@@ -24566,6 +24929,7 @@ window.tpImportBulkApply = function(){
 };
 
 window.driveChooseFolder = async function(){
+  if (!driveGoogleReady('Choosing a Drive folder')) return;
   try {
     const doc = await window.drivePick({ folders: true });
     if (!doc) return;
@@ -24651,6 +25015,7 @@ window.driveUpload = async function(file, cb){
   try {
     if (!file) return;
     if (!STATE.driveFolder || !STATE.driveFolder.id){ showToast('Choose the Shared Drive folder first (Product → Drive)', 'warning'); return; }
+    if (!driveGoogleReady('Uploading to Drive')) return;   // Build 691
     const tok = await driveTokenSmart();
     // The ONLY write path — and it always targets the designated folder.
     const fd = new FormData();
@@ -24677,6 +25042,8 @@ function renderGDrivePage() {
   const hasClient = !!googleClientId();
   const hasKey = !!driveApiKey();
   const folder = STATE.driveFolder;
+  // Build 691: which Google account Drive uses, and where to connect one.
+  const gOn = typeof window.googleLinkedFor !== 'function' || window.googleLinkedFor('drive.file');
   const row = (ok, label, extra) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:11px">
     <span style="color:${ok ? 'var(--green)' : 'var(--muted)'};width:16px;flex-shrink:0">${ok ? '✓' : '○'}</span>
     <span style="flex:1;min-width:0">${label}</span>${extra || ''}</div>`;
@@ -24686,10 +25053,11 @@ function renderGDrivePage() {
       <div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px">Pick files from anywhere you can see (Shared Drives included). Uploads write <strong>only</strong> to the designated Shared Drive folder — never anywhere else.</div>
       ${row(hasClient, 'Google Client ID (Settings → API Keys)')}
       ${row(hasKey, 'Picker API key (Settings → API Keys)', `<button class="btn btn-ghost btn-sm" onclick="cpGoto('set')">${hasKey ? 'Manage' : 'Add in Settings'}</button>`)}
+      ${row(gOn, gOn ? 'Google connected' + (STATE.googleAccount ? ' as ' + escHtml(STATE.googleAccount) : '') : 'Google not connected yet: Drive uses the account connected in Settings', gOn ? '' : `<button class="btn btn-ghost btn-sm" onclick="setGotoGoogle()">Connect Google in Settings</button>`)}
       ${row(!!(folder && folder.id), folder && folder.id ? 'Uploads go to “' + folder.name + '”' : 'Shared Drive folder not chosen', `<button class="btn btn-ghost btn-sm" onclick="driveChooseFolder()">${folder && folder.id ? 'Change' : 'Choose folder'}</button>`)}
       <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
         <label class="btn btn-gold btn-sm" style="cursor:pointer">⬆ Upload a file<input type="file" style="display:none" onchange="driveUploadFromInput(this)"></label>
-        <button class="btn btn-ghost btn-sm" onclick="drivePick().then(d=>{ if(d) showToast('Picked: '+d.name,'success'); })">📂 Test the picker</button>
+        <button class="btn btn-ghost btn-sm" onclick="if (driveGoogleReady('Testing the Drive picker')) drivePick().then(d=>{ if(d) showToast('Picked: '+d.name,'success'); }).catch(e=>showToast('Could not open the picker — ' + (e.message || e), 'error'))">📂 Test the picker</button>
       </div>
       <div style="margin-top:22px;font-size:10px;color:var(--muted);line-height:1.8">
         <strong>One-time setup:</strong> in the same Google Cloud project as your Client ID —
@@ -33603,6 +33971,7 @@ function setDriveStatus(){
 // Prove it works: opens the picker; picking anything confirms OAuth, the API
 // key, the enabled APIs and the drive.file scope in one shot.
 window.driveTestConnection = async function(){
+  if (!driveGoogleReady('Testing Drive')) return;
   try {
     showToast('Pick any file to test the connection…','info');
     const doc = await window.drivePick();
@@ -33654,15 +34023,33 @@ function setUpdateDataSummary() {
 // so a restore can itself be undone from the same list.
 const VERSION_SKIP = { legacy: 1 };
 function veniaVersionModules(){
-  return MODULE_IDS.filter(function(id){
+  const out = MODULE_IDS.filter(function(id){
     const m = MODULES[id];
     if (!m || m.projection || m.project || VERSION_SKIP[id]) return false;
     if (typeof veniaModuleEntitled !== 'function' || veniaModuleEntitled(id)) return true;
-    // Build 690: a switched-off module that still carries core data (growth
-    // holds Brand's) stays listed, for that core part only. Brand is core, so
-    // its earlier versions must be restorable whether or not Growth is on.
-    return !!(m.coreKeys && m.coreKeys.length);
+    // Build 690 listed a switched-off growth row as "Brand, kept in the Growth
+    // row". Build 691: Brand has a line of its own (below) that offers the
+    // growth row's copies too, so the growth row is not listed twice.
+    return false;
   });
+  // Build 691: Brand is core, always listed, right after Growth (or where
+  // Growth would be). Its line offers the Brand row's copies and the growth
+  // row's (which carry the same keys), and restores only Brand's keys.
+  if (MODULES.brand) {
+    const at = out.indexOf('growth');
+    if (at >= 0) out.splice(at + 1, 0, 'brand');
+    else { const p = out.indexOf('product'); out.splice(p >= 0 ? p + 1 : out.length, 0, 'brand'); }
+  }
+  return out;
+}
+// The keys a version restore of `mod` may put back.
+function veniaVersionKeys(mod){
+  const m = MODULES[mod] || {};
+  if (mod === 'brand' || veniaVersionCoreOnly(mod)) {
+    const g = MODULES.growth || {};
+    return { keys: g.coreKeys || [], ls: g.coreLs || [] };
+  }
+  return { keys: m.keys || [], ls: m.ls || [] };
 }
 // The row is listed for its core part only (module off, core page on).
 function veniaVersionCoreOnly(mod){
@@ -33670,7 +34057,7 @@ function veniaVersionCoreOnly(mod){
   return !!(m.coreKeys && m.coreKeys.length) && typeof veniaModuleEntitled === 'function' && !veniaModuleEntitled(mod);
 }
 function veniaVersionLabel(mod){
-  if (veniaVersionCoreOnly(mod)) return 'Brand';
+  if (mod === 'brand' || veniaVersionCoreOnly(mod)) return 'Brand';
   return (MODULES[mod] && MODULES[mod].label) || mod;
 }
 function veniaVersionWhen(iso){
@@ -33681,10 +34068,10 @@ function veniaVersionWhen(iso){
 function veniaVersionClone(v){ return v == null ? v : JSON.parse(JSON.stringify(v)); }
 // Works out (and, unless dry, makes) the merge-in. Returns counts.
 function veniaVersionApply(mod, data, dry){
-  let m = MODULES[mod] || {};
   // Build 690: with the module off only its core part comes back (Brand's keys
   // in the growth row); Press and Social data kept for later stay as they are.
-  if (veniaVersionCoreOnly(mod)) m = { keys: m.coreKeys || [], ls: m.coreLs || [] };
+  // Build 691: the same for Brand's own line, whichever row the copy is from.
+  const m = veniaVersionKeys(mod);
   let changed = 0, revived = 0;
   const same = function(a, b){ try { return JSON.stringify(a) === JSON.stringify(b); } catch(e){ return false; } };
   (m.keys || []).forEach(function(k){
@@ -33744,16 +34131,21 @@ window.veniaVersionsRender = async function(){
   } catch(e) { el.innerHTML = '<div style="font-size:11px;color:var(--muted)">Could not load earlier versions.</div>'; return; }
   const html = veniaVersionModules().map(function(mod){
     const seen = Object.create(null);
-    const mine = rows.filter(function(r){ return r && r.module === mod && r.updated_at; })
+    // Build 691: Brand's line lists its own row's copies and the growth
+    // row's (same keys); each option says which row it comes from.
+    const srcs = mod === 'brand' ? ['brand', 'growth'] : [mod];
+    const mine = rows.filter(function(r){ return r && srcs.indexOf(r.module) >= 0 && r.updated_at; })
       .sort(function(a, b){ return a.slot === 'restore' ? -1 : b.slot === 'restore' ? 1 : String(b.updated_at).localeCompare(String(a.updated_at)); })
-      .filter(function(r){ const k = r.slot === 'restore' ? 'restore' : r.updated_at; if (seen[k]) return false; seen[k] = 1; return true; });
+      .filter(function(r){ const k = r.module + '|' + (r.slot === 'restore' ? 'restore' : r.updated_at); if (seen[k]) return false; seen[k] = 1; return true; });
     const label = escHtml(veniaVersionLabel(mod));
-    // Growth's row also carries Brand (core), so say so: with growth off the
-    // row is shown as Brand and restores only Brand's part.
-    const sub = mod === 'growth' ? (veniaVersionCoreOnly(mod) ? 'kept in the Growth row' : 'Press, Social and Brand') : '';
+    // Growth's row also carries Brand (core), so say so.
+    const sub = mod === 'growth' ? 'Press, Social and Brand'
+      : mod === 'brand' ? 'voice, tone, library and watch' : '';
     const opts = mine.map(function(r){
-      return '<option value="' + escHtml(r.slot) + '">' + (r.slot === 'restore' ? 'Just before the last restore (' + escHtml(veniaVersionWhen(r.updated_at)) + ')'
-        : escHtml(veniaVersionWhen(r.updated_at))) + '</option>';
+      const from = mod === 'brand' ? (r.module === 'growth' ? ' · Growth row' : ' · Brand row') : '';
+      const val = mod === 'brand' ? r.module + '|' + r.slot : r.slot;
+      return '<option value="' + escHtml(val) + '">' + (r.slot === 'restore' ? 'Just before the last restore (' + escHtml(veniaVersionWhen(r.updated_at)) + ')'
+        : escHtml(veniaVersionWhen(r.updated_at))) + escHtml(from) + '</option>';
     }).join('');
     return '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--border)">'
       + '<div style="width:96px;font-size:11px;font-weight:700;color:var(--ink)">' + label
@@ -33768,12 +34160,16 @@ window.veniaVersionsRender = async function(){
 };
 window.veniaVersionRestore = async function(mod){
   const sel = document.getElementById('set-ver-' + mod);
-  const slot = sel && sel.value; if (!slot) return;
+  let slot = sel && sel.value; if (!slot) return;
+  // Build 691: Brand's options name their row ("brand|day3", "growth|hour2").
+  let src = mod;
+  if (mod === 'brand') { const i = slot.indexOf('|'); if (i < 0) return; src = slot.slice(0, i); slot = slot.slice(i + 1); }
+  if (mod === 'brand' && src !== 'brand' && src !== 'growth') return;
   const c = window.__sbClient; if (!c) { showToast('Sign in first', 'warn'); return; }
   const label = veniaVersionLabel(mod);
   let ver = null;
   try {
-    const r = await c.from('venia_module_versions').select('data,updated_at').eq('workspace_id', 'main').eq('module', mod).eq('slot', slot).maybeSingle();
+    const r = await c.from('venia_module_versions').select('data,updated_at').eq('workspace_id', 'main').eq('module', src).eq('slot', slot).maybeSingle();
     if (r.error || !r.data) { showToast('Could not open that version' + (r.error ? ': ' + (r.error.message || r.error.code) : ''), 'warn'); return; }
     ver = r.data;
   } catch(e) { showToast('Could not open that version', 'warn'); return; }
@@ -33787,8 +34183,13 @@ window.veniaVersionRestore = async function(mod){
     + 'What is there now is kept first, so you can undo this from the same list.', { ok: 'Restore' });
   if (!ok) return;
   try {
-    const k = await c.rpc('venia_keep_version_now', { p_module: mod });
-    if (k.error) { showToast('Nothing was restored: a copy of now could not be kept first (' + (k.error.message || k.error.code) + ')', 'warn'); return; }
+    // Build 691: Brand's keys are in both rows, so a restore changes both:
+    // keep now's copy of each (the brand row's only when it exists).
+    const keep = mod === 'brand' ? ['growth'].concat(window.__veniaBrandRowSeen ? ['brand'] : []) : [src];
+    for (const km of keep) {
+      const k = await c.rpc('venia_keep_version_now', { p_module: km });
+      if (k.error) { showToast('Nothing was restored: a copy of now could not be kept first (' + (k.error.message || k.error.code) + ')', 'warn'); return; }
+    }
   } catch(e) { showToast('Nothing was restored: a copy of now could not be kept first', 'warn'); return; }
   const done = veniaVersionApply(mod, ver.data, false);
   try { logActivity('Restored ' + label + ' to ' + veniaVersionWhen(ver.updated_at) + ' (' + done.changed + ' changed back, ' + done.revived + ' brought back)'); } catch(e){}
@@ -54501,7 +54902,7 @@ function cfoPlanApplyResult(text){
   STATE.finPlanJob = { ...(STATE.finPlanJob || {}), status: 'done' };
   if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
   STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: 'Financial plan — ' + new Date().toISOString().slice(0,10),
-    kind: 'brief', body: String(text).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    kind: 'brief', from: 'money', body: String(text).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
   save();
   try { logActivity('CFO built a ' + (STATE.finPlan.horizon) + '-month financial plan (self-reviewed)'); } catch(e){}
   try { cmdRenderCfo(); } catch(e){}
@@ -55010,7 +55411,7 @@ async function finWriteWeeklyBrief(force){
     const docTitle = 'Money brief — week of ' + wk;
     const prevDoc = force ? VeniaOS.get('core.brand.docs').find(d => d && d.title === docTitle) : null;
     if (prevDoc) { prevDoc.body = String(clean).slice(0, 40000); prevDoc.updatedAt = new Date().toISOString(); }
-    else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: docTitle, kind: 'note',
+    else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: docTitle, kind: 'note', from: 'money',
       body: String(clean).slice(0, 40000), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     save();
     try { logActivity('CFO ' + (force ? 're-ran' : 'wrote') + ' the weekly money brief (week of ' + wk + ')'); } catch(e){}
@@ -59625,7 +60026,9 @@ window.veniaModulesRender = async function(){
   try { if (window.veniaLoadEntitlements) await window.veniaLoadEntitlements(); } catch(e){}
   function esc(v){ return String(v == null ? '' : v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
   var TIER = { core: 'Core', base: 'Base', addon: 'Add-on' };
-  var ids = Object.keys(MODULE_MANIFEST).filter(function(id){ return id !== 'legacy'; });
+  // Build 691: 'brand' is Brand's own data row, already listed as the Brand
+  // part (under the catalogue), so it is not a second line here.
+  var ids = Object.keys(MODULE_MANIFEST).filter(function(id){ return id !== 'legacy' && id !== 'brand'; });
   var order = { core: 0, base: 1, addon: 2 };
   ids.sort(function(a, b){ return (order[MODULE_MANIFEST[a].tier] - order[MODULE_MANIFEST[b].tier]) || 0; });
   var known = !!window.VENIA_ENTITLED;
@@ -60470,6 +60873,9 @@ window.veniaModulesRender = async function(){
     if (_bn(e.newValue) > _bn(window.VENIA_BUILD)) veniaStaleTabNotice(_bn(e.newValue));
   });
   window.__syncSnapshot = function(){ return snapshot(); };
+  // Build 691: a read-only pull (what the 4-minute poll reads), for the Sync
+  // panel's diagnostics and the build checks. Merges and applies nothing.
+  window.__syncPull = function(){ return pullRow(); };
   window.__syncBase = function(snap){ if (arguments.length) setBase(snap); return getBase(); };
 
   // Lossless snapshot: tech-pack fields all hang off the style objects.
@@ -60690,6 +61096,9 @@ window.veniaModulesRender = async function(){
       // comes back on is never touched. No cloud copy read: not written.
       var cloudParts = null;
       var ids = Object.keys(parts).filter(function(id){
+        // Build 691: Brand's row goes up in its own statement below, never in
+        // this batch: one refused row would take every module down with it.
+        if (id === 'brand') return false;
         if (!moduleWritable(id, roles)) return false;
         if (typeof veniaModuleEntitled !== 'function' || veniaModuleEntitled(id)) return true;
         if (!(MODULES[id] && MODULES[id].coreKeys)) return false;
@@ -60698,6 +61107,21 @@ window.veniaModulesRender = async function(){
         parts[id] = moduleCorePart(id, cloudParts[id] || {}, parts[id]);
         return true;
       });
+      // Build 691: Brand's own row, written only once a pull has seen it (its
+      // database update applied) and only by someone its policy lets write.
+      var brandPart = null, brandGrowthToo = ids.indexOf('growth') >= 0;
+      if (parts.brand && window.__veniaBrandRowSeen && moduleWritable('brand', roles)) {
+        brandPart = Object.assign({}, parts.brand);
+        delete brandPart._who;
+        // Written without the growth row: the growth row cannot have this yet,
+        // so it is ahead (see moduleBrandFold). Written with it: both agree,
+        // and the mark is cleared.
+        if (!brandGrowthToo) brandPart._brandAhead = true;
+        var brandCloud = window.__veniaBrandCloud ? Object.assign({}, window.__veniaBrandCloud) : null;
+        if (brandCloud) delete brandCloud._who;
+        // Nothing new for it: leave the row alone (no write, no realtime echo).
+        try { if (brandCloud && _mStr(brandCloud) === _mStr(brandPart)) brandPart = null; } catch (e) {}
+      }
       try {
         var modRes = ids.length ? await c.from('venia_module_data').upsert(
           ids.map(function(id){
@@ -60745,7 +61169,32 @@ window.veniaModulesRender = async function(){
       // category disappearing off a transaction looks like.
       //
       // So the base only advances when what we actually pushed landed.
-      if (!ids.length && Object.keys(parts).length) {
+      // Build 691: the brand row, in a statement of its own, after the module
+      // rows landed. When the growth row went up too it carries the same
+      // keys, so a refusal here costs nothing and is only recorded. When it
+      // did not, this row is the only place a Brand edit can go, so a refusal
+      // fails the push like any module row (the base does not advance).
+      var brandErr = null;
+      if (brandPart && !(modErr && ids.length)) {
+        try {
+          brandPart._who = toPush._who;
+          var bRes = await c.from('venia_module_data').upsert({ workspace_id: WS_ID, module: 'brand', data: brandPart,
+            updated_by: clientId(), updated_at: stamp, rev: rev }, { onConflict: 'workspace_id,module' });
+          brandErr = bRes && bRes.error ? (bRes.error.message || bRes.error.code) : null;
+        } catch (be) { brandErr = (be && be.message) || 'threw'; }
+        window.__syncStat.brandRow = brandErr ? { t: stamp, ok: false, err: brandErr, withGrowth: brandGrowthToo }
+                                              : { t: stamp, ok: true, withGrowth: brandGrowthToo };
+        if (!brandErr) { try { var bc = Object.assign({}, brandPart); window.__veniaBrandCloud = bc; } catch (e) {} }
+        if (brandErr && !brandGrowthToo) {
+          syncFail('push', 'Brand could not be saved (' + brandErr + ') — your last Brand change is still only on '
+            + 'this device. It will be retried; do not clear the app until the next sync succeeds.');
+          window.__syncStat.push = { t: new Date().toISOString(), ok: false, err: syncReason(brandErr),
+            raw: String(brandErr).slice(0, 140), via: 'brand row refused — base NOT advanced' };
+          pushFailed('brand: ' + brandErr);
+          return;
+        }
+      }
+      if (!ids.length && Object.keys(parts).length && !(brandPart && !brandErr)) {
         syncFail('push', 'this device is not allowed to write any module — nothing has been '
           + 'published. Your work is safe on this device; do not clear the app.');
         window.__syncStat.push = { t: new Date().toISOString(), ok: false,
@@ -60887,13 +61336,27 @@ window.veniaModulesRender = async function(){
       }
       var rows = res.data || [];
       if (!rows.length) return null;
+      // Build 691: has Brand's own row reached us? It exists only once its
+      // database update has been applied, and until a pull has seen it the
+      // push never writes it (a row RLS does not know would be refused).
+      // Sticky, like the real line: a short read is not a demotion.
+      var brandRaw = null;
+      rows.forEach(function(r){ if (r && r.module === 'brand' && r.data) brandRaw = r.data; });
+      if (brandRaw) window.__veniaBrandRowSeen = true;
+      window.__veniaBrandCloud = brandRaw;
       var newest = rows.reduce(function(a,b){
         return (Date.parse(b.updated_at||'')||0) > (Date.parse(a.updated_at||'')||0) ? b : a; });
       window.__syncStat.modulePull = { ok:true, rows: rows.length,
         modules: rows.map(function(r){ return r.module; }).join(','), cloudAt: newest.updated_at };
       window.__syncStat.pull = { t: new Date().toISOString(), ok: true, rows: rows.length,
         via: rows.length + ' module rows', cloudAt: newest.updated_at, by: newest.updated_by };
-      return { data: moduleAssemble(rows), updated_at: newest.updated_at,
+      // Build 691: each row's Brand values as last seen in this tab, so the
+      // fold can tell which row moved (see moduleBrandFold).
+      var brandCtx = { seen: null };
+      try { brandCtx.seen = JSON.parse(sessionStorage.getItem('venia-brand-seen') || 'null'); } catch (e) {}
+      var assembled = moduleAssemble(rows, getBase(), brandCtx);
+      if (brandCtx.next) { try { sessionStorage.setItem('venia-brand-seen', JSON.stringify(brandCtx.next)); } catch (e) {} }
+      return { data: assembled, updated_at: newest.updated_at,
                updated_by: newest.updated_by, rev: newest.rev, _fromModules: true };
     } catch(e){ window.__syncStat.modulePull = { ok:false, err: e && e.message }; return null; }
   }
@@ -67873,6 +68336,15 @@ function tpPickFile(styleId, field, label) {
     openDp(styleId);
     showToast(label + (name ? ' — ' + name : ' link saved'), 'success');
   };
+  // Build 691: never connected to Google, no consent screen of its own here:
+  // the link can still be pasted, and picking from Drive waits for the Google
+  // card in Settings.
+  const gOn = typeof window.googleLinkedFor !== 'function' || window.googleLinkedFor('drive.file');
+  if (typeof driveReady === 'function' && driveReady() && !gOn) {
+    const url = prompt('Paste a Google Drive or public file URL for "' + label + '":\n\n(To pick from Drive instead, connect Google once on the Google card in Settings.)');
+    apply(url);
+    return;
+  }
   if (typeof driveReady === 'function' && driveReady()) {
     window.drivePick().then(doc => { if (doc) apply(doc.url, doc.name); })
       .catch(() => { const url = prompt('Paste a Google Drive or public file URL for "' + label + '":'); apply(url); });
