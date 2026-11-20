@@ -25,7 +25,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 //   {action:'remove', email}                 -> take every module away
 //   {action:'setagent', email, canWrite}     -> may Enigma change things for them
 //   {action:'setpw', email, password}        -> create the login, or reset it
-//   Build 704:
+//   Build 718:
 //   {action:'grant', email, grants:{module:role}, preset}
 //                                            -> a role preset: a level per module
 //   {action:'pause', email, paused}          -> pause or resume someone's access
@@ -56,7 +56,7 @@ const MODULES = ["home", "product", "growth", "sales", "money", "brainstorm", "p
 // 'catalog' is absent too, for the opposite reason: it is the cost-stripped
 // line, implied by ANY grant, and never something to tick on its own.
 const ROLES = ["owner", "editor", "viewer"];
-// Build 704: where a sign-in link may send someone. Only VENIA's own address,
+// Build 718: where a sign-in link may send someone. Only VENIA's own address,
 // never a host a request names, so a link can't be pointed somewhere else.
 const PUBLIC_BASE = "https://creator.veniacollection.com";
 // A role preset is only a NAME for the set of grants; the grants themselves
@@ -115,7 +115,7 @@ Deno.serve(async (req: Request) => {
       const { data: pol } = await admin.from("venia_agent_policy").select("email, can_write");
       const agentOff = new Set((pol || []).filter((r) => r.can_write === false)
         .map((r) => String(r.email).toLowerCase()));
-      // Build 704: role name and pause state. An older database without the
+      // Build 718: role name and pause state. An older database without the
       // table just answers nothing here, and everyone reads as not paused.
       const { data: profs } = await admin.from("venia_member_profiles").select("email, preset, paused, paused_at");
       const prof = new Map((profs || []).map((p) => [String(p.email).toLowerCase(), p]));
@@ -140,7 +140,7 @@ Deno.serve(async (req: Request) => {
     if (action === "grant") {
       if (!okEmail(email)) return json({ error: "that does not look like an email" }, 400);
       if (FOUNDERS.includes(email)) return json({ error: "a founder already has everything" }, 400);
-      // Build 704: a preset sends a level per module ({product:'editor', ...});
+      // Build 718: a preset sends a level per module ({product:'editor', ...});
       // the older form (modules[] + one role) still works.
       const levels: Record<string, string> = {};
       if (b.grants && typeof b.grants === "object" && !Array.isArray(b.grants)) {
@@ -211,7 +211,7 @@ Deno.serve(async (req: Request) => {
       return json({ ok: true, loginKept: true });
     }
 
-    // Build 704: pause keeps every grant and the login, and shuts the door:
+    // Build 718: pause keeps every grant and the login, and shuts the door:
     // venia_has_access() and venia_module_role() answer nothing while paused.
     if (action === "pause") {
       if (!okEmail(email)) return json({ error: "bad request" }, 400);
@@ -221,11 +221,11 @@ Deno.serve(async (req: Request) => {
         { email, paused, paused_at: paused ? new Date().toISOString() : null,
           updated_by: founder, updated_at: new Date().toISOString() },
         { onConflict: "email" });
-      if (error) return json({ error: "could not save that (is the Build 704 database update in?)" }, 500);
+      if (error) return json({ error: "could not save that (is the Build 718 database update in?)" }, 500);
       return json({ ok: true, paused });
     }
 
-    // Build 704: a sign-in link instead of a password read out loud. It opens
+    // Build 718: a sign-in link instead of a password read out loud. It opens
     // VENIA OS's "choose a password" screen, works once, and lasts an hour.
     // Supabase's own mailer only reaches this project's team, so the link is
     // handed back for the founder to send however they like.

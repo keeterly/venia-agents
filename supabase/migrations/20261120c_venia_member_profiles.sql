@@ -1,4 +1,4 @@
--- Build 704: a role name and a pause switch for each person. ADDITIVE.
+-- Build 718: a role name and a pause switch for each person. ADDITIVE.
 --
 -- venia_members stays the one truth about WHAT someone can reach (one row per
 -- module, owner/editor/viewer). This table only adds two things about the
