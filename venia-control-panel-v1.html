@@ -4234,7 +4234,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '700';
+  const BUILD = '701';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -5352,11 +5352,17 @@ window.veniaYmd = veniaYmd;
                 <label class="fl" for="team-email">Their email</label>
                 <input class="fi" id="team-email" type="email" placeholder="name@example.com" autocomplete="off">
               </div>
+              <!-- Build 701: start from a role; the ticks below follow it. -->
+              <div class="fg" style="margin-bottom:12px">
+                <label class="fl" for="team-preset">Role</label>
+                <select class="fs" id="team-preset" onchange="teamPickPreset(this.value)" style="min-height:auto;padding:7px 9px;font-size:12px;width:auto"></select>
+                <div id="team-preset-what" style="font-size:10.5px;color:var(--muted);line-height:1.6;margin-top:6px"></div>
+              </div>
               <div class="fg" style="margin-bottom:12px">
                 <label class="fl">Modules</label>
                 <div id="team-modules" style="display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:6px"></div>
               </div>
-              <div class="fg" style="margin-bottom:14px">
+              <div class="fg" id="team-role-wrap" style="margin-bottom:14px">
                 <label class="fl" for="team-role">They can</label>
                 <select class="fs" id="team-role" style="min-height:auto;padding:7px 9px;font-size:12px;width:auto">
                   <option value="editor">Edit — read and change what they hold</option>
@@ -5364,12 +5370,12 @@ window.veniaYmd = veniaYmd;
                   <option value="owner">Own — edit, for a module they run</option>
                 </select>
               </div>
-              <button class="btn btn-gold" onclick="teamGrant()">Grant access</button>
+              <button class="btn btn-gold" id="team-grant-btn" onclick="teamGrant()">Grant access</button>
               <div style="font-size:10.5px;color:var(--muted);line-height:1.7;margin-top:12px">
-                Granting access does not create a password. After granting, use
-                <strong>Set password</strong> on their row — that makes the login and gives
-                you the details to send them. Today is always included, otherwise they sign
-                in to a screen that cannot load.
+                Granting access does not send anything. After granting, use
+                <strong>Copy sign-in link</strong> on their row and send it to them: it opens a
+                page where they choose their own password, works once, and lasts an hour.
+                Today is always included, otherwise they sign in to a screen that cannot load.
                 <br><br>They sign in at <strong>creator.veniacollection.com/?team</strong> with
                 that email and password — no access code, and not the sales agent portal,
                 which is a different set of accounts entirely.
@@ -61408,6 +61414,22 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
     } catch(e){ window.VENIA_ENTITLED = null; }
   };
   window.veniaApplyAccess = apply;
+  // Build 701: the one screen a paused person sees. Signing out is the only
+  // thing on it; everything they had comes back when a founder resumes them.
+  function veniaShowPaused(em){
+    if (document.getElementById('venia-paused')) return;
+    var o = document.createElement('div');
+    o.id = 'venia-paused';
+    o.setAttribute('role', 'dialog'); o.setAttribute('aria-modal', 'true');
+    o.style.cssText = 'position:fixed;inset:0;z-index:9550;background:#0a0a0a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif;text-align:center';
+    o.innerHTML = (typeof brandMark === 'function' ? brandMark(150) : '')
+      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Access paused</div>'
+      + '<div style="max-width:320px;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Your access to VENIA OS is paused for now. Nothing of yours has been removed. Ask the person who invited you to resume it.</div>'
+      + '<button type="button" id="venia-paused-out" style="min-width:220px;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Sign out</button>'
+      + '<div style="font-size:11px;color:#6a6a6a;margin-top:14px">' + String(em).replace(/[<&"]/g, '') + '</div>';
+    document.body.appendChild(o);
+    o.querySelector('#venia-paused-out').onclick = function(){ try { if (window.veniaSignOut) window.veniaSignOut(); } catch(e){} o.remove(); };
+  }
   window.veniaLoadAccess = async function(){
     try {
       if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_SIGN) return;      // other doors entirely
@@ -61420,6 +61442,14 @@ setTimeout(function(){ initBrandWatch(); initCostSheetCalc(); }, 1500);
       // An error, or a workspace with no membership rows at all, means we do
       // not know — and not knowing must never hide anything.
       if (r.error || !r.data || !r.data.length) { window.VENIA_MY_MODULES = null; window.VENIA_MY_ROLES = null; apply(); return; }
+      // Build 701: a paused person keeps their grants but the database sends
+      // them nothing. Say that, instead of a workspace that looks empty.
+      try {
+        var pz = await c.from('venia_member_profiles').select('paused').eq('email', em).maybeSingle();
+        if (pz && pz.data && pz.data.paused && !(window.veniaIsFounderEmail && window.veniaIsFounderEmail(em))) {
+          veniaShowPaused(em); return;
+        }
+      } catch(e){}
       var mine = {};
       r.data.forEach(function(row){ mine[String(row.module)] = String(row.role || 'editor'); });
       // Someone holding every grantable module is running the whole workspace;
@@ -61537,6 +61567,53 @@ window.veniaModulesRender = async function(){
     'pattern-cad': 'Dr4ft — pattern drafting; reads styles only if they also have Product',
     settings:   'connections and preferences',
   };
+  // Build 701: ROLES AS PRESETS. A role is only a starting set of grants —
+  // a level per module — that the database then enforces like any other
+  // grant. Money is in Admin and Finance only. Settings is never handed out:
+  // it holds the workspace's connections, and stays with the founders.
+  var PRESETS = {
+    admin:      { label:'Admin',         what:'Runs the business with you: every module except Settings, including Money. Cannot add or remove people.',
+                  grants:{ product:'owner', growth:'owner', sales:'owner', money:'owner', brainstorm:'owner', 'pattern-cad':'owner' } },
+    production: { label:'Production',    what:'Product, Dr4ft and Boards. No Sales, Money or Press.',
+                  grants:{ product:'editor', 'pattern-cad':'editor', brainstorm:'editor' } },
+    sales:      { label:'Sales',         what:'Buyers, quotes, orders and line sheets; Boards to look at. Sees prices, never costs or Money.',
+                  grants:{ sales:'editor', brainstorm:'viewer' } },
+    press:      { label:'Press & Social', what:'Press, Social and Brand, plus Boards. No Product costs, Sales or Money.',
+                  grants:{ growth:'editor', brainstorm:'editor' } },
+    finance:    { label:'Finance',       what:'Money, with Sales to look at for orders and invoices.',
+                  grants:{ money:'editor', sales:'viewer' } },
+    viewer:     { label:'Viewer',        what:'Looks at Product, Press & Social, Sales and Boards; changes nothing. No Money.',
+                  grants:{ product:'viewer', growth:'viewer', sales:'viewer', brainstorm:'viewer' } },
+    custom:     { label:'Custom',        what:'Tick the modules yourself and pick one level for them.', grants:null },
+  };
+  var FEATURES = [];   // what the team function in the cloud can do (from 'list')
+  function presetKeyOf(label){
+    var k = Object.keys(PRESETS).filter(function(x){ return PRESETS[x].label === label; })[0];
+    return k || '';
+  }
+  function presetFill(){
+    var sel = document.getElementById('team-preset');
+    if (!sel || sel.options.length) return;
+    sel.innerHTML = Object.keys(PRESETS).map(function(k){
+      return '<option value="' + k + '">' + esc(PRESETS[k].label) + '</option>'; }).join('');
+    sel.value = 'production';
+    window.teamPickPreset('production');
+  }
+  // Picking a role ticks its modules. Changing a tick afterwards makes it Custom,
+  // so what the form says always matches what will be granted.
+  window.teamPickPreset = function(k){
+    var p = PRESETS[k] || PRESETS.custom;
+    var what = document.getElementById('team-preset-what');
+    if (what) what.textContent = p.what;
+    var wrap = document.getElementById('team-role-wrap');
+    if (wrap) wrap.style.display = p.grants ? 'none' : '';
+    if (!p.grants) return;
+    document.querySelectorAll('.team-mod').forEach(function(x){ x.checked = !!p.grants[x.value]; });
+  };
+  function presetToCustom(){
+    var sel = document.getElementById('team-preset');
+    if (sel && sel.value !== 'custom') { sel.value = 'custom'; window.teamPickPreset('custom'); }
+  }
   function esc(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
   async function teamCall(body){
     var c = (typeof window.__sbClient !== 'undefined' && window.__sbClient) || null;
@@ -61567,7 +61644,7 @@ window.veniaModulesRender = async function(){
     if (picks && !picks.childElementCount) {
       picks.innerHTML = Object.keys(MOD_LABEL).filter(function(m){ return m !== 'home'; }).map(function(m){
         return '<label style="display:flex;align-items:flex-start;gap:7px;font-size:11.5px;color:var(--ink);cursor:pointer;width:210px">'
-          + '<input type="checkbox" class="team-mod" value="' + m + '" style="accent-color:var(--ink);margin-top:2px">'
+          + '<input type="checkbox" class="team-mod" value="' + m + '" onchange="teamTickChanged()" style="accent-color:var(--ink);margin-top:2px">'
           + '<span><b>' + esc(MOD_LABEL[m]) + '</b><br><span style="color:var(--muted);font-size:10px">' + esc(MOD_WHAT[m]) + '</span></span></label>';
       }).join('');
       // Say the thing that is easiest to get wrong: Sales works without Product,
@@ -61588,13 +61665,15 @@ window.veniaModulesRender = async function(){
         + 'reach a module they were not given — not because it is asked not to, but because '
         + 'that data never arrives on their device.</div>');
     }
+    presetFill();
     box.innerHTML = '<div style="font-size:11px;color:var(--muted)">Loading…</div>';
     var d;
-    try { d = await teamCall({ action:'list' }); }
+    try { d = await teamCall({ action:'list' }); FEATURES = (d && d.features) || []; }
     catch(e){ box.innerHTML = '<div style="font-size:11px;color:var(--red)">' + esc(e.message) + '</div>'; return; }
     var people = (d.people || []).slice().sort(function(a,b){
       return (b.founder?1:0) - (a.founder?1:0) || String(a.email).localeCompare(String(b.email)); });
     var others = people.filter(function(x){ return !x.founder; });
+    window.__teamPeople = people;
     box.innerHTML = people.map(function(pn){
       var mods = Object.keys(pn.modules || {}).filter(function(m){ return m !== 'home'; });
       var chips = mods.length ? mods.map(function(m){
@@ -61614,18 +61693,31 @@ window.veniaModulesRender = async function(){
             ? '<span style="font-size:10px;color:var(--muted)">Can sign in'
               + (pn.lastSignIn ? ' · last ' + esc(String(pn.lastSignIn).slice(0,10)) : ' · never used yet') + '</span>'
             : '<span style="font-size:10px;color:var(--red)">No password yet — they cannot sign in</span>');
-      return '<div style="border:1px solid var(--border);padding:13px 14px;margin-bottom:1px;background:var(--bg)">'
+      // Build 701: the role in words, and a paused person said plainly.
+      var roleTag = pn.founder ? '<span style="font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)">founder</span>'
+        : '<span style="font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)">' + esc(pn.preset || 'Custom') + '</span>';
+      if (pn.paused) {
+        login = '<span style="font-size:10px;color:var(--red)">Paused — they can’t open anything until you resume</span>';
+      } else if (!pn.founder && !pn.hasLogin && FEATURES.indexOf('link') >= 0) {
+        login = '<span style="font-size:10px;color:var(--red)">Not signed in yet — send them a sign-in link</span>';
+      }
+      var hasLink = FEATURES.indexOf('link') >= 0, hasPause = FEATURES.indexOf('pause') >= 0;
+      var em = esc(pn.email);
+      return '<div style="border:1px solid var(--border);padding:13px 14px;margin-bottom:1px;background:var(--bg)' + (pn.paused ? ';opacity:.72' : '') + '">'
         + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">'
-        + '<div style="font-size:12.5px;font-weight:600">' + esc(pn.email)
-        + (pn.founder ? ' <span style="font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)">founder</span>' : '')
+        + '<div style="font-size:12.5px;font-weight:600">' + em + ' ' + roleTag
         + '</div>' + login + '</div>'
         + '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">' + chips + '</div>'
         + (pn.founder ? '' :
-            '<div style="display:flex;gap:6px;margin-top:11px">'
-            + '<button class="btn btn-ghost btn-sm" onclick="teamSetPw(\'' + esc(pn.email) + '\')">'
-            + (pn.hasLogin ? 'Reset password' : 'Set password') + '</button>'
-            + '<button class="btn btn-ghost btn-sm" onclick="teamRemove(\'' + esc(pn.email) + '\')">Remove</button>'
+            '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:11px">'
+            + '<button class="btn btn-ghost btn-sm" onclick="teamEdit(\'' + em + '\')">Change role</button>'
+            + (hasLink
+                ? '<button class="btn btn-ghost btn-sm" onclick="teamLink(\'' + em + '\')">Copy sign-in link</button>'
+                : '<button class="btn btn-ghost btn-sm" onclick="teamSetPw(\'' + em + '\')">' + (pn.hasLogin ? 'Reset password' : 'Set password') + '</button>')
+            + (hasPause ? '<button class="btn btn-ghost btn-sm" onclick="teamPause(\'' + em + '\',' + (pn.paused ? 'false' : 'true') + ')">' + (pn.paused ? 'Resume' : 'Pause') + '</button>' : '')
+            + '<button class="btn btn-ghost btn-sm" onclick="teamRemove(\'' + em + '\')">Remove</button>'
             + '</div>'
+            + (hasLink ? '<button onclick="teamSetPw(\'' + em + '\')" style="margin-top:8px;background:none;border:none;padding:0;color:var(--muted);font-size:10px;text-decoration:underline;cursor:pointer">Or set a password for them</button>' : '')
             // The one agent dial, said in the words that describe what actually
             // happens — not "agentic permissions".
             + '<label style="display:flex;align-items:flex-start;gap:7px;margin-top:10px;'
@@ -61642,29 +61734,61 @@ window.veniaModulesRender = async function(){
         '<div style="font-size:11px;color:var(--muted);font-style:italic;margin-top:10px">'
         + 'Nobody outside the two of you has access yet.</div>');
   };
+  window.teamTickChanged = function(){ presetToCustom(); };
+  // Build 701: load someone into the form to change their role.
+  window.teamEdit = function(email){
+    var pn = (window.__teamPeople || []).filter(function(x){ return x.email === email; })[0];
+    if (!pn) return;
+    document.getElementById('team-email').value = email;
+    var k = presetKeyOf(pn.preset);
+    var sel = document.getElementById('team-preset');
+    if (k && k !== 'custom') { sel.value = k; window.teamPickPreset(k); }
+    else {
+      sel.value = 'custom'; window.teamPickPreset('custom');
+      document.querySelectorAll('.team-mod').forEach(function(x){ x.checked = !!(pn.modules || {})[x.value]; });
+      var lv = Object.keys(pn.modules || {}).filter(function(m){ return m !== 'home'; }).map(function(m){ return pn.modules[m]; })[0];
+      if (lv) document.getElementById('team-role').value = lv;
+    }
+    var b = document.getElementById('team-grant-btn'); if (b) b.textContent = 'Save role';
+    try { document.getElementById('team-email').scrollIntoView({ behavior:'smooth', block:'center' }); } catch(e){}
+  };
   window.teamGrant = async function(){
     var email = (document.getElementById('team-email').value || '').trim().toLowerCase();
     var role = document.getElementById('team-role').value;
+    var pk = (document.getElementById('team-preset') || {}).value || 'custom';
+    var preset = PRESETS[pk] || PRESETS.custom;
     var mods = [].slice.call(document.querySelectorAll('.team-mod:checked')).map(function(x){ return x.value; });
     if (!email) { showToast('Their email, first', 'warning'); return; }
     if (!mods.length) { showToast('Tick at least one module', 'warning'); return; }
+    // A preset with mixed levels needs the Build 701 team function. An older
+    // one would quietly give every module the same level, so stop instead.
+    var mixed = preset.grants && Object.keys(preset.grants).map(function(m){ return preset.grants[m]; })
+      .filter(function(v, i, a){ return a.indexOf(v) === i; }).length > 1;
+    if (preset.grants && FEATURES.indexOf('grants') < 0 && mixed) {
+      showToast('The team function in the cloud needs its Build 701 update before roles can be used — pick Custom for now', 'warning'); return;
+    }
+    var levelOf = function(m){ return preset.grants ? preset.grants[m] : role; };
     // Granting REPLACES the whole set, so an existing person losing modules is
     // a real change and gets said out loud before it happens.
-    var names = mods.map(function(m){ return MOD_LABEL[m] || m; }).join(', ');
-    if (!confirm('Give ' + email + ' ' + role + ' access to: ' + names + '?\n\n'
-        + 'This replaces whatever they have now — anything not ticked is taken away.')) return;
+    var names = mods.map(function(m){ return (MOD_LABEL[m] || m) + ' (' + (levelOf(m) === 'viewer' ? 'view' : 'edit') + ')'; }).join(', ');
+    if (!confirm('Make ' + email + ' ' + preset.label + ': ' + names + '?\n\n'
+        + 'This replaces whatever they have now — anything not listed is taken away.')) return;
     try {
-      var res = await teamCall({ action:'grant', email: email, modules: mods, role: role });
+      var grants = {}; mods.forEach(function(m){ grants[m] = levelOf(m); });
+      var res = await teamCall(FEATURES.indexOf('grants') >= 0
+        ? { action:'grant', email: email, grants: grants, preset: preset.grants ? preset.label : 'Custom' }
+        : { action:'grant', email: email, modules: mods, role: preset.grants ? levelOf(mods[0]) : role });
       // The team function returns the modules it actually granted. One it does
       // not know yet (an older deploy) is dropped, so say so rather than
       // report a grant that did not happen.
       var gotMods = (res && Array.isArray(res.modules)) ? res.modules : mods;
       var dropped = mods.filter(function(m){ return gotMods.indexOf(m) < 0; });
       if (dropped.length) showToast('Not granted: ' + dropped.map(function(m){ return MOD_LABEL[m] || m; }).join(', ') + ' — the team function needs updating first', 'warning');
-      else showToast('Access granted — now set their password', 'success');
-      try { logActivity('Access granted: ' + email + ' — ' + names + ' (' + role + ')'); } catch(e){}
+      else showToast(FEATURES.indexOf('link') >= 0 ? 'Saved — now copy their sign-in link from their row' : 'Access granted — now set their password', 'success');
+      try { logActivity('Access granted: ' + email + ' — ' + preset.label + ': ' + names); } catch(e){}
       document.getElementById('team-email').value = '';
-      document.querySelectorAll('.team-mod:checked').forEach(function(x){ x.checked = false; });
+      var gb = document.getElementById('team-grant-btn'); if (gb) gb.textContent = 'Grant access';
+      var ps = document.getElementById('team-preset'); if (ps) { ps.value = 'production'; window.teamPickPreset('production'); }
       teamRender();
     } catch(e){ showToast(e.message || 'Could not grant access', 'error'); }
   };
@@ -61692,6 +61816,28 @@ window.veniaModulesRender = async function(){
       try { logActivity('Access removed: ' + email); } catch(e){}
       teamRender();
     } catch(e){ showToast(e.message || 'Could not remove', 'error'); }
+  };
+  window.teamPause = async function(email, paused){
+    if (paused && !confirm('Pause ' + email + '?\n\nThey keep their role and login, but can\'t open anything in VENIA OS until you resume.')) return;
+    try {
+      await teamCall({ action:'pause', email: email, paused: !!paused });
+      showToast(paused ? email + ' is paused' : email + ' can sign in again', 'success');
+      try { logActivity((paused ? 'Access paused: ' : 'Access resumed: ') + email); } catch(e){}
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not change that', 'error'); }
+  };
+  // Build 701: a one-hour sign-in link instead of a password read out loud.
+  window.teamLink = async function(email){
+    try {
+      var r = await teamCall({ action:'link', email: email });
+      var url = (window.VENIA_PUBLIC_BASE || location.origin) + '/?team';
+      var msg = 'Here is your link to VENIA OS. It works once, within the next hour:\n' + r.link
+        + '\n\nChoose a password there. After that, sign in at ' + url + ' with ' + email + ' and that password.';
+      try { await navigator.clipboard.writeText(msg); showToast('Sign-in link copied — send it to ' + email + '. It lasts an hour.', 'success'); }
+      catch(e){ prompt('Send this to ' + email + ' (it lasts an hour):', msg); }
+      try { logActivity('Sign-in link made: ' + email); } catch(e){}
+      teamRender();
+    } catch(e){ showToast(e.message || 'Could not make a link', 'error'); }
   };
   window.teamSetPw = async function(email){
     var pw = prompt('Password for ' + email + ' — they can change it later from Settings → Security.\n\n'
@@ -64862,7 +65008,12 @@ window.veniaModulesRender = async function(){
       recErr('');
       var done = document.getElementById('vrec-done');
       if (done) done.style.display = 'block';
-      setTimeout(function(){ location.replace((window.VENIA_PUBLIC_BASE || location.origin) + '/'); }, 1600);
+      // Build 701: a team member's front door is /?team (they have no access
+      // code). Founders go back to the bare address as before.
+      var who = '';
+      try { var u = await c.auth.getUser(); who = ((u && u.data && u.data.user && u.data.user.email) || '').toLowerCase(); } catch(e){}
+      var dest = (who && !(window.veniaIsFounderEmail && window.veniaIsFounderEmail(who))) || /[?&]team(?:[=&]|$)/.test(location.search) ? '/?team' : '/';
+      setTimeout(function(){ location.replace((window.VENIA_PUBLIC_BASE || location.origin) + dest); }, 1600);
     } catch(e){ recErr('Could not save — ' + (e.message||e)); }
   };
   function recoveryShow(){
@@ -64871,17 +65022,19 @@ window.veniaModulesRender = async function(){
     // than showing a form that cannot work.
     var h = new URLSearchParams((location.hash||'').replace(/^#/,''));
     var bad = h.get('error_description') || h.get('error') || '';
+    // Build 701: a sign-in link from Team & Access lands here too.
+    var invited = /[?&]team(?:[=&]|$)/.test(location.search);
     var o = document.createElement('div');
     o.id = 'venia-recovery';
     o.style.cssText = 'position:fixed;inset:0;z-index:9600;background:#0a0a0a;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
     o.innerHTML =
       brandMark(176)
-      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Set a new password</div>'
+      + '<div style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">' + (invited ? 'Welcome to VENIA OS' : 'Set a new password') + '</div>'
       + (bad
         ? '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#e0736a;margin:22px 0 4px">' + String(bad).replace(/\+/g,' ') + '</div>'
-          + '<div style="max-width:320px;text-align:center;font-size:12px;line-height:1.6;color:#b7b7b7;margin:8px 0 18px">Reset links last one hour and work once. Ask for a new one from the sign-in screen.</div>'
-          + '<button onclick="location.replace((window.VENIA_PUBLIC_BASE||location.origin)+\'/\')" style="min-width:220px;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Back to sign-in</button>'
-        : '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">Choose a new password for your VENIA account. At least 6 characters.</div>'
+          + '<div style="max-width:320px;text-align:center;font-size:12px;line-height:1.6;color:#b7b7b7;margin:8px 0 18px">' + (invited ? 'Sign-in links last one hour and work once. Ask whoever sent it for a new one.' : 'Reset links last one hour and work once. Ask for a new one from the sign-in screen.') + '</div>'
+          + '<button onclick="location.replace((window.VENIA_PUBLIC_BASE||location.origin)+\'/' + (invited ? '?team' : '') + '\')" style="min-width:220px;min-height:48px;background:#fff;color:#0a0a0a;border:none;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Back to sign-in</button>'
+        : '<div style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px">' + (invited ? 'Choose a password for your VENIA OS account. You’ll sign in with your email and this password. At least 6 characters.' : 'Choose a new password for your VENIA account. At least 6 characters.') + '</div>'
           + '<div style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px">'
           +   '<input id="vrec-pw" type="password" autocomplete="new-password" placeholder="New password" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none">'
           +   '<input id="vrec-pw2" type="password" autocomplete="new-password" placeholder="Type it again" onkeydown="if(event.key===\'Enter\')veniaRecoverySubmit()" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none">'
