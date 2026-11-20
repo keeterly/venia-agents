@@ -4202,7 +4202,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '684';
+  const BUILD = '685';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15762,6 +15762,42 @@ function genStyleId(season, category, gender){
   });
   return prefix + String(maxSeq+1).padStart(2,'0');
 }
+// Build 685: Product's one door for a style made somewhere else (Enigma's
+// one-touch "create a style"). The same record saveStyle() writes for a new
+// style — genStyleId() code, 'STY' id, family, default size run, margins read
+// the one way — so a style proposed by another module is a Product style, not a
+// look-alike with its own code format. Callers check VeniaOS.enabled('product').
+function styleCreateConcept(f){
+  f = f || {};
+  const name = String(f.name || '').trim().slice(0, 60);
+  if (!name) return null;
+  if (!STATE.styles) STATE.styles = [];
+  const season = String(f.season || '').replace(/\s+/g, '').toUpperCase().slice(0, 6) || smDefaultSeason();
+  const cat = Object.prototype.hasOwnProperty.call(STYLE_CAT_CODES, f.category) ? f.category : 'Tops';
+  const gender = ['womens','mens','unisex'].includes(String(f.gender || '').toLowerCase()) ? String(f.gender).toLowerCase() : 'womens';
+  const num = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
+  const now = new Date().toISOString();
+  const st = {
+    id: 'STY' + Date.now(), styleId: genStyleId(season, cat, gender),
+    name: name, family: styleNameKey(name), season: season, category: cat, gender: gender,
+    status: 'concept', drop: '',
+    retail: num(f.retail), wholesale: num(f.wholesale), cogs: 0,
+    fabric: '', colors: String(f.colors || ''), sizes: 'XS,S,M,L,XL',
+    sample: 'Proto', vendor: '', lead: 14, cloFile: '', cloStatus: 'none',
+    priority: 'mid', desc: String(f.desc || '').slice(0, 300),
+    notes: f.note ? [{ d: now.slice(0, 10), t: String(f.note) }] : [],
+    createdAt: now, updatedAt: now,
+  };
+  try { pxReadMargins(st); } catch(e){}
+  STATE.styles.unshift(st);
+  try { logActivity('New style created: ' + st.name + ' (' + st.styleId + ')'); } catch(e){}
+  save();
+  try { buildSkus(); } catch(e){}
+  try { populateStyleSelects(); } catch(e){}
+  try { if (typeof updateSidebarBadges === 'function') updateSidebarBadges(); } catch(e){}
+  return st;
+}
+window.styleCreateConcept = styleCreateConcept;
 // Season choices: every season already in the line or range plan, plus the next
 // few upcoming ones — so SS27 exists the day you start planning it.
 function smSeasonOptions(){
@@ -28888,8 +28924,11 @@ function veniaBoardsStyleItem(s){
 window.veniaBoardsStyleItem = veniaBoardsStyleItem;
 function veniaBoardsMaterialItem(m){
   const photo = /^https:\/\//i.test(String(m.photoUrl || '').trim()) ? String(m.photoUrl).trim() : '';
+  // Build 685: no cost. Boards is a creative space shared with the brand; what
+  // a material costs belongs to Product. (A card made before this showed it;
+  // linked cards drop it on their next refresh.)
   return { materialId: m.id, name: m.name || 'Untitled material', image: photo, type: m.type || '',
-           content: m.content || '', supplier: m.supplier || '', cost: Number(m.costPerUnit) || 0, unit: m.unit || '',
+           content: m.content || '', supplier: m.supplier || '', unit: m.unit || '',
            colors: m.colors || '', draft: !!m.draft };
 }
 window.veniaBoardsMaterialItem = veniaBoardsMaterialItem;
@@ -29764,11 +29803,13 @@ window.addEventListener('message', function(e){
     cpGoto('plm'); setTimeout(function(){ openDp(sid); }, 150);
     return;
   }
+  // Build 685: style-info and material-info echo the asker's req, as the other
+  // answers here do, so two asks in flight can't take each other's answer.
   if (e.data.type === 'boards:style-info') {
     if (!window.veniaBoardsLinkOn() || !e.source) return;
     const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
     const styles = ids.map(id => (STATE.styles || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsStyleItem);
-    try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:style-info', payload: { req: e.data.payload && e.data.payload.req, styles: styles, missing: ids.filter(id => !styles.some(x => x.styleId === id)) } }, location.origin); } catch(_){}
     return;
   }
   // Product <-> Boards both ways (Build 657). Still only while both modules
@@ -29795,7 +29836,7 @@ window.addEventListener('message', function(e){
     if (!window.veniaBoardsLinkOn() || !e.source) return;
     const ids = ((e.data.payload && e.data.payload.ids) || []).map(String).slice(0, 500);
     const mats = ids.map(id => (STATE.materials || []).find(x => x.id === id)).filter(Boolean).map(veniaBoardsMaterialItem);
-    try { e.source.postMessage({ source: 'venia-host', type: 'boards:material-info', payload: { materials: mats, missing: ids.filter(id => !mats.some(x => x.materialId === id)) } }, location.origin); } catch(_){}
+    try { e.source.postMessage({ source: 'venia-host', type: 'boards:material-info', payload: { req: e.data.payload && e.data.payload.req, materials: mats, missing: ids.filter(id => !mats.some(x => x.materialId === id)) } }, location.origin); } catch(_){}
     return;
   }
   if (e.data.type === 'boards:create-style' || e.data.type === 'boards:save-material') {
@@ -33006,16 +33047,30 @@ function qrCopy() {
 }
 
 // ── BOILERPLATE LIBRARY ──────────────────────────────────────────────
+// Build 685: the defaults used to be invented copy — a made-up signatory, a
+// made-up bio, contacts nobody checked — seeded into storage as if the house had
+// written them, then lifted verbatim into the press kit. They start empty now.
+// What each block is for shows as a greyed placeholder (BP_EXAMPLES), which is
+// never stored, copied or sent. Blocks already saved are left exactly as they are.
 const DEFAULT_BLOCKS = [
-  {id:'bp1',title:'Brand Description — Long',text:`VENIA Collection is a Los Angeles-based label built on precision and restraint. Established with a commitment to high-quality construction and considered design, VENIA creates garments that resist seasonality — pieces built to be worn for years, not cycles. The aesthetic is architectural: clean silhouettes, elevated fabrications, a palette rooted in black, grey, and natural tones. Influenced by the structural rigor of Yohji Yamamoto, the rawness of Rick Owens, and the quiet precision of Peter Do.`},
-  {id:'bp2',title:'Brand Description — Short',text:`VENIA Collection. Los Angeles. Garments built for duration. Architectural silhouettes, considered fabrications, a commitment to craft over trend.`},
-  {id:'bp3',title:'Press Release Header',text:`FOR IMMEDIATE RELEASE\n\nVENIA COLLECTION\nLos Angeles, CA\nContact: keeter@veniacollection.com\n@veniacollection`},
-  {id:'bp4',title:'Wholesale Intro',text:`VENIA Collection is available for wholesale consideration for SS26 and FW26. Minimum opening order: [X] units. Line sheet and terms available upon request. We work selectively with multi-brand retailers whose curation aligns with our positioning.\n\nContact: keeter@veniacollection.com`},
-  {id:'bp5',title:'Instagram Bio',text:`VENIA COLLECTION\nLos Angeles\nArchitectural. Considered. Built to last.\nveniacollection.com`},
-  {id:'bp6',title:'Email Signature',text:`Keeter Johnson\nVENIA Collection\nkeeter@veniacollection.com\n@veniacollection`},
-  {id:'bp7',title:'PR Pull Terms (Standard)',text:`VENIA Collection PR Loan Agreement\n\nItems loaned for editorial, press, or styling purposes are the property of VENIA Collection and must be returned within 14 days of the shoot/event date unless otherwise agreed in writing. Items must be returned in original condition. VENIA Collection reserves the right to invoice for any items damaged, lost, or not returned within the agreed period at full retail value.`},
+  {id:'bp1',title:'Brand Description — Long',text:''},
+  {id:'bp2',title:'Brand Description — Short',text:''},
+  {id:'bp3',title:'Press Release Header',text:''},
+  {id:'bp4',title:'Wholesale Intro',text:''},
+  {id:'bp5',title:'Instagram Bio',text:''},
+  {id:'bp6',title:'Email Signature',text:''},
+  {id:'bp7',title:'PR Pull Terms (Standard)',text:''},
 ];
-function bpInit() {
+const BP_EXAMPLES = {
+  bp1: 'Example — the paragraph an editor pastes verbatim: what the house makes, where, for whom, and what it refuses to do.',
+  bp2: 'Example — one or two lines: the house, the city, the idea.',
+  bp3: 'Example —\nFOR IMMEDIATE RELEASE\n\n[House name]\n[City]\nContact: [press email]\n[@handle]',
+  bp4: 'Example — seasons available, minimum opening order, how to request the line sheet and terms, and who to write to.',
+  bp5: 'Example — name, city, one line of position, site.',
+  bp6: 'Example —\n[Your name]\n[Role], [House name]\n[email]\n[@handle]',
+  bp7: 'Example — loan period, return condition, and what happens if items come back damaged or late.',
+};
+function bpExample(b){ return (b && BP_EXAMPLES[b.id]) || 'Write this block once; everyone copies the same words.'; }function bpInit() {
   const stored = JSON.parse(localStorage.getItem('VENIA_BOILERPLATE')||'null');
   if (!stored) localStorage.setItem('VENIA_BOILERPLATE', JSON.stringify(DEFAULT_BLOCKS));
   bpRender();
@@ -33035,7 +33090,7 @@ function bpRender() {
           <button onclick="bpDelete('${b.id}')" style="font-size:10px;padding:4px 8px;border:1px solid var(--border);cursor:pointer;background:none">✕</button>
         </div>
       </div>
-      <textarea id="bptxt-${b.id}" style="width:100%;font-family:'DM Mono',monospace;font-size:10px;line-height:1.7;border:1px solid var(--border);padding:10px;color:var(--ink);resize:vertical;background:var(--bg-off)" rows="5" onblur="bpUpdateText('${b.id}',this.value)">${b.text.replace(/</g,'&lt;')}</textarea>
+      <textarea id="bptxt-${b.id}" style="width:100%;font-family:'DM Mono',monospace;font-size:10px;line-height:1.7;border:1px solid var(--border);padding:10px;color:var(--ink);resize:vertical;background:var(--bg-off)" rows="5" placeholder="${bpExample(b).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}" onblur="bpUpdateText('${b.id}',this.value)">${String(b.text||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}</textarea>
     </div>`
   ).join('');
 }
@@ -34514,6 +34569,8 @@ function prPressKit(){
   let blocks = [];
   try { blocks = (typeof bpGet === 'function' ? bpGet() : []) || []; } catch (e) {}
   // The two blocks a journalist actually lifts.
+  // An unwritten block (Build 685: the defaults start empty) is not copy.
+  blocks = blocks.filter(b => b && String(b.text || '').trim());
   const want = blocks.filter(b => b && /brand description/i.test(b.title || ''));
   return {
     blocks: (want.length ? want : blocks.slice(0, 2)),
@@ -34543,7 +34600,7 @@ function prPressKitGaps(){
     fix: 'The first hit is the hardest; after that this section does the pitching for you.' });
   let blocks = [];
   try { blocks = (typeof bpGet === 'function' ? bpGet() : []) || []; } catch (e) {}
-  if (!blocks.some(b => b && /brand description/i.test(b.title || ''))) {
+  if (!blocks.some(b => b && /brand description/i.test(b.title || '') && String(b.text || '').trim())) {
     gaps.push({ what: 'No brand description written',
       fix: 'This is the paragraph outlets paste verbatim. Write it once, in Brand → Boilerplate.' });
   }
@@ -44940,7 +44997,7 @@ function agBuildLineSheetsSection() {
   const snapList = !snaps.length ? `
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Frozen Line Sheets</h2></div>
-      <div style="padding:18px;border:1px dashed var(--border);font-size:10.5px;color:var(--muted);line-height:1.6">No frozen sheets yet — tap <b>❄ Freeze</b> above to lock this sheet's prices and MOQs before it goes to buyers. What the buyer saw stays what the buyer saw, and order forms come straight from the snapshot.</div>
+      <div style="padding:18px;border:1px dashed var(--border);font-size:10.5px;color:var(--muted);line-height:1.6">No frozen sheets yet — tap <b>More → ❄ Freeze</b> above to lock this sheet's prices and MOQs before it goes to buyers. What the buyer saw stays what the buyer saw, and order forms come straight from the snapshot.</div>
     </div>` : `
     <div style="margin-top:24px">
       <div class="ag-sec-head"><h2 class="ag-sec-title">Frozen Line Sheets</h2></div>
@@ -45121,6 +45178,30 @@ window.SL_VLS = { perPage: 3, cols: 0, genders: [], currency: 'USD', photosOnly:
 // The sheet quotes ONE currency, chosen per export, at the season rate the app
 // already holds (fxEnsureRate asks once and keeps it). It is never today's
 // spot: a line sheet has to hold its prices all season.
+// Build 685: the visual sheet's layout — title page and line, sections and
+// their divider titles, styles per page, currency, which prices, filters — was
+// kept only in memory, so closing the app lost it (only ❄ Freeze kept anything,
+// and that keeps the styles, not the layout). It is kept in Sales' own slPrefs
+// now, with save() like every other page. Cost of goods is never kept: it is
+// off unless just turned on, and clears itself after one export.
+let SL_VLS_RESTORED = false;
+function slVlsRestore(){
+  if (SL_VLS_RESTORED) return;
+  SL_VLS_RESTORED = true;
+  const kept = STATE.slPrefs && STATE.slPrefs.vls;
+  if (!kept || typeof kept !== 'object') return;
+  Object.keys(kept).forEach(function(k){ if (k !== 'cogs' && Object.prototype.hasOwnProperty.call(SL_VLS, k)) SL_VLS[k] = kept[k]; });
+}
+function slVlsKeep(){
+  const out = {};
+  Object.keys(SL_VLS).forEach(function(k){ if (k !== 'cogs') out[k] = SL_VLS[k]; });
+  if (!STATE.slPrefs) STATE.slPrefs = {};
+  let same = false;
+  try { same = JSON.stringify(STATE.slPrefs.vls || null) === JSON.stringify(out); } catch(e){}
+  if (same) return;
+  STATE.slPrefs.vls = JSON.parse(JSON.stringify(out));
+  save();
+}
 function slVlsDate(v){
   const t = String(v||'').trim(); if (!t) return '';
   const d = new Date(t + (/^\d{4}-\d{2}-\d{2}$/.test(t) ? 'T00:00:00' : ''));
@@ -45309,6 +45390,7 @@ window.slVlsStyles = function(){
     && (!SL_VLS.photosOnly || !!s.photoUrl));
 };
 window.slVlsOpen = function(){
+  slVlsRestore();
   const genders = ['womens','mens','unisex','unspecified'];
   const label = { womens:'Womens', mens:'Mens', unisex:'Unisex', unspecified:'Gender not set' };
   const counts = {}; slLsStyles().forEach(s => { const g = slVlsGenderOf(s); counts[g] = (counts[g]||0)+1; });
@@ -45477,6 +45559,7 @@ window.slVlsPreview = function(){
   // the document once, not once per event.
   clearTimeout(SL_VLS_PREV_T);
   SL_VLS_PREV_T = setTimeout(function(){
+    try { slVlsKeep(); } catch (e) {}
     let html = '';
     try { html = slVlsDoc({ groupBy: SL_VLS.byVendor ? 'vendor' : '' }); } catch (e) { html = ''; }
     if (!html) {
@@ -47711,7 +47794,11 @@ function slOpenQuoteDetail(id) {
 }
 
 function slOpenLinesheetModal() {
-  agentSend('sl','Generate a complete FW26 wholesale line sheet. For each active style include: style number, name, brief description in VENIA voice, wholesale price, retail price, colors, sizes, MOQ, and estimated delivery. Format as clean text, ready to paste into a document.');
+  // Build 685: the season the Line Sheets page is on, else the newest season in
+  // the line — not a hard-coded FW26.
+  let season = (typeof SL_LS_SEASON === 'string' && SL_LS_SEASON && SL_LS_SEASON !== 'all') ? SL_LS_SEASON : '';
+  if (!season) { try { season = (rpSeasons() || [])[0] || ''; } catch(e){} }
+  agentSend('sl','Generate a complete ' + (season ? season + ' ' : '') + 'wholesale line sheet. For each active style' + (season ? ' in ' + season : '') + ' include: style number, name, brief description in VENIA voice, wholesale price, retail price, colors, sizes, MOQ, and estimated delivery. Format as clean text, ready to paste into a document.');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -59584,6 +59671,21 @@ window.veniaModulesRender = async function(){
         if (ev === 'SIGNED_IN' || ev === 'SIGNED_OUT') {
           try { document.querySelectorAll('iframe').forEach(function(f){ if (/\/boards(\b|#|$)/.test(f.getAttribute('src') || '') && f.contentWindow) f.contentWindow.postMessage({ source: 'venia-host', type: 'boards:signed-in' }, location.origin); }); } catch(_){}
         }
+        // ...and Dr4ft (Build 685). A Dr4ft opened before sign-in sits on its
+        // "Sign in to VENIA OS to open Dr4ft" gate, and its loader listens for
+        // nothing from here, so the frame is reloaded — only when the gate is
+        // what it shows, so a pattern being drawn is never touched. Its library
+        // in this page, which found nobody signed in, is asked again too.
+        if (ev === 'SIGNED_IN') {
+          try {
+            var L = window.DR4FT_LIB;
+            if (L && L.ok === false && !L.loading) { L.ok = null; L.email = ''; }
+            var pf = document.querySelector('#cp-screen-patterncad iframe');
+            var gated = false;
+            try { gated = !!(pf && pf.contentDocument && pf.contentDocument.getElementById('vpc-gate')); } catch(_){}
+            if (gated) pf.contentWindow.location.reload();
+          } catch(_){}
+        }
       });
     } catch (e) {}
   }
@@ -63292,10 +63394,19 @@ window.veniaModulesRender = async function(){
       if (!idGroups.length) throw new Error('No groups came back');
       STATE.dumpMap = { groups: idGroups, at: new Date().toISOString(), count: open.length };
       save();
+      logActivity('Brain dump mapped — ' + groups.length + ' areas');
+      // Build 685: the Canvas tab is retired where Boards is in the page, so the
+      // grouping opens where it now lives — "Enigma's grouping of loose notes",
+      // under From Brainstorm in Boards — instead of switching to a hidden tab.
+      // The standalone Brainstorm app (no Boards) still shows its Canvas tab.
+      if (dumpBoardsHere()){
+        showToast('◍ Grouped — it\u2019s under From Brainstorm in Boards','success');
+        window.dumpMapsInBoards();
+        return;
+      }
       TAB = 'map';
       render();
       showToast('◍ Map ready','success');
-      logActivity('Brain dump mapped — ' + groups.length + ' areas');
     } catch(e){
       showToast('Could not map — ' + String(e.message||e), 'error');
     } finally {
@@ -63466,8 +63577,11 @@ window.veniaModulesRender = async function(){
       it.children = kids; it.done = false; it.doneAt = null;
       if (branches.length) it.web = { branches: branches, at: new Date().toISOString() };
       expandingId = null;
-      save(); TAB = 'map'; render();
-      showToast('✦ Plan + mind map ready','success');
+      // Build 685: the new goal and its steps show on Goals, the visible tab.
+      // It used to jump to the Canvas tab, which is hidden where Boards is in
+      // the page; the standalone Brainstorm app still goes to its Canvas.
+      save(); TAB = dumpBoardsHere() ? 'inbox' : 'map'; render();
+      showToast(dumpBoardsHere() ? '✦ Goal ready — its steps are below' : '✦ Plan + mind map ready','success');
       logActivity('Idea expanded into a plan — ' + idea.slice(0, 40));
     } catch(e){
       expandingId = null; render();
@@ -65889,30 +66003,22 @@ window.veniaModulesRender = async function(){
       return;   // drafting isn't sending — the ○ marks it handled
     } else if (a.kind === 'style'){
       if (!bsVeniaOn()){ showToast('Connect VENIA OS in ⚙ to create styles', 'info'); return; }
-      // A concept product straight into the OS line plan — same shape the
-      // Styles page creates, status 'concept' so it's clearly a proposal.
-      if (!STATE.styles) STATE.styles = [];
-      var season = String(a.season || 'SS27').toUpperCase().slice(0, 6);
-      var n = 1, sid;
-      do { sid = 'VN-' + season + '-' + ('00' + n).slice(-3); n++; }
-      while (VeniaOS.get('core.catalog').some(function(st){ return st.styleId === sid; }));
-      var st = {
-        id: 'STY' + Date.now(), styleId: sid,
-        name: String(a.name || a.label).toUpperCase().slice(0, 60),
-        season: season, category: String(a.category || 'Tops'), gender: 'womens',
-        status: 'concept', drop: '',
-        retail: parseFloat(a.retail) || 0, wholesale: parseFloat(a.wholesale) || 0, cogs: 0,
-        fabric: '', colors: String(a.colors || ''), sizes: 'XS,S,M,L,XL',
-        sample: 'Proto', vendor: '', lead: 14, cloFile: '', cloStatus: 'none',
-        priority: 'mid', desc: String(a.desc || '').slice(0, 300),
-        notes: [{ d: new Date().toISOString().slice(0, 10), t: 'Created from Enigma\'s brief (one-touch).' }]
-      };
-      STATE.styles.unshift(st);
-      try { if (typeof buildSkus === 'function') buildSkus(); } catch(e){}
-      try { if (typeof updateSidebarBadges === 'function') updateSidebarBadges(); } catch(e){}
+      // Build 685: a style is Product's record, so it is made by Product's own
+      // create path (styleCreateConcept: genStyleId code, same shape as the
+      // Styles page) and only while Product is on. This used to build its own
+      // VN-SEASON-001 code and push onto STATE.styles from here.
+      var prodOn = false;
+      try { prodOn = VeniaOS.enabled('product') && typeof window.styleCreateConcept === 'function'; } catch(e){}
+      if (!prodOn){ showToast('Product isn\u2019t switched on here, so there is nowhere to create a style.', 'info'); return; }
+      var st = window.styleCreateConcept({
+        name: String(a.name || a.label).toUpperCase(), season: a.season, category: a.category,
+        retail: a.retail, wholesale: a.wholesale, colors: a.colors, desc: a.desc,
+        note: 'Created from Enigma\'s brief (one-touch).'
+      });
+      if (!st){ showToast('That style needs a name.', 'info'); return; }
       a.done = true;
-      showToast('Style created — ' + st.name + ' (' + sid + ')', 'success');
-      logActivity('One-touch: concept style ' + sid + ' from Enigma brief');
+      showToast('Style created — ' + st.name + ' (' + st.styleId + ')', 'success');
+      logActivity('One-touch: concept style ' + st.styleId + ' from Enigma brief');
     } else if (a.kind === 'note'){
       if (!bsVeniaOn()){ showToast('Connect VENIA OS in ⚙ to pin to the Board', 'info'); return; }
       // Build 684: pins go to Boards. This used to push onto STATE.board, the
@@ -66627,7 +66733,10 @@ window.veniaModulesRender = async function(){
         + '<button onclick="dumpNestPick(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">⇱ Nest</button>'
         + '<button onclick="' + (i.img ? 'dumpClearPhoto' : 'dumpAttachPhoto') + '(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">' + (i.img ? '📷 Remove photo' : '📷 Photo') + '</button>'
         + '<button onclick="dumpDuplicateGoal(\'' + i.id + '\')" style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">⧉ Duplicate</button>'
-        + (kids.length >= 2 ? '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">◍ Mind map →</button>' : '')
+        + (kids.length >= 2 ? (dumpBoardsHere()
+            // Build 685: the goal's map is its column on the Goals board in Boards.
+            ? '<button onclick="dumpMapsInBoards()" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">▦ In Boards →</button>'
+            : '<button onclick="dumpTab(\'map\')" style="background:none;border:none;color:var(--ink);font-size:11px;font-weight:600;cursor:pointer;padding:1px 0;letter-spacing:.02em">◍ Mind map →</button>') : '')
         + '<span style="flex:1"></span>'
         + '<button onclick="dumpDelete(\'' + i.id + '\')" title="Delete goal" style="background:none;border:none;color:var(--border-mid);font-size:12px;cursor:pointer;padding:2px 0;line-height:1">🗑</button>'
         + '</div>';
