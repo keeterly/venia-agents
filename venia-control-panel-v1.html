@@ -4213,7 +4213,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '695';
+  const BUILD = '696';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -19950,7 +19950,7 @@ const RS_MS_LBL = Object.fromEntries(RS_MS);
 function rsPath(po){ return (po && RS_PATHS[po.path]) ? po.path : 'restock'; }
 function rsPathLabel(po){ return { first:'FIRST RUN', restock:'RESTOCK', change:'RESTOCK + CHANGES' }[rsPath(po)]; }
 function rsStepLabel(po, k){
-  if (k === 'costing' && rsPath(po) === 'restock') return 'Confirm last run\'s price';
+  if (k === 'costing' && rsPath(po) === 'restock') return rsHasEarlierRun(po) ? 'Confirm last run\'s price' : 'Confirm the price';
   if (k === 'fabricOrd' && rsMaker(po) === 'cmt') return 'Fabric bought';
   return RS_MS_LBL[k];
 }
@@ -20122,6 +20122,89 @@ function rsMissing(po){
   if (unordered) out.push('fabric not ordered');
   return out;
 }
+// Build 696: was this style ever made through VENIA OS? A restock of a
+// style that never ran here has no last price, factory or fabric to copy.
+function rsHasEarlierRun(po){
+  const sid = po && (po.styleId || (rsStyle(po)||{}).id);
+  if (!sid) return false;
+  return poList().some(p => p !== po && p.id !== po.id && p.type !== 'fabric' && p.type !== 'trim'
+    && (p.styleId === sid || (p.items||[]).some(it => it.styleId === sid))
+    && ['received','partial','shipped','in_production','placed'].includes(p.status));
+}
+// Build 696: what to do next on the card, in the order a designer would do
+// it. Each item names the field it is about, so "Go" can take you there.
+function rsGuide(d){
+  const out = [], cmt = rsMaker(d) === 'cmt';
+  const add = (text, go) => out.push({ text, go });
+  if (!cmt && !d.vendor && !d.vendorId) add('Pick the factory, or choose We run it (LA)', 'rs-factory');
+  if (cmt){
+    const w = d.work || [];
+    const cut = w.find(x => x.step === 'cut'), sew = w.find(x => x.step === 'sew');
+    if (!w.some(x => x.step === 'cut' && x.vendorId)) add('Pick or add your cutter in Work orders', cut ? 'rs-wv-' + cut.id : 'rs-work');
+    if (!w.some(x => x.step === 'sew' && x.vendorId)) add('Pick or add your sewing contractor in Work orders', sew ? 'rs-wv-' + sew.id : 'rs-work');
+  }
+  if (!((d.qty || d.units) > 0)) add('Enter how many to make', 'rs-qty');
+  if (!d.inStockBy) add('Set the date it should be in stock', 'rs-instock');
+  if (!d.dyeHouse) add('Decide the dye: not dyed, the factory, or a dye house', 'rs-dye');
+  const bom = d.bom || [];
+  if (!bom.length) add('Add the fabric to the BOM', 'rs-bom');
+  const ordered = new Set(d.fabricPoIds||[]);
+  const linkedMats = new Set(poList().filter(x => ordered.has(x.id)).map(x => x.materialId));
+  bom.forEach((l, i) => {
+    const fab = rsIsFabricLine(l);
+    const m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
+    const nm = (m && m.name) || String(l.matName||'').trim();
+    if (!m && !nm){ add('Name the ' + (fab ? 'fabric' : String(l.lineType||'line').toLowerCase()) + ' on BOM line ' + (i+1), 'rs-bn-' + i); return; }
+    if (!(parseFloat(l.qty) > 0)) add('Add how much ' + nm + ' goes into one piece', 'rs-bq-' + i);
+    if (!m) add('Add ' + nm + ' to Sourcing with its mill and price', 'rs-ms-' + i);
+    else if (fab && !matIsVendorManaged(m) && (!String(m.supplier||'').trim() || !(parseFloat(m.costPerUnit) > 0))) add('Add the mill and price for ' + nm, 'rs-ms-' + i);
+    else if (fab && !matIsVendorManaged(m) && !linkedMats.has(l.matId) && (parseFloat(l.qty) > 0)) add('Order the ' + nm, 'rs-of-' + i);
+  });
+  if (cmt){
+    const w = d.work || [];
+    const noRate = w.filter(x => x.vendorId && !(parseFloat(x.rate) > 0));
+    if (noRate.length) add('Add the rate for ' + noRate.length + ' work order' + (noRate.length>1?'s':''), 'rs-wrate-' + noRate[0].id);
+  }
+  if (!out.length && !d.id) add('Save the run', 'rs-save');
+  return out;
+}
+window.rsGo = function(id){
+  const el = document.getElementById(id); if (!el) return;
+  try { el.scrollIntoView({ block:'center', behavior:'smooth' }); } catch(e){ el.scrollIntoView(); }
+  if (/^rs-ms-/.test(id)){ const n = el.querySelector('input'); if (n) setTimeout(() => n.focus(), 250); return; }
+  if (el.focus) setTimeout(() => el.focus(), 250);
+};
+// Build 696: add a BOM line's material to Sourcing (or fill in its missing
+// mill and price) without leaving the card, so Order fabric works.
+window.rsSaveMat = function(i){
+  rsReadForm();
+  const d = RS_DRAFT; const l = (d.bom||[])[i]; if (!l) return;
+  const val = (k) => ((document.getElementById('rs-mat' + k + '-' + i)||{}).value || '').trim();
+  const supplier = val('sup'), cost = parseFloat(val('cost')) || 0, lead = parseInt(val('lead'), 10) || 0;
+  if (!supplier){ showToast('Add the mill or supplier'); return; }
+  if (!(cost > 0)){ showToast('Add the price per ' + (l.unit || 'unit')); return; }
+  const link = (m) => { try { const v = (STATE.vendors||[]).find(x => String(x.name||'').trim().toLowerCase() === supplier.toLowerCase()); if (v) m.vendorId = v.id; } catch(e){} };
+  let m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
+  if (m){
+    m.supplier = supplier; m.costPerUnit = cost; if (lead) m.leadDays = lead; link(m);
+  } else {
+    const name = String(l.matName||'').trim();
+    if (!name){ showToast('Name the material first'); return; }
+    m = (STATE.materials||[]).find(x => String(x.name||'').trim().toLowerCase() === name.toLowerCase());
+    if (m){ m.supplier = m.supplier || supplier; m.costPerUnit = parseFloat(m.costPerUnit) > 0 ? m.costPerUnit : cost; if (lead && !m.leadDays) m.leadDays = lead; link(m); }
+    else {
+      m = { id: 'MAT' + Date.now(), name, type: l.lineType === 'Fabric' || !l.lineType ? 'Fabric' : l.lineType, supplier, costPerUnit: cost, unit: l.unit || 'yd', leadDays: lead, content:'', colors:'', color:'', notes:'Added from Produce', lots: [] };
+      link(m);
+      STATE.materials = STATE.materials || []; STATE.materials.push(m);
+    }
+    l.matId = m.id; l.matName = m.name;
+  }
+  l.supplier = m.supplier; l.costPerUnit = parseFloat(m.costPerUnit) || 0; l.unit = m.unit || l.unit;
+  save();
+  try { logActivity('Material ' + m.name + ' saved to Sourcing from Produce'); } catch(e){}
+  showToast(m.name + ' is in Sourcing');
+  rsRender(d.id || null);
+};
 function rsLineKey(l){ return (l.matId || '') + '|' + String(l.matName||'').trim().toLowerCase(); }
 function rsNextMs(po){
   const ms = po.ms || {};
@@ -20202,19 +20285,36 @@ function rsReadForm(){
   (d.work||[]).forEach(w => {
     const vid = v('rs-wv-'+w.id);
     if (vid !== undefined){ const vend = (STATE.vendors||[]).find(x => x.id === vid); w.vendorId = vend ? vend.id : ''; w.vendor = vend ? vend.name : ''; }
+    // Build 696: a contractor typed here joins Sourcing with the step's type,
+    // or links to the one on file with that name.
+    const vn = (v('rs-wvn-'+w.id) || '').trim();
+    if (vn && !w.vendorId){
+      STATE.vendors = STATE.vendors || [];
+      let vend = STATE.vendors.find(x => String(x.name||'').trim().toLowerCase() === vn.toLowerCase());
+      if (!vend){
+        const type = { marker:'Marker Maker', cut:'Cutter', sew:'Sewing Contractor', dye:'Dye House', finish:'Finisher' }[w.step] || '';
+        vend = { id: 'VEN' + Date.now() + Math.floor(Math.random()*90+10), name: vn, type, country: 'USA', city: 'Los Angeles', contact:'', email:'', phone:'', moq:'', rating:'', notes:'Added from Produce', currency:'USD', incoterm:'', lead: 0, dutyRate: null };
+        STATE.vendors.push(vend);
+        try { logActivity('Supplier ' + vn + ' added from Produce'); } catch(e){}
+        try { save(); } catch(e){}
+      }
+      w.vendorId = vend.id; w.vendor = vend.name;
+    }
     ['out','back','rejects','rate'].forEach(f => { const x = v('rs-w'+f+'-'+w.id); if (x !== undefined) w[f] = x; });
     const dn = document.getElementById('rs-wdone-'+w.id); if (dn) w.done = dn.checked;
   });
   (d.bom||[]).forEach((l, i) => {
     const q = v('rs-bq-'+i); if (q !== undefined) l.qty = Math.max(0, parseFloat(q)||0);
     const w = v('rs-bw-'+i); if (w !== undefined) l.waste = w;
+    const t = v('rs-bt-'+i); if (t !== undefined) l.lineType = t;
     const m = v('rs-bm-'+i);
     if (m !== undefined && m !== (l.matId||'')){
       const mat = (STATE.materials||[]).find(x => x.id === m);
-      l.matId = mat ? mat.id : ''; if (mat){ l.matName = mat.name; l.unit = mat.unit || l.unit || 'yd'; l.supplier = mat.supplier || ''; l.costPerUnit = parseFloat(mat.costPerUnit)||0; }
+      l.matId = mat ? mat.id : ''; if (mat){ l.matName = mat.name; l.unit = mat.unit || l.unit || 'yd'; l.supplier = mat.supplier || ''; l.costPerUnit = parseFloat(mat.costPerUnit)||0;
+        // Build 696: picking a fabric sets the line to Fabric (a new line starts as Trim).
+        if (['Fabric','Lining','Trim','Label','Packaging','Dye','Thread','Hardware'].includes(mat.type)) l.lineType = mat.type; }
     }
     const n = v('rs-bn-'+i); if (n !== undefined && !l.matId) l.matName = n.trim();
-    const t = v('rs-bt-'+i); if (t !== undefined) l.lineType = t;
   });
   RS_MS.forEach(([k]) => {
     // Only a tick the person changed counts: a rule that flipped since the
@@ -20474,17 +20574,31 @@ function rsRender(id){
         : `<button class="btn btn-ghost btn-sm" onclick="rsOrderTrim(${i})">Order</button>`)
       : vm ? '<span style="font-size:10px;color:var(--muted)">Factory buys it</span>'
       : fpo ? `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[fpo.status]||fpo.status)}</span>`
-      : `<button class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order fabric</button>`;
+      : (l.matId && (() => { const mm = (STATE.materials||[]).find(x => x.id === l.matId); return mm && String(mm.supplier||'').trim() && parseFloat(mm.costPerUnit) > 0; })())
+        ? `<button id="rs-of-${i}" class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order fabric</button>`
+        : '';
+    const mm = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
+    const typed = String(l.matName||'').trim();
+    const needsSrc = !vm && (mm ? (rsIsFabricLine(l) && (!String(mm.supplier||'').trim() || !(parseFloat(mm.costPerUnit) > 0))) : !!typed);
+    const vendNames = (STATE.vendors||[]).filter(v => !v.archived).map(v => v.name).filter(Boolean);
+    const srcRow = needsSrc ? `<tr><td colspan="6" data-label="" style="background:var(--bg-off)">
+      <div id="rs-ms-${i}" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:4px 0">
+        <div style="font-size:11px;color:var(--ink);flex:1 1 100%">${mm ? slEsc(mm.name) + ' has no mill or price yet.' : slEsc(typed) + " isn't in Sourcing yet."} Add them here so you can order it.</div>
+        <label style="font-size:10px;color:var(--muted);flex:1 1 170px">Mill or supplier<input id="rs-matsup-${i}" list="rs-vend-list" type="text" style="${fld};margin-top:3px" value="${slEsc((mm && mm.supplier) || '')}" placeholder="e.g. the mill's name"></label>
+        <label style="font-size:10px;color:var(--muted);flex:0 1 110px">Price per ${slEsc(l.unit||'unit')}<input id="rs-matcost-${i}" type="number" min="0" step="0.01" style="${fld};margin-top:3px" value="${mm && parseFloat(mm.costPerUnit) > 0 ? mm.costPerUnit : ''}" placeholder="$"></label>
+        <label style="font-size:10px;color:var(--muted);flex:0 1 100px">Lead · days<input id="rs-matlead-${i}" type="number" min="0" style="${fld};margin-top:3px" value="${mm && mm.leadDays ? mm.leadDays : ''}" placeholder="21"></label>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rsSaveMat(${i})">Save to Sourcing</button>
+      </div></td></tr>` : '';
     return `<tr>
       <td data-label="Line"><select id="rs-bt-${i}" style="${fld};min-width:84px" onchange="rsRefresh()">${types.map(t => `<option ${String(l.lineType||'')===t?'selected':''}>${t}</option>`).join('')}</select></td>
       <td data-label="Material"><select id="rs-bm-${i}" style="${fld};min-width:140px" onchange="rsRefresh()">${matOpts(l.matId)}</select>
-        ${l.matId ? '' : `<input id="rs-bn-${i}" type="text" style="${fld};margin-top:4px" value="${slEsc(l.matName||'')}" placeholder="Name, e.g. cotton gauze">`}</td>
+        ${l.matId ? '' : `<input id="rs-bn-${i}" type="text" style="${fld};margin-top:4px" value="${slEsc(l.matName||'')}" placeholder="Or type a new one, e.g. cotton gauze" onchange="rsRefresh()">`}</td>
       <td data-label="Per unit"><div style="display:flex;gap:4px;align-items:center"><input id="rs-bq-${i}" type="number" min="0" step="0.01" style="${fld};width:78px;${noUse?'border-color:var(--red)':''}" value="${noUse?'':l.qty}" placeholder="?" onchange="rsRefresh()"><span style="font-size:10px;color:var(--muted)">${slEsc(l.unit||'')}</span></div>
         ${noUse?'<div style="font-size:10px;color:var(--red);margin-top:3px">Usage missing</div>':''}</td>
       <td data-label="Waste %"><input id="rs-bw-${i}" type="number" min="0" style="${fld};width:56px" value="${slEsc(l.waste||'')}" placeholder="0" onchange="rsRefresh()"></td>
       <td data-label="Need" style="font-family:'DM Mono',monospace;font-size:12px;white-space:nowrap">${noUse ? '<span style="color:var(--red)">—</span>' : units ? need + ' ' + slEsc(l.unit||'') : '<span style="color:var(--muted)">set qty</span>'}</td>
       <td data-label=""><div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">${act}<button class="btn btn-ghost btn-sm" style="padding:4px 8px" title="Remove this line" aria-label="Remove line" onclick="rsDelLine(${i})">✕</button></div></td>
-    </tr>`;
+    </tr>${srcRow}`;
   }).join('');
   const today = rsIso(new Date());
   // Steps by phase: a tick to use the step, its date and done. Off steps stay
@@ -20520,7 +20634,7 @@ function rsRender(id){
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${sub}</div></button>`;
   }).join('');
   const stOpts = Object.entries(PO_STATUSES).map(([k,v]) => `<option value="${k}" ${(d.status||'draft')===k?'selected':''}>${v}</option>`).join('');
-  const leadNote = (s.lead && parseInt(s.lead,10) < 21) ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">The style says ${slEsc(s.lead)} with no unit</div>` : '';
+  const leadNote = (s.lead && parseInt(s.lead,10) < 21) ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">The style's lead says ${slEsc(s.lead)}. If that's weeks, enter ${parseInt(s.lead,10)*7}.</div>` : '';
   const qtyBlock = sizes.length
     ? `<div style="grid-column:1/-1"><div style="${lbl}">Quantity by size · ${units} total</div><div style="display:flex;gap:6px;flex-wrap:wrap">${sizes.map(sz =>
         `<label style="display:flex;flex-direction:column;font-size:10px;color:var(--muted);gap:2px">${slEsc(sz)}<input id="rs-sz-${slEsc(sz)}" type="number" min="0" style="${fld};width:62px" value="${(d.sizes||{})[sz]||''}" onchange="rsRefresh()"></label>`).join('')}</div></div>`
@@ -20545,7 +20659,7 @@ function rsRender(id){
         : owed ? `<button type="button" style="background:none;border:0;padding:0;min-height:0;font-size:11px;letter-spacing:0;text-transform:none;text-decoration:underline;color:var(--ink);cursor:pointer;white-space:nowrap" onclick="rsDraftBill('${w.id}')">Draft bill</button>` : '';
       return `<tr>
         <td data-label="Step" style="font-size:12px;white-space:nowrap">${RS_WORK_STEPS[w.step]}</td>
-        <td data-label="Supplier"><select id="rs-wv-${w.id}" style="${fld};min-width:120px;max-width:170px;padding:4px;min-height:32px" onchange="rsRefresh()">${vendOpts(w.step, w.vendorId)}</select></td>
+        <td data-label="Supplier"><select id="rs-wv-${w.id}" style="${fld};min-width:120px;max-width:170px;padding:4px;min-height:32px" onchange="rsRefresh()">${vendOpts(w.step, w.vendorId)}</select>${w.vendorId ? '' : `<input id="rs-wvn-${w.id}" type="text" style="${fld};min-width:120px;max-width:170px;padding:4px;min-height:30px;margin-top:4px" placeholder="or add a new one" aria-label="New ${slEsc(RS_WORK_STEPS[w.step])} supplier" onchange="rsRefresh()">`}</td>
         ${w.step === 'marker'
           ? `<td data-label="Pieces" colspan="3" style="font-size:11px;color:var(--muted)"><label style="display:flex;gap:6px;align-items:center"><input id="rs-wdone-${w.id}" type="checkbox" style="width:14px;height:14px;min-height:0" ${w.done?'checked':''} onchange="rsRefresh()"> Marker delivered</label></td>
              <td data-label="Fee">${num('rs-wrate-'+w.id, w.rate, 60, 'fee $')}</td>`
@@ -20557,14 +20671,14 @@ function rsRender(id){
       </tr>`;
     }).join('');
     const openBills = (d.bills||[]).filter(b => !b.paidAt);
-    workBlock = `<div>
+    workBlock = `<div id="rs-work" tabindex="-1">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
         <div style="${lbl};margin:0">Work orders · pieces out, back, rejects at QC, paid per piece that passes</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ghost btn-sm" onclick="rsAddWork('sew')">+ Sewing contractor</button><button class="btn btn-ghost btn-sm" onclick="rsAddWork('dye')">+ Dye house</button><button class="btn btn-ghost btn-sm" onclick="rsAddWork('finish')">+ Finisher</button>${(d.work||[]).some(w => w.step === 'marker') ? '' : `<button class="btn btn-ghost btn-sm" onclick="rsAddWork('marker')">+ Marker maker</button>`}</div>
       </div>
       <style>@media (min-width:700px){.rs-work th,.rs-work td{padding:8px 6px!important}.rs-work th:first-child,.rs-work td:first-child{padding-left:12px!important}}</style><div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl rs-work"><thead><tr><th>Step</th><th>Supplier</th><th>Out</th><th>Back</th><th>Rejects</th><th>Rate</th><th>Owed · bill</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="7" style="color:var(--muted);font-size:11px">No work orders yet.</td></tr>'}</tbody></table></div>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px">${openBills.length ? openBills.length + ' draft bill' + (openBills.length>1?'s':'') + ' (' + slMoneyC('USD', openBills.reduce((a,b) => a + (b.amount||0), 0)) + ') ' + (openBills.length>1?'show':'shows') + ' in Money as money going out. ' : ''}Bills are drafts until you mark them paid; nothing is paid from here. Missing a cutter or contractor? Add them in Sourcing.</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">${openBills.length ? openBills.length + ' draft bill' + (openBills.length>1?'s':'') + ' (' + slMoneyC('USD', openBills.reduce((a,b) => a + (b.amount||0), 0)) + ') ' + (openBills.length>1?'show':'shows') + ' in Money as money going out. ' : ''}Bills are drafts until you mark them paid; nothing is paid from here. Not in the list? Type a new cutter or contractor under the picker and it joins Sourcing.</div>
     </div>`;
   }
   const ex0 = document.getElementById('rs-modal'); if (ex0) ex0.remove();
@@ -20578,9 +20692,20 @@ function rsRender(id){
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:82vh;overflow-y:auto">
       <div style="display:flex;gap:8px;flex-wrap:wrap" role="group" aria-label="What are you making?">${pathBtns}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center" role="group" aria-label="Who makes it?"><span style="${lbl};margin:0 6px 0 0">Who makes it?</span>${makerBtns}</div>
-      <div id="rs-missing" style="font-size:11px;padding:8px 10px;border:1px solid ${missing.length?'var(--amber)':'var(--green)'};color:${missing.length?'var(--amber)':'var(--green)'}">
-        ${missing.length ? '<b>Still to settle:</b> ' + missing.map(slEsc).join(' · ') : (rsMaker(d) === 'cmt' ? 'Everything the run needs is here.' : 'Everything the factory needs is here.')}
-      </div>
+      ${(() => {
+        const g = rsGuide(d), first = g[0], rest = g.slice(1);
+        const fresh = rsPath(d) !== 'first' && !rsHasEarlierRun(d)
+          ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">This style hasn't been made through VENIA OS before, so there's no last factory, fabric or price to copy. Fill them in once and Save to style keeps them for next time.</div>` : '';
+        if (!first) return `<div id="rs-missing" style="font-size:11px;padding:8px 10px;border:1px solid var(--green);color:var(--green)">${rsMaker(d) === 'cmt' ? 'Everything the run needs is here.' : 'Everything the factory needs is here.'} Keep it on track from the steps below.</div>`;
+        return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid var(--amber)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="color:var(--ink);min-width:0"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);font-weight:700;margin-right:6px">Next · 1 of ${g.length}</span>${slEsc(first.text)}</div>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="rsGo('${first.go}')">Go</button>
+          </div>
+          ${rest.length ? `<ol style="margin:8px 0 0 18px;padding:0;color:var(--muted);font-size:11px;line-height:1.7" start="2">${rest.map(x => `<li><button type="button" onclick="rsGo('${x.go}')" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:inherit;letter-spacing:0;text-transform:none;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--border)">${slEsc(x.text)}</button></li>`).join('')}</ol>` : ''}
+          ${fresh}
+        </div>`;
+      })()}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
         ${qtyBlock}
         <div><div style="${lbl}">Colour</div><input id="rs-colour" type="text" style="${fld}" value="${slEsc(d.colour||'')}" placeholder="e.g. Black"></div>
@@ -20596,7 +20721,7 @@ function rsRender(id){
 
       <div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-          <div style="${lbl};margin:0">BOM for this run · need = usage × ${units||0} units + waste</div>
+          <datalist id="rs-vend-list">${(STATE.vendors||[]).filter(v => !v.archived && v.name).map(v => `<option value="${slEsc(v.name)}">`).join('')}</datalist><div id="rs-bom" tabindex="-1" style="${lbl};margin:0">BOM for this run · need = usage × ${units||0} units + waste</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="rsAddLine()">+ Line</button>
             <button class="btn btn-ghost btn-sm" onclick="rsReloadBom()" title="Start the lines again from the style's BOM">Copy from style</button>
@@ -20605,7 +20730,7 @@ function rsRender(id){
         </div>
         <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Line</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
           <tbody>${bomRows || '<tr><td colspan="6" style="color:var(--muted);font-size:11px">No lines yet — add the fabric first.</td></tr>'}</tbody></table></div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px">Missing a material or mill? Add it in Sourcing, then pick it here.</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px">Not in the list? Type it under the picker, then add its mill and price right here.</div>
       </div>
       ${rsMaker(d) === 'cmt' ? workBlock : ''}
 
@@ -20622,7 +20747,7 @@ function rsRender(id){
       <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
         ${d.id ? `<button class="btn btn-ghost btn-sm" onclick="rsDelete()">Delete</button><button class="btn btn-ghost btn-sm" onclick="rsPayments()" title="Deposit, balance and receiving">Payments and receiving</button>` : ''}
         <button class="btn btn-ghost" onclick="closeModal('rs-modal')">Cancel</button>
-        <button class="btn btn-gold" onclick="rsSave(true)">Save</button>
+        <button id="rs-save" class="btn btn-gold" onclick="rsSave(true)">Save</button>
       </div>
     </div>
   </div>`;
