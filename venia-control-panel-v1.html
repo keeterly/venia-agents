@@ -7150,7 +7150,7 @@ window.veniaYmd = veniaYmd;
                 <select class="fs" id="sm-priority"><option value="high">High</option><option value="mid" selected>Medium</option><option value="low">Low</option></select>
               </div>
               <div class="fg sm-adv"><label class="fl" for="sm-sample">Sample Round</label>
-                <select class="fs" id="sm-sample"><option>Proto</option><option>SMS1</option><option>SMS2</option><option>TOP</option><option>Approved</option></select>
+                <select class="fs" id="sm-sample"><option>Proto</option><option>SMS1</option><option>SMS2</option><option>PP</option><option>TOP</option><option>Approved</option></select>
               </div>
               <div class="fg sm-adv"><label class="fl" for="sm-vendor">Factory</label><input class="fi" id="sm-vendor" placeholder="Factory name" list="venia-vendor-names" onfocus="veniaVendorNames()" autocomplete="off"></div>
               <div class="fg sm-adv"><label class="fl" for="sm-lead">Lead Time (weeks)</label><input class="fi fi-mono" id="sm-lead" type="number" placeholder="12"></div>
@@ -14998,7 +14998,7 @@ function tlSchedule(s){
   return out;
 }
 function tlDone(s, key){
-  const st = s.status, smIdx = ['Proto','SMS1','SMS2','TOP','Approved'].indexOf(s.sample || '');
+  const st = s.status, smIdx = ['Proto','SMS1','SMS2','PP','TOP','Approved'].indexOf(s.sample || '');
   let shipped = ['active','sale'].includes(st);
   // An active style that is being made again (Build 674): its production legs
   // follow the open PO, not the style's status — before this, every milestone
@@ -17997,7 +17997,8 @@ function calcLanded(s) {
 // ═══════════════════════════════════════════════
 //  SAMPLE TRACKER
 // ═══════════════════════════════════════════════
-const SAMPLE_STAGES = ['Proto','SMS1','SMS2','TOP','Approved'];
+// Build 710: PP (pre-production) sits between SMS2 and TOP.
+const SAMPLE_STAGES = ['Proto','SMS1','SMS2','PP','TOP','Approved'];
 const SAMPLE_COLORS = {Proto:'var(--purple)',SMS1:'var(--blue)',SMS2:'var(--teal)',TOP:'var(--amber)',Approved:'var(--green)'};
 
 // ── Sample round intelligence ────────────────────────────────────────────
@@ -18635,7 +18636,7 @@ function dpSampleRoundsHtml(s) {
     ${rows}${fitRows}
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px">
       <select class="fs" id="dp-sr-round" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
-        ${(typeof SAMPLE_STAGES!=='undefined'?SAMPLE_STAGES:['Proto','SMS1','SMS2','TOP','Approved']).map(st=>`<option value="${st}"${s.sample===st?' selected':''}>${st}</option>`).join('')}
+        ${(typeof SAMPLE_STAGES!=='undefined'?SAMPLE_STAGES:['Proto','SMS1','SMS2','PP','TOP','Approved']).map(st=>`<option value="${st}"${s.sample===st?' selected':''}>${st}</option>`).join('')}
       </select>
       <select class="fs" id="dp-sr-result" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
         <option value="">Result…</option><option value="approved">Approved</option><option value="revise">Revise</option><option value="rejected">Rejected</option>
@@ -20074,8 +20075,11 @@ function rsDerivedDone(po, k){
   const ok = (e) => ['approved','pass'].includes(String(e.result||'').toLowerCase());
   const since = String(po.createdAt || '').slice(0,10);
   const fresh = (e) => rsPath(po) === 'first' || !since || String(e.date||'') >= since;
-  if (k === 'proto' && log.some(e => fresh(e) && ((e.round === 'Proto' && ok(e)) || ['SMS1','SMS2','SMS','TOP'].includes(e.round)))) return 'From the sample log';
-  if (k === 'fit' && log.some(e => fresh(e) && ((['SMS1','SMS2','SMS'].includes(e.round) && ok(e)) || e.round === 'TOP'))) return 'From the sample log';
+  if (k === 'proto' && log.some(e => fresh(e) && ((e.round === 'Proto' && ok(e)) || ['SMS1','SMS2','SMS','PP','TOP'].includes(e.round)))) return 'From the sample log';
+  if (k === 'fit' && log.some(e => fresh(e) && ((['SMS1','SMS2','SMS'].includes(e.round) && ok(e)) || e.round === 'TOP' || e.round === 'PP'))) return 'From the sample log';
+  // Build 710: an approved PP or TOP round in the sample log ticks its step.
+  if (k === 'pp' && log.some(e => fresh(e) && ((e.round === 'PP' && ok(e)) || e.round === 'TOP'))) return 'From the sample log';
+  if (k === 'top' && log.some(e => fresh(e) && e.round === 'TOP' && ok(e))) return 'From the sample log';
   if (k === 'tpIssued' && (s.issued||[]).some(e => rsPath(po) === 'first' || !since || String(e.at||'') >= since)) return 'Tech pack revision issued';
   if (RS_WORK_STEPS[k] && rsMaker(po) === 'cmt'){
     const rows = (po.work||[]).filter(w => w.step === k);
@@ -20313,7 +20317,7 @@ window.rsStart = function(styleId, path){
     inStockBy: '', leadDays: (parseInt(s.lead,10) >= 21 ? parseInt(s.lead,10) : RS_DEFAULT_LEAD),
     vendor: s.vendor || '', vendorId: s.vendorId || '', dyeHouse: '',
     cost: Math.round((landedCost(s)||0)*100)/100,
-    bom: rsBomFromStyle(s), fabricPoIds: [], ms: {},
+    bom: rsBomFromStyle(s), bomShared: true, fabricPoIds: [], ms: {},
     season: String(s.season||'').trim(), currency: 'USD', depositPct: 30, status: 'draft', notes: '',
   };
   rsRender(null);
@@ -20325,7 +20329,40 @@ window.rsOpen = function(id){
   RS_DRAFT.qty = it.qty || po.units || 0;
   RS_DRAFT.sizes = it.sizes || {};
   RS_DRAFT.cost = it.cost || 0;
+  // Build 710: a shared BOM is the style's, read fresh each time the run opens.
+  if (RS_DRAFT.bomShared){ const s = rsStyle(RS_DRAFT); if (s) RS_DRAFT.bom = rsBomFromStyle(s); }
   rsRender(id);
+};
+// Build 710: write a shared run's BOM back to the style. Lines are matched to
+// the style's own by material (or name) so fields only the BOM page keeps
+// (notes, placement, ids) stay. Empty lines are skipped.
+function rsBomToStyle(d){
+  const s = rsStyle(d); if (!s || !d.bomShared) return;
+  STATE.bom = STATE.bom || {};
+  const old = (STATE.bom[s.id] || []).slice();
+  const key = (l) => l.matId ? 'm:' + l.matId : 'n:' + String(l.matName||'').trim().toLowerCase();
+  const out = (d.bom || []).filter(l => l.matId || String(l.matName||'').trim()).map(l => {
+    const i = old.findIndex(o => key(o) === key(l));
+    const base = i >= 0 ? old.splice(i, 1)[0] : {};
+    return Object.assign({ id: 'bl' + Date.now().toString(36) + Math.random().toString(36).slice(2,6) }, base, { matId: l.matId||'', matName: l.matName||'', lineType: l.lineType||'Fabric', matType: l.lineType||'Fabric',
+      qty: parseFloat(l.qty)||0, unit: l.unit||base.unit||'yd', waste: l.waste||'', supplier: l.supplier||'', costPerUnit: parseFloat(l.costPerUnit)||0,
+      placement: l.placement || base.placement || '' });
+  });
+  STATE.bom[s.id] = out;
+}
+window.rsBomShare = async function(on){
+  rsReadForm(); const d = RS_DRAFT; if (!d) return;
+  const s = rsStyle(d); if (!s) return;
+  if (on){
+    const had = ((STATE.bom||{})[s.id]||[]).length;
+    if (had && !(await veniaConfirm('Use ' + (s.name||'the style') + '\'s BOM for this run? The ' + (d.bom||[]).length + ' line' + ((d.bom||[]).length===1?'':'s') + ' here are replaced by the style\'s ' + had + '.', { ok: 'Use the style BOM' }))) return;
+    d.bomShared = true;
+    if (had) d.bom = rsBomFromStyle(s); else rsBomToStyle(d);
+  } else {
+    d.bomShared = false;
+  }
+  rsRender(d.id || null);
+  showToast(on ? 'This run now uses the style\'s BOM' : 'This run has its own BOM now. The style\'s BOM stays as it is');
 };
 function rsReadForm(){
   const d = RS_DRAFT; if (!d) return;
@@ -20393,7 +20430,16 @@ function rsReadForm(){
     }
     const dEl = document.getElementById('rs-ms-'+k), cEl = document.getElementById('rs-msd-'+k);
     if (!dEl || dEl.disabled) return;
-    if (dEl.value || (cEl && cEl.checked)) (d.ms = d.ms || {})[k] = { date: dEl.value||'', done: !!(cEl && cEl.checked) };
+    // Build 702: owner and note ride on the milestone and survive a re-read.
+    const oEl = document.getElementById('rs-mso-'+k), nEl = document.getElementById('rs-msn-'+k);
+    const owner = oEl ? oEl.value.trim() : (((d.ms||{})[k]||{}).owner || '');
+    const note = nEl ? nEl.value.trim() : (((d.ms||{})[k]||{}).note || '');
+    if (dEl.value || (cEl && cEl.checked) || owner || note){
+      const was = (d.ms||{})[k] || {};
+      (d.ms = d.ms || {})[k] = Object.assign({}, was, { date: dEl.value||'', done: !!(cEl && cEl.checked) });
+      if (owner) d.ms[k].owner = owner; else delete d.ms[k].owner;
+      if (note) d.ms[k].note = note; else delete d.ms[k].note;
+    }
     else if (d.ms) delete d.ms[k];
   });
   d.units = d.qty || 0;
@@ -20451,9 +20497,13 @@ window.rsSaveBomToStyle = async function(){
 };
 function rsCommit(){
   const d = RS_DRAFT; const s = rsStyle(d);
+  // Build 702: the first date each milestone is saved with is its plan.
+  d.msBase = d.msBase || {};
+  Object.entries(d.ms || {}).forEach(([k, m]) => { if (m && m.date && !d.msBase[k]) d.msBase[k] = m.date; });
   const item = { styleId: d.styleId, name: (s && s.styleId ? s.styleId + ' ' : '') + (s ? s.name : ''), qty: d.qty||0, sizes: d.sizes||{}, cost: d.cost||0 };
   if (d.colour) item.colorway = d.colour;
   if (rsMaker(d) === 'cmt'){ d.vendor = 'VENIA (LA)'; d.vendorId = ''; }
+  if (d.bomShared) rsBomToStyle(d);
   const out = Object.assign({}, d, {
     items: [item], units: d.qty||0, total: Math.round((d.qty||0) * (d.cost||0) * 100)/100,
     exFactory: (d.ms && d.ms.exf && d.ms.exf.date) || d.exFactory || '',
@@ -20608,6 +20658,119 @@ window.rsDelete = async function(){
 };
 window.rsPayments = function(){ rsSave(true); setTimeout(() => poOpenModal(RS_DRAFT.id), 60); };
 
+// ── Build 702: helpers for the run page ─────────────────────────────────
+function rsDaysBetween(a, b){ return Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 864e5); }
+function rsOwnerNames(d){
+  const out = new Set(['Keeter', 'Christine']);
+  try { (STATE.vendors||[]).forEach(v => { if (v && v.name && !v.archived) out.add(v.name); }); } catch(e){}
+  Object.values(d.ms||{}).forEach(m => { if (m && m.owner) out.add(m.owner); });
+  return [...out];
+}
+// Where the run stands: late, at risk, on track, or not dated; and the next
+// open milestone.
+function rsRunState(po){
+  const today = rsIso(new Date()), now = new Date();
+  let status = '', next = null;
+  rsSteps(po).forEach(k => {
+    const m = (po.ms||{})[k] || {}; if (!m.date) return;
+    if (!status) status = 'ontrack';
+    if (rsMsDone(po, k)) return;
+    const past = m.date < today, soon = !past && (new Date(m.date + 'T12:00:00') - now) < 14 * 864e5;
+    if (past) status = 'late'; else if (soon && status !== 'late') status = 'risk';
+    if (!next) next = { k, label: rsStepLabel(po, k), date: m.date, owner: m.owner || '' };
+  });
+  return { status, next };
+}
+// One line of state per stage for the rail.
+function rsStageInfo(d, s){
+  const units = d.qty || d.units || 0, cmt = rsMaker(d) === 'cmt';
+  const issued = (s.issued||[]).length;
+  const bom = d.bom || [];
+  const noUse = bom.filter(l => !(parseFloat(l.qty) > 0)).length;
+  const run = rsRunState(d);
+  const late = rsSteps(d).filter(k => { const m = (d.ms||{})[k]||{}; return m.date && !rsMsDone(d,k) && m.date < rsIso(new Date()); });
+  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id));
+  const target = (() => { try { const m = typeof csModel === 'function' ? csModel(s) : null; return m && m.basis > 0 ? m.basis : (+s.cogs||0); } catch(e){ return +s.cogs||0; } })();
+  const smp = ['proto','fit','pp','top'].filter(k => rsStepOn(d, k));
+  const smpDone = smp.filter(k => rsMsDone(d, k)).length;
+  const recv = ((d.items||[])[0]||{}).receivedQty || 0;
+  const w = d.work || [];
+  return [
+    issued ? { text: 'Tech pack issued', tone: 'ok' } : { text: 'Tech pack not issued', tone: 'warn' },
+    !bom.length ? { text: 'No lines yet', tone: 'warn' } : noUse ? { text: noUse + ' without usage', tone: 'warn' } : { text: bom.length + ' line' + (bom.length>1?'s':'') + (d.bomShared ? ' · the style\'s BOM' : ' · its own BOM'), tone: 'ok' },
+    cmt ? ((w.some(x => x.step==='cut' && x.vendorId) && w.some(x => x.step==='sew' && x.vendorId)) ? { text: 'Cutter and sewing picked', tone: 'ok' } : { text: 'Pick cutter and sewing', tone: 'warn' })
+        : (d.vendor ? { text: d.vendor, tone: 'ok' } : { text: 'No factory yet', tone: 'warn' }),
+    !(d.cost > 0) ? { text: 'No unit cost', tone: 'warn' } : target > 0 && d.cost > target ? { text: '$' + (d.cost - target).toFixed(2) + ' over target', tone: 'warn' } : { text: '$' + (+d.cost).toFixed(2) + ' a unit', tone: 'ok' },
+    !(units > 0) || !d.inStockBy ? { text: !(units > 0) ? 'No quantity' : 'No in-stock date', tone: 'warn' } : { text: units + ' · ' + veniaDate(d.inStockBy), tone: 'ok' },
+    late.length ? { text: late.length + ' late', tone: 'bad' } : run.next ? { text: 'Next: ' + run.next.label, tone: run.status === 'risk' ? 'warn' : 'ok' } : { text: run.status ? 'All done' : 'Not dated yet', tone: run.status ? 'ok' : 'mute' },
+    smp.length ? { text: smpDone + ' of ' + smp.length + ' approved', tone: smpDone === smp.length ? 'ok' : 'mute' } : { text: 'None needed', tone: 'mute' },
+    linked.length || (d.bills||[]).length ? { text: linked.length + ' order' + (linked.length===1?'':'s') + ((d.bills||[]).length ? ' · ' + d.bills.length + ' bill' + (d.bills.length>1?'s':'') : ''), tone: 'ok' } : { text: 'Nothing ordered yet', tone: 'mute' },
+    recv ? { text: recv + ' of ' + units + ' received', tone: recv >= units ? 'ok' : 'warn' } : { text: 'Not started', tone: 'mute' },
+  ];
+}
+// The time and action calendar as bars: each milestone runs from the one
+// before it to its own date; a dashed tick marks the first plan when it moved.
+function rsGanttHTML(d){
+  const keys = rsSteps(d).filter(k => ((d.ms||{})[k]||{}).date);
+  if (!keys.length) return `<div style="font-size:11px;color:var(--muted);padding:12px;border:1px dashed var(--border)">Set the in-stock date and tap Fill blank dates to lay out the calendar.</div>`;
+  const today = rsIso(new Date());
+  const dates = keys.map(k => d.ms[k].date).concat(Object.values(d.msBase||{}));
+  let a = dates.reduce((x, y) => y < x ? y : x), b = dates.reduce((x, y) => y > x ? y : x);
+  a = rsBack(a, 3); b = rsBack(b, -3);
+  const span = Math.max(1, rsDaysBetween(a, b));
+  const pct = (iso) => Math.max(0, Math.min(100, rsDaysBetween(a, iso) / span * 100));
+  const months = []; { const c = new Date(a + 'T12:00:00'); c.setDate(1); while (rsIso(c) <= b){ const iso = rsIso(c); if (iso >= a) months.push(iso); c.setMonth(c.getMonth() + 1); } }
+  let prev = null;
+  const rows = keys.map(k => {
+    const m = d.ms[k]; const done = rsMsDone(d, k); const late = !done && m.date < today;
+    const from = prev && prev < m.date ? prev : rsBack(m.date, 2); prev = m.date;
+    const base = (d.msBase||{})[k];
+    const col = done ? 'var(--green)' : late ? 'var(--red)' : 'var(--ink)';
+    return `<div class="rs-g-row" style="align-items:center;border-top:1px solid var(--border);min-height:30px">
+      <div style="padding:4px 8px;font-size:11px;display:flex;gap:6px;align-items:center;min-width:0"><span style="width:8px;height:8px;border-radius:50%;flex:0 0 8px;border:1px solid ${done ? 'var(--green)' : late ? 'var(--red)' : 'var(--muted)'};background:${done ? 'var(--green)' : late ? 'var(--red)' : 'transparent'}"></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${slEsc(rsStepLabel(d, k))}</span></div>
+      <div style="padding:4px 8px;font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${slEsc(m.owner || '—')}</div>
+      <div style="position:relative;height:20px;margin-right:8px">
+        ${base && base !== m.date ? `<span title="Planned ${slEsc(base)}" style="position:absolute;top:2px;height:16px;left:calc(${pct(base)}% - 1px);border-left:2px dashed var(--muted)"></span>` : ''}
+        <span title="${slEsc(m.date)}" style="position:absolute;top:5px;height:10px;left:${pct(from)}%;width:max(4px,${pct(m.date) - pct(from)}%);background:${col};opacity:${done ? .7 : .85}"></span>
+      </div></div>`;
+  }).join('');
+  const todayLine = today >= a && today <= b ? `<span style="position:absolute;top:0;bottom:0;left:calc(${pct(today)}% );border-left:1px solid var(--red)" title="Today"></span>` : '';
+  return `<style>.rs-gantt{overflow-x:auto;border:1px solid var(--border);-webkit-overflow-scrolling:touch}.rs-gantt .rs-g-in{min-width:620px;position:relative}.rs-gantt .rs-g-row{display:grid!important;grid-template-columns:170px 90px minmax(0,1fr)!important}</style><div class="rs-gantt"><div class="rs-g-in">
+    <div class="rs-g-row" style="background:var(--bg-off);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600;min-height:26px;align-items:center">
+      <div style="padding:4px 8px">Milestone</div><div style="padding:4px 8px">Owner</div>
+      <div style="position:relative;height:26px;margin-right:8px">${months.map(iso => `<span style="position:absolute;top:6px;left:${pct(iso)}%;white-space:nowrap">${new Date(iso + 'T12:00:00').toLocaleString('en-US', { month: 'short' })}</span>`).join('')}</div>
+    </div>
+    <div style="position:relative">${rows}<div style="position:absolute;top:0;bottom:0;left:260px;right:8px;pointer-events:none">${todayLine}</div></div>
+  </div></div>
+  <div style="font-size:10px;color:var(--muted);margin-top:6px">Bar = when the step runs · dashed line = the first plan, when a date moved · red line = today.</div>`;
+}
+window.rsStage = function(n){
+  const el = document.getElementById('rs-st-' + n); if (!el) return;
+  try { el.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch(e){ el.scrollIntoView(); }
+};
+window.rsOpenTechPack = function(){
+  rsReadForm(); const d = RS_DRAFT; if (!d) return;
+  rsCommit(); try { renderProduction(); } catch(e){}
+  closeModal('rs-modal');
+  try { cpGoto('plm'); } catch(e){}
+  try { goTo('techpack', document.querySelector('[data-page=techpack]')); } catch(e){}
+  setTimeout(() => { try { renderTechPack(d.styleId); } catch(e){} }, 80);
+};
+window.rsOpenCostSheet = function(){
+  rsReadForm(); const d = RS_DRAFT; if (!d) return;
+  if (!d.id){ showToast('Save the run first, so nothing you typed is lost'); return; }
+  rsCommit(); try { renderProduction(); } catch(e){}
+  closeModal('rs-modal');
+  try { csOpenFor(d.styleId); } catch(e){}
+};
+window.rsOpenSamples = function(){
+  rsReadForm(); const d = RS_DRAFT; if (!d) return;
+  if (!d.id){ showToast('Save the run first, so nothing you typed is lost'); return; }
+  rsCommit(); try { renderProduction(); } catch(e){}
+  closeModal('rs-modal');
+  try { cpGoto('plm'); goTo('samples', document.querySelector('[data-page=samples]')); } catch(e){}
+  setTimeout(() => { try { openSampleCard(d.styleId); } catch(e){} }, 80);
+};
 function rsRender(id){
   const d = RS_DRAFT; if (!d) return;
   const s = rsStyle(d);
@@ -20684,8 +20847,10 @@ function rsRender(id){
     return `<div class="rs-step" style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:6px 0;border-top:1px solid var(--border);${on?'':'opacity:.5'}">
       <input id="rs-on-${k}" data-on="${on?'1':'0'}" type="checkbox" style="width:16px;height:16px;min-height:0;flex:0 0 16px;margin:0" ${on?'checked':''} ${k==='approval'?'disabled':''} onchange="rsRefresh()" aria-label="Use ${slEsc(rsStepLabel(d,k))}" title="${on?'Switch this step off':'Add this step back'}">
       <div style="min-width:0;flex:1 1 180px"><div style="font-size:12px;color:${late?'var(--red)':'var(--ink)'}">${slEsc(rsStepLabel(d,k))}${late?' · late':''}</div>${why?`<div style="font-size:10px;color:${derived?'var(--green)':'var(--muted)'}">${slEsc(why)}</div>`:''}</div>
-      <input id="rs-ms-${k}" type="date" value="${slEsc(m.date||'')}" style="${fld};width:150px;flex:0 0 150px;padding:4px;min-height:32px;margin-left:auto;${late?'border-color:var(--red)':''}" ${on?'':'disabled'}>
+      ${on ? `<input id="rs-mso-${k}" type="text" value="${slEsc(m.owner||'')}" list="rs-owner-list" placeholder="Owner" aria-label="Owner of ${slEsc(rsStepLabel(d,k))}" style="${fld};width:120px;flex:0 1 120px;padding:4px;min-height:32px;margin-left:auto">` : ''}
+      <input id="rs-ms-${k}" type="date" value="${slEsc(m.date||'')}" style="${fld};width:150px;flex:0 0 150px;padding:4px;min-height:32px;${on?'':'margin-left:auto;'}${late?'border-color:var(--red)':''}" ${on?'':'disabled'}>
       <label style="font-size:10px;color:var(--muted);display:flex;gap:4px;align-items:center;cursor:pointer;flex:0 0 58px"><input id="rs-msd-${k}" type="checkbox" style="width:14px;height:14px;min-height:0;margin:0" ${done?'checked':''} ${on && !derived?'':'disabled'}> done</label>
+      ${on ? `<input id="rs-msn-${k}" type="text" value="${slEsc(m.note||'')}" placeholder="Note" aria-label="Note on ${slEsc(rsStepLabel(d,k))}" style="${fld};flex:1 1 100%;padding:4px;min-height:30px;margin-left:26px;font-size:11px">${(d.msBase||{})[k] && m.date && (d.msBase||{})[k] !== m.date ? `<div style="flex:1 1 100%;margin-left:26px;font-size:10px;color:${m.date > d.msBase[k] ? 'var(--amber)' : 'var(--muted)'}">Planned ${slEsc(veniaDate(d.msBase[k]))} · ${m.date > d.msBase[k] ? 'moved ' + rsDaysBetween(d.msBase[k], m.date) + ' days later' : 'moved earlier'}</div>` : ''}` : ''}
     </div>`;
   };
   const msCells = phases.map(ph => {
@@ -20748,78 +20913,187 @@ function rsRender(id){
       <div style="font-size:10px;color:var(--muted);margin-top:6px">${openBills.length ? openBills.length + ' draft bill' + (openBills.length>1?'s':'') + ' (' + slMoneyC('USD', openBills.reduce((a,b) => a + (b.amount||0), 0)) + ') ' + (openBills.length>1?'show':'shows') + ' in Money as money going out. ' : ''}Bills are drafts until you mark them paid; nothing is paid from here. Not in the list? Type a new cutter or contractor under the picker and it joins Sourcing.</div>
     </div>`;
   }
-  const ex0 = document.getElementById('rs-modal'); if (ex0) ex0.remove();
-  const ov = document.createElement('div');
-  ov.className = 'overlay'; ov.id = 'rs-modal';
-  ov.innerHTML = `<div class="modal" style="width:760px;max-width:96vw">
-    <div class="modal-head"><div style="min-width:0">
-        <div class="modal-title">Produce · ${slEsc(s.name||'')}</div>
-        <div style="font-size:11px;color:var(--muted);margin-top:2px">${stock} in stock${s.season?' · '+slEsc(s.season):''}${d.id?' · '+slEsc(d.id):' · not saved yet'}</div>
-      </div><button class="modal-close" aria-label="Close" onclick="closeModal('rs-modal')">&#x2715;</button></div>
-    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:82vh;overflow-y:auto">
-      <div style="display:flex;gap:8px;flex-wrap:wrap" role="group" aria-label="What are you making?">${pathBtns}</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center" role="group" aria-label="Who makes it?"><span style="${lbl};margin:0 6px 0 0">Who makes it?</span>${makerBtns}</div>
-      ${(() => {
-        const g = rsGuide(d), first = g[0], rest = g.slice(1);
-        const fresh = rsPath(d) !== 'first' && !rsHasEarlierRun(d)
-          ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">This style hasn't been made through VENIA OS before, so there's no last factory, fabric or price to copy. Fill them in once and Save to style keeps them for next time.</div>` : '';
-        if (!first) return `<div id="rs-missing" style="font-size:11px;padding:8px 10px;border:1px solid var(--green);color:var(--green)">${rsMaker(d) === 'cmt' ? 'Everything the run needs is here.' : 'Everything the factory needs is here.'} Keep it on track from the steps below.</div>`;
-        return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid var(--amber)">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-            <div style="color:var(--ink);min-width:0"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);font-weight:700;margin-right:6px">Next · 1 of ${g.length}</span>${slEsc(first.text)}</div>
-            <button type="button" class="btn btn-ghost btn-sm" onclick="rsGo('${first.go}')">Go</button>
-          </div>
-          ${rest.length ? `<ol style="margin:8px 0 0 18px;padding:0;color:var(--muted);font-size:11px;line-height:1.7" start="2">${rest.map(x => `<li><button type="button" onclick="rsGo('${x.go}')" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:inherit;letter-spacing:0;text-transform:none;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--border)">${slEsc(x.text)}</button></li>`).join('')}</ol>` : ''}
-          ${fresh}
-        </div>`;
-      })()}
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
-        ${qtyBlock}
-        <div><div style="${lbl}">Colour</div><input id="rs-colour" type="text" style="${fld}" value="${slEsc(d.colour||'')}" placeholder="e.g. Black"></div>
-        <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()"></div>
-        <div><div style="${lbl}">Production lead · days</div><input id="rs-lead" type="number" min="1" style="${fld}" value="${slEsc(d.leadDays||RS_DEFAULT_LEAD)}">${leadNote}</div>
-        ${rsMaker(d) === 'cmt'
-          ? `<div><div style="${lbl}">Made by</div><div style="${fld};display:flex;align-items:center">VENIA, Los Angeles</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Each step's vendor is in Work orders below</div></div>`
-          : `<div><div style="${lbl}">Factory</div><select id="rs-factory" style="${fld}" onchange="rsRefresh()">${factoryOpts}</select></div>`}
-        <div><div style="${lbl}">Dye</div><select id="rs-dye" style="${fld}" onchange="rsRefresh()">${dyeOpts}</select></div>
-        <div><div style="${lbl}">Unit cost · USD</div><input id="rs-cost" type="number" min="0" step="0.01" style="${fld}" value="${d.cost||''}" onchange="rsRefresh()"><div style="font-size:10px;color:var(--muted);margin-top:3px">Total ${slMoneyC('USD', (units||0)*(d.cost||0))}</div>${rsMaker(d) === 'cmt' ? (() => { const c = rsCmtUnitCost(d); return `<div style="font-size:10px;color:var(--muted);margin-top:3px">BOM $${c.mat.toFixed(2)} + work $${c.labour.toFixed(2)} = <b style="color:var(--ink)">$${c.total.toFixed(2)}</b> <button class="btn btn-ghost btn-sm" style="padding:2px 6px;margin-left:4px" onclick="rsUseCmtCost()">Use</button></div>`; })() : ''}</div>
-        <div><div style="${lbl}">Status</div><select id="rs-status" style="${fld}">${stOpts}</select></div>
+  // ── Build 702: the run is a page ─────────────────────────────────────
+  // Nine stages in the order a run is made, a Next line on top, and a time
+  // and action calendar. Every field keeps its id, so reading the form,
+  // Go and the guide work as before. Stages read the records that already
+  // exist (the style's tech pack, cost sheet and sample log, Sourcing, POs).
+  const prev = document.getElementById('rs-modal');
+  const keepScroll = prev ? ((prev.querySelector('.rs-main')||{}).scrollTop || 0) : 0;
+  const keepWin = prev ? (prev.dataset.run || '') : '';
+  if (prev) prev.remove();
+  const st = rsStageInfo(d, s);
+  const tone = (t) => t === 'ok' ? 'var(--green)' : t === 'warn' ? 'var(--amber)' : t === 'bad' ? 'var(--red)' : 'var(--muted)';
+  const run = rsRunState(d);
+  const pill = run.status === 'late' ? ['Late', 'var(--red)'] : run.status === 'risk' ? ['At risk', 'var(--amber)'] : run.status === 'ontrack' ? ['On track', 'var(--green)'] : ['Not dated yet', 'var(--muted)'];
+  const sec = (n, title, body, from) => `<section id="rs-st-${n}" class="rs-sec" data-n="${n}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+        <h3 style="margin:0;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700"><span style="font-family:'DM Mono',monospace;color:var(--muted);margin-right:8px">${n}</span>${title}</h3>
+        ${from ? `<span style="font-size:10px;color:var(--muted)">${from}</span>` : ''}
+      </div>${body}</section>`;
+  const lastIssue = (s.issued || []).slice(-1)[0];
+  const stage1 = `<div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+      ${s.photoUrl ? `<img src="${slEsc(s.photoUrl)}" alt="" style="width:84px;height:84px;object-fit:cover;border:1px solid var(--border);flex:0 0 84px">` : ''}
+      <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:4px;font-size:12px">
+        <div><b>${slEsc(s.name||'')}</b> <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:11px">${slEsc(s.styleId||'')}${s.season?' · '+slEsc(s.season):''}</span></div>
+        <div>Tech pack: ${lastIssue ? `<span style="color:var(--green)">Rev ${slEsc(String(lastIssue.rev||s.rev||''))} issued ${slEsc(veniaDate(lastIssue.at))}</span>` : `<span style="color:var(--amber)">not issued yet</span>`}${s.shareToken ? ' · factory link on' : ''}</div>
+        <div style="color:var(--muted);font-size:11px">${rsMaker(d) === 'cmt' ? 'Your cutter and sewers work from the issued tech pack.' : 'The factory works from the issued tech pack.'}</div>
       </div>
-
-      <div>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="rsOpenTechPack()">${d.id ? 'Open tech pack' : 'Save and open tech pack'}</button>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px" role="group" aria-label="What are you making?">${pathBtns}</div>`;
+  const stage2 = `<div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-          <datalist id="rs-vend-list">${(STATE.vendors||[]).filter(v => !v.archived && v.name).map(v => `<option value="${slEsc(v.name)}">`).join('')}</datalist><div id="rs-bom" tabindex="-1" style="${lbl};margin:0">BOM for this run · need = usage × ${units||0} units + waste</div>
+          <datalist id="rs-vend-list">${(STATE.vendors||[]).filter(v => !v.archived && v.name).map(v => `<option value="${slEsc(v.name)}">`).join('')}</datalist><div id="rs-bom" tabindex="-1" style="${lbl};margin:0">Need = usage × ${units||0} units + waste</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="rsAddLine()">+ Line</button>
-            <button class="btn btn-ghost btn-sm" onclick="rsReloadBom()" title="Start the lines again from the style's BOM">Copy from style</button>
-            <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Keep these lines on the style for next time">Save to style</button>
+            ${d.bomShared
+              ? `<button class="btn btn-ghost btn-sm" onclick="rsBomShare(false)" title="Give this run a BOM of its own, for a different fabric or trim. The style's BOM stays as it is">Use a separate BOM</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="rsBomShare(true)" title="Use the style's BOM, so a change here changes the style">Use the style BOM</button>
+            <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Copy these lines onto the style">Save to style</button>`}
           </div>
         </div>
         <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Line</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
           <tbody>${bomRows || '<tr><td colspan="6" style="color:var(--muted);font-size:11px">No lines yet — add the fabric first.</td></tr>'}</tbody></table></div>
         <div style="font-size:10px;color:var(--muted);margin-top:6px">Not in the list? Type it under the picker, then add its mill and price right here.</div>
+      </div>`;
+  const stage3 = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px" role="group" aria-label="Who makes it?"><span style="${lbl};margin:0 6px 0 0">Who makes it?</span>${makerBtns}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:${rsMaker(d) === 'cmt' ? '14px' : '0'}">
+        ${rsMaker(d) === 'cmt'
+          ? `<div><div style="${lbl}">Made by</div><div style="${fld};display:flex;align-items:center">VENIA, Los Angeles</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Each step's supplier is in Work orders below</div></div>`
+          : `<div><div style="${lbl}">Factory</div><select id="rs-factory" style="${fld}" onchange="rsRefresh()">${factoryOpts}</select></div>`}
+        <div><div style="${lbl}">Dye</div><select id="rs-dye" style="${fld}" onchange="rsRefresh()">${dyeOpts}</select></div>
       </div>
-      ${rsMaker(d) === 'cmt' ? workBlock : ''}
-
-      <div>
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-          <div style="${lbl};margin:0">Steps · worked back from the in-stock date</div>
-          <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsFillDates(false)">Fill blank dates</button><button class="btn btn-ghost btn-sm" onclick="rsFillDates(true)" title="Re-date every milestone that isn't done">Re-date all</button></div>
-        </div>
-        <div>${msCells}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px">Tick a step to use it, untick to leave it out. ${rsMaker(d) === 'cmt' ? `Dates work back from the in-stock date: about a week to finish, QC and pick up, two weeks when it's dyed, and the fabric's own lead (or ${RS_FABRIC_LEAD} days). Change any date by hand.` : `Dates use the lead above, the fabric's own lead (or ${RS_FABRIC_LEAD} days) and ${RS_TRANSIT} days in transit. Change any date by hand.`}</div>
+      ${rsMaker(d) === 'cmt' ? workBlock : ''}`;
+  const target = (() => { try { const m = typeof csModel === 'function' ? csModel(s) : null; return m && m.basis > 0 ? { v: m.basis, from: m.basisFrom === 'sheet' ? 'cost sheet' : 'COGS' } : (s.cogs > 0 ? { v: +s.cogs, from: 'COGS' } : null); } catch(e){ return s.cogs > 0 ? { v: +s.cogs, from: 'COGS' } : null; } })();
+  const gap = target && d.cost ? Math.round(((d.cost||0) - target.v) * 100) / 100 : null;
+  const stage4 = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
+        <div><div style="${lbl}">This run · unit cost</div><input id="rs-cost" type="number" min="0" step="0.01" style="${fld}" value="${d.cost||''}" onchange="rsRefresh()"><div style="font-size:10px;color:var(--muted);margin-top:3px">Total ${slMoneyC('USD', (units||0)*(d.cost||0))}</div>${rsMaker(d) === 'cmt' ? (() => { const c = rsCmtUnitCost(d); return `<div style="font-size:10px;color:var(--muted);margin-top:3px">BOM $${c.mat.toFixed(2)} + work $${c.labour.toFixed(2)} = <b style="color:var(--ink)">$${c.total.toFixed(2)}</b> <button class="btn btn-ghost btn-sm" style="padding:2px 6px;margin-left:4px" onclick="rsUseCmtCost()">Use</button></div>`; })() : ''}</div>
+        <div><div style="${lbl}">Style target</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace">${target ? '$' + target.v.toFixed(2) : '—'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${target ? 'From the ' + target.from : 'No cost sheet yet'} · <button type="button" onclick="rsOpenCostSheet()" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:var(--ink);text-decoration:underline;cursor:pointer;letter-spacing:0;text-transform:none">Open cost sheet</button></div></div>
+        <div><div style="${lbl}">Difference</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace;color:${gap == null ? 'var(--muted)' : gap > 0 ? 'var(--amber)' : 'var(--green)'}">${gap == null ? '—' : (gap > 0 ? '+$' : gap < 0 ? '−$' : '$') + Math.abs(gap).toFixed(2) + ' a unit'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${gap == null ? 'Shows once both are set' : gap > 0 ? 'Over the target, so the margin is thinner' : 'At or under the target'}</div></div>
+      </div>`;
+  const stage5 = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
+        ${qtyBlock}
+        <div><div style="${lbl}">Colour</div><input id="rs-colour" type="text" style="${fld}" value="${slEsc(d.colour||'')}" placeholder="e.g. Black"></div>
+        <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()"></div>
+        <div><div style="${lbl}">Production lead · days</div><input id="rs-lead" type="number" min="1" style="${fld}" value="${slEsc(d.leadDays||RS_DEFAULT_LEAD)}">${leadNote}</div>
+        <div><div style="${lbl}">Status</div><select id="rs-status" style="${fld}">${stOpts}</select></div>
+      </div>`;
+  const stage6 = `${rsGanttHTML(d)}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0 6px">
+        <div style="${lbl};margin:0">Milestones · worked back from the in-stock date</div>
+        <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsFillDates(false)">Fill blank dates</button><button class="btn btn-ghost btn-sm" onclick="rsFillDates(true)" title="Re-date every milestone that isn't done">Re-date all</button></div>
       </div>
-
+      <datalist id="rs-owner-list">${rsOwnerNames(d).map(n => `<option value="${slEsc(n)}">`).join('')}</datalist><div>${msCells}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Tick a step to use it, untick to leave it out. Give each one an owner and a note. The first dates you save are kept as the plan, so a slip shows against it. ${rsMaker(d) === 'cmt' ? `Dates work back from the in-stock date: about a week to finish, QC and pick up, two weeks when it's dyed, and the fabric's own lead (or ${RS_FABRIC_LEAD} days).` : `Dates use the lead above, the fabric's own lead (or ${RS_FABRIC_LEAD} days) and ${RS_TRANSIT} days in transit.`}</div>`;
+  const log = (s.sampleLog || []).slice().sort((a, b) => String(b.date||'').localeCompare(String(a.date||''))).slice(0, 6);
+  const smpSteps = ['proto','fit','pp','top'].filter(k => rsStepOn(d, k));
+  const stage7 = `${smpSteps.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${smpSteps.map(k => { const dn = rsMsDone(d, k); const m = (d.ms||{})[k] || {}; return `<span style="font-size:11px;padding:4px 8px;border:1px solid ${dn ? 'var(--green)' : 'var(--border)'};color:${dn ? 'var(--green)' : 'var(--ink)'}">${slEsc(rsStepLabel(d, k))}${dn ? ' ✓' : m.date ? ' · ' + slEsc(veniaDate(m.date)) : ''}</span>`; }).join('')}</div>` : `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">No sample approvals on this ${rsKindWord(d)}. Add Proto, Fit, PP or TOP in the calendar if you need one.</div>`}
+      ${log.length ? `<div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Round</th><th>Date</th><th>Result</th><th>Note</th></tr></thead><tbody>${log.map(e => `<tr><td data-label="Round">${slEsc(e.round||'')}</td><td data-label="Date" style="font-family:'DM Mono',monospace;font-size:11px">${slEsc(e.date||'')}</td><td data-label="Result">${slEsc(e.result||'—')}</td><td data-label="Note" style="color:var(--muted)">${slEsc(e.note||'')}</td></tr>`).join('')}</tbody></table></div>` : `<div style="font-size:11px;color:var(--muted)">No samples logged for this style yet.</div>`}
+      <div style="margin-top:8px"><button type="button" class="btn btn-ghost btn-sm" onclick="rsOpenSamples()">Log a sample</button> <span style="font-size:10px;color:var(--muted);margin-left:6px">An approved round in the sample log ticks its milestone here.</span></div>`;
+  const allLinked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id));
+  const bills = d.bills || [];
+  const stage8 = `<div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Order</th><th>For</th><th>Supplier</th><th>Amount</th><th>Status</th></tr></thead><tbody>
+        <tr><td data-label="Order" style="font-family:'DM Mono',monospace;font-size:11px">${slEsc(d.id || 'not saved yet')}</td><td data-label="For">${slEsc(rsTitle(d))} · ${units} units</td><td data-label="Supplier">${slEsc(rsMaker(d) === 'cmt' ? 'VENIA (LA)' : (d.vendor || '—'))}</td><td data-label="Amount" style="font-family:'DM Mono',monospace">${slMoneyC('USD', (units||0)*(d.cost||0))}</td><td data-label="Status">${slEsc(PO_STATUSES[d.status||'draft'] || d.status || 'Draft')}</td></tr>
+        ${allLinked.map(p => `<tr><td data-label="Order" style="font-family:'DM Mono',monospace;font-size:11px">${slEsc(p.id)}</td><td data-label="For">${p.type === 'trim' ? 'Trim · ' + slEsc(p.itemName||'') : 'Fabric'} · ${p.qty||0} ${slEsc(p.unit||'')}</td><td data-label="Supplier">${slEsc(p.vendor||'—')}</td><td data-label="Amount" style="font-family:'DM Mono',monospace">${slMoneyC('USD', p.total||0)}</td><td data-label="Status">${slEsc(PO_STATUSES[p.status] || p.status || '')}</td></tr>`).join('')}
+        ${bills.map(b => `<tr><td data-label="Order" style="font-family:'DM Mono',monospace;font-size:11px">${slEsc(b.id)}</td><td data-label="For">Bill · ${slEsc(b.desc||'')}</td><td data-label="Supplier">${slEsc(b.vendor||'')}</td><td data-label="Amount" style="font-family:'DM Mono',monospace">${slMoneyC('USD', b.amount||0)}</td><td data-label="Status" style="color:${b.paidAt ? 'var(--green)' : 'var(--amber)'}">${b.paidAt ? 'Paid' : 'Draft bill'}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Fabric and trim orders are placed from Production. ${rsMaker(d) === 'cmt' ? 'Bills come from Work orders in stage 3.' : 'Deposit and balance are under Payments and receiving.'} Nothing is paid from here.</div>`;
+  const recv = ((d.items||[])[0] || {}).receivedQty || 0;
+  const landKeys = rsSteps(d).filter(k => ['exf','arrived','pickup','instock'].includes(k));
+  const stage9 = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${landKeys.map(k => { const dn = rsMsDone(d, k); const m = (d.ms||{})[k] || {}; return `<span style="font-size:11px;padding:4px 8px;border:1px solid ${dn ? 'var(--green)' : 'var(--border)'};color:${dn ? 'var(--green)' : 'var(--ink)'}">${slEsc(rsStepLabel(d, k))}${dn ? ' ✓' : m.date ? ' · ' + slEsc(veniaDate(m.date)) : ''}</span>`; }).join('')}</div>
+      <div style="font-size:12px;margin-bottom:10px">${recv ? `<b>${recv}</b> of ${units} received` : 'Nothing received yet.'}</div>
       <div><div style="${lbl}">Notes</div><textarea id="rs-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(d.notes||'')}</textarea></div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
-        ${d.id ? `<button class="btn btn-ghost btn-sm" onclick="rsDelete()">Delete</button><button class="btn btn-ghost btn-sm" onclick="rsPayments()" title="Deposit, balance and receiving">Payments and receiving</button>` : ''}
-        <button class="btn btn-ghost" onclick="closeModal('rs-modal')">Cancel</button>
-        <button id="rs-save" class="btn btn-gold" onclick="rsSave(true)">Save</button>
+      ${d.id ? `<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="rsPayments()" title="Deposit, balance and receiving">Payments and receiving</button></div>` : ''}`;
+  const nextBlock = (() => {
+    const g = rsGuide(d), first = g[0], rest = g.slice(1);
+    const fresh = rsPath(d) !== 'first' && !rsHasEarlierRun(d)
+      ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">This style hasn't been made through VENIA OS before, so there's no last factory, fabric or price to copy. Fill them in once${d.bomShared ? ' and the BOM stays on the style' : ' and Save to style keeps the BOM'} for next time.</div>` : '';
+    if (!first) {
+      const nx = run.next;
+      return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid ${run.status === 'late' ? 'var(--red)' : 'var(--green)'};color:var(--ink)"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${run.status === 'late' ? 'var(--red)' : 'var(--green)'};font-weight:700;margin-right:6px">${nx ? 'Next' : 'Ready'}</span>${nx ? slEsc(nx.label) + ' · ' + slEsc(veniaDate(nx.date)) + (nx.owner ? ' · ' + slEsc(nx.owner) : '') : (rsMaker(d) === 'cmt' ? 'Everything the run needs is here.' : 'Everything the factory needs is here.')}</div>`;
+    }
+    return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid var(--amber)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="color:var(--ink);min-width:0"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);font-weight:700;margin-right:6px">Next · 1 of ${g.length}</span>${slEsc(first.text)}</div>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rsGo('${first.go}')">Go</button>
+      </div>
+      ${rest.length ? `<ol style="margin:8px 0 0 18px;padding:0;color:var(--muted);font-size:11px;line-height:1.7" start="2">${rest.map(x => `<li><button type="button" onclick="rsGo('${x.go}')" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:inherit;letter-spacing:0;text-transform:none;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--border)">${slEsc(x.text)}</button></li>`).join('')}</ol>` : ''}
+      ${fresh}
+    </div>`;
+  })();
+  const titles = ['Style and tech pack','BOM and materials','Sourcing and suppliers','Cost','Quantity and dates','Time and action calendar','Samples and approvals','Orders and money','Ship and receive'];
+  const rail = titles.map((t, i) => { const x = st[i] || {}; return `<button type="button" class="rs-stage" data-go="${i+1}" onclick="rsStage(${i+1})"><span class="rs-sn">${i+1}</span><span style="min-width:0"><span class="rs-stt">${t}</span><span class="rs-sts" style="color:${tone(x.tone)}">${slEsc(x.text||'')}</span></span></button>`; }).join('');
+  const ov = document.createElement('div');
+  ov.className = 'overlay rs-page-ov'; ov.id = 'rs-modal'; ov.dataset.run = d.id || 'new';
+  ov.innerHTML = `<style>
+    .rs-page-ov{padding:0}
+    .rs-page{background:var(--bg);width:100%;height:100%;max-width:none;max-height:none;display:flex;flex-direction:column;overflow:hidden}
+    .rs-page-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px 20px;flex-wrap:wrap;padding:14px max(18px,env(safe-area-inset-right,0px)) 12px max(18px,env(safe-area-inset-left,0px));padding-top:calc(14px + env(safe-area-inset-top,0px));border-bottom:1px solid var(--border)}
+    .rs-page-body{flex:1;min-height:0;display:grid;grid-template-columns:240px 1fr}
+    .rs-rail{border-right:1px solid var(--border);overflow-y:auto;padding:8px 0}
+    .rs-stage{display:flex;gap:10px;align-items:flex-start;width:100%;text-align:left;background:none;border:0;padding:9px 16px;color:var(--ink);cursor:pointer;min-height:0;letter-spacing:0;text-transform:none;font:inherit}
+    .rs-stage:hover,.rs-stage[aria-current="true"]{background:var(--bg-off)}
+    .rs-sn{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);flex:0 0 16px;padding-top:1px}
+    .rs-stt{display:block;font-size:12px;font-weight:600}
+    .rs-sts{display:block;font-size:10px;margin-top:1px}
+    .rs-main{overflow-y:auto;padding:18px max(18px,env(safe-area-inset-right,0px)) calc(60px + env(safe-area-inset-bottom,0px)) 22px;display:flex;flex-direction:column;gap:26px;min-width:0}
+    .rs-sec{scroll-margin-top:12px;padding-top:4px;border-top:1px solid var(--border);padding-top:16px}
+    .rs-sec:first-of-type{border-top:0;padding-top:0}
+    @media (max-width:760px){
+      .rs-page-body{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+      .rs-rail{border-right:0;border-bottom:1px solid var(--border);display:flex;overflow-x:auto;overflow-y:hidden;padding:0}
+      .rs-stage{width:auto;flex:0 0 auto;max-width:180px}
+      .rs-main{padding-left:max(16px,env(safe-area-inset-left,0px))}
+    }
+  </style>
+  <div class="modal rs-page" role="dialog" aria-label="Production run · ${slEsc(s.name||'')}">
+    <div class="rs-page-head">
+      <div style="min-width:0">
+        <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:600">Production · ${slEsc(RS_PATHS[rsPath(d)])}${d.id ? ' · ' + slEsc(d.id) : ' · not saved yet'}</div>
+        <div class="modal-title" style="margin-top:2px">${slEsc(s.name||'')}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px 16px;font-size:11px;color:var(--muted);margin-top:4px">
+          <span>${rsMaker(d) === 'cmt' ? 'We run it (LA)' : (d.vendor ? slEsc(d.vendor) : 'No factory yet')}</span>
+          <span>${units ? units + ' units' : 'No quantity yet'}${d.colour ? ' · ' + slEsc(d.colour) : ''}</span>
+          <span>${d.inStockBy ? 'In stock by ' + slEsc(veniaDate(d.inStockBy)) : 'No in-stock date'}</span>
+          <span>${stock} in stock now</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;padding:4px 8px;border:1px solid ${pill[1]};color:${pill[1]}">${pill[0]}</span>
+        ${d.id ? `<button class="btn btn-ghost btn-sm" onclick="rsDelete()">Delete</button>` : ''}
+        <button class="btn btn-ghost btn-sm" onclick="closeModal('rs-modal')">Close</button>
+        <button id="rs-save" class="btn btn-gold btn-sm" onclick="rsSave(false)">Save</button>
+      </div>
+    </div>
+    <div class="rs-page-body">
+      <nav class="rs-rail" aria-label="Stages">${rail}</nav>
+      <div class="rs-main modal-body">
+        ${nextBlock}
+        ${sec(1, 'Style and tech pack', stage1, 'From the style')}
+        ${sec(2, 'BOM and materials', stage2, d.bomShared ? 'The style\'s BOM. A change here changes the style when you save' : 'This run\'s own BOM. The style\'s BOM is separate')}
+        ${sec(3, 'Sourcing and suppliers', stage3, 'Suppliers live in Sourcing')}
+        ${sec(4, 'Cost', stage4, 'Target from the cost sheet')}
+        ${sec(5, 'Quantity and dates', stage5, '')}
+        ${sec(6, 'Time and action calendar', stage6, 'Feeds Timeline and Today')}
+        ${sec(7, 'Samples and approvals', stage7, 'From the sample log')}
+        ${sec(8, 'Orders and money', stage8, 'From Production and Money')}
+        ${sec(9, 'Ship and receive', stage9, '')}
       </div>
     </div>
   </div>`;
   document.body.appendChild(ov);
   openModal('rs-modal');
+  const main = ov.querySelector('.rs-main');
+  if (main && keepWin === (d.id || 'new') && keepScroll) main.scrollTop = keepScroll;
+  if (main) {
+    const mark = () => {
+      const secs = [...main.querySelectorAll('.rs-sec')]; const top = main.getBoundingClientRect().top + 40;
+      let cur = secs[0]; secs.forEach(x => { if (x.getBoundingClientRect().top <= top) cur = x; });
+      ov.querySelectorAll('.rs-stage').forEach(b => b.setAttribute('aria-current', cur && b.dataset.go === cur.dataset.n ? 'true' : 'false'));
+    };
+    main.addEventListener('scroll', mark, { passive: true }); mark();
+  }
 }
 
 // ── Timeline rows: one per open restock, its own milestones ────────────────
@@ -22435,7 +22709,7 @@ function renderTechPackWork(s) {
       <div class="tpg" style="margin-bottom:6px">
         ${ef('Stage','status','',['concept','design','sms','development','production','active','sale'])}
         ${ef('Production status','prodStatus','',TP_PROD_STATUS)}
-        ${ef('Sample round','sample','',['Proto','SMS1','SMS2','TOP','Approved'])}
+        ${ef('Sample round','sample','',['Proto','SMS1','SMS2','PP','TOP','Approved'])}
       </div>
       <!-- Three fields that all sound like "what stage is this at" sat next to
            each other with nothing saying how they differ. -->
@@ -39449,7 +39723,7 @@ function agentActionCard(chatBody, headline, lines, undoCall, btnLabel, mark){
 function agentRunLogSampleRound(action, chatBody){
   const s = agentFindStyle(action.style);
   if (!s) { appendAgentNote(chatBody, 'I couldn\'t find a style called "' + String(action.style||'') + '" in the line — nothing was logged.'); return; }
-  const rounds = ['Proto','SMS1','SMS2','TOP'];
+  const rounds = ['Proto','SMS1','SMS2','PP','TOP'];
   const round = rounds.find(r => r.toLowerCase() === String(action.round||'').trim().toLowerCase()) || 'Proto';
   let result = String(action.result||'').toLowerCase().trim();
   if (['','approved','revise','rejected'].indexOf(result) < 0) result = '';
