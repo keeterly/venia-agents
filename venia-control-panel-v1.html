@@ -4102,7 +4102,7 @@ window.veniaYmd = veniaYmd;
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
   const BUILD = '675';
-  const BUILD_DATE = '2026.11.19';
+  const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -13795,6 +13795,8 @@ function renderMaterials(filter) {
         // Fabric liability — required (BOM yield × outstanding PO units) vs
         // on hand + on order. All derived except on-hand, which is optional.
         const req = matRequired(m.id), onOrder = matOnOrder(m.id);
+        const noUse = matUsageMissing(m.id);
+        const noUseLine = noUse.length ? `<div style="margin-top:6px;font-size:10px;color:var(--red);line-height:1.5">No usage per unit on ${esc(noUse.join(', '))}, so their need isn't counted below.</div>` : '';
         const onHand = parseFloat(m.qtyOnHand)||0;
         const short = Math.round(Math.max(0, req - onHand - onOrder)*10)/10;
         // Vendor-managed fabric is the factory's to buy, hold and run short of.
@@ -13803,7 +13805,7 @@ function renderMaterials(filter) {
         if (matIsVendorManaged(m)) {
           return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);line-height:1.6">
             The factory sources this inside their price${req?` — they need <b style="color:var(--soft)">${req} ${esc(unit||'')}</b> for the units we have on order`:''}.
-            <br>MOQ, leftovers and lead time sit with them.
+            <br>MOQ, leftovers and lead time sit with them.${noUseLine}
           </div>`;
         }
         return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
@@ -13815,7 +13817,8 @@ function renderMaterials(filter) {
             ${req?`<span>· open POs need <b style="color:var(--ink)">${req}</b></span>`:''}
           </div>
           ${req && short > 0 ? `<div style="font-size:10px;color:var(--red);font-weight:700;margin-top:4px">⚠ Short ${short} ${m.unit||''} for committed production</div>`
-            : (req ? `<div style="font-size:10px;color:var(--green);margin-top:4px">✓ Covered for committed production</div>` : '')}
+            : (req && !noUse.length ? `<div style="font-size:10px;color:var(--green);margin-top:4px">✓ Covered for committed production</div>` : '')}
+          ${noUseLine}
           <button class="btn btn-ghost btn-sm" style="margin-top:6px" onclick="poOrderFabric('${m.id}')">Order fabric →</button>
         </div>`;
       })()}
@@ -14254,7 +14257,20 @@ function tlSchedule(s){
 }
 function tlDone(s, key){
   const st = s.status, smIdx = ['Proto','SMS1','SMS2','TOP','Approved'].indexOf(s.sample || '');
-  const shipped = ['active','sale'].includes(st);
+  let shipped = ['active','sale'].includes(st);
+  // An active style that is being made again (Build 674): its production legs
+  // follow the open PO, not the style's status — before this, every milestone
+  // read done and a restock could never show late.
+  if (shipped && ['prod','exf','drop'].includes(key)) {
+    const open = (STATE.pos||[]).filter(po => po.type !== 'fabric' && !['received','cancelled'].includes(po.status)
+      && (po.items||[]).some(it => it.styleId === s.id));
+    if (open.length) {
+      const po = open[0];
+      if (key === 'prod') return ['production','shipped','partial'].includes(po.status) || !!(po.ms && po.ms.cut && po.ms.cut.done);
+      if (key === 'exf') return ['shipped','partial'].includes(po.status);
+      return false;
+    }
+  }
   // The sample log is ground truth: an approved round — or any later round
   // already logged — marks the milestone done even if s.sample never advanced.
   const log = s.sampleLog || [];
@@ -14328,6 +14344,10 @@ function renderGantt(filter) {
   // The season calendar strip leads the page: the filtered season's key dates,
   // or the newest season's when viewing all.
   const calSeason = ganttFilter !== 'all' ? ganttFilter : (rpSeasons()[0] || '');
+  // Restocks (Build 674) are their own rows: an active style can't carry a
+  // second production, so its run is tracked on the run's own milestones.
+  const rsTl = (typeof rsTimelineHTML === 'function') ? rsTimelineHTML(ganttFilter) : { html:'', late:0, risk:0, ok:0 };
+  late += rsTl.late; risk += rsTl.risk; ontrack += rsTl.ok;
   document.getElementById('gantt-container').innerHTML = `
     ${calSeason ? scStripHTML(calSeason) : ''}
     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);margin-bottom:16px">
@@ -14335,7 +14355,8 @@ function renderGantt(filter) {
       <div style="background:var(--bg);padding:14px;text-align:center"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--amber);margin-bottom:6px">At risk</div><div style="font-family:'DM Mono',monospace;font-size:24px;color:var(--amber)">${risk}</div></div>
       <div style="background:var(--bg);padding:14px;text-align:center;${late?'box-shadow:inset 0 -3px 0 var(--red)':''}"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:${late?'var(--red)':'var(--muted)'};margin-bottom:6px">Late</div><div style="font-family:'DM Mono',monospace;font-size:24px;color:${late?'var(--red)':'var(--ink)'}">${late}</div></div>
     </div>
-    ${rows.join('') || '<div style="padding:26px;text-align:center;color:var(--muted);font-size:11px">No styles with drop dates yet.</div>'}
+    ${rsTl.html}
+    ${rows.join('') || (rsTl.html ? '' : '<div style="padding:26px;text-align:center;color:var(--muted);font-size:11px">No styles with drop dates yet.</div>')}
     ${undated.length ? `<div style="margin-top:18px">
       <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">No drop date — not on the timeline</div>
       ${undated.map(s => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px">
@@ -15262,7 +15283,18 @@ function openDp(styleId) {
     <div class="dp-full" style="padding:10px 0 4px;border-top:1px solid var(--border);display:flex;flex-wrap:wrap;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="openColorwayModal('${s.id}')">Colorways (${(s.colorways||[]).length})</button>
       <button class="btn btn-ghost btn-sm" onclick="dpViewTechPack()">Tech Pack</button>
+      <button class="btn btn-ghost btn-sm" onclick="rsStart('${s.id}')" title="Make this style again: quantity, factory, BOM, fabric and dates in one place">Restock</button>
     </div>
+    ${(function(){ try {
+      const runs = rsRuns().filter(po => po.styleId === s.id && poOpen(po));
+      if (!runs.length) return '';
+      return '<div class="dp-full" style="padding:6px 0 4px;display:flex;flex-direction:column;gap:4px">' + runs.map(po => {
+        const nx = rsNextMs(po), miss = rsMissing(po);
+        return '<button class="btn btn-ghost btn-sm" style="text-align:left;justify-content:flex-start;white-space:normal" onclick="rsOpen(\'' + po.id + '\')">Restock ' + slEsc(po.id) + ' · ' + (po.units||0) + ' units'
+          + (po.inStockBy ? ' · in stock by ' + slEsc(veniaDate(po.inStockBy)) : '')
+          + (miss.length ? ' · ' + miss.length + ' to settle' : nx ? ' · next ' + slEsc(nx.l) : '') + '</button>';
+      }).join('') + '</div>';
+    } catch(e){ return ''; } })()}
   `;
 
   // The actions belong in the photograph's column on a wide panel and under it
@@ -18306,7 +18338,7 @@ function renderInventory(filter='all') {
         <td data-label="Units sold" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)"${soldShared?` title="${esc(styleSalesNote(soldRaw,s))}"`:''}>${sold}${soldShared?'<span style="color:var(--amber);margin-left:4px;font-size:9px">shared</span>':''}</td>
         <td data-label="Retail" style="font-family:'DM Mono',monospace;font-size:11px">${s.retail?'$'+s.retail:'—'}</td>
         <td data-label="Stock value" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--ink)">$${stockVal}</td>
-        <td data-label="Reorder qty"><input type="number" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" placeholder="Qty" value="${s.reorderQty||''}" onchange="setReorderQty('${s.id}',this.value)" onclick="event.stopPropagation()"></td>
+        <td data-label="Reorder qty"><input type="number" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" placeholder="Qty" value="${s.reorderQty||''}" onchange="setReorderQty('${s.id}',this.value)" onclick="event.stopPropagation()"> <button class="btn btn-ghost btn-sm" style="margin-left:4px" onclick="event.stopPropagation();rsStart('${s.id}')" title="Start a restock with this quantity">Restock</button></td>
       </tr>`;
     }).join('')}
     </tbody></table></div>`;
@@ -18372,14 +18404,42 @@ function matOnOrder(matId){
 function matRequired(matId){
   let req = 0;
   (STATE.styles||[]).filter(s => s.status !== 'archived').forEach(s => {
-    const openUnits = poUnitsForStyle(s.id);
+    // Restocks (Build 674) carry their own BOM: their units are counted
+    // against it, and only the rest against the style's BOM.
+    const runUnits = matRunUnits(s.id);
+    const openUnits = Math.max(0, poUnitsForStyle(s.id) - runUnits);
     if (!openUnits) return;
     ((STATE.bom||{})[s.id]||[]).filter(r => r.matId === matId).forEach(r => {
       const waste = parseFloat(r.waste)||0;
       req += (parseFloat(r.qty)||0) * (1 + waste/100) * openUnits;
     });
   });
+  (STATE.pos||[]).filter(po => po.kind === 'restock' && !['received','cancelled'].includes(po.status)).forEach(po => {
+    const left = (po.items||[]).reduce((a,it) => a + Math.max(0, (it.qty||0) - (it.receivedQty||0)), 0);
+    (po.bom||[]).filter(r => r.matId === matId).forEach(r => {
+      req += (parseFloat(r.qty)||0) * (1 + (parseFloat(r.waste)||0)/100) * left;
+    });
+  });
   return Math.round(req*10)/10;
+}
+function matRunUnits(styleId){
+  let n = 0;
+  (STATE.pos||[]).filter(po => po.kind === 'restock' && !['received','cancelled'].includes(po.status)).forEach(po =>
+    (po.items||[]).forEach(it => { if (it.styleId === styleId) n += Math.max(0, (it.qty||0) - (it.receivedQty||0)); }));
+  return n;
+}
+// The styles on open POs whose BOM line for this material has no usage per
+// unit: their need can't be worked out, so a 0 would be a false "nothing".
+function matUsageMissing(matId){
+  const out = [];
+  (STATE.styles||[]).filter(s => s.status !== 'archived').forEach(s => {
+    if (Math.max(0, poUnitsForStyle(s.id) - matRunUnits(s.id)) <= 0) return;
+    if (((STATE.bom||{})[s.id]||[]).some(r => r.matId === matId && !(parseFloat(r.qty) > 0))) out.push(s.name || s.styleId);
+  });
+  (STATE.pos||[]).filter(po => po.kind === 'restock' && !['received','cancelled'].includes(po.status)).forEach(po => {
+    if ((po.bom||[]).some(r => r.matId === matId && !(parseFloat(r.qty) > 0))) out.push((typeof rsTitle === 'function' ? rsTitle(po) : po.id) + ' restock');
+  });
+  return out;
 }
 window.matSetOnHand = function(matId, v){
   const m = (STATE.materials||[]).find(x => x.id === matId); if (!m) return;
@@ -18392,7 +18452,9 @@ window.matSetOnHand = function(matId, v){
 window.poOrderFabric = function(matId){
   const m = (STATE.materials||[]).find(x => x.id === matId); if (!m) return;
   const need = Math.max(0, matRequired(matId) - (parseFloat(m.qtyOnHand)||0) - matOnOrder(matId));
-  const qtyStr = prompt('Order how much ' + (m.name||'fabric') + '? (' + (m.unit||'yd') + ')' + (need ? '\nShortfall vs open POs: ' + need : ''), need ? String(Math.ceil(need)) : '');
+  const noUse = matUsageMissing(matId);
+  const qtyStr = prompt('Order how much ' + (m.name||'fabric') + '? (' + (m.unit||'yd') + ')' + (need ? '\nShortfall vs open POs: ' + need : '')
+    + (noUse.length ? '\nNo usage per unit yet on: ' + noUse.join(', ') + ' — their need isn\'t counted.' : ''), need ? String(Math.ceil(need)) : '');
   if (qtyStr == null) return;
   const qty = parseFloat(qtyStr);
   if (isNaN(qty) || qty <= 0){ showToast('Enter a quantity'); return; }
@@ -18535,7 +18597,13 @@ function renderProduction(){
   const rows = pos.slice().sort((a,b)=>String(b.createdAt||'').localeCompare(String(a.createdAt||''))).map(po=>{
     const { dep, bal } = poAmounts(po);
     const pay = (paidAt, amt, tag) => `<span title="${tag} ${veniaMoney(amt, { cents: 'auto' })}" style="font-family:'DM Mono',monospace;font-size:10px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
-    const msLine = (po.type !== 'fabric' && po.ms && Object.keys(po.ms).some(k => po.ms[k] && po.ms[k].date)) ? (() => {
+    const msLine = po.kind === 'restock' ? (() => {
+      const nx = rsNextMs(po), miss = rsMissing(po);
+      if (miss.length) return `<div style="font-size:10px;margin-top:3px;color:var(--amber)">To settle: ${slEsc(miss.join(' · '))}</div>`;
+      if (!nx) return '';
+      const late = nx.date < new Date().toISOString().slice(0,10);
+      return `<div style="font-size:10px;margin-top:3px;font-family:'DM Mono',monospace;color:${late?'var(--red)':'var(--muted)'}">Next: ${slEsc(nx.l)} ${slEsc(nx.date.slice(5))}${late?' ⚠':''}</div>`;
+    })() : (po.type !== 'fabric' && po.ms && Object.keys(po.ms).some(k => po.ms[k] && po.ms[k].date)) ? (() => {
       const today = new Date().toISOString().slice(0,10);
       return `<div style="font-size:10px;margin-top:3px;display:flex;gap:8px;flex-wrap:wrap">${PO_MILESTONES.map(([k,l]) => {
         const m = po.ms[k]; if (!m || !m.date) return '';
@@ -18543,8 +18611,8 @@ function renderProduction(){
         return `<span style="font-family:'DM Mono',monospace;color:${m.done?'var(--green)':late?'var(--red)':'var(--muted)'}">${l.split(' ')[0]} ${m.done?'✓':m.date.slice(5)}${late?' ⚠':''}</span>`;
       }).filter(Boolean).join('')}</div>`;
     })() : '';
-    return `<tr onclick="poOpenModal('${po.id}')" style="cursor:pointer">
-      <td data-label=""><div class="t-name">${po.id}${po.type==='fabric'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">FABRIC</span>':''}</div><div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div>${msLine}</td>
+    return `<tr onclick="${po.kind==='restock'?'rsOpen':'poOpenModal'}('${po.id}')" style="cursor:pointer">
+      <td data-label=""><div class="t-name">${po.id}${po.type==='fabric'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">FABRIC</span>':''}${po.kind==='restock'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">RESTOCK</span> <span style="font-size:11px;font-weight:400">'+slEsc(rsTitle(po))+'</span>':''}${po.runId?' <span style="font-size:10px;color:var(--muted)">for '+slEsc(po.runId)+'</span>':''}</div><div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div>${msLine}</td>
       <td data-label="Units" style="font-family:'DM Mono',monospace;font-size:11px">${po.type==='fabric' ? (po.qty||0)+' '+slEsc(po.unit||'yd') : (po.units||0) + ((po.items||[]).some(it=>it.receivedQty) ? ' <span style="color:var(--teal)">('+(po.items||[]).reduce((a,it)=>a+(it.receivedQty||0),0)+' in)</span>' : '')}</td>
       <td data-label="Total" style="font-family:'DM Mono',monospace;font-size:11px">${slMoneyC(po.currency, po.total||0)}</td>
       <td data-label="Payments" class="po-pay-cell">${pay(po.depositPaidAt, dep, 'D')}${pay(po.balancePaidAt, bal, 'B')}</td>
@@ -18566,7 +18634,7 @@ function renderProduction(){
       try { return poDemandHTML(PO_DEMAND_SEASON, seasons); } catch(e){ return ''; }
     })()}
     <div class="sec-head"><div class="sec-title">Purchase Orders</div>
-      <div class="sec-actions"><button class="btn btn-gold btn-sm" onclick="poOpenModal(null)">+ New PO</button></div></div>
+      <div class="sec-actions" style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsPickStyle()" title="Make a style that already exists again">+ Restock</button><button class="btn btn-gold btn-sm" onclick="poOpenModal(null)">+ New PO</button></div></div>
     ${pos.length ? `<div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
       <th>PO / Factory</th><th>Units</th><th>Total</th><th>Payments</th><th>Ex-factory</th><th>Status</th>
     </tr></thead><tbody>${rows}</tbody></table></div>`
@@ -18628,6 +18696,13 @@ window.poReadItems = function(){
 };
 window.poRecalc = function(){
   const cur = (document.getElementById('po-currency')||{}).value || 'USD';
+  const fixed = document.getElementById('po-fixed-total');
+  if (fixed){
+    const total = parseFloat(fixed.dataset.total)||0, pct = parseFloat((document.getElementById('po-deposit-pct')||{}).value)||0;
+    const sv = document.getElementById('po-split-view');
+    if (sv) sv.textContent = pct>0 ? `deposit ${slMoneyC(cur, total*pct/100)} · balance ${slMoneyC(cur, total*(100-pct)/100)}` : '';
+    return;
+  }
   let units=0, total=0;
   document.querySelectorAll('#po-items .sl-q-item').forEach(r=>{
     let u=0; r.querySelectorAll('.sl-qi-sz').forEach(i=>u+=parseInt(i.value,10)||0);
@@ -18692,7 +18767,17 @@ window.poOpenModal = function(id){
         <div><div style="${lbl}">Season</div><input id="po-season" type="text" style="${fld}" value="${slEsc(po?.season||(typeof RP_SEASON==='string'&&RP_SEASON?RP_SEASON:''))}" placeholder="FW26"></div>
         <div><div style="${lbl}">Currency</div><select id="po-currency" style="${fld}" onchange="poRecalc()">${curOpts}</select></div>
       </div>
-      <div>
+      ${po && (po.type === 'fabric' || po.kind === 'restock') ? `<div>
+        <div style="${lbl}">${po.type === 'fabric' ? 'Fabric' : 'Restock'}</div>
+        <div id="po-fixed-total" data-total="${po.total||0}" style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">
+          <span style="font-size:12px">${po.type === 'fabric'
+            ? slEsc((po.qty||0) + ' ' + (po.unit||'yd') + ' of ' + (((STATE.materials||[]).find(m => m.id === po.materialId)||{}).name || 'fabric'))
+            : slEsc((po.units||0) + ' units · ' + rsTitle(po) + (((po.items||[])[0]||{}).colorway ? ' · ' + po.items[0].colorway : ''))}
+            <span style="color:var(--muted);font-size:10px;margin-left:6px">${po.kind === 'restock' ? 'Change it on the restock card' : ''}</span></span>
+          <span style="font-family:'DM Mono',monospace;font-size:16px;font-weight:600">${slMoneyC(cur, po.total||0)}</span>
+        </div>
+        <div id="po-split-view" style="font-size:9.5px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:4px;text-align:right"></div>
+      </div>` : `<div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap">
           <div style="${lbl};margin:0">Order lines — style · colorway · size run · unit cost</div>
           <div style="display:flex;gap:6px">
@@ -18706,7 +18791,7 @@ window.poOpenModal = function(id){
           <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)">Total</span>
           <span id="po-total-view" style="font-family:'DM Mono',monospace;font-size:16px;font-weight:600">${slMoneyC(cur, po?.total||0)}</span>
         </div>
-      </div>
+      </div>`}
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
         <div><div style="${lbl}">Deposit %</div><input id="po-deposit-pct" type="number" min="0" max="100" style="${fld}" value="${po?(po.depositPct!=null?po.depositPct:30):30}" oninput="poRecalc()"></div>
         <div><div style="${lbl}">Ex-factory date</div><input id="po-exfactory" type="date" style="${fld}" value="${slEsc(po?.exFactory||'')}"></div>
@@ -18717,7 +18802,8 @@ window.poOpenModal = function(id){
         ${payRow('Deposit', dep, po.depositDue, po.depositPaidAt, 'po-dep-due', 'poMarkDepositPaid')}
         ${payRow('Balance', bal, po.balanceDue, po.balancePaidAt, 'po-bal-due', 'poMarkBalancePaid')}
       </div>` : ''}
-      ${po && po.type !== 'fabric' ? `<div>
+      ${po && po.kind === 'restock' ? `<div style="font-size:11px;color:var(--muted);display:flex;gap:10px;align-items:center;flex-wrap:wrap">Milestones, BOM and fabric for this restock live on its card. <button class="btn btn-ghost btn-sm" onclick="closeModal('po-modal');rsOpen('${po.id}')">Open the restock card</button></div>` : ''}
+      ${po && po.type !== 'fabric' && po.kind !== 'restock' ? `<div>
         <div style="${lbl};margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:10px"><span>WIP milestones — planned dates between placed and ex-factory</span><button class="btn btn-ghost btn-sm" onclick="poSeedMilestones()" title="Fill blank dates backward from ex-factory using the vendor's lead time">⚡ Suggest dates</button></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px">
           ${PO_MILESTONES.map(([k,l]) => `
@@ -18769,11 +18855,20 @@ window.poSave = function(existingId){
     if (!Object.keys(data.ms).length) delete data.ms;
   }
   if (!data.vendor){ showToast('Name the factory'); return; }
-  if (!items.length){ showToast('Add at least one style with units'); return; }
+  // A fabric PO has yardage, not style lines: its quantity and total come from
+  // the material order and stay as they are (Build 674 — before this, a
+  // fabric PO could not be saved from this window at all).
+  const was = existingId ? (poList().find(p => p.id === existingId)||{}) : {};
+  const wasFabric = was.type === 'fabric' || was.kind === 'restock';   // lines are kept as they are
+  if (wasFabric){ delete data.items; delete data.units; delete data.total; }
+  else if (!items.length){ showToast('Add at least one style with units'); return; }
   const pos = poList();
   if (existingId){
     const idx = pos.findIndex(p=>p.id===existingId);
     if (idx>=0) pos[idx] = { ...pos[idx], ...data };
+    try { if (idx>=0 && pos[idx].runId) rsSyncFromFabric(pos[idx].runId); } catch(e){}
+    // A restock's ex-factory is also its milestone: keep the two the same.
+    try { if (idx>=0 && pos[idx].kind === 'restock' && data.exFactory){ pos[idx].ms = pos[idx].ms || {}; const m = pos[idx].ms.exf || {}; if (m.date !== data.exFactory) pos[idx].ms.exf = { date: data.exFactory, done: !!m.done }; } } catch(e){}
   } else {
     data.id = 'PO-' + Date.now().toString(36).toUpperCase();
     data.createdAt = new Date().toISOString();
@@ -18781,7 +18876,7 @@ window.poSave = function(existingId){
   }
   save();
   closeModal('po-modal');
-  try { logActivity('Production PO ' + (existingId||data.id) + ' saved — ' + data.vendor + ' · ' + units + ' units'); } catch(e){}
+  try { logActivity('Production PO ' + (existingId||data.id) + ' saved — ' + data.vendor + ' · ' + (wasFabric ? (was.units||0) : units) + ' units'); } catch(e){}
   try { window.updateInventoryNav && window.updateInventoryNav(); } catch(e){}
   renderProduction();
   showToast(existingId ? 'PO updated' : 'PO ' + data.id + ' created');
@@ -18796,6 +18891,7 @@ window.poReceive = function(id){
     if (!confirm('Receive fabric PO ' + id + ' — add ' + (po.qty||0) + ' ' + (po.unit||'yd') + (m ? ' of ' + m.name : '') + ' into material stock?')) return;
     if (m) m.qtyOnHand = Math.round(((parseFloat(m.qtyOnHand)||0) + (parseFloat(po.qty)||0)) * 100) / 100;
     po.status = 'received'; po.receivedAt = new Date().toISOString(); po.updatedAt = po.receivedAt;
+    try { if (po.runId) rsSyncFromFabric(po.runId); } catch(e){}
     save();
     try { logActivity('Fabric PO ' + id + ' received — ' + (po.qty||0) + ' ' + (po.unit||'yd') + ' into material stock'); } catch(e){}
     closeModal('po-modal'); renderProduction();
@@ -18836,6 +18932,500 @@ window.poDelete = async function(id){
   if (!(await veniaConfirm('Delete ' + id + '?', { ok: 'Delete the PO', danger: true }))) return;
   STATE.pos = poList().filter(p=>p.id!==id);
   save(); closeModal('po-modal'); renderProduction();
+};
+
+// ═══════════════════════════════════════════════
+//  RESTOCK (Build 674) — produce or restock a style that already exists
+//  A restock is a garment PO with kind:'restock' and a few optional fields:
+//  inStockBy, leadDays, vendorId, dyeHouse, colour, its own BOM copy (bom),
+//  linked fabric POs (fabricPoIds) and milestones worked back from the
+//  in-stock date (ms). Nothing new is stored outside STATE.pos, so it saves
+//  and syncs with Product exactly like any PO, and payments, receiving and
+//  the demand plan keep working on it unchanged.
+// ═══════════════════════════════════════════════
+const RS_MS = [
+  ['fabricOrd','Fabric ordered'], ['fabricIn','Fabric in'], ['approval','Lab dip / TOP'],
+  ['cut','Cut'], ['dye','Dye'], ['packed','Packed'], ['exf','Ex-factory'],
+  ['arrived','Arrived'], ['instock','In stock'],
+];
+const RS_MS_LBL = Object.fromEntries(RS_MS);
+const RS_DEFAULT_LEAD = 45;       // the OS's production default (tlSchedule)
+const RS_FABRIC_LEAD = 21;        // when a material has no lead days of its own
+const RS_TRANSIT = 14;            // ex-factory → arrived
+function rsIsRun(po){ return !!(po && po.kind === 'restock'); }
+function rsRuns(){ return poList().filter(rsIsRun); }
+function rsOpenRuns(){ return rsRuns().filter(poOpen); }
+function rsStyle(po){ return (STATE.styles||[]).find(s => s.id === (po.styleId || ((po.items||[])[0]||{}).styleId)) || null; }
+function rsIso(d){ const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0,10); }
+function rsBack(iso, days){ const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() - days); return rsIso(d); }
+function rsSizesFor(s){ try { return expandSizes(s && s.sizes); } catch(e){ return []; } }
+function rsLineNeed(line, units){
+  const q = parseFloat(line.qty)||0, w = parseFloat(line.waste)||0;
+  return Math.round(q * (1 + w/100) * (units||0) * 10) / 10;
+}
+function rsIsFabricLine(l){ return /^(fabric|lining)$/i.test(String(l.lineType || l.matType || '')); }
+// The BOM a run starts from: the style's own BOM, or (when it has none) the
+// shell fabric the style names. Usage per unit is never invented — a line with
+// no usage says so, everywhere its need would be shown.
+function rsBomFromStyle(s){
+  const src = ((STATE.bom||{})[s.id] || []).map(l => ({
+    matName: l.matName||'', matId: l.matId||'', lineType: l.lineType || l.matType || 'Fabric',
+    qty: parseFloat(l.qty)||0, unit: l.unit||'yd', waste: l.waste||'', supplier: l.supplier||'',
+    costPerUnit: parseFloat(l.costPerUnit)||0, placement: l.placement||'',
+  }));
+  if (src.length) return src;
+  const out = [];
+  const fab = String(s.fabric||'').trim();
+  const m = fab ? bomMatFor(s.fabricMatId || fab) : null;
+  out.push({ matName: m ? m.name : fab, matId: m ? m.id : '', lineType: 'Fabric', qty: 0, unit: m ? (m.unit||'yd') : 'yd',
+    waste: '', supplier: m ? (m.supplier||'') : '', costPerUnit: m ? (parseFloat(m.costPerUnit)||0) : 0, placement: 'Shell' });
+  return out;
+}
+function rsSchedule(inStockBy, lead, fabricLead){
+  const L = parseInt(lead,10) || RS_DEFAULT_LEAD, F = parseInt(fabricLead,10) || RS_FABRIC_LEAD;
+  const arrived = 3, exf = arrived + RS_TRANSIT, packed = exf + 3, dye = packed + 8,
+        cut = exf + L, approval = cut + 7, fabricIn = approval + 7, fabricOrd = fabricIn + F;
+  const off = { instock:0, arrived, exf, packed, dye, cut, approval, fabricIn, fabricOrd };
+  const out = {};
+  Object.keys(off).forEach(k => { out[k] = rsBack(inStockBy, off[k]); });
+  return out;
+}
+function rsFabricLead(po){
+  let best = 0;
+  (po.bom||[]).filter(rsIsFabricLine).forEach(l => {
+    const m = l.matId ? bomMatFor(l.matId) : null;
+    best = Math.max(best, parseInt(m && m.leadDays,10) || 0);
+  });
+  return best || RS_FABRIC_LEAD;
+}
+// What still stands between this run and the factory. Each entry is short
+// enough for Today and for the card's badge.
+function rsMissing(po){
+  const out = [];
+  if (!(po.units > 0)) out.push('no quantity');
+  if (!po.inStockBy) out.push('no in-stock date');
+  if (!po.vendor) out.push('no factory');
+  if (!po.dyeHouse) out.push('no dye decision');
+  const bom = po.bom || [];
+  if (!bom.length) out.push('no BOM');
+  const noUse = bom.filter(l => !(parseFloat(l.qty) > 0)).length;
+  if (noUse) out.push(noUse + ' BOM line' + (noUse>1?'s':'') + ' without usage');
+  const ordered = new Set(po.fabricPoIds||[]);
+  const linkedMats = new Set(poList().filter(x => ordered.has(x.id)).map(x => x.materialId));
+  const unordered = bom.filter(l => rsIsFabricLine(l) && !linkedMats.has(l.matId)
+    && !(l.matId && matIsVendorManaged(bomMatFor(l.matId)))).length;
+  if (unordered) out.push('fabric not ordered');
+  return out;
+}
+function rsNextMs(po){
+  const ms = po.ms || {};
+  for (const [k, l] of RS_MS){ const m = ms[k]; if (m && m.date && !m.done) return { k, l, date: m.date }; }
+  return null;
+}
+function rsTitle(po){ const s = rsStyle(po); return (s ? s.name : 'Restock'); }
+// A run's fabric milestones follow its linked fabric POs: placed (or later)
+// ticks "Fabric ordered", received ticks "Fabric in". Called when a fabric PO
+// is saved or received from Production, so the run never says late for an
+// order that went out.
+function rsSyncFromFabric(runId){
+  const run = poList().find(p => p.id === runId && rsIsRun(p)); if (!run) return;
+  const fab = poList().filter(p => (run.fabricPoIds||[]).includes(p.id) && p.status !== 'cancelled');
+  if (!fab.length) return;
+  const today = rsIso(new Date());
+  run.ms = run.ms || {};
+  const set = (k) => { const m = run.ms[k] || {}; if (!m.done) run.ms[k] = { date: m.date || today, done: true }; };
+  if (fab.every(p => p.status !== 'draft')) set('fabricOrd');
+  if (fab.every(p => p.status === 'received')) set('fabricIn');
+}
+window.rsSyncFromFabric = rsSyncFromFabric;
+
+// ── The card ────────────────────────────────────────────────────────────────
+let RS_DRAFT = null;   // the run being edited (a copy until Save)
+window.rsStart = function(styleId){
+  const s = (STATE.styles||[]).find(x => x.id === styleId); if (!s) return;
+  const open = rsOpenRuns().find(po => po.styleId === s.id);
+  if (open){ rsOpen(open.id); showToast('This style already has an open restock — opened it'); return; }
+  const qty = parseInt(s.reorderQty,10) || 0;
+  const sizes = rsSizesFor(s);
+  RS_DRAFT = {
+    kind: 'restock', styleId: s.id, colour: s.colors || '',
+    qty, sizes: sizes.length ? poSpreadSizes(sizes, qty) : {},
+    inStockBy: '', leadDays: (parseInt(s.lead,10) >= 21 ? parseInt(s.lead,10) : RS_DEFAULT_LEAD),
+    vendor: s.vendor || '', vendorId: s.vendorId || '', dyeHouse: '',
+    cost: Math.round((landedCost(s)||0)*100)/100,
+    bom: rsBomFromStyle(s), fabricPoIds: [], ms: {},
+    season: String(s.season||'').trim(), currency: 'USD', depositPct: 30, status: 'draft', notes: '',
+  };
+  rsRender(null);
+};
+window.rsOpen = function(id){
+  const po = poList().find(p => p.id === id); if (!po) return;
+  RS_DRAFT = JSON.parse(JSON.stringify(po));
+  const it = (po.items||[])[0] || {};
+  RS_DRAFT.qty = it.qty || po.units || 0;
+  RS_DRAFT.sizes = it.sizes || {};
+  RS_DRAFT.cost = it.cost || 0;
+  rsRender(id);
+};
+function rsReadForm(){
+  const d = RS_DRAFT; if (!d) return;
+  const v = (id) => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  const s = rsStyle(d);
+  const sizes = rsSizesFor(s);
+  if (sizes.length){
+    d.sizes = {};
+    sizes.forEach(sz => { const n = parseInt(v('rs-sz-'+sz),10)||0; if (n) d.sizes[sz] = n; });
+    d.qty = Object.values(d.sizes).reduce((a,b) => a+b, 0);
+  } else if (v('rs-qty') !== undefined) d.qty = Math.max(0, parseInt(v('rs-qty'),10)||0);
+  if (v('rs-colour') !== undefined) d.colour = v('rs-colour').trim();
+  if (v('rs-instock') !== undefined) d.inStockBy = v('rs-instock');
+  if (v('rs-lead') !== undefined) d.leadDays = parseInt(v('rs-lead'),10) || RS_DEFAULT_LEAD;
+  if (v('rs-cost') !== undefined) d.cost = Math.max(0, parseFloat(v('rs-cost'))||0);
+  if (v('rs-status') !== undefined) d.status = v('rs-status');
+  if (v('rs-notes') !== undefined) d.notes = v('rs-notes').trim();
+  const fv = v('rs-factory');
+  if (fv !== undefined){
+    const vend = (STATE.vendors||[]).find(x => x.id === fv);
+    d.vendorId = vend ? vend.id : ''; d.vendor = vend ? vend.name : '';
+  }
+  if (v('rs-dye') !== undefined) d.dyeHouse = v('rs-dye');
+  (d.bom||[]).forEach((l, i) => {
+    const q = v('rs-bq-'+i); if (q !== undefined) l.qty = Math.max(0, parseFloat(q)||0);
+    const w = v('rs-bw-'+i); if (w !== undefined) l.waste = w;
+    const m = v('rs-bm-'+i);
+    if (m !== undefined && m !== (l.matId||'')){
+      const mat = (STATE.materials||[]).find(x => x.id === m);
+      l.matId = mat ? mat.id : ''; if (mat){ l.matName = mat.name; l.unit = mat.unit || l.unit || 'yd'; l.supplier = mat.supplier || ''; l.costPerUnit = parseFloat(mat.costPerUnit)||0; }
+    }
+    const n = v('rs-bn-'+i); if (n !== undefined && !l.matId) l.matName = n.trim();
+    const t = v('rs-bt-'+i); if (t !== undefined) l.lineType = t;
+  });
+  RS_MS.forEach(([k]) => {
+    const dEl = document.getElementById('rs-ms-'+k), cEl = document.getElementById('rs-msd-'+k);
+    if (!dEl) return;
+    if (dEl.value || (cEl && cEl.checked)) (d.ms = d.ms || {})[k] = { date: dEl.value||'', done: !!(cEl && cEl.checked) };
+    else if (d.ms) delete d.ms[k];
+  });
+  d.units = d.qty || 0;
+}
+window.rsRefresh = function(){ rsReadForm(); rsRender(RS_DRAFT && RS_DRAFT.id || null); };
+window.rsFillDates = function(all){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d) return;
+  if (!d.inStockBy){ showToast('Set the in-stock date first'); return; }
+  const sch = rsSchedule(d.inStockBy, d.leadDays, rsFabricLead(d));
+  d.ms = d.ms || {};
+  RS_MS.forEach(([k]) => {
+    if (k === 'dye' && d.dyeHouse === 'none') { if (d.ms.dye && !d.ms.dye.done) delete d.ms.dye; return; }
+    const cur = d.ms[k];
+    if (cur && cur.done) return;
+    if (!all && cur && cur.date) return;
+    d.ms[k] = { date: sch[k], done: false };
+  });
+  rsRender(d.id || null);
+};
+window.rsAddLine = function(){ rsReadForm(); (RS_DRAFT.bom = RS_DRAFT.bom || []).push({ matName:'', matId:'', lineType:'Trim', qty:0, unit:'pc', waste:'', supplier:'', costPerUnit:0 }); rsRender(RS_DRAFT.id||null); };
+window.rsDelLine = function(i){ rsReadForm(); RS_DRAFT.bom.splice(i,1); rsRender(RS_DRAFT.id||null); };
+window.rsReloadBom = function(){
+  rsReadForm(); const s = rsStyle(RS_DRAFT); if (!s) return;
+  RS_DRAFT.bom = rsBomFromStyle(s); rsRender(RS_DRAFT.id||null);
+  showToast('BOM copied again from the style');
+};
+// Write this run's BOM back to the style, so the next run (and the tech pack)
+// start from it. Only on a tap, and only after a check: it replaces lines.
+window.rsSaveBomToStyle = async function(){
+  rsReadForm(); const s = rsStyle(RS_DRAFT); if (!s) return;
+  const had = ((STATE.bom||{})[s.id]||[]).length;
+  if (had && !(await veniaConfirm('Replace the ' + had + ' line' + (had>1?'s':'') + ' on ' + (s.name||'this style') + '\'s BOM with this restock\'s ' + RS_DRAFT.bom.length + '?', { ok: 'Replace the style BOM' }))) return;
+  STATE.bom = STATE.bom || {};
+  STATE.bom[s.id] = RS_DRAFT.bom.map(l => Object.assign({}, l, { matType: l.lineType }));
+  save();
+  try { logActivity('BOM for ' + (s.name||'') + ' updated from its restock'); } catch(e){}
+  showToast('Saved to the style\'s BOM', 'success');
+};
+function rsCommit(){
+  const d = RS_DRAFT; const s = rsStyle(d);
+  const item = { styleId: d.styleId, name: (s && s.styleId ? s.styleId + ' ' : '') + (s ? s.name : ''), qty: d.qty||0, sizes: d.sizes||{}, cost: d.cost||0 };
+  if (d.colour) item.colorway = d.colour;
+  const out = Object.assign({}, d, {
+    items: [item], units: d.qty||0, total: Math.round((d.qty||0) * (d.cost||0) * 100)/100,
+    exFactory: (d.ms && d.ms.exf && d.ms.exf.date) || d.exFactory || '',
+    updatedAt: new Date().toISOString(),
+  });
+  delete out.qty; delete out.sizes; delete out.cost;
+  const pos = poList();
+  if (d.id){
+    const i = pos.findIndex(p => p.id === d.id);
+    if (i >= 0) pos[i] = Object.assign({}, pos[i], out);
+  } else {
+    out.id = 'PO-' + Date.now().toString(36).toUpperCase();
+    out.createdAt = out.updatedAt;
+    pos.unshift(out);
+    RS_DRAFT.id = out.id;
+  }
+  save();
+  return out.id;
+}
+window.rsSave = function(close){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d) return;
+  const isNew = !d.id;
+  const id = rsCommit();
+  try { logActivity('Restock ' + id + ' saved — ' + rsTitle(d) + ' · ' + (d.qty||0) + ' units' + (d.inStockBy ? ' · in stock by ' + d.inStockBy : '')); } catch(e){}
+  try { window.updateInventoryNav && window.updateInventoryNav(); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  if (close) closeModal('rs-modal'); else rsRender(id);
+  showToast(isNew ? 'Restock ' + id + ' saved as a draft' : 'Restock saved', 'success');
+};
+// Order one fabric line: a fabric PO for exactly this run's need, linked both
+// ways (fabric PO .runId, run .fabricPoIds). Same rails as Materials' order.
+window.rsOrderFabric = function(i){
+  rsReadForm();
+  const d = RS_DRAFT; const l = (d.bom||[])[i]; if (!l) return;
+  const m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
+  if (!m){ showToast('Pick the material from Sourcing first, so the order has a supplier and a price'); return; }
+  if (!(parseFloat(l.qty) > 0)){ showToast('Add the usage per unit first — the order is usage × quantity'); return; }
+  if (!(d.qty > 0)){ showToast('Set the quantity first'); return; }
+  const need = rsLineNeed(l, d.qty);
+  const runId = rsCommit();
+  const qty = Math.ceil(need);
+  const cost = parseFloat(m.costPerUnit)||0;
+  const fpo = {
+    id: 'PO-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase(),
+    type: 'fabric', materialId: m.id, runId,
+    vendor: m.supplier || 'Mill', season: d.season || '',
+    qty, unit: m.unit || l.unit || 'yd', units: 0, items: [],
+    currency: 'USD', depositPct: 50, total: Math.round(qty * cost * 100)/100,
+    exFactory: '', status: 'draft', notes: 'Fabric for restock ' + runId + ' — ' + rsTitle(d),
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  };
+  poList().unshift(fpo);
+  const run = poList().find(p => p.id === runId);
+  run.fabricPoIds = (run.fabricPoIds||[]).concat(fpo.id);
+  d.fabricPoIds = run.fabricPoIds.slice();
+  // The fabric order is the first milestone: date it today if it had none.
+  run.ms = run.ms || {};
+  if (!run.ms.fabricOrd || !run.ms.fabricOrd.done) run.ms.fabricOrd = { date: (run.ms.fabricOrd && run.ms.fabricOrd.date) || rsIso(new Date()), done: false };
+  d.ms = JSON.parse(JSON.stringify(run.ms));
+  save();
+  try { logActivity('Fabric PO ' + fpo.id + ' drafted for restock ' + runId + ' — ' + qty + ' ' + fpo.unit + ' of ' + m.name); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  rsRender(runId);
+  showToast('Fabric PO ' + fpo.id + ' drafted — ' + qty + ' ' + fpo.unit + '. Place it from Production when the mill confirms', 'success');
+};
+window.rsDelete = async function(){
+  const d = RS_DRAFT; if (!d || !d.id) { closeModal('rs-modal'); return; }
+  if (!(await veniaConfirm('Delete restock ' + d.id + '? Linked fabric POs stay.', { ok: 'Delete the restock', danger: true }))) return;
+  STATE.pos = poList().filter(p => p.id !== d.id);
+  save(); closeModal('rs-modal');
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+};
+window.rsPayments = function(){ rsSave(true); setTimeout(() => poOpenModal(RS_DRAFT.id), 60); };
+
+function rsRender(id){
+  const d = RS_DRAFT; if (!d) return;
+  const s = rsStyle(d);
+  if (!s){ showToast('That style is gone'); return; }
+  const fld = 'width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:12px;min-height:38px';
+  const lbl = 'font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
+  const stock = (function(){ try { return invStockEffective(s).units; } catch(e){ return s.stock||0; } })();
+  const sizes = rsSizesFor(s);
+  const units = d.qty || 0;
+  const missing = rsMissing(Object.assign({}, d, { units }));
+  const factories = (STATE.vendors||[]).filter(v => !v.type || /factory|manufactur|atelier/i.test(v.type));
+  const others = (STATE.vendors||[]);
+  const factoryOpts = `<option value="">— pick a factory —</option>` + factories.map(v =>
+    `<option value="${slEsc(v.id)}" ${d.vendorId===v.id || (!d.vendorId && d.vendor && d.vendor===v.name)?'selected':''}>${slEsc(v.name)}${v.country?' · '+slEsc(v.country):''}</option>`).join('');
+  const dyeOpts = `<option value="" ${!d.dyeHouse?'selected':''}>— decide —</option>`
+    + `<option value="none" ${d.dyeHouse==='none'?'selected':''}>Not dyed</option>`
+    + `<option value="factory" ${d.dyeHouse==='factory'?'selected':''}>Factory dyes it</option>`
+    + others.map(v => `<option value="${slEsc(v.id)}" ${d.dyeHouse===v.id?'selected':''}>${slEsc(v.name)}</option>`).join('');
+  const matOpts = (sel) => `<option value="">— type a name or pick —</option>` + (STATE.materials||[]).map(m =>
+    `<option value="${slEsc(m.id)}" ${sel===m.id?'selected':''}>${slEsc(m.name)}${m.supplier?' · '+slEsc(m.supplier):''}</option>`).join('');
+  const types = ['Fabric','Lining','Trim','Label','Packaging','Dye','Thread','Hardware'];
+  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id));
+  const bomRows = (d.bom||[]).map((l, i) => {
+    const need = rsLineNeed(l, units);
+    const noUse = !(parseFloat(l.qty) > 0);
+    const fpo = linked.find(p => p.materialId && p.materialId === l.matId);
+    const vm = l.matId && matIsVendorManaged(bomMatFor(l.matId));
+    const act = !rsIsFabricLine(l) ? ''
+      : vm ? '<span style="font-size:10px;color:var(--muted)">Factory buys it</span>'
+      : fpo ? `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[fpo.status]||fpo.status)}</span>`
+      : `<button class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order fabric</button>`;
+    return `<tr>
+      <td data-label="Line"><select id="rs-bt-${i}" style="${fld};min-width:84px" onchange="rsRefresh()">${types.map(t => `<option ${String(l.lineType||'')===t?'selected':''}>${t}</option>`).join('')}</select></td>
+      <td data-label="Material"><select id="rs-bm-${i}" style="${fld};min-width:140px" onchange="rsRefresh()">${matOpts(l.matId)}</select>
+        ${l.matId ? '' : `<input id="rs-bn-${i}" type="text" style="${fld};margin-top:4px" value="${slEsc(l.matName||'')}" placeholder="Name, e.g. cotton gauze">`}</td>
+      <td data-label="Per unit"><div style="display:flex;gap:4px;align-items:center"><input id="rs-bq-${i}" type="number" min="0" step="0.01" style="${fld};width:78px;${noUse?'border-color:var(--red)':''}" value="${noUse?'':l.qty}" placeholder="?" onchange="rsRefresh()"><span style="font-size:10px;color:var(--muted)">${slEsc(l.unit||'')}</span></div>
+        ${noUse?'<div style="font-size:10px;color:var(--red);margin-top:3px">Usage missing</div>':''}</td>
+      <td data-label="Waste %"><input id="rs-bw-${i}" type="number" min="0" style="${fld};width:56px" value="${slEsc(l.waste||'')}" placeholder="0" onchange="rsRefresh()"></td>
+      <td data-label="Need" style="font-family:'DM Mono',monospace;font-size:12px;white-space:nowrap">${noUse ? '<span style="color:var(--red)">—</span>' : units ? need + ' ' + slEsc(l.unit||'') : '<span style="color:var(--muted)">set qty</span>'}</td>
+      <td data-label=""><div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">${act}<button class="btn btn-ghost btn-sm" style="padding:4px 8px" title="Remove this line" aria-label="Remove line" onclick="rsDelLine(${i})">✕</button></div></td>
+    </tr>`;
+  }).join('');
+  const today = rsIso(new Date());
+  const msCells = RS_MS.map(([k, l]) => {
+    const m = (d.ms||{})[k] || {};
+    const late = m.date && !m.done && m.date < today;
+    const skip = k === 'dye' && d.dyeHouse === 'none';
+    return `<div style="${skip?'opacity:.45':''}">
+      <div style="font-size:10px;color:${late?'var(--red)':'var(--muted)'};margin-bottom:3px;letter-spacing:.5px">${l}${late?' · late':''}</div>
+      <input id="rs-ms-${k}" type="date" value="${slEsc(m.date||'')}" style="${fld};padding:5px;${late?'border-color:var(--red)':''}" ${skip?'disabled':''}>
+      <label style="font-size:10px;color:var(--muted);display:flex;gap:4px;align-items:center;margin-top:3px;cursor:pointer"><input id="rs-msd-${k}" type="checkbox" ${m.done?'checked':''} ${skip?'disabled':''}> done</label>
+    </div>`;
+  }).join('');
+  const stOpts = Object.entries(PO_STATUSES).map(([k,v]) => `<option value="${k}" ${(d.status||'draft')===k?'selected':''}>${v}</option>`).join('');
+  const leadNote = (s.lead && parseInt(s.lead,10) < 21) ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">The style says ${slEsc(s.lead)} with no unit</div>` : '';
+  const qtyBlock = sizes.length
+    ? `<div><div style="${lbl}">Quantity by size · ${units} total</div><div style="display:flex;gap:6px;flex-wrap:wrap">${sizes.map(sz =>
+        `<label style="display:flex;flex-direction:column;font-size:10px;color:var(--muted);gap:2px">${slEsc(sz)}<input id="rs-sz-${slEsc(sz)}" type="number" min="0" style="${fld};width:62px" value="${(d.sizes||{})[sz]||''}" onchange="rsRefresh()"></label>`).join('')}</div></div>`
+    : `<div><div style="${lbl}">Quantity · one size</div><input id="rs-qty" type="number" min="0" inputmode="numeric" style="${fld}" value="${units||''}" placeholder="Units" onchange="rsRefresh()"></div>`;
+
+  const ex0 = document.getElementById('rs-modal'); if (ex0) ex0.remove();
+  const ov = document.createElement('div');
+  ov.className = 'overlay'; ov.id = 'rs-modal';
+  ov.innerHTML = `<div class="modal" style="width:760px;max-width:96vw">
+    <div class="modal-head"><div style="min-width:0">
+        <div class="modal-title">Restock · ${slEsc(s.name||'')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${stock} in stock${s.season?' · '+slEsc(s.season):''}${d.id?' · '+slEsc(d.id):' · not saved yet'}</div>
+      </div><button class="modal-close" aria-label="Close" onclick="closeModal('rs-modal')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:16px;max-height:82vh;overflow-y:auto">
+      <div id="rs-missing" style="font-size:11px;padding:8px 10px;border:1px solid ${missing.length?'var(--amber)':'var(--green)'};color:${missing.length?'var(--amber)':'var(--green)'}">
+        ${missing.length ? '<b>Still to settle:</b> ' + missing.map(slEsc).join(' · ') : 'Everything the factory needs is here.'}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
+        ${qtyBlock}
+        <div><div style="${lbl}">Colour</div><input id="rs-colour" type="text" style="${fld}" value="${slEsc(d.colour||'')}" placeholder="e.g. Black"></div>
+        <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()"></div>
+        <div><div style="${lbl}">Production lead · days</div><input id="rs-lead" type="number" min="1" style="${fld}" value="${slEsc(d.leadDays||RS_DEFAULT_LEAD)}">${leadNote}</div>
+        <div><div style="${lbl}">Factory</div><select id="rs-factory" style="${fld}" onchange="rsRefresh()">${factoryOpts}</select></div>
+        <div><div style="${lbl}">Dye</div><select id="rs-dye" style="${fld}" onchange="rsRefresh()">${dyeOpts}</select></div>
+        <div><div style="${lbl}">Unit cost · USD</div><input id="rs-cost" type="number" min="0" step="0.01" style="${fld}" value="${d.cost||''}" onchange="rsRefresh()"><div style="font-size:10px;color:var(--muted);margin-top:3px">Total ${slMoneyC('USD', (units||0)*(d.cost||0))}</div></div>
+        <div><div style="${lbl}">Status</div><select id="rs-status" style="${fld}">${stOpts}</select></div>
+      </div>
+
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <div style="${lbl};margin:0">BOM for this restock · need = usage × ${units||0} units + waste</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="rsAddLine()">+ Line</button>
+            <button class="btn btn-ghost btn-sm" onclick="rsReloadBom()" title="Start the lines again from the style's BOM">Copy from style</button>
+            <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Keep these lines on the style for next time">Save to style</button>
+          </div>
+        </div>
+        <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Line</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
+          <tbody>${bomRows || '<tr><td colspan="6" style="color:var(--muted);font-size:11px">No lines yet — add the fabric first.</td></tr>'}</tbody></table></div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px">Missing a material or mill? Add it in Sourcing, then pick it here.</div>
+      </div>
+
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <div style="${lbl};margin:0">Milestones · worked back from the in-stock date</div>
+          <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsFillDates(false)">Fill blank dates</button><button class="btn btn-ghost btn-sm" onclick="rsFillDates(true)" title="Re-date every milestone that isn't done">Re-date all</button></div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px">${msCells}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px">A restock skips proto and SMS. Dates use the lead above, the fabric's own lead (or ${RS_FABRIC_LEAD} days) and ${RS_TRANSIT} days in transit. Change any date by hand.</div>
+      </div>
+
+      <div><div style="${lbl}">Notes</div><textarea id="rs-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(d.notes||'')}</textarea></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        ${d.id ? `<button class="btn btn-ghost btn-sm" onclick="rsDelete()">Delete</button><button class="btn btn-ghost btn-sm" onclick="rsPayments()" title="Deposit, balance and receiving">Payments and receiving</button>` : ''}
+        <button class="btn btn-ghost" onclick="closeModal('rs-modal')">Cancel</button>
+        <button class="btn btn-gold" onclick="rsSave(true)">Save</button>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  openModal('rs-modal');
+}
+
+// ── Timeline rows: one per open restock, its own milestones ────────────────
+function rsTimelineHTML(season){
+  const runs = rsOpenRuns().filter(po => (po.inStockBy || (po.ms && Object.keys(po.ms).length))
+    && (!season || season === 'all' || String(po.season||'').trim() === season));
+  if (!runs.length) return { html: '', late: 0, risk: 0, ok: 0 };
+  const now = new Date(); const today = rsIso(now);
+  let late = 0, risk = 0, ok = 0;
+  const rows = runs.map(po => {
+    const ms = po.ms || {};
+    let status = 'ontrack', next = null;
+    const cells = RS_MS.filter(([k]) => !(k === 'dye' && po.dyeHouse === 'none')).map(([k, l]) => {
+      const m = ms[k] || {};
+      const past = m.date && m.date < today;
+      const soon = m.date && !past && (new Date(m.date + 'T12:00:00') - now) < 14 * 864e5;
+      const color = m.done ? 'var(--green)' : !m.date ? 'var(--border)' : past ? 'var(--red)' : soon ? 'var(--amber)' : 'var(--border-mid)';
+      if (!m.done && past) status = 'late'; else if (!m.done && soon && status !== 'late') status = 'risk';
+      if (!m.done && m.date && !next) next = l + ' · ' + veniaDate(m.date);
+      return `<div style="flex:1;min-width:56px;text-align:center">
+        <div style="width:10px;height:10px;border-radius:50%;margin:0 auto;background:${m.done?'var(--green)':'transparent'};border:2px solid ${color}"></div>
+        <div style="font-size:9px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin-top:5px;white-space:nowrap">${l}</div>
+        <div style="font-size:9px;font-family:'DM Mono',monospace;color:${m.done||!m.date?'var(--muted)':color==='var(--border-mid)'?'var(--muted)':color}">${m.done?'✓':m.date?m.date.slice(5):'—'}</div>
+      </div>`;
+    }).join('');
+    if (status === 'late') late++; else if (status === 'risk') risk++; else ok++;
+    const miss = rsMissing(po);
+    const badge = status === 'late' ? '<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">LATE</span>'
+      : status === 'risk' ? '<span style="color:var(--amber);font-size:10px;letter-spacing:1.5px;font-weight:700">AT RISK</span>'
+      : '<span style="color:var(--green);font-size:10px;letter-spacing:1.5px;font-weight:700">ON TRACK</span>';
+    return `<div style="background:var(--bg);border:1px solid var(--border);padding:14px;margin-bottom:10px${status==='late'?';box-shadow:inset 3px 0 0 var(--red)':''}">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div style="flex:1;min-width:0;cursor:pointer" onclick="rsOpen('${po.id}')">
+          <span style="font-size:10px;letter-spacing:1.5px;color:var(--teal);font-weight:700;margin-right:6px">RESTOCK</span>
+          <span style="font-size:12px;font-weight:700;color:var(--ink)">${slEsc(rsTitle(po))}</span>
+          <span style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-left:8px">${po.units||0} units${po.vendor?' · '+slEsc(po.vendor):''}${po.inStockBy?' · in stock by '+slEsc(veniaDate(po.inStockBy)):''}</span>
+        </div>
+        ${badge}
+      </div>
+      <div style="display:flex;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px">${cells}</div>
+      ${miss.length ? `<div style="font-size:10px;color:var(--amber);margin-top:8px">Still to settle: ${miss.map(slEsc).join(' · ')}</div>` : (next && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${slEsc(next)}</div>` : '')}
+    </div>`;
+  }).join('');
+  return { html: `<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Restocks</div>${rows}</div>`, late, risk, ok };
+}
+window.rsTimelineHTML = rsTimelineHTML;
+
+// ── Today: what's missing, and the next step coming up ─────────────────────
+function rsTodayItems(midnight){
+  const items = [];
+  const days = (d) => Math.round((new Date(d + 'T00:00:00') - midnight) / 86400000);
+  rsOpenRuns().forEach(po => {
+    const act = "rsOpen('" + po.id + "')";
+    const name = rsTitle(po);
+    const miss = rsMissing(po);
+    if (miss.length) items.push({ key: 'rs|' + po.id + '|miss', sig: miss.join('|'), pri: 'med',
+      text: `${name} restock: ${miss.join(', ')}`, act });
+    const nx = rsNextMs(po);
+    if (nx){
+      const dd = days(nx.date);
+      if (dd >= 0 && dd <= 7) items.push({ key: 'rs|' + po.id + '|next|' + nx.k, pri: dd <= 2 ? 'med' : 'low',
+        text: `${name} restock: ${nx.l} ${dd===0?'today':'in '+dd+'d'}${po.vendor?' at '+po.vendor:''}`, act });
+    }
+  });
+  return items;
+}
+window.rsTodayItems = rsTodayItems;
+
+// Production's "+ Restock": pick the style first (typable list), then the card.
+window.rsPickStyle = function(){
+  const ex0 = document.getElementById('rs-pick'); if (ex0) ex0.remove();
+  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived').slice().sort((a,b) => String(a.name||'').localeCompare(String(b.name||'')));
+  const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'rs-pick';
+  ov.innerHTML = `<div class="modal" style="width:440px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Restock which style?</div><button class="modal-close" aria-label="Close" onclick="closeModal('rs-pick')">&#x2715;</button></div>
+    <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:10px">
+      <input id="rs-pick-q" type="search" placeholder="Type a style name" autocomplete="off" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:10px;font-size:13px" oninput="rsPickFilter(this.value)">
+      <div id="rs-pick-list" style="max-height:52vh;overflow-y:auto;display:flex;flex-direction:column">${styles.map(s =>
+        `<button class="rs-pick-row" data-n="${slEsc(String((s.name||'')+' '+(s.styleId||'')).toLowerCase())}" onclick="closeModal('rs-pick');rsStart('${s.id}')" style="text-align:left;background:none;border:none;border-bottom:1px solid var(--border);color:var(--ink);padding:10px 4px;font-size:12px;cursor:pointer">${slEsc(s.name||'')} <span style="color:var(--muted);font-size:10px;font-family:'DM Mono',monospace">${slEsc(s.styleId||'')} ${slEsc(s.season||'')}</span></button>`).join('')}</div>
+    </div></div>`;
+  document.body.appendChild(ov); openModal('rs-pick');
+  setTimeout(() => { const q = document.getElementById('rs-pick-q'); if (q) q.focus(); }, 30);
+};
+window.rsPickFilter = function(q){
+  q = String(q||'').trim().toLowerCase();
+  document.querySelectorAll('#rs-pick-list .rs-pick-row').forEach(b => { b.hidden = !!q && !b.dataset.n.includes(q); });
 };
 
 // ═══════════════════════════════════════════════
@@ -28849,7 +29439,7 @@ function cmdInit() {
   // Which module a Today row belongs to (its key's first part, as Today's own
   // groups read it). Rows of your own (task) belong to no module.
   const MOD_OF = { pull:'growth', growth:'growth', mk:'growth', sample:'product', tl:'product', cal:'product', gap:'product',
-    fc:'product', gate:'product', buyer:'sales', 'buyers-more':'sales', owed:'sales', wholesale:'sales', unreachable:'sales',
+    fc:'product', gate:'product', rs:'product', buyer:'sales', 'buyers-more':'sales', owed:'sales', wholesale:'sales', unreachable:'sales',
     quote:'sales', agleads:'sales', del:'sales', inv:'money', uncat:'money', nag:'settings' };
   function modOf(i){
     const key = String(i && i.key || ''), k = key.split('|')[0];
@@ -29382,14 +29972,17 @@ function buildTodayFocus() {
     }
     // WIP milestones: a factory quietly slipping shows up here, not at ex-factory.
     if (po.type !== 'fabric' && po.ms) {
-      const MS_LBL = { cut:'Cutting', mid:'Mid-production check', top:'Top-of-production approval', dye:'Dye / wash', packed:'Packing' };
+      const MS_LBL = Object.assign({}, (typeof RS_MS_LBL === 'object' ? RS_MS_LBL : {}), { cut:'Cutting', mid:'Mid-production check', top:'Top-of-production approval', dye:'Dye / wash', packed:'Packing' });
+      const msAct = po.kind === 'restock' ? "rsOpen('" + po.id + "')" : act;
       Object.entries(po.ms).forEach(([k, m]) => {
         if (!m || !m.date || m.done) return;
         const md = payDays(m.date);
-        if (md < 0) items.push({key:'po|'+po.id+'|ms'+k, pri: md < -7 ? 'high' : 'med', text:`${MS_LBL[k]||k} is ${-md}d late at ${po.vendor} — ${po.id}`, act});
+        if (md < 0) items.push({key:'po|'+po.id+'|ms'+k, pri: md < -7 ? 'high' : 'med', text:`${MS_LBL[k]||k} is ${-md}d late at ${po.vendor||'the factory'} — ${po.kind==='restock' && typeof rsTitle==='function' ? rsTitle(po) + ' restock' : po.id}`, act: msAct});
       });
     }
   });
+  // 6d. Restocks (Build 674): what's still missing, and the next step this week.
+  try { if (typeof rsTodayItems === 'function') rsTodayItems(midnight).forEach(i => items.push(i)); } catch(e){}
   // 7. Content going out in the next 48h.
   (VeniaOS.get('growth.calendar')||[]).forEach(e => {
     const d = new Date(e.date + 'T00:00:00');
@@ -29580,6 +30173,7 @@ function buildTodayFocus() {
   const groupOf = (i) => {
     const k = String(i.key || '').split('|')[0];
     if (k === 'po' && /\|(exf|ms)/.test(String(i.key))) return 'production';
+    if (k === 'rs') return 'production';   // restocks (Build 674)
     return GROUP_OF[k] || 'setup';
   };
   const live = items.filter(i => !dropped(i) && !asleep(i));
