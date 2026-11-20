@@ -4204,7 +4204,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '691';
+  const BUILD = '693';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6158,8 +6158,31 @@ window.veniaYmd = veniaYmd;
                 <div class="fg"><label class="fl" for="bw-link">Link</label><input class="fi" id="bw-link" placeholder="https://…"></div>
                 <div class="fg" style="grid-column:1/-1"><label class="fl" for="bw-notes">Notes</label><input class="fi" id="bw-notes" placeholder="Key competitor for FW26 coat market"></div>
               </div>
-              <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="saveBrandWatch()" aria-label="Save brand watch entry">Add to Tracking</button>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="ag-btn ag-btn-primary ag-btn-sm" id="bw-save-btn" onclick="saveBrandWatch()" aria-label="Save brand watch entry">Add to Tracking</button>
+                <button class="ag-btn ag-btn-ghost ag-btn-sm" id="bw-cancel-btn" onclick="cancelBrandWatchEdit()" style="display:none">Cancel</button>
+              </div>
             </div>
+            <!-- Build 693: on a phone each watched brand is a short card
+                 (brand and actions, then platform and date, then the note),
+                 instead of six columns scrolling sideways. -->
+            <style>
+              @media (max-width: 700px) {
+                #brand-watch-table, #brand-watch-table tbody { display:block; width:100%; min-width:0 !important; }
+                #brand-watch-table thead { display:none; }
+                #brand-watch-table tr.bw-row { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:8px; row-gap:2px; padding:10px 12px; }
+                #brand-watch-table tr.bw-row td { display:block; padding:0 !important; border:0; min-width:0; }
+                #brand-watch-table td.bw-c-brand { grid-column:1; grid-row:1; align-self:center; overflow-wrap:anywhere; }
+                #brand-watch-table td.bw-c-act { grid-column:2; grid-row:1 / span 2; align-self:start; }
+                #brand-watch-table td.bw-c-platform { grid-column:1; grid-row:2; }
+                #brand-watch-table td.bw-c-checked { grid-column:1; grid-row:3; }
+                #brand-watch-table td.bw-c-checked::before { content:'Last checked '; font-family:inherit; letter-spacing:.5px; }
+                #brand-watch-table td.bw-c-notes { grid-column:1 / -1; grid-row:4; margin-top:4px; }
+                #brand-watch-table td.bw-c-notes .bw-clip { max-width:100% !important; }
+                #brand-watch-table td.bw-c-link { grid-column:1 / -1; grid-row:5; margin-top:4px; }
+                #brand-watch-table tr.bw-empty, #brand-watch-table tr.bw-empty td { display:block; }
+              }
+            </style>
             <div class="tbl-wrap">
               <table id="brand-watch-table" style="font-size:11px">
                 <thead><tr style="border-bottom:2px solid var(--ink)">
@@ -36319,10 +36342,10 @@ async function agentSend(key, message) {
     // snapshot pushed time-to-first-token past the function window — the 504s
     // — and buried the finance signal in noise it can never act on.
     const sysPrompt = key === 'fin'
-      ? [ agent.system + veniaVoiceText('fin') + '\n\n' + agentScopedSpec('fin') + agentPrefsText(key),
+      ? [ agent.system + veniaVoiceText('fin') + veniaBrandIdentityText('fin') + '\n\n' + agentScopedSpec('fin') + agentPrefsText(key),
           plmContext() + (typeof veniaFinanceContext === 'function' ? veniaFinanceContext() : '')
                        + (typeof veniaFinOpsContext === 'function' ? veniaFinOpsContext() : '') ]
-      : [ agent.system + veniaVoiceText(key) + '\n\n' + agentScopedSpec(key) + agentPrefsText(key),
+      : [ agent.system + veniaVoiceText(key) + veniaBrandIdentityText(key) + '\n\n' + agentScopedSpec(key) + agentPrefsText(key),
           plmContext() + agentContextHints() ];
     const reply = key === 'fin'
       ? await cfoCallCloudFirst(sysPrompt, SK.history, message)
@@ -36437,7 +36460,11 @@ const ACTION_MODULE = {
   generate_care_label: 'product', log_sample_round: 'product', set_forecast: 'product',
   save_season_calendar: 'product', set_po_terms: 'product', set_cost_sheet: 'product',
   price_from_retail: 'product',
-  create_pull: 'growth', log_coverage: 'growth', add_pitch: 'growth', save_brand_doc: 'growth',
+  create_pull: 'growth', log_coverage: 'growth', add_pitch: 'growth',
+  // Build 693: the Brand Library is written by Brand's writers (founders, and
+  // Growth, Product or Money editors/owners: MODULES.brand.writers, the same
+  // rule as the Brand row's policy from Build 691), not by Growth alone.
+  save_brand_doc: 'brand',
   set_budget: 'money', set_revenue_goal: 'money', set_txn_category: 'money',
   set_money_watch: 'money', generate_pl: 'money',
   set_order_status: 'sales',
@@ -36458,6 +36485,10 @@ function agentCanWriteModule(m){
   if (window.VENIA_AGENT_WRITE === false) return false;
   const roles = window.VENIA_MY_ROLES;
   if (!roles) return true;                      // founder, or not known yet
+  // A mirror row (Brand) lists who may write it; anyone who can write one of
+  // those modules may (moduleWritable says the same for the sync push).
+  const w = window.MODULES && MODULES[m] && MODULES[m].writers;
+  if (w) return w.some(x => roles[x] === 'owner' || roles[x] === 'editor');
   return roles[m] === 'owner' || roles[m] === 'editor';
 }
 function agentCanAct(type){
@@ -36822,7 +36853,7 @@ function agentAllActionSpec() {
     { m:'brainstorm', t: () => agentBrainstormActionSpec() },
     { m:'product',    t: () => agentImageActionSpec() },
     { m:'growth',     t: () => agentPRRadarSpec() },
-    { m:'growth',     t: () => agentBrandDocSpec() },
+    { m:'brand',      t: () => agentBrandDocSpec() },
     { m:'growth',     t: () => agentSocialPlanSpec() },
     // These two carry more than one module and filter themselves, chunk by chunk.
     { m:null,         t: () => agentOpsActionSpec() },
@@ -36956,7 +36987,7 @@ function agentOpsActionSpec() { return agentSpecChunks([
 // lists, briefs the Brand agent wrote had nowhere to live. save_brand_doc
 // persists them into the synced Brand Library (STATE.brandDocs).
 function agentBrandDocSpec() {
-  if (!agentCanWriteModule('growth')) return '';
+  if (!agentCanWriteModule('brand')) return '';
   return '\n\nACTION — save_brand_doc: persist brand/creative output into the Brand Library so it outlives this chat. Use whenever you produce brand content worth keeping — guidelines, a manifesto draft, a shot list, a mood-board or campaign brief, a template — or the user says save/keep it.\n'
     + '```venia:action\n'
     + '{"type":"save_brand_doc","title":"Short document name","kind":"guideline","body":"The full document text — markdown formatting is fine."}\n'
@@ -37556,6 +37587,32 @@ function veniaHouseVoiceNotes(press){
   return brandHas ? '' : prNotes;
 }
 window.veniaHouseVoiceNotes = veniaHouseVoiceNotes;
+// THE HOUSE, IN A FEW LINES (Build 693). Brand Settings' identity fields (the
+// one-liner, customer, manifesto, aesthetic, palette, references) reached the
+// assistant only on a turn asked from the Brand screen. Since Build 690 Brand's
+// voice is the house voice, so its identity goes on every turn too, short:
+// each field clipped, the whole capped. The voice character is already in the
+// voice line and Never use is checked by the tone guard, so neither repeats.
+// key 'br' gets nothing here: a Brand turn already carries every field.
+function veniaBrandIdentityText(key){
+  if (key === 'br') return '';
+  const bp = (window.VeniaOS && VeniaOS.get('core.brand.prefs')) || {};
+  if (!bp || typeof bp !== 'object' || Array.isArray(bp)) return '';
+  const F = [['oneliner', 'One-liner'], ['customer', 'Customer'], ['manifesto', 'Manifesto'], ['aesthetic', 'Aesthetic'],
+             ['palette', 'Palette'], ['refs', 'References'], ['alwaysUse', 'Always use']];
+  const clip = (v, n) => { const t = String(v).replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1).replace(/\s+\S*$/, '') + '\u2026' : t; };
+  const lines = [];
+  let used = 0;
+  F.forEach(function(f){
+    const v = bp[f[0]];
+    if (!v || !String(v).trim() || used > 700) return;
+    const line = f[1] + ': ' + clip(v, f[0] === 'manifesto' ? 220 : 160);
+    used += line.length; lines.push(line);
+  });
+  if (!lines.length) return '';
+  return '\n\nVENIA\u2019S IDENTITY (Brand Settings) \u2014 the house every desk writes for:\n' + lines.join('\n');
+}
+window.veniaBrandIdentityText = veniaBrandIdentityText;
 window.VENIA_VOICE = VENIA_VOICE;
 window.VENIA_AVOID = VENIA_AVOID;
 window.VENIA_LEXICON = VENIA_LEXICON;
@@ -43233,12 +43290,12 @@ function agBuildBrOverview() {
   const mem = (STATE.eniMemory||[]).length;
   const stat = (l, v, sub, color) => `<div class="ag-stat"><div class="ag-stat-l">${l}</div><div class="ag-stat-v"${color ? ` style="color:${color}"` : ''}>${v}</div><div class="ag-stat-s">${sub}</div></div>`;
   const toneGlance = (ap + av) ? `
-    <div class="ag-sec-head"><h2 class="ag-sec-title">Tone at a glance</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('br','tone')">Open library</button></div></div>
+    <div class="ag-sec-head"><h2 class="ag-sec-title">Tone at a glance</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('br','tone')">Open tone</button></div></div>
     <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:11px;line-height:1.7">
       ${ap ? `<div style="flex:1;min-width:180px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--green);font-weight:700;margin-bottom:4px">We say</div>${(t.approved||[]).slice(0,6).map(slEsc).join(' · ')}</div>` : ''}
       ${av ? `<div style="flex:1;min-width:180px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--red);font-weight:700;margin-bottom:4px">We avoid</div>${(t.avoid||[]).slice(0,6).map(slEsc).join(' · ')}</div>` : ''}
     </div>`
-  : `<div class="ag-sec-head"><h2 class="ag-sec-title">Tone at a glance</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('br','tone')">Open library</button></div></div>
+  : `<div class="ag-sec-head"><h2 class="ag-sec-title">Tone at a glance</h2><div class="ag-sec-actions"><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="agNavGo('br','tone')">Open tone</button></div></div>
      <div style="padding:24px;text-align:center;color:var(--muted);font-size:11px">The tone library is empty — add words you use and words you avoid, and every agent inherits the voice.</div>`;
   return `
     <div class="ag-stats">
@@ -48813,8 +48870,21 @@ window.brRestoreToneDoc = function(){
   try { showToast('Restored', 'success'); } catch(e){}
   try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
 };
-window.brInstallVeniaTone = function(){
+window.brInstallVeniaTone = async function(){
   brToneNorm();
+  // Build 693: REINSTALL NEVER REPLACES THE DOCUMENT. It used to put the
+  // shipped document over an edited one, and over its last-good copy too, so
+  // "Restore last good" could not bring the edit back. With a document in the
+  // Library it now asks first and only adds the words and lines that are
+  // missing; the document and its last-good copy are left as they are.
+  const installedDoc = veniaToneDoc();
+  if (installedDoc) {
+    const ask = 'Add the missing VENIA words and lines?\nThis adds any VENIA tone words, words to avoid and example lines that are not already in your lists. '
+      + 'Your tone document and its last good version stay exactly as they are; nothing is removed.';
+    let ok = false;
+    try { ok = (typeof veniaConfirm === 'function') ? await veniaConfirm(ask, { ok: 'Add missing words', cancel: 'Cancel' }) : confirm(ask.replace('\n', '\n\n')); } catch(e){ ok = false; }
+    if (!ok) return;
+  }
   const t = VeniaOS.get('core.brand.tone');
   const add = function(list, words){
     const have = {};
@@ -48836,13 +48906,20 @@ window.brInstallVeniaTone = function(){
     'Washed wool, oxidized hardware, and silk suspended from the shoulder.',
     'We made this jacket around the idea of a garment slowly becoming part of its wearer.',
   ]);
+  if (installedDoc) {
+    // The document and its backup are not touched here, ever.
+    if (a + v + p2) save();
+    try { if (a + v + p2) logActivity('Brand: added missing VENIA tone words (' + a + ' words, ' + v + ' avoided, ' + p2 + ' lines)'); } catch(e){}
+    try { showToast(a + v + p2 ? 'Added ' + a + ' words, ' + v + ' avoided, ' + p2 + ' lines. Your tone document is unchanged.'
+                               : 'Nothing missing. Your lists already have every VENIA word and line; your tone document is unchanged.', 'success'); } catch(e){}
+    try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
+    return;
+  }
   if (!Array.isArray(STATE.brandDocs)) STATE.brandDocs = [];
-  const title = 'VENIA — Tone & Brand Language System';
+  const title = VENIA_TONE_DOC_TITLE;
   const body = VENIA_TONE_DOC;
-  const existing = VeniaOS.get('core.brand.docs').find(function(d){ return d.title === title; });
-  if (existing) { existing.body = body; existing.updatedAt = new Date().toISOString(); }
-  else STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: title, kind: 'tone', body: body,
-                                 createdAt: new Date().toISOString() });
+  STATE.brandDocs.unshift({ id: 'BD' + Date.now(), title: title, kind: 'tone', body: body,
+                            createdAt: new Date().toISOString() });
   brToneBackupSet(body);
   save();
   try { logActivity('Brand: installed the VENIA tone system (' + a + ' words, ' + v + ' avoided, ' + p2 + ' lines)'); } catch(e){}
@@ -48855,15 +48932,15 @@ function agBuildToneLibrarySection() {
 
   const approvedList = t.approved.length === 0
     ? `<div style="padding:20px;text-align:center;color:var(--muted);font-size:10px">None yet</div>`
-    : t.approved.map((w,i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)"><span style="font-size:11px;color:var(--green)">${w}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('approved',${i})">&#x2715;</button></div>`).join('');
+    : t.approved.map((w,i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)"><span style="font-size:11px;color:var(--green)">${escHtml(w)}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('approved',${i})">&#x2715;</button></div>`).join('');
 
   const avoidList = t.avoid.length === 0
     ? `<div style="padding:20px;text-align:center;color:var(--muted);font-size:10px">None yet</div>`
-    : t.avoid.map((w,i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)"><span style="font-size:11px;color:var(--red)">${w}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('avoid',${i})">&#x2715;</button></div>`).join('');
+    : t.avoid.map((w,i) => `<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)"><span style="font-size:11px;color:var(--red)">${escHtml(w)}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('avoid',${i})">&#x2715;</button></div>`).join('');
 
   const phraseList = t.phrases.length === 0
     ? `<div style="padding:20px;text-align:center;color:var(--muted);font-size:10px">None yet</div>`
-    : t.phrases.map((p,i) => `<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);gap:8px"><span style="font-size:11px;color:var(--ink);line-height:1.4;flex:1">${p}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('phrases',${i})">&#x2715;</button></div>`).join('');
+    : t.phrases.map((p,i) => `<div style="display:flex;align-items:flex-start;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--border);gap:8px"><span style="font-size:11px;color:var(--ink);line-height:1.4;flex:1">${escHtml(p)}</span><button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="brRemoveToneWord('phrases',${i})">&#x2715;</button></div>`).join('');
 
   const installed = !!veniaToneDoc();
   const liveDoc = veniaToneDocLive();
@@ -48888,7 +48965,7 @@ function agBuildToneLibrarySection() {
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${installed ? '<button class="ag-btn ag-btn-sm ag-btn-primary" onclick="brEditToneDoc()">Edit tone document</button>' : ''}
-        <button class="ag-btn ag-btn-sm ${installed ? '' : 'ag-btn-primary'}" onclick="brInstallVeniaTone()">${installed ? 'Reinstall' : 'Install VENIA tone system'}</button>
+        <button class="ag-btn ag-btn-sm ${installed ? '' : 'ag-btn-primary'}" onclick="brInstallVeniaTone()"${installed ? ' title="Adds any VENIA words and lines missing from your lists. Your tone document is not changed."' : ''}>${installed ? 'Add missing words' : 'Install VENIA tone system'}</button>
       </div>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);margin-bottom:24px">
@@ -59427,9 +59504,32 @@ function exportTechPackQuick() {
 
 // ── WATCHLIST BRAND TRACKING ─────────────────────────────────
 
+// Build 693: the list is read from storage on every change (a sync may have
+// rewritten it since this screen opened), every change calls save() so it
+// reaches the other devices, and what is shown open or closed stays in this
+// tab only. Rows can be edited; "Last checked" moves when a row is edited or
+// marked checked.
+function bwLoad() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('venia-brand-watch') || 'null'); } catch (e) {}
+  const list = Array.isArray(saved) ? saved.filter(b => b && typeof b === 'object') : [];
+  // An older build stored whether a row was open; that is not data.
+  list.forEach(b => { delete b.expanded; });
+  window._brandWatchData = list;
+  return list;
+}
+window._bwOpen = window._bwOpen || {};
+window._bwEditing = null;
+function bwToday() { return new Date().toISOString().slice(0, 10); }
+// Only an http(s) address becomes a link; anything else is shown as text.
+function bwSafeLink(u) {
+  const s = String(u == null ? '' : u).trim();
+  return /^https?:\/\/[^\s"'<>]+$/i.test(s) ? s : '';
+}
+function bwRowKey(b, i) { return String(b.brand || '') + '|' + (b.addedAt || b.lastChecked || '') + '|' + i; }
+
 function initBrandWatch() {
-  const saved = JSON.parse(localStorage.getItem('venia-brand-watch')||'null');
-  window._brandWatchData = saved || [];
+  bwLoad();
   renderBrandWatch();
 }
 
@@ -59437,55 +59537,136 @@ function renderBrandWatch() {
   const tbody = document.getElementById('brand-watch-body');
   if (!tbody) return;
   const data = window._brandWatchData || [];
-  if (!data.length) { tbody.innerHTML='<tr><td colspan="6" style="padding:16px;text-align:center;color:var(--muted);font-size:11px">No brands tracked yet</td></tr>'; return; }
-  tbody.innerHTML = data.map((b,i) => `
-    <tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="toggleBrandNote(${i})" onmouseenter="this.style.background='var(--bg-off)'" onmouseleave="this.style.background=''">
-      <td style="padding:9px 12px;font-weight:700;font-size:12px">${b.brand}</td>
-      <td style="padding:9px 12px;font-size:10px;color:var(--muted);letter-spacing:0.5px">${b.platform}</td>
-      <td style="padding:9px 12px;font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${b.lastChecked||'—'}</td>
-        ${b.expanded
-          ? `<div style="line-height:1.6">${b.notes||'—'}</div>`
-          : `<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:220px">${b.notes||'—'}</span>`}
+  const E = (typeof escHtml === 'function') ? escHtml : (x => String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])));
+  if (!data.length) { tbody.innerHTML = '<tr class="bw-empty"><td colspan="6" style="padding:16px;text-align:center;color:var(--muted);font-size:11px">No brands tracked yet</td></tr>'; return; }
+  tbody.innerHTML = data.map((b, i) => {
+    const open = !!window._bwOpen[bwRowKey(b, i)];
+    const notes = String(b.notes || '');
+    const link = bwSafeLink(b.link);
+    const linkCell = link
+      ? `<a href="${E(link)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="${E(link)}" style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--ink);text-decoration:none;border-bottom:1px solid var(--border)">Open ↗</a>`
+      : (String(b.link || '').trim() ? `<span style="font-size:10px;color:var(--muted)" title="Only http:// and https:// links open">${E(String(b.link).trim().slice(0, 40))}</span>` : '<span style="color:var(--muted)">—</span>');
+    return `
+    <tr class="bw-row" style="border-bottom:1px solid var(--border);cursor:pointer" onclick="toggleBrandNote(${i})" onmouseenter="this.style.background='var(--bg-off)'" onmouseleave="this.style.background=''">
+      <td class="bw-c-brand" style="padding:9px 12px;font-weight:700;font-size:12px">${E(b.brand || '')}</td>
+      <td class="bw-c-platform" style="padding:9px 12px;font-size:10px;color:var(--muted);letter-spacing:0.5px">${E(b.platform || '')}</td>
+      <td class="bw-c-checked" style="padding:9px 12px;font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;white-space:nowrap">${E(b.lastChecked || '—')}</td>
+      <td class="bw-c-notes" style="padding:9px 12px;font-size:11px;color:var(--ink)">
+        ${open || !notes
+          ? `<div style="line-height:1.6;white-space:pre-wrap">${E(notes || '—')}</div>`
+          : `<span class="bw-clip" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:260px">${E(notes)}</span>`}
       </td>
-      <td style="padding:9px 12px"><a href="${b.link||'#'}" target="_blank" onclick="event.stopPropagation()" style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--ink);text-decoration:none;border-bottom:1px solid var(--border)">↗</a></td>
-      <td style="padding:9px 12px"><button onclick="event.stopPropagation();removeBrandWatch(${i})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px" aria-label="Remove brand">✕</button></td>
-    </tr>`).join('');
+      <td class="bw-c-link" style="padding:9px 12px">${linkCell}</td>
+      <td class="bw-c-act" style="padding:6px 8px;white-space:nowrap;text-align:right">
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();checkBrandWatch(${i})" aria-label="Mark ${E(b.brand || 'brand')} checked today" title="Mark checked today">✓ Checked</button>
+        <button class="ag-btn ag-btn-ghost ag-btn-sm" onclick="event.stopPropagation();editBrandWatch(${i})" aria-label="Edit ${E(b.brand || 'brand')}">Edit</button>
+        <button onclick="event.stopPropagation();removeBrandWatch(${i})" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:4px 6px" aria-label="Remove ${E(b.brand || 'brand')}">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
 }
 
+// Showing a note in full is a view choice, kept in this tab only.
 function toggleBrandNote(i) {
-  const d = window._brandWatchData||[];
-  if (d[i]) { d[i].expanded = !d[i].expanded; saveBrandWatchData(); renderBrandWatch(); }
+  const d = window._brandWatchData || [];
+  if (!d[i]) return;
+  const k = bwRowKey(d[i], i);
+  window._bwOpen[k] = !window._bwOpen[k];
+  renderBrandWatch();
 }
 
 function removeBrandWatch(i) {
-  window._brandWatchData.splice(i,1);
+  const d = bwLoad();
+  if (!d[i]) { renderBrandWatch(); return; }
+  d.splice(i, 1);
+  window._bwOpen = {};
+  if (window._bwEditing === i) cancelBrandWatchEdit();
+  else if (window._bwEditing != null && window._bwEditing > i) window._bwEditing--;
   saveBrandWatchData(); renderBrandWatch();
 }
 
+function checkBrandWatch(i) {
+  const d = bwLoad();
+  if (!d[i]) { renderBrandWatch(); return; }
+  d[i].lastChecked = bwToday();
+  saveBrandWatchData(); renderBrandWatch();
+  try { showToast('Marked ' + (d[i].brand || 'brand') + ' checked today', 'success'); } catch (e) {}
+}
+
+// Writes the list and schedules a sync (the list rides in the Growth row and,
+// from Build 691, Brand's own row).
 function saveBrandWatchData() {
-  localStorage.setItem('venia-brand-watch', JSON.stringify(window._brandWatchData||[]));
+  const clean = (window._brandWatchData || []).map(b => { const c = Object.assign({}, b); delete c.expanded; return c; });
+  try { localStorage.setItem('venia-brand-watch', JSON.stringify(clean)); } catch (e) {}
+  try { if (typeof save === 'function') save(); } catch (e) {}
+}
+
+function bwFormReset() {
+  window._bwEditing = null;
+  ['bw-brand', 'bw-link', 'bw-notes'].forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const btn = document.getElementById('bw-save-btn'); if (btn) btn.textContent = 'Add to Tracking';
+  const cancel = document.getElementById('bw-cancel-btn'); if (cancel) cancel.style.display = 'none';
 }
 
 function toggleBrandWatchForm() {
   const f = document.getElementById('brand-watch-add-form');
-  if (f) f.style.display = f.style.display==='none'?'block':'none';
+  if (!f) return;
+  const opening = f.style.display === 'none' || window._bwEditing != null;
+  bwFormReset();
+  f.style.display = opening ? 'block' : 'none';
+}
+
+function editBrandWatch(i) {
+  const d = bwLoad();
+  const b = d[i]; if (!b) { renderBrandWatch(); return; }
+  const f = document.getElementById('brand-watch-add-form'); if (!f) return;
+  window._bwEditing = i;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+  set('bw-brand', b.brand); set('bw-link', b.link); set('bw-notes', b.notes);
+  const pl = document.getElementById('bw-platform');
+  if (pl) {
+    if (b.platform && ![...pl.options].some(o => o.value === b.platform)) { const o = document.createElement('option'); o.textContent = b.platform; pl.appendChild(o); }
+    pl.value = b.platform || 'Website';
+  }
+  const btn = document.getElementById('bw-save-btn'); if (btn) btn.textContent = 'Save changes';
+  const cancel = document.getElementById('bw-cancel-btn'); if (cancel) cancel.style.display = '';
+  f.style.display = 'block';
+  try { f.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+}
+
+function cancelBrandWatchEdit() {
+  bwFormReset();
+  const f = document.getElementById('brand-watch-add-form'); if (f) f.style.display = 'none';
 }
 
 function saveBrandWatch() {
   const brand = document.getElementById('bw-brand')?.value?.trim();
   if (!brand) { showToast('Brand name required','error'); return; }
-  const entry = {
+  const rawLink = (document.getElementById('bw-link')?.value || '').trim();
+  // "example.com" is taken as https://example.com; any other scheme is refused.
+  const link = rawLink && !/^[a-z][a-z0-9+.-]*:/i.test(rawLink) && /^[^\s/]+\.[^\s]+$/.test(rawLink) ? 'https://' + rawLink : rawLink;
+  if (link && !bwSafeLink(link)) { showToast('The link has to start with http:// or https://', 'error'); return; }
+  const fields = {
     brand,
-    platform: document.getElementById('bw-platform')?.value||'Website',
-    link:     document.getElementById('bw-link')?.value||'',
-    notes:    document.getElementById('bw-notes')?.value||'',
-    lastChecked: new Date().toISOString().slice(0,10),
-    expanded: false
+    platform: document.getElementById('bw-platform')?.value || 'Website',
+    link,
+    notes:    (document.getElementById('bw-notes')?.value || '').trim(),
   };
-  (window._brandWatchData||[]).push(entry);
-  saveBrandWatchData(); renderBrandWatch();
-  ['bw-brand','bw-link','bw-notes'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
-  document.getElementById('brand-watch-add-form').style.display='none';
+  const d = bwLoad();
+  const i = window._bwEditing;
+  const f = document.getElementById('brand-watch-add-form');
+  if (i != null && d[i]) {
+    Object.assign(d[i], fields, { lastChecked: bwToday() });
+    saveBrandWatchData();
+    bwFormReset(); renderBrandWatch();
+    if (f) f.style.display = 'none';
+    showToast('Saved ' + brand, 'success');
+    return;
+  }
+  d.push(Object.assign(fields, { addedAt: bwToday(), lastChecked: bwToday() }));
+  saveBrandWatchData();
+  bwFormReset(); renderBrandWatch();
+  if (f) f.style.display = 'none';
   showToast('Brand added to watchlist','success');
 }
 
@@ -69801,6 +69982,9 @@ async function skSend(preset, opts){
       persona + '\n\n' + SK_ANSWER_RULE
         + '\nGive help specific to the user\'s current section when relevant. You can take any of the actions below right from wherever they are — never send the user to another screen to get something done.'
         + (typeof veniaVoiceText === 'function' ? veniaVoiceText(agKey) : '')
+        // Build 693: Brand's identity on every turn (the dock carries no
+        // Brand Settings otherwise, not even on the Brand screen).
+        + (typeof veniaBrandIdentityText === 'function' ? veniaBrandIdentityText('dock') : '')
         + (hasActions ? agentAllActionSpec() + AGENT_TOOL_NOTE : ''),
       (typeof plmContext==='function' ? plmContext() : '')
         + '\n\nWHERE THE USER IS RIGHT NOW: ' + info.label + '. ' + info.guide
