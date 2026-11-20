@@ -1561,6 +1561,11 @@ html.no-settings  [data-space="settings"]{ display:none !important; }
   color:var(--ink);
 }
 .cp-screen.active{display:flex;animation:cpFadeIn .22s ease-out}
+#vtb-back{position:fixed;left:16px;bottom:24px;z-index:9600;background:var(--ink,#111);color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:0;
+  padding:10px 16px;font:600 11px/1 'Helvetica Neue',Helvetica,Arial,sans-serif;letter-spacing:.6px;text-transform:uppercase;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.25)}
+#vtb-back.done{background:var(--green,#1f7a3a)}
+@media (max-width:680px){ #vtb-back{left:12px;bottom:calc(var(--float-bottom,84px) + 8px);padding:9px 13px} }
+html.v-route-pending .cp-screen,html.v-route-pending .main,html.v-route-pending .sidebar{visibility:hidden}
 /* Boards runs in its own frame (Build 612): a module, not part of this page. */
 #cp-screen-boards iframe{flex:1 1 auto;width:100%;height:100%;border:0;display:block;background:#fff}
 @media (max-width: 768px){ #cp-screen-boards{ bottom:calc(62px + var(--sab, 0px)); } }
@@ -4092,6 +4097,22 @@ html:not(.share-mode) .tpbar{ border-radius:0 !important; }
 </style>
 </head>
 <body>
+<script>
+// A RELOAD OPENS WHERE YOU WERE, NOT ON TODAY FIRST (Build 696). The saved
+// route is restored just after the page is built, so for a moment Today was
+// drawn and then swapped for the module you were in: a flash on every reload
+// of a phone or a desk. Until the restore has run, the screens are held
+// back (never longer than 1.5s).
+(function(){
+  try {
+    if (location.search || /brainstorm/.test(location.hash || '')) return;
+    var r = JSON.parse(localStorage.getItem('venia_route_v1') || 'null');
+    if (!r || !r.space || r.space === 'cp' || r.space === 'boards') return;
+    document.documentElement.classList.add('v-route-pending');
+    setTimeout(function(){ document.documentElement.classList.remove('v-route-pending'); }, 1500);
+  } catch (e) {}
+})();
+</script>
 
 <!-- Progress Bar -->
 <div id="venia-progress" style="position:fixed;top:0;left:0;right:0;height:2px;z-index:99998;background:transparent;pointer-events:none">
@@ -9945,7 +9966,7 @@ const ADD_LABELS = {
 // Removing the class + forcing a reflow (offsetWidth) restarts the animation
 // even when the element already carried it from a previous swap.
 window.vFade = function (el) {
-  if (!el) return;
+  if (!el || window.__veniaQuiet) return;
   el.classList.remove('vfade');
   void el.offsetWidth;
   el.classList.add('vfade');
@@ -11265,7 +11286,33 @@ function popKeepFocus(popId, render){
 //
 // Repaint whatever is actually visible. Never while someone is typing into it —
 // a repaint replaces the content and would eat the keystroke.
-window.veniaRepaint = function(){
+// A REPAINT IS NOT AN ARRIVAL (Build 696). The fade, the jump back to the top
+// and the scroll position belong to walking onto a page. A repaint of the page
+// you are already on -- new data from the cloud, a sweep that found a change --
+// keeps all three: no fade, scroll left where it was, and identical content
+// not touched at all. veniaQuietly runs any render that way.
+window.veniaQuietly = function(fn){
+  var was = window.__veniaQuiet;
+  window.__veniaQuiet = true;
+  var keep = [];
+  try {
+    var se = document.scrollingElement;
+    if (se && se.scrollTop > 0) keep.push([se, se.scrollTop]);
+    document.querySelectorAll('.cp-screen.active *, #content, #content *, #dump-sheet *').forEach(function(el){
+      if (el.scrollTop > 0) keep.push([el, el.scrollTop]);
+    });
+  } catch (e) {}
+  try { return fn(); }
+  finally {
+    window.__veniaQuiet = was;
+    // A fresh .fade-up row would run its entrance again; on a repaint it is
+    // already here.
+    try { document.querySelectorAll('.fade-up').forEach(function(el){ el.style.animation = 'none'; }); } catch (e) {}
+    keep.forEach(function(k){ try { if (k[0].isConnected && k[0].scrollTop !== k[1]) k[0].scrollTop = k[1]; } catch (e) {} });
+  }
+};
+window.veniaRepaint = function(){ return window.veniaQuietly(veniaRepaintNow); };
+function veniaRepaintNow(){
   var act = document.activeElement;
   var typing = act && /^(INPUT|TEXTAREA|SELECT)$/.test(act.tagName || '');
   try {
@@ -11281,12 +11328,16 @@ window.veniaRepaint = function(){
       if (!(r.width > 0 && r.height > 0)) continue;          // not the visible screen
       if (typing && scr.contains(act)) continue;             // don't yank a field being edited
       var key = scr.id.replace('cp-screen-', '');
+      // A relocated panel (Press Tools, Brand Watch, Campaigns) is showing:
+      // agNav would hide it and drop you back on the rail's page (Build 696).
+      var agx = [].slice.call(scr.querySelectorAll('.agx-section')).some(function(x){ return x.style.display !== 'none' && x.getBoundingClientRect().height > 0; });
+      if (agx) continue;
       var item = scr.querySelector('.ag-nav-item.active');
       var m = item && (item.getAttribute('onclick') || '').match(/agNav\(\s*'[^']+'\s*,\s*'([^']+)'/);
       if (m && typeof agNav === 'function') agNav(key, m[1], item);
     }
   } catch (e) {}
-};
+}
 
 // ── Image lightbox ───────────────────────────────────────────────────────
 // A thumbnail in a table row is too small to judge a garment by. Clicking one
@@ -29594,6 +29645,13 @@ function routeSave(space, page) {
   } catch(e){}
 }
 function routeRestore() {
+  try { return routeRestoreNow(); }
+  finally {
+    // Product's page is opened a beat after the space (see below).
+    setTimeout(function(){ document.documentElement.classList.remove('v-route-pending'); }, 90);
+  }
+}
+function routeRestoreNow() {
   if (window.VENIA_SHARE || window.VENIA_AGENT || window.VENIA_PAY || window.VENIA_RECOVERY || window.VENIA_SIGN) return;
   let r = null;
   try { r = JSON.parse(localStorage.getItem(ROUTE_KEY) || 'null'); } catch(e){}
@@ -30623,12 +30681,20 @@ window.veniaTodayBoards = async function(){
       return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     };
     const who = function(e){ const n = String(e || '').split('@')[0].split(/[._-]/)[0]; return n ? n.charAt(0).toUpperCase() + n.slice(1) : ''; };
+    // THE SAME THUMBNAIL KEEPS THE SAME ADDRESS (Build 696). Each signed link
+    // is new, so asking for fresh ones every minute made every thumbnail on
+    // Today load again from nothing: the row blinked once a minute. A board's
+    // link is kept until it changes or nears the end of its hour.
+    const cache = window.__todayBoardUrls || (window.__todayBoardUrls = {});
     let urls = {};
-    try {
-      const sg = await sb.storage.from('venia-boards').createSignedUrls(r.data.map(function(b){ return 'main/thumbs/' + b.id + '.png'; }), 3600);
-      (sg.data || []).forEach(function(x){ if (x && x.signedUrl && !x.error) { const id = String(x.path || '').replace(/^main\/thumbs\//, '').replace(/\.png$/, ''); urls[id] = x.signedUrl; } });
+    const need = r.data.filter(function(b){ const c = cache[b.id]; return !(c && c.v === b.updated_at && Date.now() - c.at < 50 * 60000); });
+    r.data.forEach(function(b){ const c = cache[b.id]; if (c && c.v === b.updated_at && Date.now() - c.at < 50 * 60000) urls[b.id] = c.url; });
+    if (need.length) try {
+      const sg = await sb.storage.from('venia-boards').createSignedUrls(need.map(function(b){ return 'main/thumbs/' + b.id + '.png'; }), 3600);
+      (sg.data || []).forEach(function(x){ if (x && x.signedUrl && !x.error) { const id = String(x.path || '').replace(/^main\/thumbs\//, '').replace(/\.png$/, ''); urls[id] = x.signedUrl;
+        const b = need.find(function(y){ return y.id === id; }); if (b) cache[id] = { url: x.signedUrl, v: b.updated_at, at: Date.now() }; } });
     } catch(e){}
-    row.innerHTML = r.data.map(function(b){
+    const html = r.data.map(function(b){
       const t = b.title || 'Untitled board';
       const u = urls[b.id];
       const by = who(b.updated_by);
@@ -30639,6 +30705,16 @@ window.veniaTodayBoards = async function(){
     }).join('')
       + '<button type="button" class="cpl-board cpl-board-add" onclick="veniaNewBoard()"><div class="cpl-board-img">+</div>'
       + '<div class="cpl-board-t">New board</div><div class="cpl-board-m">Blank or a template</div></button>';
+    if (row.__html === html) return;          // nothing new: leave the row alone
+    // Same boards, same pictures: only "5m ago" moved on. Change the words.
+    const sig = r.data.map(function(b){ return b.id + '|' + (b.title || '') + '|' + (urls[b.id] || ''); }).join('\n');
+    const metas = row.querySelectorAll('.cpl-board[data-b] .cpl-board-m');
+    if (row.__sig === sig && metas.length === r.data.length) {
+      r.data.forEach(function(b, n){ const by = who(b.updated_by); const t = ago(b.updated_at) + (by ? ' · ' + by : ''); if (metas[n].textContent !== t) metas[n].textContent = t; });
+      row.__html = html;
+      return;
+    }
+    row.innerHTML = html; row.__html = html; row.__sig = sig;
     row.querySelectorAll('.cpl-board[data-b]').forEach(function(el){
       el.addEventListener('click', function(){ window.veniaOpenBoards(el.getAttribute('data-b')); });
     });
@@ -31601,15 +31677,19 @@ function cmdInit() {
       : 'Nothing urgent. ' + live.length + ' on your list when you have a minute.';
     const three = sorted.slice(0, 3);
     window.__homeTop = three;
-    if (top) top.innerHTML = three.map(function(i, n){
+    // Build 696: Today redraws these every couple of minutes (the board
+    // mentions check, coming back to the app); drawing the same rows again
+    // replaced every button on screen for nothing. Same words, same rows: left be.
+    const setHtml = function(el, html){ if (el && el.__html !== html) { el.innerHTML = html; el.__html = html; } };
+    if (top) setHtml(top, three.map(function(i, n){
       const m = modOf(i), hot = i.pri === 'high';
       const when = plain(i.meta || '') || (hot ? 'Urgent' : '');
       const act = i.act ? String(i.act).replace(/"/g, '&quot;') : 'homeToggleList(true)';
-      return '<button type="button" class="hm-row" onclick="' + act + '">' + svg(m || 'today')
+      return '<button type="button" class="hm-row" data-k="' + esc(String(i.key == null ? '' : i.key)) + '" onclick="' + act + '">' + svg(m || 'today')
         + '<span class="hm-row-b"><span class="hm-row-t">' + esc(plain(i.title || i.text)) + '</span>'
         + '<span class="hm-row-m">' + esc(m ? LABEL[m] : 'Your item') + '</span></span>'
         + (when ? '<span class="hm-row-w' + (hot ? ' hot' : '') + '">' + esc(when) + '</span>' : '') + '</button>';
-    }).join('');
+    }).join(''));
     if (top) top.style.display = three.length ? '' : 'none';
     const listOpen = !!(document.getElementById('hm-list') || {}).classList && document.getElementById('hm-list').classList.contains('open');
     if (all) {
@@ -31652,10 +31732,10 @@ function cmdInit() {
       });
       return tiles.length ? '<div class="hm-grp"><div class="hm-grp-l">' + g[0] + '</div>' + tiles.join('') + '</div>' : '';
     }).join('');
-    mods.innerHTML = '<div class="hm-mods-h"><h2>Modules</h2><span class="hm-mods-n">' + shown + ' installed</span>'
+    setHtml(mods, '<div class="hm-mods-h"><h2>Modules</h2><span class="hm-mods-n">' + shown + ' installed</span>'
       + '<button type="button" class="hm-add" onclick="homeAddModule()">＋ Add a module</button></div>'
       + groups
-      + '<button type="button" class="hm-add hm-add-ph" onclick="homeAddModule()">＋ Add a module</button>';
+      + '<button type="button" class="hm-add hm-add-ph" onclick="homeAddModule()">＋ Add a module</button>');
     // Quotes out: the same figure Sales' overview shows -- sent and waiting, in
     // USD. A draft has gone to nobody, so it is not out (Build 686).
     try {
@@ -32404,7 +32484,7 @@ function buildTodayFocus() {
       isAsleep ? 'snoozed until ' + veniaDate(snz[i.key], 'day') : '',
       d ? ({ done:'done', dormant:'marked Dormant' }[d.why] || 'dropped') + ' ' + veniaDate(d.at) : ''].filter(Boolean).join(' · ');
     const canOpen = !!(i.act && !isDropped);
-    return `<div class="focus-row${isAsleep || isDropped ? ' fr-dim' : ''}${canOpen ? ' fr-go-ok' : ''}" style="border-left-color:${colMap[i.pri] || 'var(--muted)'}">
+    return `<div class="focus-row${isAsleep || isDropped ? ' fr-dim' : ''}${canOpen ? ' fr-go-ok' : ''}" data-k="${String(i.key == null ? '' : i.key).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}" style="border-left-color:${colMap[i.pri] || 'var(--muted)'}">
       <div class="fr-text"${i.detail || canOpen ? ` onclick="todayRowTap(this)" title="${canOpen ? 'Open' : 'Tap for details'}"` : ''}>
         <div class="fr-title">${i.title}${canOpen ? '<span class="fr-chev" aria-hidden="true">\u00a0›</span>' : ''}${meta ? ` <span class="fr-meta">${meta}</span>` : ''}</div>
         ${i.detail ? `<div class="fr-detail">${i.detail}</div>` : ''}
@@ -32520,6 +32600,108 @@ window.todayRowTap = function(el){
   if (el.querySelector('.fr-detail')) el.classList.toggle('open');
   else if (go) go.click();
 };
+// ── BACK TO TODAY (Build 696) ────────────────────────────────────────────
+// "When I click through and resolve a Today task, there is no way back to
+// Today after I resolve the ask." A Today row opens the module that owns it
+// (a pull, a buyer, an order, a sample, a proposal, Brainstorm) and, once you
+// were there, nothing said where you had come from.
+//
+// So a tap on Today that takes you somewhere is remembered for this tab. While
+// you are in that module a "← Back to Today" button stays in the corner, on a
+// desk and a phone. When the item you opened leaves Today's list (approved,
+// ticked off, answered, snoozed), the button turns into "Done · Back to Today".
+// It asks, never jumps: the ask may have a second step you still want to take.
+// Today is rebuilt before you land on it, so the resolved row is already gone
+// rather than shown and then removed. Moving on by yourself (the space bar,
+// the phone's tabs or menu, a module tile on Today) is ordinary navigation and
+// puts the button away, and arriving back on Today by any route does too.
+(function(){
+  var SK = 'venia-from-today', ARM_MS = 2500;
+  var origin = null, pending = null, navAt = 0, lastV = null, checkT = null;
+  try { var o = JSON.parse(sessionStorage.getItem(SK) || 'null'); if (o && Date.now() - (o.at || 0) < 3 * 3600000) origin = o; } catch (e) {}
+  function view(){
+    if (document.getElementById('dump-sheet')) return 'dump';
+    var s = document.querySelector('.cp-screen.active');
+    return s ? s.id.replace('cp-screen-', '') : 'plm';
+  }
+  function keep(){ try { if (origin) sessionStorage.setItem(SK, JSON.stringify(origin)); else sessionStorage.removeItem(SK); } catch (e) {} }
+  function btn(){ return document.getElementById('vtb-back'); }
+  function paint(){
+    var b = btn();
+    if (!origin || view() === 'cp' || !document.body) { if (b) b.remove(); return; }
+    // A record or a question open on top (a pull, a buyer, a confirm) has its
+    // own close; the button waits behind it rather than compete with it.
+    var covered = !!document.querySelector('.overlay.open, .dpanel.open, #venia-choose');
+    if (b && b.hidden !== covered) b.hidden = covered;
+    if (covered && !b) return;
+    if (!b) {
+      b = document.createElement('button');
+      b.type = 'button'; b.id = 'vtb-back';
+      b.onclick = function(){ window.todayBackGo(); };
+      document.body.appendChild(b);
+    }
+    if (covered) return;
+    var t = origin.resolved ? '✓ Done · Back to Today' : '← Back to Today';
+    if (b.textContent !== t) b.textContent = t;
+    b.classList.toggle('done', !!origin.resolved);
+    var tip = origin.label ? (origin.resolved ? 'Done: ' : 'From Today: ') + origin.label : 'Back to Today';
+    if (b.title !== tip) b.title = tip;
+  }
+  function clear(){ origin = null; pending = null; keep(); paint(); }
+  // Is the row you opened still on Today's list? Rebuilding the list here also
+  // means Today is already up to date when you go back to it.
+  function check(){
+    clearTimeout(checkT);
+    checkT = setTimeout(function(){
+      if (!origin || !origin.key || origin.resolved) return;
+      try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch (e) { return; }
+      var live = (window.__todayItems || []).some(function(i){ return i && i.key === origin.key; });
+      if (!live) { origin.resolved = true; keep(); paint(); }
+    }, 400);
+  }
+  window.todayBackCheck = check;
+  window.todayBackGo = function(){
+    clear();
+    try { if (document.getElementById('dump-sheet') && typeof dumpClose === 'function') dumpClose(); } catch (e) {}
+    try { if (typeof cpRenderToday === 'function') cpRenderToday(); } catch (e) {}
+    cpGoto('cp');
+  };
+  // Every save is a chance the ask was resolved. save() is re-wrapped by the
+  // sync layer after this runs, so the hook is put back whenever it is lost.
+  function hookSave(){
+    var f = window.save;
+    if (typeof f !== 'function' || f.__vtb) return;
+    var w = function(){ var r = f.apply(this, arguments); if (origin && !origin.resolved) check(); return r; };
+    w.__vtb = true; window.save = w;
+  }
+  document.addEventListener('click', function(e){
+    var t = e.target;
+    if (!t || !t.closest || t.closest('#vtb-back')) return;
+    // The space bar, the phone's tabs and menu, the sidebar and Today's module
+    // tiles are where you go by yourself.
+    if (t.closest('.cp-global-bar, #mob-nav, #mob-drawer, .sidebar, #hm-mods')) { navAt = Date.now(); pending = null; return; }
+    if (view() !== 'cp') return;
+    var row = t.closest('[data-k]');
+    var lab = row && row.querySelector('.fr-title, .hm-row-t');
+    pending = { at: Date.now(), key: (row && row.getAttribute('data-k')) || '',
+      label: lab ? lab.textContent.replace(/\s+/g, ' ').replace(/ ?›$/, '').trim().slice(0, 80) : '' };
+  }, true);
+  setInterval(function(){
+    hookSave();
+    var v = view();
+    if (pending && Date.now() - pending.at > ARM_MS) pending = null;
+    if (pending && v !== 'cp') {
+      origin = { at: Date.now(), key: pending.key, label: pending.label, dest: v, resolved: false };
+      pending = null; keep();
+      if (origin.key) check();
+    } else if (origin) {
+      if (v === 'cp') clear();
+      else if (navAt > origin.at && lastV !== null && v !== lastV) clear();
+    }
+    lastV = v;
+    paint();
+  }, 200);
+})();
 window.todayDone = function(key){
   const i = todayItemByKey(key);
   if (!i) return;
@@ -35030,16 +35212,33 @@ function agNav(key, section, el) {
 
   const agent = AGENTS[key];
 
+  let html = null;
   if (section === 'overview') {
     // Sales / Marketing / Brand render their overviews live from real data;
     // PR restores its captured markup (its stats are already live-filled).
-    if (key === 'sl') contentEl.innerHTML = agBuildSalesOverview();
-    else if (key === 'mk') contentEl.innerHTML = agBuildMkOverview();
-    else if (key === 'br') contentEl.innerHTML = agBuildBrOverview();
-    else if (agent && agent._overview) contentEl.innerHTML = agent._overview;
+    if (key === 'sl') html = agBuildSalesOverview();
+    else if (key === 'mk') html = agBuildMkOverview();
+    else if (key === 'br') html = agBuildBrOverview();
+    else if (agent && agent._overview) html = agent._overview;
   } else {
-    contentEl.innerHTML = agBuildSection(key, section, cfg);
+    html = agBuildSection(key, section, cfg);
   }
+  if (html == null) return;
+  // Press's overview is the markup captured at boot, with its figures filled
+  // in afterwards; drawn again, the figures went back to "—" until the next
+  // visit through the space bar (Build 696). They are filled every time now.
+  const refill = () => { if (key === 'pr' && section === 'overview' && typeof prRefreshOverview === 'function') { try { prRefreshOverview(); } catch (e) {} } };
+  // A quiet repaint (Build 696) that would draw exactly what is on screen
+  // leaves it alone: no rebuilt rows, no lost hover, no blink.
+  if (window.__veniaQuiet) {
+    if (contentEl.__agHtml === html && contentEl.__agWas === key + '|' + section) { refill(); return; }
+    // Drawn by another path (the first visit fills the overview directly):
+    // compare what the markup would become with what is there.
+    try { const t = document.createElement('template'); t.innerHTML = html; if (t.innerHTML === contentEl.innerHTML) { contentEl.__agHtml = html; contentEl.__agWas = key + '|' + section; refill(); return; } } catch (e) {}
+  }
+  contentEl.innerHTML = html;
+  contentEl.__agHtml = html; contentEl.__agWas = key + '|' + section;
+  refill();
   // Calm cross-fade the freshly-swapped content instead of hard-cutting.
   try { window.vFade(contentEl); } catch (e) {}
 
@@ -61868,14 +62067,25 @@ window.veniaModulesRender = async function(){
   // repainting for it is a visible flash of the whole page for no reason.
   // When the comparison itself fails, say "changed": a missed repaint loses
   // a partner's work from the screen, a spare one only blinks.
+  // A PULL THAT BROUGHT NOTHING NEW REDRAWS NOTHING (Build 696).
+  //
+  // "I get flashing on some modules." Every pull -- the boot read, the
+  // four-minute poll, a partner's realtime write and, on a phone, every single
+  // return to the app -- went through applySnapshot, and applySnapshot repainted
+  // the open screen whether or not anything had changed. The repaint replaced
+  // the whole content area and re-ran its fade, so the page blinked each time
+  // the phone came out of a pocket, and on a desk once at boot and every four
+  // minutes. The change test was already here; the repaint now waits for it.
   function absorbRemote(row, via){
     var before = null;
     try { before = _mStr(snapshot()); } catch (e) { before = null; }
-    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data));
+    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data), true);
     setBase(row.data);
     window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: via || 'pull' };
-    if (before == null) return true;
-    try { return _mStr(snapshot()) !== before; } catch (e) { return true; }
+    var changed = true;
+    if (before != null) { try { changed = _mStr(snapshot()) !== before; } catch (e) { changed = true; } }
+    if (changed) { try { if (typeof window.veniaRepaint === 'function') window.veniaRepaint(); } catch (e) {} }
+    return changed;
   }
   window.__syncAbsorb = absorbRemote;
 
@@ -62004,7 +62214,7 @@ window.veniaModulesRender = async function(){
     if (Object.keys(ls).length) d._ls = ls;
     return d;
   }
-  function applySnapshot(data){
+  function applySnapshot(data, noRepaint){
     if (!data) return;
     applyingRemote = true;
     window.__vApplyingRemote = true;   // tell save()'s stamp not to overwrite the partner's timestamps
@@ -62051,7 +62261,8 @@ window.veniaModulesRender = async function(){
     } finally { applyingRemote = false; window.__vApplyingRemote = false; }
     // Paint the freshly merged data onto whatever screen is open. Without this
     // the pull is invisible until you navigate, which reads as missing data.
-    try { if (typeof window.veniaRepaint === 'function') window.veniaRepaint(); } catch (e) {}
+    // (absorbRemote paints for itself, and only when the merge changed something.)
+    if (!noRepaint) { try { if (typeof window.veniaRepaint === 'function') window.veniaRepaint(); } catch (e) {} }
   }
 
   // Every leg records into __syncStat so the Sync Status panel (and the
@@ -62485,6 +62696,10 @@ window.veniaModulesRender = async function(){
   }
 
   function rerender(){
+    if (typeof window.veniaQuietly === 'function') return window.veniaQuietly(rerenderNow);
+    return rerenderNow();
+  }
+  function rerenderNow(){
     try {
       if (STATE.currentPage === 'techpack' && typeof renderTechPack === 'function' && typeof TP_STYLE_ID !== 'undefined' && TP_STYLE_ID) renderTechPack(TP_STYLE_ID);
       else if (typeof renderPage === 'function') renderPage(STATE.currentPage || 'dashboard');
@@ -62769,9 +62984,10 @@ window.veniaModulesRender = async function(){
           // Fresh browser holds only seed data → let cloud win wholesale. A
           // returning device has real local work → 3-way merge so unpushed local
           // edits survive alongside the cloud's.
-          if (FRESH_BROWSER) { applySnapshot(row.data); setBase(row.data); }
-          else absorbRemote(row, 'boot');
-          rerender();
+          // Build 696: a returning device repaints only when the merge
+          // changed something; an identical cloud copy leaves the screen be.
+          if (FRESH_BROWSER) { applySnapshot(row.data); setBase(row.data); rerender(); }
+          else if (absorbRemote(row, 'boot')) rerender();
         } else {
           // Last cloud write was ours — but that is not proof our copy matches
           // it, so merge rather than assume. Cheap, and it closes the loop that
