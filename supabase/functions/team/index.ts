@@ -41,7 +41,10 @@ function json(o: unknown, status = 200) {
 // a domain check would hand that colleague the power to grant themselves every
 // module. The list matches venia_is_founder() in the database exactly.
 const FOUNDERS = ["keeter@veniacollection.com", "christine@veniacollection.com"];
-const MODULES = ["home", "product", "growth", "sales", "money", "brainstorm", "settings"];
+// 'pattern-cad' (Dr4ft, Build 684) is an app module with no venia_module_data
+// row; its grant is read by venia_module_role(m := 'pattern-cad') in the
+// pattern-cad function and by veniaPatternCadOn() in the app.
+const MODULES = ["home", "product", "growth", "sales", "money", "brainstorm", "pattern-cad", "settings"];
 // 'legacy' is deliberately absent: it holds a pre-module store spanning sales,
 // growth and product in one string, so it is founders-only and not grantable.
 // 'catalog' is absent too, for the opposite reason: it is the cost-stripped
