@@ -17,7 +17,10 @@ connector tools). Today's modules are listed in `MODULES` and described in
 | settings | core | connections and preferences |
 | catalog | core | the sellable line, cost stripped |
 | product | add-on | styles, materials, BOM, POM, tech packs, costing, POs |
-| growth | add-on | press pulls, coverage, marketing, brand |
+| growth | add-on | the data behind Press, Social and Brand (one module id, one data row) |
+| ↳ Press (space `pr`) | add-on part | sample pulls, pitches, editors, coverage, press tools, the PR watchlist; sub-switch `growth-press` |
+| ↳ Social (space `mk`) | add-on part | Social Command, the Writer, the Launch Machine; sub-switch `growth-social` |
+| ↳ Brand (space `br`) | core page | voice, tone library, brand library, competitor watch, brand settings; its data rides in the growth row for now |
 | sales | add-on | buyers, quotes, orders, line sheets |
 | money | add-on | bank feed, cash, plan, CFO |
 | brainstorm | add-on | ideas, plans, mind map, boards |
@@ -57,6 +60,34 @@ Account and brands, subscriptions, sync, the shell (nav, routing, Today's
 frame), the Catalogue, the Brand kit, currency rates, the activity log, mail
 and Google, photos and files, push, search, and the assistant host.
 `CORE_SERVICES` in the app lists where each lives today.
+
+## Growth shown as Press, Social and Brand (Build 682)
+
+The `growth` module stays one module id with one `venia_module_data` row:
+every key (`prPulls`, `mkPosts`, `brTone`, `brandDocs` …) is where it was, and
+nothing is moved or renamed. What changed is how it reads:
+
+- **Press** (today's PR, space `pr`) and **Social** (today's Marketing, space
+  `mk`; Social Command is its home, with the Writer and the Launch Machine) are
+  add-ons. Each has its own top-bar button and Home tile; Press also has the
+  phone tab. Each has an optional sub-switch in `venia_entitlements`,
+  `growth-press` and `growth-social`, read like `pattern-cad`: a part is off
+  only when its row says so (`window.VENIA_ENTITLED['growth-social'] === false`),
+  and missing or unknown means on. Both are also off when `growth` is off.
+  `veniaGrowthPartOn('press' | 'social')` answers, and `veniaApplyAccess()`
+  sets `html.no-press` / `html.no-social`, which hide `[data-space="press"]` /
+  `[data-space="social"]`.
+- **Brand** (space `br`) is a core page every brand has: voice, the tone
+  library, the brand library (Brand → Library lists every document), competitor
+  watch and brand settings. It is always shown, whatever Growth's switches say.
+  Its data still rides in the growth row for now (`core.brand.*` offers read it),
+  and moves into core storage in a later stage.
+
+`MODULE_MANIFEST.growth.parts` describes the three; Settings → Modules lists
+Brand with the core and Press and Social as two add-on rows. A person's grant
+is still the one `growth` grant (Team & Access shows it as "Press & Social").
+Old routes are unchanged: `cpGoto('pr' | 'mk' | 'br')`, `agNav('pr', …)` and
+saved routes all open the same screens.
 
 ## Modules that run in their own frame
 
