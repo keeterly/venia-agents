@@ -4124,7 +4124,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '679';
+  const BUILD = '680';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7876,6 +7876,9 @@ const MODULES = {
     label: 'Sales', space: 'sl', nav: true,
     owns: 'wholesale — the buyers CRM, stockist outreach, quotes, orders, line sheets, account health',
     keys: ['slBuyers', 'slQuotes', 'slOrders', 'slLinesheets', 'slPrefs',
+           // Build 680: the line sheet's category running order. It was set on
+           // STATE but owned by no module, so save() never kept it.
+           'lsCatOrder',
            // THE SEASON RATE. A pricing decision, not a device preference: the
            // rate a line sheet quotes all season has to be the same rate on
            // both founders' machines and on an agent's. It was in no module at
@@ -8192,6 +8195,8 @@ const VENIA_OFFERS = {
   'growth.coverage':   { key: 'prCoverage',    list: true },
   'growth.editors':    { key: 'prEditors',     list: true },
   'growth.calendar':   { key: 'mkCalendar',    list: true },
+  // Build 680: Social Command's posts, the store that replaced mkCalendar.
+  'growth.posts':      { key: 'mkPosts',       list: true },
   'growth.seen':       { key: 'growthSeen',    list: false },
   // sales
   'sales.buyers':      { key: 'slBuyers',      list: true },
@@ -10504,8 +10509,12 @@ window.fxSetView = function(code){
 window.fxEditRate = function(){
   const code = fxView();
   if (code === 'USD') { toast('US dollars is the currency everything is stored in', 'info'); return; }
-  if (STATE.fxRates) delete STATE.fxRates[code];
-  if (!fxEnsureRate(code)) { if (!STATE.fxRates) STATE.fxRates = {}; save(); }
+  // Build 680: the old rate stays until a new one is given. Deleting it first
+  // meant Cancel saved the season with no rate at all.
+  const R = VeniaOS.get('core.fx') || {};
+  const had = R[code];
+  delete R[code];
+  if (!fxEnsureRate(code) && had) R[code] = had;
   try { renderStyles(); } catch(e){}
   try { if (document.getElementById('px-pop')) pxRender(); } catch(e){}
 };
@@ -16690,9 +16699,12 @@ function globalSearch(val) {
 
 function exportCSV() {
   const headers = ['StyleID','Name','Season','Category','Gender','Stage','Drop','COGS','Wholesale','Retail','Margin%','Fabric','Colors','Sizes','Vendor','Sample','CLO3D'];
-  const rows = STATE.styles.map(s => {
+  // Build 680: each field quoted, so "Black, Ivory" or "XS,S,M,L" no longer
+  // shifts every column after it; archived styles left out.
+  const q = v => { const t = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v)); return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+  const rows = (STATE.styles || []).filter(s => s && s.status !== 'archived').map(s => {
     const m = s.retail && s.cogs ? Math.round(((s.retail-s.cogs)/s.retail)*100) : '';
-    return [s.styleId,s.name,s.season,s.category,s.gender,s.status,s.drop,s.cogs,s.wholesale,s.retail,m,s.fabric,s.colors,s.sizes,s.vendor,s.sample,s.cloFile].join(',');
+    return [s.styleId,s.name,s.season,s.category,s.gender,s.status,s.drop,s.cogs,s.wholesale,s.retail,m,s.fabric,s.colors,s.sizes,s.vendor,s.sample,s.cloFile].map(q).join(',');
   });
   const csv = [headers.join(','),...rows].join('\n');
   const a = document.createElement('a');
@@ -19871,19 +19883,21 @@ function runSearch(q) {
     return;
   }
 
-  const styleHits = STATE.styles.filter(s =>
-    s.name.toLowerCase().includes(q) || s.styleId.toLowerCase().includes(q) ||
-    (s.fabric||'').toLowerCase().includes(q) || (s.colors||'').toLowerCase().includes(q) ||
-    (s.vendor||'').toLowerCase().includes(q) || s.category.toLowerCase().includes(q)
-  );
-  const matHits = STATE.materials.filter(m =>
-    m.name.toLowerCase().includes(q) || (m.supplier||'').toLowerCase().includes(q) ||
-    (m.content||'').toLowerCase().includes(q)
-  );
-  const vendorHits = STATE.vendors.filter(v =>
-    v.name.toLowerCase().includes(q) || (v.country||'').toLowerCase().includes(q) ||
-    (v.type||'').toLowerCase().includes(q) || (v.contact||'').toLowerCase().includes(q)
-  );
+  // Build 680: every field read as text. A style with no name, or colours
+  // stored as a list, made the whole search throw.
+  const L = v => String(Array.isArray(v) ? v.join(' ') : (v == null ? '' : v)).toLowerCase();
+  const styleHits = (STATE.styles || []).filter(s => s && (
+    L(s.name).includes(q) || L(s.styleId).includes(q) || L(s.code).includes(q) ||
+    L(s.fabric).includes(q) || L(s.colors).includes(q) ||
+    L(s.vendor).includes(q) || L(s.category).includes(q)
+  ));
+  const _prodOn = (function(){ try { return !window.VeniaOS || VeniaOS.enabled('product'); } catch(e){ return true; } })();
+  const matHits = (_prodOn ? (STATE.materials || []) : []).filter(m => m && (
+    L(m.name).includes(q) || L(m.supplier).includes(q) || L(m.content).includes(q)
+  ));
+  const vendorHits = (_prodOn ? (STATE.vendors || []) : []).filter(v => v && (
+    L(v.name).includes(q) || L(v.country).includes(q) || L(v.type).includes(q) || L(v.contact).includes(q)
+  ));
   // Search is app-wide, not PLM-only: CRM accounts, quotes, Brainstorm
   // items/briefs, and press contacts are all findable from anywhere.
   const buyerHits = (VeniaOS.get('sales.buyers')||[]).filter(b =>
@@ -29025,7 +29039,7 @@ window.addEventListener('message', function(e){
     const on = !!window.veniaBoardsLinkOn();
     const items = !on ? [] : kind === 'materials'
       ? (STATE.materials || []).map(veniaBoardsMaterialItem)
-      : (STATE.styles || []).filter(s => s && !s.archived).map(veniaBoardsStyleItem);
+      : (STATE.styles || []).filter(s => s && !s.archived && s.status !== 'archived').map(veniaBoardsStyleItem);
     try { e.source.postMessage({ source: 'venia-host', type: 'boards:catalog', payload: { req: e.data.payload && e.data.payload.req, on: on, kind: kind, items: items.slice(0, 2000) } }, location.origin); } catch(_){}
     return;
   }
@@ -29828,7 +29842,7 @@ function cmdInit() {
   const on = function(id){ try { return !window.VeniaOS || VeniaOS.enabled(id); } catch(e){ return true; } };
   // Which module a Today row belongs to (its key's first part, as Today's own
   // groups read it). Rows of your own (task) belong to no module.
-  const MOD_OF = { pull:'growth', growth:'growth', mk:'growth', sample:'product', tl:'product', cal:'product', gap:'product',
+  const MOD_OF = { pull:'growth', growth:'growth', mk:'growth', mkp:'growth', sample:'product', tl:'product', cal:'product', gap:'product',
     fc:'product', gate:'product', rs:'product', buyer:'sales', 'buyers-more':'sales', owed:'sales', wholesale:'sales', unreachable:'sales',
     quote:'sales', agleads:'sales', del:'sales', inv:'money', uncat:'money', nag:'settings' };
   function modOf(i){
@@ -30387,7 +30401,21 @@ function buildTodayFocus() {
   });
   // 6d. Restocks (Build 674): what's still missing, and the next step this week.
   try { if (typeof rsTodayItems === 'function') rsTodayItems(midnight).forEach(i => items.push(i)); } catch(e){}
-  // 7. Content going out in the next 48h.
+  // 7. Content going out in the next 48h. Build 680: Social Command's posts
+  //    first (that is where posts are planned now), then the old calendar.
+  try {
+    (VeniaOS.get('growth.posts')||[]).forEach(p => {
+      if (!p || ['published','archived'].indexOf(p.status) >= 0) return;
+      const when = typeof socWhen === 'function' ? socWhen(p) : '';
+      if (!when) return;
+      const days = Math.round((new Date(when + 'T00:00:00') - midnight) / 86400000);
+      if (days < 0 || days > 1) return;
+      const ready = p.status === 'approved' || p.status === 'scheduled';
+      items.push({ key: 'mkp|' + p.id, pri: ready ? 'low' : 'med',
+        text: `Post ${days === 0 ? 'today' : 'tomorrow'} — ${slEsc(p.title || 'untitled post')}${ready ? '' : ' (not approved yet)'}`,
+        act: "cpGoto('mk');setTimeout(function(){agNavGo('mk','social')},150)" });
+    });
+  } catch(e){}
   (VeniaOS.get('growth.calendar')||[]).forEach(e => {
     const d = new Date(e.date + 'T00:00:00');
     const days = Math.round((d - midnight) / 86400000);
@@ -30575,7 +30603,7 @@ function buildTodayFocus() {
   const GROUP_OF = { inv:'money', uncat:'money', po:'money', pull:'pulls', sample:'pulls',
     buyer:'outreach', 'buyers-more':'outreach', owed:'outreach', wholesale:'outreach', unreachable:'outreach',
     quote:'outreach', growth:'outreach', agleads:'outreach', tl:'production', cal:'production', gap:'production',
-    fc:'production', gate:'production', mk:'production', del:'orders', task:'mine', btask:'mine', nag:'setup' };
+    fc:'production', gate:'production', mk:'production', mkp:'production', del:'orders', task:'mine', btask:'mine', nag:'setup' };
   const groupOf = (i) => {
     const k = String(i.key || '').split('|')[0];
     if (k === 'po' && /\|(exf|ms)/.test(String(i.key))) return 'production';
@@ -30945,7 +30973,18 @@ window.todayTaskAdd = function(text){
 };
 window.todayTaskDone = function(id){
   const t = (STATE.todayTasks || []).find(function(x){ return x && x.id === id; });
-  if (!t || t.done) return false;
+  // Build 680: a Today task added since Build 662 lives in Brainstorm's list;
+  // tick it there (the same thing Today's own Done does), so the connector's
+  // complete_task works on it.
+  if (!t) {
+    const d = ((window.VeniaOS && VeniaOS.get('brainstorm.dump')) || []).find(function(x){ return x && x.id === id && !Array.isArray(x.children); });
+    if (!d || d.done) return false;
+    d.done = true; d.doneAt = new Date().toISOString(); save();
+    try { buildTodayFocus(); } catch(e){}
+    try { if (window.dumpBadge) window.dumpBadge(); } catch(e){}
+    return true;
+  }
+  if (t.done) return false;
   t.done = true; t.doneAt = new Date().toISOString();
   save();
   try { buildTodayFocus(); } catch(e){}
@@ -33125,6 +33164,10 @@ function agNav(key, section, el) {
     const ovActions = (AGENTS[key]||{})._overviewActions;
     if (cfg.actions) actionsEl.innerHTML = cfg.actions;
     else if (section === 'overview' && ovActions != null) actionsEl.innerHTML = ovActions;
+    // Build 680: a page with no buttons of its own shows none, rather than
+    // keeping the last page's ("+ Add Buyer" on Orders, "+ New Post" on
+    // Marketing Settings).
+    else actionsEl.innerHTML = '';
   }
 
   // Update chat suggest chips
@@ -35882,6 +35925,19 @@ const VENIA_TONE_CHANNELS = {
 const VENIA_AGENT_CHANNEL = { pr: 'press', mk: 'social', br: 'campaign', sl: 'wholesale',
                               fin: 'internal', plm: 'product', ops: 'internal' };
 // The founders' own additions from Brand → Tone, which until now went nowhere.
+// Build 680: the tone library is { approved, avoid, phrases }. The old store
+// answers [] for a key it doesn't have, and that [] reached STATE and the
+// cloud, so every page reading .approved.length threw (Sales Account Health,
+// Sell-through, Brand Tone Library). This puts the shape back; it holds no
+// words, so nothing is lost.
+function brToneNorm(){
+  const S = window.STATE || {};
+  const t = S.brTone;
+  if (!t || typeof t !== 'object' || Array.isArray(t)) S.brTone = { approved: [], avoid: [], phrases: [] };
+  else ['approved', 'avoid', 'phrases'].forEach(function(k){ if (!Array.isArray(S.brTone[k])) S.brTone[k] = []; });
+  return S.brTone;
+}
+window.brToneNorm = brToneNorm;
 function veniaToneLibraryText(){
   const t = (window.STATE && STATE.brTone) || null;
   if (!t) return '';
@@ -41367,7 +41423,7 @@ function agSectionData(key, section) {
   };
 
   const BR_DATA = {
-    tone:       { stats:[{l:'Approved words',v:(STATE.brTone||{approved:[]}).approved.length+'',s:'in library'},{l:'Avoid words',v:(STATE.brTone||{avoid:[]}).avoid.length+'',s:'banned list'},{l:'Phrases',v:((STATE.brTone||{}).phrases||[]).length+'',s:'example lines'}], prompts:[{t:'Write VENIA\'s tone of voice in one paragraph',tag:'DRAFT',d:'Short, specific, usable as a brief for any collaborator.'},{t:'Build a tone library — approved and avoided vocabulary for VENIA',tag:'BUILD',d:'Words we use, words we avoid, example phrases.'}] },
+    tone:       { stats:[{l:'Approved words',v:brToneNorm().approved.length+'',s:'in library'},{l:'Avoid words',v:brToneNorm().avoid.length+'',s:'banned list'},{l:'Phrases',v:brToneNorm().phrases.length+'',s:'example lines'}], prompts:[{t:'Write VENIA\'s tone of voice in one paragraph',tag:'DRAFT',d:'Short, specific, usable as a brief for any collaborator.'},{t:'Build a tone library — approved and avoided vocabulary for VENIA',tag:'BUILD',d:'Words we use, words we avoid, example phrases.'}] },
     'br-prefs': { prompts:[{t:'Help me configure brand preferences',tag:'BUILD',d:'Visual direction, tone, review workflow.'}] },
   };
   const dataMap = { pr: PR_DATA, mk: MK_DATA, sl: SL_DATA, br: BR_DATA };
@@ -41597,7 +41653,7 @@ function agBuildMkOverview() {
 
 // Live Brand overview — real tone library, brand watch, memory and voice tools.
 function agBuildBrOverview() {
-  const t = STATE.brTone || { approved:[], avoid:[], phrases:[] };
+  const t = brToneNorm();
   const ap = (t.approved||[]).length, av = (t.avoid||[]).length, ph = (t.phrases||[]).length;
   let watch = [];
   try { const w = JSON.parse(localStorage.getItem('venia-brand-watch') || '[]'); if (Array.isArray(w)) watch = w; } catch (e) {}
@@ -47114,7 +47170,7 @@ window.brRestoreToneDoc = function(){
   try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
 };
 window.brInstallVeniaTone = function(){
-  if (!STATE.brTone) STATE.brTone = { approved:[], avoid:[], phrases:[] };
+  brToneNorm();
   const t = VeniaOS.get('core.brand.tone');
   const add = function(list, words){
     const have = {};
@@ -47150,7 +47206,7 @@ window.brInstallVeniaTone = function(){
   try { agNav('br','tone', document.querySelector('#cp-screen-br .ag-nav-item.active')); } catch(e){}
 };
 function agBuildToneLibrarySection() {
-  if (!STATE.brTone) STATE.brTone = { approved:[], avoid:[], phrases:[] };
+  brToneNorm();
   const t = STATE.brTone;
 
   const approvedList = t.approved.length === 0
@@ -47224,7 +47280,7 @@ function agBuildToneLibrarySection() {
 function brAddToneWord(list) {
   const val = prompt(list === 'phrases' ? 'Add example phrase:' : 'Add word:');
   if (!val || !val.trim()) return;
-  if (!STATE.brTone) STATE.brTone = { approved:[], avoid:[], phrases:[] };
+  brToneNorm();
   if (!STATE.brTone[list]) STATE.brTone[list] = [];
   STATE.brTone[list].push(val.trim());
   save();
@@ -47263,6 +47319,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (!STATE.slQuotes)     STATE.slQuotes     = dbGet('slQuotes')     || [];
   if (!STATE.slLinesheets) STATE.slLinesheets = dbGet('slLinesheets') || [];
   if (!STATE.brTone)       STATE.brTone       = dbGet('brTone')       || { approved:[], avoid:[], phrases:[] };
+  brToneNorm();
 });
 
 // ══════════════════════════════════════════════════════════
@@ -47368,10 +47425,9 @@ function mkSavePrefs() {
   STATE.mkPrefs.season       = g('mkp-season');
   STATE.mkPrefs.budget       = g('mkp-budget');
   STATE.mkPrefs.audience     = g('mkp-audience');
-  if (!localStorage.getItem('venia-plm-v2')) return;
-  const stored = JSON.parse(localStorage.getItem('venia-plm-v2'));
-  stored.mkPrefs = STATE.mkPrefs;
-  localStorage.setItem('venia-plm-v2', JSON.stringify(stored));
+  // Build 680: through save(), so it is stamped and reaches the cloud. The
+  // raw write to this device's store never left the device.
+  try { save(); } catch(e){}
   if (typeof toast === 'function') toast('Marketing preferences saved');
 }
 
@@ -47541,6 +47597,9 @@ function slSavePrefs() {
     STATE.slPrefs[k] = g('slp-' + k);
   });
   dbSet('slPrefs', STATE.slPrefs);
+  // Build 680: save() so the settings reach this device's store and the cloud
+  // now. dbSet alone wrote only the old local store, so a reload lost them.
+  try { save(); } catch(e){}
   if (typeof toast === 'function') toast('Sales preferences saved');
 }
 
@@ -47638,6 +47697,8 @@ function brSavePrefs() {
   STATE.brPrefs.toneGuard = g('brp-toneGuard');
   STATE.brPrefs.agentNotes= g('brp-agentNotes');
   dbSet('brPrefs', STATE.brPrefs);
+  // Build 680: save() — dbSet alone wrote only the old local store.
+  try { save(); } catch(e){}
   if (typeof toast === 'function') toast('Brand preferences saved');
 }
 
@@ -56696,6 +56757,8 @@ function pkSavePressKit() {
       bio: bio ? bio.value : '', contacts: contacts ? contacts.value : '',
       savedAt: new Date().toISOString(),
     }));
+    // Build 680: and to the cloud (Growth's row carries VENIA_PRESSKIT).
+    try { save(); } catch(e){}
     showToast('Press kit saved', 'success');
   } catch(e) { showToast('Could not save press kit', 'error'); }
 }

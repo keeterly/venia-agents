@@ -286,6 +286,17 @@ const readTools = [
       if (!d) return noAccess('Today');
       const tasks = (d.todayTasks || []).filter((t) => t && !t.done)
         .map((t) => ({ id: t.id, text: t.text, by: t.by, added: t.at }));
+      // Build 680: since Build 662 a task added on Today is a Brainstorm quick
+      // task (one list), so those are Today's open tasks too. Same ids work
+      // with complete_task.
+      const bs = moduleData(mods, 'brainstorm');
+      // Same rule as Today: loose items (not goals with steps), not done, not
+      // put off past today.
+      const td = new Date().toISOString().slice(0, 10);
+      ((bs && Array.isArray(bs.dump)) ? bs.dump : [])
+        .filter((x) => x && !x.done && !Array.isArray(x.children) && !(x.snooze && x.snooze > td) && String(x.t || '').trim())
+        .forEach((x) => tasks.push({ id: x.id, text: String(x.t).split('\n')[0].trim().slice(0, 200), by: x.by, added: x.d,
+          due: x.due || undefined, from: 'Brainstorm' }));
       return text({
         open_tasks: tasks,
         assigned: d.todayAssign || {},
