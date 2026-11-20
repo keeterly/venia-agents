@@ -4234,7 +4234,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '702';
+  const BUILD = '710';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7146,7 +7146,7 @@ window.veniaYmd = veniaYmd;
                 <select class="fs" id="sm-priority"><option value="high">High</option><option value="mid" selected>Medium</option><option value="low">Low</option></select>
               </div>
               <div class="fg sm-adv"><label class="fl" for="sm-sample">Sample Round</label>
-                <select class="fs" id="sm-sample"><option>Proto</option><option>SMS1</option><option>SMS2</option><option>TOP</option><option>Approved</option></select>
+                <select class="fs" id="sm-sample"><option>Proto</option><option>SMS1</option><option>SMS2</option><option>PP</option><option>TOP</option><option>Approved</option></select>
               </div>
               <div class="fg sm-adv"><label class="fl" for="sm-vendor">Factory</label><input class="fi" id="sm-vendor" placeholder="Factory name" list="venia-vendor-names" onfocus="veniaVendorNames()" autocomplete="off"></div>
               <div class="fg sm-adv"><label class="fl" for="sm-lead">Lead Time (weeks)</label><input class="fi fi-mono" id="sm-lead" type="number" placeholder="12"></div>
@@ -14994,7 +14994,7 @@ function tlSchedule(s){
   return out;
 }
 function tlDone(s, key){
-  const st = s.status, smIdx = ['Proto','SMS1','SMS2','TOP','Approved'].indexOf(s.sample || '');
+  const st = s.status, smIdx = ['Proto','SMS1','SMS2','PP','TOP','Approved'].indexOf(s.sample || '');
   let shipped = ['active','sale'].includes(st);
   // An active style that is being made again (Build 674): its production legs
   // follow the open PO, not the style's status — before this, every milestone
@@ -17993,7 +17993,8 @@ function calcLanded(s) {
 // ═══════════════════════════════════════════════
 //  SAMPLE TRACKER
 // ═══════════════════════════════════════════════
-const SAMPLE_STAGES = ['Proto','SMS1','SMS2','TOP','Approved'];
+// Build 710: PP (pre-production) sits between SMS2 and TOP.
+const SAMPLE_STAGES = ['Proto','SMS1','SMS2','PP','TOP','Approved'];
 const SAMPLE_COLORS = {Proto:'var(--purple)',SMS1:'var(--blue)',SMS2:'var(--teal)',TOP:'var(--amber)',Approved:'var(--green)'};
 
 // ── Sample round intelligence ────────────────────────────────────────────
@@ -18631,7 +18632,7 @@ function dpSampleRoundsHtml(s) {
     ${rows}${fitRows}
     <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px">
       <select class="fs" id="dp-sr-round" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
-        ${(typeof SAMPLE_STAGES!=='undefined'?SAMPLE_STAGES:['Proto','SMS1','SMS2','TOP','Approved']).map(st=>`<option value="${st}"${s.sample===st?' selected':''}>${st}</option>`).join('')}
+        ${(typeof SAMPLE_STAGES!=='undefined'?SAMPLE_STAGES:['Proto','SMS1','SMS2','PP','TOP','Approved']).map(st=>`<option value="${st}"${s.sample===st?' selected':''}>${st}</option>`).join('')}
       </select>
       <select class="fs" id="dp-sr-result" style="min-height:auto;padding:5px 7px;font-size:10px;width:auto">
         <option value="">Result…</option><option value="approved">Approved</option><option value="revise">Revise</option><option value="rejected">Rejected</option>
@@ -20070,8 +20071,11 @@ function rsDerivedDone(po, k){
   const ok = (e) => ['approved','pass'].includes(String(e.result||'').toLowerCase());
   const since = String(po.createdAt || '').slice(0,10);
   const fresh = (e) => rsPath(po) === 'first' || !since || String(e.date||'') >= since;
-  if (k === 'proto' && log.some(e => fresh(e) && ((e.round === 'Proto' && ok(e)) || ['SMS1','SMS2','SMS','TOP'].includes(e.round)))) return 'From the sample log';
-  if (k === 'fit' && log.some(e => fresh(e) && ((['SMS1','SMS2','SMS'].includes(e.round) && ok(e)) || e.round === 'TOP'))) return 'From the sample log';
+  if (k === 'proto' && log.some(e => fresh(e) && ((e.round === 'Proto' && ok(e)) || ['SMS1','SMS2','SMS','PP','TOP'].includes(e.round)))) return 'From the sample log';
+  if (k === 'fit' && log.some(e => fresh(e) && ((['SMS1','SMS2','SMS'].includes(e.round) && ok(e)) || e.round === 'TOP' || e.round === 'PP'))) return 'From the sample log';
+  // Build 710: an approved PP or TOP round in the sample log ticks its step.
+  if (k === 'pp' && log.some(e => fresh(e) && ((e.round === 'PP' && ok(e)) || e.round === 'TOP'))) return 'From the sample log';
+  if (k === 'top' && log.some(e => fresh(e) && e.round === 'TOP' && ok(e))) return 'From the sample log';
   if (k === 'tpIssued' && (s.issued||[]).some(e => rsPath(po) === 'first' || !since || String(e.at||'') >= since)) return 'Tech pack revision issued';
   if (RS_WORK_STEPS[k] && rsMaker(po) === 'cmt'){
     const rows = (po.work||[]).filter(w => w.step === k);
@@ -20309,7 +20313,7 @@ window.rsStart = function(styleId, path){
     inStockBy: '', leadDays: (parseInt(s.lead,10) >= 21 ? parseInt(s.lead,10) : RS_DEFAULT_LEAD),
     vendor: s.vendor || '', vendorId: s.vendorId || '', dyeHouse: '',
     cost: Math.round((landedCost(s)||0)*100)/100,
-    bom: rsBomFromStyle(s), fabricPoIds: [], ms: {},
+    bom: rsBomFromStyle(s), bomShared: true, fabricPoIds: [], ms: {},
     season: String(s.season||'').trim(), currency: 'USD', depositPct: 30, status: 'draft', notes: '',
   };
   rsRender(null);
@@ -20321,7 +20325,40 @@ window.rsOpen = function(id){
   RS_DRAFT.qty = it.qty || po.units || 0;
   RS_DRAFT.sizes = it.sizes || {};
   RS_DRAFT.cost = it.cost || 0;
+  // Build 710: a shared BOM is the style's, read fresh each time the run opens.
+  if (RS_DRAFT.bomShared){ const s = rsStyle(RS_DRAFT); if (s) RS_DRAFT.bom = rsBomFromStyle(s); }
   rsRender(id);
+};
+// Build 710: write a shared run's BOM back to the style. Lines are matched to
+// the style's own by material (or name) so fields only the BOM page keeps
+// (notes, placement, ids) stay. Empty lines are skipped.
+function rsBomToStyle(d){
+  const s = rsStyle(d); if (!s || !d.bomShared) return;
+  STATE.bom = STATE.bom || {};
+  const old = (STATE.bom[s.id] || []).slice();
+  const key = (l) => l.matId ? 'm:' + l.matId : 'n:' + String(l.matName||'').trim().toLowerCase();
+  const out = (d.bom || []).filter(l => l.matId || String(l.matName||'').trim()).map(l => {
+    const i = old.findIndex(o => key(o) === key(l));
+    const base = i >= 0 ? old.splice(i, 1)[0] : {};
+    return Object.assign({ id: 'bl' + Date.now().toString(36) + Math.random().toString(36).slice(2,6) }, base, { matId: l.matId||'', matName: l.matName||'', lineType: l.lineType||'Fabric', matType: l.lineType||'Fabric',
+      qty: parseFloat(l.qty)||0, unit: l.unit||base.unit||'yd', waste: l.waste||'', supplier: l.supplier||'', costPerUnit: parseFloat(l.costPerUnit)||0,
+      placement: l.placement || base.placement || '' });
+  });
+  STATE.bom[s.id] = out;
+}
+window.rsBomShare = async function(on){
+  rsReadForm(); const d = RS_DRAFT; if (!d) return;
+  const s = rsStyle(d); if (!s) return;
+  if (on){
+    const had = ((STATE.bom||{})[s.id]||[]).length;
+    if (had && !(await veniaConfirm('Use ' + (s.name||'the style') + '\'s BOM for this run? The ' + (d.bom||[]).length + ' line' + ((d.bom||[]).length===1?'':'s') + ' here are replaced by the style\'s ' + had + '.', { ok: 'Use the style BOM' }))) return;
+    d.bomShared = true;
+    if (had) d.bom = rsBomFromStyle(s); else rsBomToStyle(d);
+  } else {
+    d.bomShared = false;
+  }
+  rsRender(d.id || null);
+  showToast(on ? 'This run now uses the style\'s BOM' : 'This run has its own BOM now. The style\'s BOM stays as it is');
 };
 function rsReadForm(){
   const d = RS_DRAFT; if (!d) return;
@@ -20462,6 +20499,7 @@ function rsCommit(){
   const item = { styleId: d.styleId, name: (s && s.styleId ? s.styleId + ' ' : '') + (s ? s.name : ''), qty: d.qty||0, sizes: d.sizes||{}, cost: d.cost||0 };
   if (d.colour) item.colorway = d.colour;
   if (rsMaker(d) === 'cmt'){ d.vendor = 'VENIA (LA)'; d.vendorId = ''; }
+  if (d.bomShared) rsBomToStyle(d);
   const out = Object.assign({}, d, {
     items: [item], units: d.qty||0, total: Math.round((d.qty||0) * (d.cost||0) * 100)/100,
     exFactory: (d.ms && d.ms.exf && d.ms.exf.date) || d.exFactory || '',
@@ -20655,7 +20693,7 @@ function rsStageInfo(d, s){
   const w = d.work || [];
   return [
     issued ? { text: 'Tech pack issued', tone: 'ok' } : { text: 'Tech pack not issued', tone: 'warn' },
-    !bom.length ? { text: 'No lines yet', tone: 'warn' } : noUse ? { text: noUse + ' without usage', tone: 'warn' } : { text: bom.length + ' line' + (bom.length>1?'s':''), tone: 'ok' },
+    !bom.length ? { text: 'No lines yet', tone: 'warn' } : noUse ? { text: noUse + ' without usage', tone: 'warn' } : { text: bom.length + ' line' + (bom.length>1?'s':'') + (d.bomShared ? ' · the style\'s BOM' : ' · its own BOM'), tone: 'ok' },
     cmt ? ((w.some(x => x.step==='cut' && x.vendorId) && w.some(x => x.step==='sew' && x.vendorId)) ? { text: 'Cutter and sewing picked', tone: 'ok' } : { text: 'Pick cutter and sewing', tone: 'warn' })
         : (d.vendor ? { text: d.vendor, tone: 'ok' } : { text: 'No factory yet', tone: 'warn' }),
     !(d.cost > 0) ? { text: 'No unit cost', tone: 'warn' } : target > 0 && d.cost > target ? { text: '$' + (d.cost - target).toFixed(2) + ' over target', tone: 'warn' } : { text: '$' + (+d.cost).toFixed(2) + ' a unit', tone: 'ok' },
@@ -20905,8 +20943,10 @@ function rsRender(id){
           <datalist id="rs-vend-list">${(STATE.vendors||[]).filter(v => !v.archived && v.name).map(v => `<option value="${slEsc(v.name)}">`).join('')}</datalist><div id="rs-bom" tabindex="-1" style="${lbl};margin:0">Need = usage × ${units||0} units + waste</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="rsAddLine()">+ Line</button>
-            <button class="btn btn-ghost btn-sm" onclick="rsReloadBom()" title="Start the lines again from the style's BOM">Copy from style</button>
-            <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Keep these lines on the style for next time">Save to style</button>
+            ${d.bomShared
+              ? `<button class="btn btn-ghost btn-sm" onclick="rsBomShare(false)" title="Give this run a BOM of its own, for a different fabric or trim. The style's BOM stays as it is">Use a separate BOM</button>`
+              : `<button class="btn btn-ghost btn-sm" onclick="rsBomShare(true)" title="Use the style's BOM, so a change here changes the style">Use the style BOM</button>
+            <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Copy these lines onto the style">Save to style</button>`}
           </div>
         </div>
         <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Line</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
@@ -20925,8 +20965,8 @@ function rsRender(id){
   const gap = target && d.cost ? Math.round(((d.cost||0) - target.v) * 100) / 100 : null;
   const stage4 = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px">
         <div><div style="${lbl}">This run · unit cost</div><input id="rs-cost" type="number" min="0" step="0.01" style="${fld}" value="${d.cost||''}" onchange="rsRefresh()"><div style="font-size:10px;color:var(--muted);margin-top:3px">Total ${slMoneyC('USD', (units||0)*(d.cost||0))}</div>${rsMaker(d) === 'cmt' ? (() => { const c = rsCmtUnitCost(d); return `<div style="font-size:10px;color:var(--muted);margin-top:3px">BOM $${c.mat.toFixed(2)} + work $${c.labour.toFixed(2)} = <b style="color:var(--ink)">$${c.total.toFixed(2)}</b> <button class="btn btn-ghost btn-sm" style="padding:2px 6px;margin-left:4px" onclick="rsUseCmtCost()">Use</button></div>`; })() : ''}</div>
-        <div><div style="${lbl}">Style target</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace">${target ? slMoneyC('USD', target.v) : '—'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${target ? 'From the ' + target.from : 'No cost sheet yet'} · <button type="button" onclick="rsOpenCostSheet()" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:var(--ink);text-decoration:underline;cursor:pointer;letter-spacing:0;text-transform:none">Open cost sheet</button></div></div>
-        <div><div style="${lbl}">Difference</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace;color:${gap == null ? 'var(--muted)' : gap > 0 ? 'var(--amber)' : 'var(--green)'}">${gap == null ? '—' : (gap > 0 ? '+' : '') + slMoneyC('USD', gap) + ' a unit'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${gap == null ? 'Shows once both are set' : gap > 0 ? 'Over the target, so the margin is thinner' : 'At or under the target'}</div></div>
+        <div><div style="${lbl}">Style target</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace">${target ? '$' + target.v.toFixed(2) : '—'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${target ? 'From the ' + target.from : 'No cost sheet yet'} · <button type="button" onclick="rsOpenCostSheet()" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:var(--ink);text-decoration:underline;cursor:pointer;letter-spacing:0;text-transform:none">Open cost sheet</button></div></div>
+        <div><div style="${lbl}">Difference</div><div style="${fld};display:flex;align-items:center;font-family:'DM Mono',monospace;color:${gap == null ? 'var(--muted)' : gap > 0 ? 'var(--amber)' : 'var(--green)'}">${gap == null ? '—' : (gap > 0 ? '+$' : gap < 0 ? '−$' : '$') + Math.abs(gap).toFixed(2) + ' a unit'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${gap == null ? 'Shows once both are set' : gap > 0 ? 'Over the target, so the margin is thinner' : 'At or under the target'}</div></div>
       </div>`;
   const stage5 = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
         ${qtyBlock}
@@ -20964,7 +21004,7 @@ function rsRender(id){
   const nextBlock = (() => {
     const g = rsGuide(d), first = g[0], rest = g.slice(1);
     const fresh = rsPath(d) !== 'first' && !rsHasEarlierRun(d)
-      ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">This style hasn't been made through VENIA OS before, so there's no last factory, fabric or price to copy. Fill them in once and Save to style keeps them for next time.</div>` : '';
+      ? `<div style="font-size:10px;color:var(--muted);margin-top:6px">This style hasn't been made through VENIA OS before, so there's no last factory, fabric or price to copy. Fill them in once${d.bomShared ? ' and the BOM stays on the style' : ' and Save to style keeps the BOM'} for next time.</div>` : '';
     if (!first) {
       const nx = run.next;
       return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid ${run.status === 'late' ? 'var(--red)' : 'var(--green)'};color:var(--ink)"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:${run.status === 'late' ? 'var(--red)' : 'var(--green)'};font-weight:700;margin-right:6px">${nx ? 'Next' : 'Ready'}</span>${nx ? slEsc(nx.label) + ' · ' + slEsc(veniaDate(nx.date)) + (nx.owner ? ' · ' + slEsc(nx.owner) : '') : (rsMaker(d) === 'cmt' ? 'Everything the run needs is here.' : 'Everything the factory needs is here.')}</div>`;
@@ -21027,7 +21067,7 @@ function rsRender(id){
       <div class="rs-main modal-body">
         ${nextBlock}
         ${sec(1, 'Style and tech pack', stage1, 'From the style')}
-        ${sec(2, 'BOM and materials', stage2, 'This run\'s copy of the style BOM')}
+        ${sec(2, 'BOM and materials', stage2, d.bomShared ? 'The style\'s BOM. A change here changes the style when you save' : 'This run\'s own BOM. The style\'s BOM is separate')}
         ${sec(3, 'Sourcing and suppliers', stage3, 'Suppliers live in Sourcing')}
         ${sec(4, 'Cost', stage4, 'Target from the cost sheet')}
         ${sec(5, 'Quantity and dates', stage5, '')}
@@ -22665,7 +22705,7 @@ function renderTechPackWork(s) {
       <div class="tpg" style="margin-bottom:6px">
         ${ef('Stage','status','',['concept','design','sms','development','production','active','sale'])}
         ${ef('Production status','prodStatus','',TP_PROD_STATUS)}
-        ${ef('Sample round','sample','',['Proto','SMS1','SMS2','TOP','Approved'])}
+        ${ef('Sample round','sample','',['Proto','SMS1','SMS2','PP','TOP','Approved'])}
       </div>
       <!-- Three fields that all sound like "what stage is this at" sat next to
            each other with nothing saying how they differ. -->
@@ -39679,7 +39719,7 @@ function agentActionCard(chatBody, headline, lines, undoCall, btnLabel, mark){
 function agentRunLogSampleRound(action, chatBody){
   const s = agentFindStyle(action.style);
   if (!s) { appendAgentNote(chatBody, 'I couldn\'t find a style called "' + String(action.style||'') + '" in the line — nothing was logged.'); return; }
-  const rounds = ['Proto','SMS1','SMS2','TOP'];
+  const rounds = ['Proto','SMS1','SMS2','PP','TOP'];
   const round = rounds.find(r => r.toLowerCase() === String(action.round||'').trim().toLowerCase()) || 'Proto';
   let result = String(action.result||'').toLowerCase().trim();
   if (['','approved','revise','rejected'].indexOf(result) < 0) result = '';
