@@ -98,6 +98,7 @@
         s.src = url;
         s.onload = function () {
           URL.revokeObjectURL(url);
+          libraryHost();
           // "Save a copy that runs offline" in the CAD saves the page as loaded.
           // Here the page is a loader, so hand it the CAD's own one-file page.
           part('page', token).then(function (t) { window.__vpcSource = t; }, function () {});
@@ -114,6 +115,39 @@
       else gate('Dr4ft didn\'t load. Check the connection and try again.', 'Reload');
     });
   }
+
+  // 4. THE PATTERN LIBRARY (Build 683). VENIA OS keeps Dr4ft's library and
+  //    where each person left off (venia_patterns). Once Dr4ft is running, and
+  //    only if the shell's library answered, it is told VENIA OS is its library
+  //    host: Dr4ft then hides its own library, and reports every open, save and
+  //    view, which the shell writes to the library. The shell reaches Dr4ft's
+  //    commands (open, newPattern, save, state, listLocal) through
+  //    window.dr4ft.command directly; the page is the same origin. Send to a
+  //    tech pack stays off (no sendPattern here). The contract is
+  //    keeterly/venia-pattern-cad docs/venia-os-contract.md, version 2.
+  //    Registered after Dr4ft starts (not via __DR4FT_HOST__) so Dr4ft's own
+  //    listeners are in place to say what is open.
+  function libraryHost() {
+    if (!embedded) return;
+    var ask = null;
+    try { ask = window.parent.veniaDr4ftLibraryReady; } catch (e) { ask = null; }
+    if (typeof ask !== 'function') return;
+    Promise.resolve(ask()).then(function (on) {
+      if (!on || !window.dr4ft || typeof window.dr4ft.registerHost !== 'function') return;
+      window.dr4ft.registerHost({
+        name: 'VENIA OS',
+        library: true,
+        onEvent: function (event, data) { post('pattern-cad:dr4ft-event', { event: event, data: data }); },
+        listStyles: function (query) {
+          return ask2('list_styles', { text: String(query || ''), limit: 50 }).then(function (r) {
+            var list = (r && r.payload && r.payload.styles) || [];
+            return list.map(function (s) { return { id: s.id, code: s.styleId || '', name: s.name || '', season: s.season || '' }; });
+          });
+        },
+      });
+    }, function () {});
+  }
+  var ask2 = function () { return Promise.resolve({ payload: { styles: [] } }); };
 
   function post(type, payload) {
     if (!embedded) return;
@@ -139,6 +173,7 @@
         post('pattern-cad:ask', { id: id, tool: tool, args: args || {} });
       });
     };
+    ask2 = ask;
     var mcp = {
       callTool: function (server, tool, args) {
         if (server !== 'VENIA OS' || (tool !== 'list_styles' && tool !== 'get_style')) {
