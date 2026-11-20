@@ -1,5 +1,6 @@
 import webpush from 'web-push';
 import { VENIA_ORIGINS } from './_shared/origins.js';
+import { MODEL, streamMessage, requireText } from './_shared/anthropic-reply.js';
 
 // THE CFO PLANNER — a multi-pass financial planning engine.
 //
@@ -50,26 +51,22 @@ const RULES = `HARD RULES — these are not style preferences:
 • The bank feed covers linked accounts only and may be partly uncategorized — treat heavy uncategorized volume as a stated confidence limit, not something to smooth over.
 • Round to whole dollars. Every month's arithmetic must reconcile: revenue − cogs − opex = net; cash_end = prior cash_end + net.`;
 
-async function callModel(key, system, user, maxTokens) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({
-      model: 'claude-opus-5',
-      max_tokens: maxTokens || 8192,
-      system,
-      messages: [{ role: 'user', content: user }],
-    }),
-  });
-  if (!r.ok) {
-    let d = 'HTTP ' + r.status;
-    try { const e = await r.json(); if (e && e.error && e.error.message) d = e.error.message; } catch (_) {}
-    throw new Error(d);
-  }
-  const data = await r.json();
-  const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-  if (!text) throw new Error('empty reply');
-  return text;
+// Each pass names the room its ANSWER needs; THINK_ROOM is added on top for
+// Opus 5's adaptive thinking, which counts against max_tokens. Without it the
+// analyst (6,000) and critic (6,000) passes spent everything thinking over the
+// 120k-character snapshot and returned no text — "empty reply" since 4 Sept.
+// Streamed, because a pass that thinks for more than five minutes would trip
+// Node fetch's 300s headers timeout on a buffered call.
+const THINK_ROOM = 16000;
+async function callModel(key, system, user, answerTokens, signal) {
+  const maxTokens = (answerTokens || 8192) + THINK_ROOM;
+  const msg = await streamMessage(key, {
+    model: MODEL,
+    max_tokens: maxTokens,
+    system,
+    messages: [{ role: 'user', content: user }],
+  }, { signal });
+  return requireText(msg, maxTokens);
 }
 
 export default async (req) => {
@@ -97,6 +94,12 @@ export default async (req) => {
   const DATA = String(snapshot).slice(0, 120000);
   const pushSubs = Array.isArray(p.push) ? p.push.slice(0, 12) : [];
 
+  // Netlify stops a background function at 15 minutes. Stop at 14 instead and
+  // say which pass ran out, rather than leaving the job to the client's 17-minute
+  // "timed out".
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 14 * 60 * 1000);
+  let pass = 'analyst';
   try {
     // ── PASS 1 — ANALYST: what is true today, before any planning ──────────
     const baseline = await callModel(key,
@@ -108,7 +111,8 @@ export default async (req) => {
       + `4. Cash and obligations: cash held, owed on cards/loans, receivables outstanding, factory commitments.\n`
       + `5. GAPS — every number a competent CFO would need that is absent or untrustworthy here. Be specific and blunt.\n\n`
       + `Plain prose and short tables. No recommendations.`,
-      6000);
+      6000, ac.signal);
+    pass = 'planner';
 
     // ── PASS 2 — PLANNER: the month-by-month plan on that baseline ──────────
     const plan = await callModel(key,
@@ -122,7 +126,8 @@ export default async (req) => {
       + `4. Risks: what breaks this plan, how likely, what to do about each.\n`
       + `5. The first five actions, in order, with timing.\n\n`
       + `Be honest about a hard position if the data shows one — a plan that flatters is worthless.`,
-      10000);
+      10000, ac.signal);
+    pass = 'critic';
 
     // ── PASS 3 — CRITIC: an adversarial subagent hunting for what is wrong ──
     const critique = await callModel(key,
@@ -136,7 +141,8 @@ export default async (req) => {
       + `• OMISSION: obligations, costs or risks present in the data that the plan ignores.\n`
       + `• EXECUTABILITY: anything that assumes staff, systems or time two people do not have.\n\n`
       + `List each issue as: SEVERITY (blocking / serious / minor) — what is wrong — the correct treatment. If you genuinely find nothing in a category, write "none" for it.`,
-      6000);
+      6000, ac.signal);
+    pass = 'reviser';
 
     // ── PASS 4 — REVISER: fix everything found, emit the final artifact ─────
     const finalOut = await callModel(key,
@@ -156,7 +162,8 @@ export default async (req) => {
       + `"verification":{"issues_fixed":[""],"issues_disputed":[""],"confidence":"high|medium|low","confidence_reason":""}}\n`
       + '```\n\n'
       + `JSON rules: every month from the next calendar month forward, ${horizon} entries, whole dollars, arithmetic reconciling exactly. "budget" items ∈ photoshoots | influencer | adspend | events | misc. "period" ∈ monthly | quarterly | annual | seasonal. "source" ∈ "" | dtc-30 | dtc-ytd | wholesale-ytd | total-ytd. Set confidence honestly — if the bank feed is thin or largely uncategorized, it is not "high".`,
-      12000);
+      12000, ac.signal);
+    clearTimeout(timer);
 
     await complete(id, secret, 'done', finalOut);
 
@@ -170,7 +177,11 @@ export default async (req) => {
     }
     return new Response('', { status: 200 });
   } catch (e) {
-    await complete(id, secret, 'error', String((e && e.message) || 'planning failed'));
+    clearTimeout(timer);
+    const why = ac.signal.aborted
+      ? 'the planner ran out of time in the ' + pass + ' pass (15-minute limit)'
+      : pass + ' pass: ' + String((e && e.message) || 'planning failed');
+    await complete(id, secret, 'error', why);
     return new Response('', { status: 200 });
   }
 };

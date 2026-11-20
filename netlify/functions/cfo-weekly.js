@@ -1,4 +1,7 @@
 import webpush from 'web-push';
+import { MODEL, replyText, emptyReason } from './_shared/anthropic-reply.js';
+
+const WEEKLY_MAX_TOKENS = 8000;
 
 // THE AUTONOMOUS WEEKLY BRIEF. Monday morning, the CFO speaks first —
 // whether or not anyone opens the app.
@@ -82,8 +85,12 @@ export default async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-opus-5',
-        max_tokens: 700,
+        model: MODEL,
+        // 700 was the whole budget, and Opus 5's adaptive thinking (on by
+        // default, counted against max_tokens) can spend it before a word of
+        // the brief is written — "empty brief" every Monday. The brief stays
+        // under 55 words because the prompt says so; this is only a ceiling.
+        max_tokens: WEEKLY_MAX_TOKENS,
         system: `You are the CFO of VENIA Collection, a two-person luxury womenswear label in Los Angeles, writing the Monday money brief that lands on both founders' phones as a push notification.
 
 Under 55 words. No greeting, no sign-off, no headings. Lead with the single most important truth about their position — the number first. Then at most one more fact that changes a decision, then ONE specific action for this week.
@@ -94,9 +101,9 @@ Use only the figures given. Never invent one. Give the bank's date exactly as th
     });
     if (!r.ok) return new Response('model error', { status: 200 });
     const data = await r.json();
-    text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+    text = replyText(data, ' ');
+    if (!text) return new Response('empty brief — ' + emptyReason(data, WEEKLY_MAX_TOKENS), { status: 200 });
   } catch (e) { return new Response('model call failed', { status: 200 }); }
-  if (!text) return new Response('empty brief', { status: 200 });
 
   webpush.setVapidDetails('mailto:keeter@veniacollection.com', vapidPub, vapidPriv);
   const note = JSON.stringify({

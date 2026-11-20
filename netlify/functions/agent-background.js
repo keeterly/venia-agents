@@ -1,5 +1,8 @@
 import webpush from 'web-push';
 import { VENIA_ORIGINS } from './_shared/origins.js';
+import { MODEL, requireText } from './_shared/anthropic-reply.js';
+
+const AGENT_MAX_TOKENS = 16384;
 
 // Server-side delegate worker. The "-background" suffix makes Netlify return
 // 202 to the caller immediately and let this run for up to 15 minutes — so the
@@ -53,8 +56,11 @@ export default async (req) => {
 
   const attempt = async (tools) => {
     const body = {
-      model: 'claude-opus-5',
-      max_tokens: 8192,
+      model: MODEL,
+      // 8192 is the budget claude.js found adaptive thinking could spend whole
+      // on a long task, stopping before any text. 16384 is the ceiling it
+      // moved to; you pay only for tokens generated.
+      max_tokens: AGENT_MAX_TOKENS,
       system: String(sys || ''),
       messages: [{ role: 'user', content: String(q) }],
       ...(tools ? { tools } : {}),
@@ -70,9 +76,7 @@ export default async (req) => {
       throw new Error(d);
     }
     const data = await r.json();
-    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-    if (!text) throw new Error('empty reply');
-    return text;
+    return requireText(data, AGENT_MAX_TOKENS);
   };
 
   let out = null, err = null;

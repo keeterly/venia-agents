@@ -738,7 +738,8 @@ const writeTools = [
       properties: { items: { type: 'array', minItems: 1, items: { type: 'object', required: ['category'], properties: {
         id: S.str('Transaction id from list_transactions'),
         match: { type: 'object', properties: { desc: S.str('Words in the description, e.g. HISCOX') } },
-        category: S.str('Category, e.g. insurance') } } } },
+        category: S.str('Category, e.g. insurance'),
+        line: S.str('Optional, marketing only: the Budget line this spend counts under — photoshoots, influencer, adspend, events or misc') } } } },
     },
     build(a) {
       const i = list(a.items).filter((x) => x && x.category && (x.id || (x.match && x.match.desc)));
