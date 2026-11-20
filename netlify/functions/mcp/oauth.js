@@ -273,7 +273,10 @@ export async function token(req) {
     if (!rec) return oauthError('invalid_grant', 'Unknown or expired refresh token');
     if (clientId && rec.client_id !== clientId) return oauthError('invalid_grant', 'Token was issued to another client');
     const sess = await getJSON('sess:' + rec.sid);
-    if (!sess) return oauthError('invalid_grant', 'This connection was signed out. Connect again.');
+    if (!sess) {
+      const ended = await getJSON('ended:' + rec.sid);
+      return oauthError('invalid_grant', ended ? ENDED_MESSAGE : 'This connection was signed out. Connect again.');
+    }
     sess.exp = Date.now() + REFRESH_TTL;
     await putJSON('sess:' + rec.sid, sess);
     return issue(rec.sid, rec.email, rec.client_id);
@@ -283,8 +286,22 @@ export async function token(req) {
 }
 
 // ── resolving a bearer token to a live Supabase session ─────────────────────
-// Returns { email, access } or null. Refreshes the Supabase session when it is
-// within a minute of expiring and stores the rotated refresh token at once.
+// Returns { email, access } when the call may go ahead, or a reason it may not:
+//   null                 no token, or one this connector never issued
+//   { ended: true }      the VENIA sign-in behind it is over; Claude must reconnect
+//   { transient: true }  Supabase did not answer; try again shortly
+// Refreshes the Supabase session when it is within a minute of expiring and
+// stores the rotated refresh token at once.
+//
+// WHY THE RE-READ (Build 699). Supabase rotates refresh tokens. When Claude
+// sends two calls at the moment the session needs renewing, both try the same
+// refresh token; one wins and stores the new session, and the other is told
+// the token is "not found". That loser used to delete the session the winner
+// had just saved. Now it reads the session again first, and only gives up if
+// nobody has renewed it.
+export const ENDED_MESSAGE = 'VENIA OS signed this connection out, because every VENIA OS session '
+  + 'for this account was ended. Reconnect VENIA OS in Claude\'s connector settings.';
+
 export async function resolveBearer(req) {
   const h = req.headers.get('authorization') || '';
   const m = /^Bearer\s+(.+)$/i.exec(h);
@@ -292,15 +309,42 @@ export async function resolveBearer(req) {
   const at = await getJSON('at:' + await sha256b64url(m[1].trim()));
   if (!at) return null;
   const sess = await getJSON('sess:' + at.sid);
-  if (!sess) return null;
+  if (!sess) return (await getJSON('ended:' + at.sid)) ? { ended: true } : null;
   let sb;
   try { sb = await unseal(sess.sealed); } catch (_) { return null; }
   if (!sb.exp || sb.exp < Date.now() + 60 * 1000) {
     const next = await refreshSession(sb.refresh);
-    if (!next) { await del('sess:' + at.sid); return null; }   // revoked in Supabase: make them reconnect
-    sb = next;
-    sess.sealed = await seal(sb);
-    await putJSON('sess:' + at.sid, sess);
+    if (next && next.transient) {
+      // Supabase hiccup. The old access token may still have a minute left;
+      // if not, ask Claude to retry rather than ending a working connection.
+      if (sb.exp && sb.exp > Date.now() + 5 * 1000) return { email: at.email, access: sb.access, sid: at.sid };
+      return { transient: true };
+    }
+    if (next && next.ended) {
+      // The winner of a race may still be saving: look a few times, briefly.
+      let fresh = null;
+      for (let i = 0; i < 4 && !fresh; i++) {
+        if (i) await new Promise((r) => setTimeout(r, 400));
+        const again = await getJSON('sess:' + at.sid);
+        let s = null;
+        try { s = again ? await unseal(again.sealed) : null; } catch (_) { s = null; }
+        if (s && s.refresh !== sb.refresh && s.exp > Date.now() + 60 * 1000) fresh = s;
+      }
+      if (fresh) {
+        sb = fresh;                                    // another call renewed it: carry on
+      } else {
+        // Ended in Supabase (a sign-out everywhere, or revoked). Leave a note so
+        // the next refresh can say why, then make them reconnect.
+        console.warn('[mcp] connection ended: Supabase refused the refresh for', at.email);
+        await putJSON('ended:' + at.sid, { email: at.email, at: Date.now(), exp: Date.now() + REFRESH_TTL });
+        await del('sess:' + at.sid);
+        return { ended: true };
+      }
+    } else {
+      sb = next;
+      sess.sealed = await seal(sb);
+      await putJSON('sess:' + at.sid, sess);
+    }
   }
   return { email: at.email, access: sb.access, sid: at.sid };
 }

@@ -87,6 +87,12 @@ async function handleMcp(req) {
 
   const who = await oauth.resolveBearer(req);
   if (!who) return oauth.unauthorized(req);
+  if (who.ended) return oauth.unauthorized(req, oauth.ENDED_MESSAGE);
+  if (who.transient) {
+    return new Response(JSON.stringify({ error: 'temporarily_unavailable',
+      error_description: 'VENIA OS could not reach its database just now. Try again in a minute.' }),
+    { status: 503, headers: { ...cors, 'Content-Type': 'application/json', 'Retry-After': '30' } });
+  }
 
   let body;
   try { body = await req.json(); } catch (_) { return reply(rpcError(null, -32700, 'Parse error'), 400); }
