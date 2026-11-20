@@ -4202,7 +4202,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '686';
+  const BUILD = '687';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4795,10 +4795,11 @@ window.veniaYmd = veniaYmd;
             <button class="ag-btn ag-btn-primary ag-btn-sm" onclick="saveBudgetData();showToast('Budget saved','success')">Save</button>
           </div>
         </div>
+        <div style="font-size:11px;color:var(--muted);line-height:1.6;margin:-8px 0 14px">Actual comes from bank transactions filed as Marketing; tag them in Cash to split by line.<br><span id="budget-basis"></span></div>
         <div class="tbl-wrap" style="overflow-x:auto">
-          <table style="min-width:600px">
+          <table style="min-width:680px">
             <thead><tr>
-              <th>Line Item</th><th>Budget ($)</th><th>Spent ($)</th><th>Remaining</th><th>Progress</th>
+              <th>Line Item</th><th>Budget ($)</th><th>Actual (bank)</th><th>Entered by hand</th><th>Remaining</th><th>Progress</th>
             </tr></thead>
             <tbody id="budget-tbody">
               <tr data-item="photoshoots">
@@ -4841,7 +4842,7 @@ window.veniaYmd = veniaYmd;
         </div>
         <div style="padding:16px;border-top:1px solid var(--border);background:var(--bg-off);display:flex;justify-content:space-between;align-items:center;margin-top:1px">
           <span style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">Total Budget</span>
-          <span id="budget-total" style="font-family:'DM Mono',monospace;font-size:16px;color:var(--ink)">$0 / $0 spent</span>
+          <span id="budget-total" style="font-family:'DM Mono',monospace;font-size:14px;color:var(--ink);text-align:right">$0 budget</span>
         </div>
         </div>
       </div>
@@ -9320,12 +9321,14 @@ function mergeSnapshots(base, local, cloud) {
     // is the one holding the empty value locally.
     if (k === 'finTxns' && (_mRecArray(l) || _mRecArray(c))) {
       const merged = _mArray(Array.isArray(b) ? b : [], Array.isArray(l) ? l : [], Array.isArray(c) ? c : []);
-      const lCat = Object.create(null);
+      const lCat = Object.create(null), lMkt = Object.create(null);
       (Array.isArray(l) ? l : []).forEach(function (t) {
         if (t && t.id != null && t.category) lCat[t.id] = t.category;
+        if (t && t.id != null && t.mkt) lMkt[t.id] = t.mkt;     // Build 687: the Budget line, same rule
       });
       merged.forEach(function (t) {
         if (t && t.id != null && !t.category && lCat[t.id]) t.category = lCat[t.id];
+        if (t && t.id != null && !t.mkt && lMkt[t.id]) t.mkt = lMkt[t.id];
       });
       // A BANK SYNC IS NEVER MERGED AWAY (Build 607).
       //
@@ -36194,9 +36197,9 @@ function agentFinActionSpec() { return agentSpecChunks([
     + '\nTHESE WAIT FOR A TAP: record_payment, set_order_status, set_txn_category, set_budget, set_cost_sheet and create_pull are shown to the founder as a checklist and change nothing until they tap Apply. Say the change is ready for their tap, never that it is done.\n'
     + '\nACTION — set_budget: update the marketing Budget Tracker (Money → Budget).\n'
     + '```venia:action\n'
-    + '{"type":"set_budget","items":[{"item":"photoshoots","budget":5000,"spent":1200}]}\n'
+    + '{"type":"set_budget","items":[{"item":"photoshoots","budget":5000}]}\n'
     + '```\n'
-    + '"item" ∈ photoshoots | influencer | adspend | events | misc. Include ONLY the fields the user gave — omit "budget" or "spent" to leave that side untouched. Values are SET, not added: to record new spend, add it to the current figure from the FINANCE SNAPSHOT and set the new total. Only when the user states amounts — never invent a number.\n'
+    + '"item" ∈ photoshoots | influencer | adspend | events | misc. "budget" sets the line\'s budget. Actual spend comes from the bank (transactions filed as marketing, split by their line tag) — never set it. "spent" is only the figure entered by hand, for money that never went through the bank (cash, a personal card); include it only when the user gives that figure, and say it is entered by hand. Include ONLY the fields the user gave — omit a field to leave it untouched. Values are SET, not added. Only when the user states amounts — never invent a number.\n'
     + '\nACTION — set_revenue_goal: set or update a revenue goal (Money → Goals). A goal matching an existing name updates it.\n'
     + '```venia:action\n'
     + '{"type":"set_revenue_goal","name":"FW26 Wholesale","target":50000,"current":0,"period":"seasonal","source":""}\n'
@@ -37669,7 +37672,7 @@ function agentRunSetBudget(action, chatBody){
     data[k] = row;
     done.push(k
       + (it.budget != null && isFinite(b) ? ' — budget $' + Math.round(b).toLocaleString() : '')
-      + (it.spent  != null && isFinite(s) ? ' — spent $'  + Math.round(s).toLocaleString() : ''));
+      + (it.spent  != null && isFinite(s) ? ' — entered by hand $'  + Math.round(s).toLocaleString() : ''));
   });
   if (!done.length) { appendAgentNote(chatBody, 'I couldn\'t match those to budget lines (photoshoots, influencer, adspend, events, misc) — nothing was changed.'); return; }
   window.__agPrevBudget = prev;
@@ -37780,7 +37783,7 @@ const ACTION_LIST = {
   set_budget:     { field: 'items', verb: 'Set', always: true, label: function(x){
                       return (x.item || 'a budget line')
                         + (x.budget != null ? ' \u2014 budget ' + x.budget : '')
-                        + (x.spent != null ? ', spent ' + x.spent : ''); } },
+                        + (x.spent != null ? ', entered by hand ' + x.spent : ''); } },
   set_cost_sheet: { field: 'items', verb: 'Change', always: true, label: function(x){
                       const ks = Object.keys(x || {}).filter(function(k){ return k !== 'style' && k !== 'styleId'; });
                       return (x.style || x.styleId || 'a style') + ' \u2014 '
@@ -53349,14 +53352,15 @@ function veniaFinanceContext(){
     ).join('\n') + (d.rows.length>10 ? '\n…+' + (d.rows.length-10) + ' more' : '')
       + (d.dtcAmbiguous ? '\n• ' + d.dtcAmbiguous + ' silhouette' + (d.dtcAmbiguous>1?'s have':' has') + ' multiple fabrications sharing one name; per-fabrication profit cannot be split from Shopify data — say so rather than guessing.' : ''));
     try {
-      const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
-      if (bdg) {
-        const ls = Object.entries(bdg).map(([k,r]) => {
-          const b = parseFloat(r.budget)||0, s = parseFloat(r.spent)||0;
-          return (b || s) ? '• ' + k + ': ' + money(s) + ' spent of ' + money(b) : null;
-        }).filter(Boolean);
-        if (ls.length) parts.push('Marketing budget lines:\n' + ls.join('\n'));
-      }
+      const br = budgetRows();
+      const ls = br.rows.map(r => (r.budget || r.hand || r.bank)
+        ? '• ' + r.key + ': ' + money(r.bank) + ' from the bank of ' + money(r.budget) + ' budget'
+          + (r.hand ? '; ' + money(r.hand) + ' entered by hand' : '')
+          + (r.over ? ' — OVER by ' + money(r.over) : '')
+        : null).filter(Boolean);
+      if (ls.length) parts.push('Marketing budget lines (' + br.period.label + '; actual = bank transactions filed as marketing, split by their line tag, untagged under misc'
+        + (br.untagged ? ', ' + br.untagged + ' untagged' : '') + '; over budget judged on '
+        + (br.bankMode ? 'the bank figure' : 'the hand-entered figures, as no marketing spend is in the bank this month') + '):\n' + ls.join('\n'));
     } catch(e){}
     try {
       const gs = revGetGoals();
@@ -53975,9 +53979,11 @@ function cfoPlanSnapshot(){
   try { out += '\n\n' + (typeof plmContext === 'function' ? plmContext() : ''); } catch(e){}
   try { out += (typeof veniaFinOpsContext === 'function' ? veniaFinOpsContext() : ''); } catch(e){}
   try {
-    const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
-    if (bdg) out += '\n\nMarketing budget lines: ' + Object.entries(bdg)
-      .map(([k,r]) => k + ' $' + (parseFloat(r.spent)||0) + ' spent of $' + (parseFloat(r.budget)||0)).join(', ');
+    // Build 687: actual is the bank's marketing spend this month; a hand
+    // figure is named as such so the planner never mistakes it for the bank.
+    const br = budgetRows();
+    if (br.rows.some(r => r.budget || r.hand || r.bank)) out += '\n\nMarketing budget lines (' + br.period.label + ', actual from the bank): ' + br.rows
+      .map(r => r.key + ' $' + Math.round(r.bank) + ' actual of $' + Math.round(r.budget) + (r.hand ? ' ($' + Math.round(r.hand) + ' entered by hand)' : '')).join(', ');
   } catch(e){}
   try {
     const cfg = finWatchCfg();
@@ -54448,18 +54454,15 @@ function finWatchAlerts(){
         text:`${under.length} style${under.length>1?'s':''} under ${cfg.marginFloor}% wholesale margin — worst: ${under[0].s.name||under[0].s.styleId} at ${under[0].m}%` });
     }
   } catch(e){}
-  // 5. Budget lines spent past their budget.
+  // 5. Budget lines spent past their budget. Build 687: the same reading the
+  // Budget page shows — the bank's marketing spend this month once there is
+  // any, the figures entered by hand until then.
   try {
-    const bdg = JSON.parse(localStorage.getItem('venia_budget') || 'null');
-    if (bdg) {
-      const over = Object.entries(bdg).map(([k,r]) => {
-        const b = parseFloat(r.budget)||0, sp = parseFloat(r.spent)||0;
-        return (b > 0 && sp > b) ? { k, by: sp - b } : null;
-      }).filter(Boolean).sort((a,b) => b.by - a.by);
-      if (over.length) out.push({ key:'fin|budget', pri:'med',
-        act:"cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-budget',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-budget]'))},140)",
-        text:`${over[0].k} is ${money(over[0].by)} over budget${over.length>1 ? ' (+' + (over.length-1) + ' more line' + (over.length>2?'s':'') + ')' : ''}` });
-    }
+    const br = budgetRows();
+    const over = br.rows.filter(r => r.over > 0).sort((a,b) => b.over - a.over);
+    if (over.length) out.push({ key:'fin|budget', pri:'med',
+      act:"cpGoto('cmd');setTimeout(function(){cmdShowSection('cmd-budget',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=cmd-budget]'))},140)",
+      text:`${over[0].label}: ${money(over[0].over)} over budget${br.bankMode ? ' this month, by the bank' : ', by the figures entered by hand'}${over.length>1 ? ' (+' + (over.length-1) + ' more line' + (over.length>2?'s':'') + ')' : ''}` });
   } catch(e){}
   // 6. Weekly money brief waiting to be read.
   try {
@@ -55911,22 +55914,25 @@ function finUnfiledByMerchant(){
 window.finUnfiledByMerchant = finUnfiledByMerchant;
 
 // File a whole merchant in one call. Same undo as every other bulk write.
-window.finFileMerchant = function(key, cat){
+window.finFileMerchant = function(key, cat, mkt){
   if (!cat) { showToast('Choose a category first', 'warning'); return 0; }
   if (finAllCats().indexOf(cat) < 0) { showToast('No category called "' + cat + '"', 'error'); return 0; }
+  // Build 687: the Budget line, only for Marketing and only a known line.
+  const line = (cat === 'marketing' && MKT_LINES.indexOf(mkt) >= 0) ? mkt : '';
   const prev = {}; let n = 0;
   (STATE.finTxns || []).forEach(t => {
     if (!t || t.status === 'void' || finTxnCat(t)) return;
     if (finMerchantKey(t.desc) !== key) return;
     prev[t.id] = t.category || '';
     t.category = cat; n++;
+    if (line) t.mkt = line;
   });
   if (!n) { showToast('Nothing left to file for ' + key, 'info'); return 0; }
   window.__agPrevTxnCats = prev;
   save();
   try { cmdRenderBank(); } catch(e){}
   showToast(n + ' ' + key + ' row' + (n === 1 ? '' : 's') + ' filed as ' + finCatLabel(cat)
-    + ' — Undo above the list', 'success');
+    + (line ? ' (' + MKT_LINE_LABEL[line] + ')' : '') + ' — Undo above the list', 'success');
   try { logActivity('Filed ' + n + ' ' + key + ' transactions as ' + cat); } catch(e){}
   return n;
 };
@@ -56178,9 +56184,21 @@ window.finReviewRender = function(){
       +     (g.from ? ' · ' + slEsc(g.from) + (g.to && g.to !== g.from ? ' → ' + slEsc(g.to) : '') : '')
       +   '</div>'
       + '</div>'
-      + '<div style="display:flex;gap:5px;align-items:center">'
-      +   '<select class="fs" id="' + id + '" style="min-height:auto;padding:5px 6px;font-size:10.5px;max-width:132px">'
+      + '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;justify-content:flex-end">'
+      +   '<select class="fs" id="' + id + '" style="min-height:auto;padding:5px 6px;font-size:10.5px;max-width:132px" '
+      +     'onchange="finReviewCatChange(this)">'
       +     opts(id) + '</select>'
+      // Build 687: a Marketing vendor can be put on its Budget line in the
+      // same answer. Shown only once Marketing is chosen; the payee guess is
+      // pre-selected and goes in only when File is pressed.
+      +   (function(){
+            const sug = finMktSuggest((g.sample || '') + ' ' + (g.label || g.merchant || ''));
+            return '<select class="fs" id="' + id + '-mkt" aria-label="Budget line" style="display:none;min-height:auto;padding:5px 6px;font-size:10.5px;max-width:150px">'
+              + '<option value=""' + (!sug ? ' selected' : '') + '>Line: Misc (untagged)</option>'
+              + MKT_LINES.map(k => '<option value="' + k + '"' + (sug === k ? ' selected' : '') + '>Line: ' + MKT_LINE_LABEL[k]
+                  + (sug === k ? ' (suggested)' : '') + '</option>').join('')
+              + '</select>';
+          })()
       +   '<button class="ag-btn ag-btn-primary ag-btn-sm" onclick="finReviewFile(' + JSON.stringify(g.merchant).replace(/"/g, '&quot;') + ", '" + id + "')\">File</button>"
       + '</div></div>';
   }).join('');
@@ -56203,11 +56221,16 @@ window.finReviewRender = function(){
     +   'a wrong category on a submitted statement is worse than an honest "Unclassified" line.'
     + '</div>';
 };
+window.finReviewCatChange = function(sel){
+  const m = sel && document.getElementById(sel.id + '-mkt');
+  if (m) m.style.display = sel.value === 'marketing' ? '' : 'none';
+};
 window.finReviewFile = function(merchant, selId){
   const sel = document.getElementById(selId);
   const cat = sel ? sel.value : '';
   if (!cat) { showToast('Choose a category for ' + merchant + ' first', 'warning'); return; }
-  finFileMerchant(merchant, cat);
+  const m = document.getElementById(selId + '-mkt');
+  finFileMerchant(merchant, cat, cat === 'marketing' && m ? m.value : '');
   finReviewRender();
 };
 
@@ -56306,6 +56329,42 @@ window.bankSetCategory = function(id, cat, el){
   FIN_TX_KEEP[id] = 1;
   try { if (el && el.blur) el.blur(); } catch(e){}
   setTimeout(function(){ try { cmdRenderBank(); } catch(e){} }, 0);
+};
+
+// Build 687: which Budget line a Marketing row counts under (t.mkt). Optional;
+// untagged marketing counts under Misc. A guess from the payee is shown
+// pre-selected in grey with a Use button — it is written only when somebody
+// picks a line or presses Use.
+function finMktPick(t){
+  const tagged = MKT_LINES.indexOf(t.mkt) >= 0;
+  const sug = tagged ? '' : finMktSuggest(t.desc);
+  const sel = tagged ? t.mkt : sug;
+  const id = slEsc(t.id);
+  return '<select class="fs" aria-label="Budget line" title="'
+    + (sug ? 'Suggested from the payee. Counted under Misc until you pick a line or press Use.' : 'Which Budget line this counts under. Untagged counts under Misc.')
+    + '" style="min-height:auto;padding:4px 6px;font-size:10px;max-width:150px' + (sug ? ';color:var(--muted);font-style:italic' : '')
+    + '" onchange="bankSetMktLine(\'' + id + '\', this.value, this)">'
+    + '<option value=""' + (!sel ? ' selected' : '') + '>Line: Misc (untagged)</option>'
+    + MKT_LINES.map(k => '<option value="' + k + '"' + (sel === k ? ' selected' : '') + '>Line: ' + MKT_LINE_LABEL[k]
+        + (k === sug ? ' (suggested)' : '') + '</option>').join('')
+    + '</select>'
+    + (sug ? '<button class="ag-btn ag-btn-ghost ag-btn-sm" style="padding:3px 8px" onclick="bankSetMktLine(\'' + id + '\', \'' + sug + '\')">Use</button>' : '');
+}
+window.bankSetMktLine = function(id, line, el){
+  const t = (STATE.finTxns || []).find(x => x.id === id);
+  if (!t) return;
+  const next = String(line || '');
+  if (next && MKT_LINES.indexOf(next) < 0) return;
+  const now = Date.now();
+  // The same phone-picker echo bankSetCategory guards against.
+  if (!next && window.__lastMktSet && (now - window.__lastMktSet.t) < 600) return;
+  if (next === (t.mkt || '') && MKT_LINES.indexOf(t.mkt) >= 0) return;
+  t.mkt = next;
+  window.__lastMktSet = { id: id, t: now };
+  save();
+  FIN_TX_KEEP[id] = 1;
+  try { if (el && el.blur) el.blur(); } catch(e){}
+  setTimeout(function(){ try { cmdRenderBank(); } catch(e){} try { loadBudgetData(); } catch(e){} }, 0);
 };
 
 // ── Spend by category ────────────────────────────────────────────────────
@@ -56582,10 +56641,11 @@ window.cmdRenderBank = function(){
       <input type="checkbox" style="grid-row:1;align-self:start;margin-top:2px" ${FIN_TX_SEL[t.id]?'checked':''} onchange="bankSelectTxn('${slEsc(t.id)}', this.checked)" aria-label="Select transaction">
       <span style="grid-row:1;overflow-wrap:anywhere;line-height:1.35">${slEsc(t.desc||'')}${t.status==='pending' ? ' <span style="color:var(--muted);font-size:9px">(pending)</span>' : ''}</span>
       <span style="grid-row:1;align-self:start;font-family:'DM Mono',monospace;text-align:right;white-space:nowrap;color:${(t.amount||0) < 0 ? 'var(--ink)' : 'var(--green)'}">${money(t.amount||0)}</span>
-      <div style="grid-column:2/4;display:flex;gap:8px;align-items:center">
+      <div style="grid-column:2/4;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;white-space:nowrap">${slEsc(veniaDate(t.date))}</span>
         ${FIN_TX_FILTER.mode === 'uncat' && FIN_TX_KEEP[t.id] && t.category ? '<span style="color:var(--green);font-size:9px;letter-spacing:1px;text-transform:uppercase;white-space:nowrap">Filed \u2713</span>' : ''}
         <select class="fs" title="${finTxnCat(t) && !t.category ? 'Read from the description — nothing was filed by hand. It is already counted under this category.' : ''}" style="min-height:auto;padding:4px 6px;font-size:10px;flex:1;max-width:190px${finTxnCat(t) && !t.category ? ';color:var(--muted);font-style:italic' : ''}" onchange="bankSetCategory('${slEsc(t.id)}', this.value, this)">${catOpts(finTxnCat(t) || '')}</select>
+        ${finTxnCat(t) === 'marketing' ? finMktPick(t) : ''}
       </div>
     </div>`).join('');
   // Build 604: how old the bank data is, said first, whenever a sync has not landed.
@@ -57358,13 +57418,81 @@ function exportCampaignCSV() {
 }
 
 // ── BUDGET TRACKER ──
+// Build 687: the Budget compares against the bank. A line's ACTUAL is the sum
+// of live bank transactions filed as Marketing this month, split by the
+// optional sub-tag t.mkt (set in Cash); untagged marketing spend counts under
+// Misc. The old hand-typed "spent" figures are kept exactly as they were in
+// venia_budget and shown beside the bank figure, labelled "entered by hand",
+// so nothing anybody typed disappears. Over budget is judged on the bank
+// figure once any marketing spend is in the ledger for the month, and on the
+// hand figures until then.
+const MKT_LINES = ['photoshoots', 'influencer', 'adspend', 'events', 'misc'];
+const MKT_LINE_LABEL = { photoshoots: 'Photoshoots', influencer: 'Influencer fees', adspend: 'Ad spend', events: 'Events', misc: 'Misc' };
+// A suggestion only — shown pre-selected in Cash, never written by itself.
+function finMktSuggest(desc){
+  const d = String(desc || '').toLowerCase();
+  if (/facebook|\bfb\b|\bmeta\b|instagram|google ?ads|adwords|tiktok|pinterest ads|snap ?ads/.test(d)) return 'adspend';
+  if (/photograph|\bphoto\b|studio/.test(d)) return 'photoshoots';
+  return '';
+}
+// The line a marketing transaction counts under: its tag, else Misc.
+function finMktLine(t){
+  const k = t && t.mkt;
+  return MKT_LINES.indexOf(k) >= 0 ? k : 'misc';
+}
+// The budget has never carried a period of its own, so it is this month.
+function budgetPeriod(){
+  const now = new Date();
+  const from = veniaYmd(new Date(now.getFullYear(), now.getMonth(), 1));
+  const to = veniaYmd(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+  return { from: from, to: to, label: now.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) };
+}
+// Marketing spend from the one ledger (finBankData: excluded accounts already
+// out). Refunds filed as Marketing net against the line they are tagged to.
+function budgetActuals(){
+  const p = budgetPeriod();
+  const by = {}; MKT_LINES.forEach(k => { by[k] = 0; });
+  let n = 0, untagged = 0;
+  let live = [];
+  try { live = (finBankData() || {}).live || []; } catch(e){ live = []; }
+  live.forEach(t => {
+    if (!t || t.status === 'void' || !t.date) return;
+    if (t.date < p.from || t.date > p.to) return;
+    if (finTxnCat(t) !== 'marketing') return;          // financing, transfers and the rest are not marketing
+    by[finMktLine(t)] += -(t.amount || 0);
+    n++;
+    if (MKT_LINES.indexOf(t.mkt) < 0) untagged++;
+  });
+  MKT_LINES.forEach(k => { by[k] = Math.round(by[k] * 100) / 100; });
+  return { by: by, n: n, untagged: untagged, period: p };
+}
+// One reading of every line for every screen that shows the budget: the page,
+// Money Watch, the assistant's finance context and the planner's snapshot.
+function budgetRows(){
+  let data; try { data = JSON.parse(localStorage.getItem('venia_budget') || '{}') || {}; } catch(e){ data = {}; }
+  const act = budgetActuals();
+  const bankMode = act.n > 0;
+  const rows = MKT_LINES.map(k => {
+    const r = data[k] || {};
+    const budget = parseFloat(r.budget) || 0, hand = parseFloat(r.spent) || 0, bank = act.by[k] || 0;
+    const used = bankMode ? bank : hand;
+    return { key: k, label: MKT_LINE_LABEL[k], budget: budget, hand: hand, bank: bank, used: used,
+             src: bankMode ? 'bank' : 'hand', over: budget > 0 && used > budget ? used - budget : 0 };
+  });
+  return { rows: rows, bankMode: bankMode, n: act.n, untagged: act.untagged, period: act.period };
+}
+window.budgetRows = budgetRows;
+function budgetRowUsed(tr){
+  const sEl = tr.querySelector('[data-field="spent"]');
+  const hand = sEl ? (parseFloat(sEl.value) || 0) : (parseFloat(tr.getAttribute('data-hand')) || 0);
+  return tr.getAttribute('data-mode') === 'bank' ? (parseFloat(tr.getAttribute('data-bank')) || 0) : hand;
+}
 function updateBudgetRow(input) {
   var tr = input.closest('tr');
   if (!tr) return;
   var budgetEl = tr.querySelector('[data-field="budget"]');
-  var spentEl = tr.querySelector('[data-field="spent"]');
   var budget = parseFloat(budgetEl ? budgetEl.value : 0) || 0;
-  var spent = parseFloat(spentEl ? spentEl.value : 0) || 0;
+  var spent = budgetRowUsed(tr);
   var remaining = budget - spent;
   var pct = budget > 0 ? Math.min(100, Math.round(spent/budget*100)) : 0;
   var remCell = tr.querySelector('.remaining-cell');
@@ -57380,49 +57508,82 @@ function updateBudgetRow(input) {
 function updateBudgetTotal() {
   var tbody = document.getElementById('budget-tbody');
   if (!tbody) return;
-  var totalBudget = 0, totalSpent = 0;
-  tbody.querySelectorAll('tr').forEach(function(tr) {
-    var b = tr.querySelector('[data-field="budget"]'); var s = tr.querySelector('[data-field="spent"]');
+  var totalBudget = 0, totalUsed = 0, totalHand = 0, bankMode = false;
+  tbody.querySelectorAll('tr[data-item]').forEach(function(tr) {
+    var b = tr.querySelector('[data-field="budget"]');
+    var s = tr.querySelector('[data-field="spent"]');
     totalBudget += parseFloat(b ? b.value : 0) || 0;
-    totalSpent += parseFloat(s ? s.value : 0) || 0;
+    totalUsed += budgetRowUsed(tr);
+    totalHand += s ? (parseFloat(s.value) || 0) : (parseFloat(tr.getAttribute('data-hand')) || 0);
+    if (tr.getAttribute('data-mode') === 'bank') bankMode = true;
   });
   var el = document.getElementById('budget-total');
-  if (el) el.textContent = veniaMoney(totalBudget, { cents: 'auto' })+' / $'+totalSpent.toLocaleString()+' spent';
+  if (el) el.textContent = veniaMoney(totalBudget, { cents: 'auto' }) + ' budget · '
+    + veniaMoney(totalUsed, { cents: 'auto' }) + (bankMode ? ' from the bank' : ' entered by hand')
+    + (bankMode && totalHand ? ' · ' + veniaMoney(totalHand, { cents: 'auto' }) + ' entered by hand' : '');
 }
+// Saves only what the page edits — the budget, and the hand figure where its
+// box is showing. Every other field already stored on a line is kept.
 function saveBudgetData() {
   var tbody = document.getElementById('budget-tbody');
   if (!tbody) return;
-  var data = {};
-  tbody.querySelectorAll('tr').forEach(function(tr) {
+  var data; try { data = JSON.parse(localStorage.getItem('venia_budget') || '{}') || {}; } catch(e) { data = {}; }
+  tbody.querySelectorAll('tr[data-item]').forEach(function(tr) {
     var item = tr.getAttribute('data-item');
     var b = tr.querySelector('[data-field="budget"]'); var s = tr.querySelector('[data-field="spent"]');
-    if (item && b && s) data[item] = {budget:b.value, spent:s.value};
+    if (!item || !b) return;
+    var row = Object.assign({ budget: '', spent: '' }, data[item] || {});
+    row.budget = b.value;
+    if (s) row.spent = s.value;
+    data[item] = row;
   });
   try { localStorage.setItem('venia_budget', JSON.stringify(data)); } catch(e) {}
   // Build 679: and to the cloud (Money's row carries venia_budget).
   try { save(); } catch(e) {}
 }
 function loadBudgetData() {
-  try {
-    var data = JSON.parse(localStorage.getItem('venia_budget') || '{}');
-    Object.keys(data).forEach(function(item) {
-      var tr = document.querySelector('#budget-tbody [data-item="'+item+'"]');
-      if (!tr) return;
-      var b = tr.querySelector('[data-field="budget"]'); var s = tr.querySelector('[data-field="spent"]');
-      if (b) b.value = data[item].budget;
-      if (s) s.value = data[item].spent;
-      if (b) updateBudgetRow(b);
-    });
-  } catch(e) {}
-}
-function exportBudgetCSV() {
   var tbody = document.getElementById('budget-tbody');
   if (!tbody) return;
-  var rows = [['Line Item','Budget','Spent','Remaining']];
-  tbody.querySelectorAll('tr').forEach(function(tr) {
-    var item = tr.querySelector('.t-name'); var b = tr.querySelector('[data-field="budget"]'); var s = tr.querySelector('[data-field="spent"]');
-    if (item && b && s) { var budget=parseFloat(b.value)||0, spent=parseFloat(s.value)||0; rows.push([item.textContent,budget,spent,budget-spent]); }
+  var r;
+  try { r = budgetRows(); } catch(e) { return; }
+  var stored; try { stored = JSON.parse(localStorage.getItem('venia_budget') || '{}') || {}; } catch(e) { stored = {}; }
+  var m = function(n){ return veniaMoney(n, { cents: 'auto' }); };
+  var esc = function(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+  tbody.innerHTML = r.rows.map(function(x) {
+    var raw = stored[x.key] || {};
+    // The hand box shows while it holds a figure, or while the bank has no
+    // marketing spend this month to show instead.
+    var showHand = !!x.hand || !r.bankMode;
+    return '<tr data-item="' + x.key + '" data-mode="' + x.src + '" data-bank="' + x.bank + '" data-hand="' + x.hand + '">'
+      + '<td><span class="t-name">' + x.label + '</span></td>'
+      + '<td><input class="pom-input" style="width:90px" data-field="budget" value="' + esc(raw.budget) + '" placeholder="0" inputmode="decimal" oninput="updateBudgetRow(this)" aria-label="' + x.label + ' budget"></td>'
+      + '<td class="t-mono" style="white-space:nowrap' + (r.bankMode ? '' : ';color:var(--muted)') + '">' + m(x.bank) + '</td>'
+      + '<td style="white-space:nowrap">' + (showHand
+          ? '<input class="pom-input" style="width:80px' + (r.bankMode ? ';color:var(--muted)' : '') + '" data-field="spent" value="' + esc(raw.spent) + '" placeholder="0" inputmode="decimal" oninput="updateBudgetRow(this)" aria-label="' + x.label + ' spent, entered by hand">'
+            + ' <span style="font-size:9px;color:var(--muted);letter-spacing:.5px">entered by hand</span>'
+          : '<span style="color:var(--muted)">—</span>') + '</td>'
+      + '<td class="t-mono remaining-cell">—</td>'
+      + '<td style="min-width:140px"><div class="mbar" style="display:flex;align-items:center;gap:6px"><div class="mtrack" style="flex:1;height:4px;background:#e0e0e0"><div class="mfill" style="height:100%;width:0%;background:#000"></div></div><span class="t-mono" style="font-size:10px">0%</span></div></td>'
+      + '</tr>';
+  }).join('');
+  tbody.querySelectorAll('tr[data-item]').forEach(function(tr) {
+    var b = tr.querySelector('[data-field="budget"]');
+    // Paint without the save that typing schedules — loading is not an edit.
+    if (b) { updateBudgetRow(b); clearTimeout(window._budgetTimer); }
   });
+  var note = document.getElementById('budget-basis');
+  if (note) note.textContent = r.period.label + ': '
+    + (r.bankMode
+        ? r.n + ' marketing transaction' + (r.n === 1 ? '' : 's') + ' in the bank'
+          + (r.untagged ? ' (' + r.untagged + ' untagged, counted under Misc)' : '')
+          + '. Over budget is judged on the bank figure.'
+        : 'no marketing spend in the bank yet, so over budget is judged on the figures entered by hand.');
+}
+function exportBudgetCSV() {
+  try { saveBudgetData(); } catch(e) {}
+  var r = budgetRows();
+  var rows = [['Line Item','Budget','Actual (bank, ' + r.period.label + ')','Entered by hand','Remaining']];
+  r.rows.forEach(function(x) { rows.push([x.label, x.budget, x.bank, x.hand, x.budget - x.used]); });
   var csv = rows.map(function(r){ return r.map(function(c){ return '"'+String(c).replace(/"/g,'""')+'"'; }).join(','); }).join('\n');
   var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,'+encodeURIComponent(csv); a.download = 'venia-budget.csv'; a.click();
   showToast('Budget CSV exported', 'success');
