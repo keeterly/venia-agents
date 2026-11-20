@@ -155,8 +155,15 @@ Deno.serve(async (req: Request) => {
     u2.searchParams.set("access_token", String(j1.access_token));
     const r2 = await fetch(u2.toString());
     const j2 = await r2.json().catch(() => ({}));
-    const token = String(j2.access_token || j1.access_token);
-    const ttl = Number(j2.expires_in) || 3600;
+    // Build 701: a one-hour token cannot be renewed, so storing one would look
+    // connected for an hour and then fail with nothing anyone could do but
+    // reconnect. Say so now instead.
+    if (!r2.ok || !j2.access_token) {
+      return backToApp(false, String(j2?.error?.message
+        || "Instagram connected, but would not give a lasting token. Try Reconnect again."));
+    }
+    const token = String(j2.access_token);
+    const ttl = Number(j2.expires_in) || 5184000;
 
     // 3. Who did we just connect? Stored so the screen can name the account
     //    rather than saying "connected" about something unidentified.

@@ -24,6 +24,12 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 //   {action:'feed', limit} -> published media, refreshing the token if needed
 //   {action:'disconnect'}  -> forget the account and the token
 //
+// And one action with no founder behind it (Build 701):
+//   {action:'keepalive', secret} -> renews the token, from the daily
+//   instagram-keepalive Netlify function. It needs the shared secret that
+//   already guards the morning digest (venia_config.digest_secret), and it
+//   answers with dates only, never the token.
+//
 // The OAuth redirect itself lands on the sibling function `instagram-callback`,
 // which is public because Instagram redirects a browser there with no headers.
 
@@ -50,6 +56,12 @@ const SCOPES = "instagram_business_basic";
 // token refreshed with a week to spare survives a fortnight of nobody opening
 // the app; one refreshed on the last day does not survive a long weekend.
 const REFRESH_WHEN_DAYS_LEFT = 10;
+// Build 701: the token expired on Oct 31 because the only renewal ran when
+// someone opened Social in the last ten days of its life, and nobody did. The
+// daily keepalive renews it once it is ten days old (50 of 60 left), so a
+// month of nobody opening the app no longer costs the connection. Meta only
+// renews a token that is at least a day old and not yet expired.
+const KEEPALIVE_WHEN_DAYS_LEFT = 50;
 
 const IG_AUTH = "https://www.instagram.com/oauth/authorize";
 const IG_TOKEN = "https://api.instagram.com/oauth/access_token";
@@ -90,12 +102,13 @@ function publicRow(r: Record<string, unknown> | null) {
 // Keep the token alive. Returns the token to use, or throws with the reason
 // Instagram gave — which is the difference between "reconnect the account" and
 // "the network was down".
-async function liveToken(db: ReturnType<typeof admin>, row: Record<string, unknown>) {
+async function liveToken(db: ReturnType<typeof admin>, row: Record<string, unknown>,
+                         when = REFRESH_WHEN_DAYS_LEFT) {
   const token = String(row.access_token || "");
   const exp = row.expires_at ? new Date(String(row.expires_at)) : null;
   const daysLeft = exp ? (exp.getTime() - Date.now()) / 86400000 : 999;
-  if (daysLeft < 0) throw new Error("The Instagram connection has expired — reconnect the account.");
-  if (daysLeft > REFRESH_WHEN_DAYS_LEFT) return token;
+  if (daysLeft < 0) throw new Error("The Instagram connection has expired. Reconnect to bring it back.");
+  if (daysLeft > when) return token;
 
   const u = new URL(IG_GRAPH + "/refresh_access_token");
   u.searchParams.set("grant_type", "ig_refresh_token");
@@ -119,6 +132,33 @@ async function liveToken(db: ReturnType<typeof admin>, row: Record<string, unkno
   return String(j.access_token);
 }
 
+// Constant-time, so the answer's timing says nothing about how close a guess was.
+function sameSecret(a: string, b: string) {
+  if (!a || !b || a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+async function keepalive(db: ReturnType<typeof admin>, secret: string) {
+  const { data: cfg } = await db.from("venia_config").select("v").eq("k", "digest_secret").maybeSingle();
+  if (!sameSecret(secret, String(cfg?.v || ""))) return json({ error: "unauthorized" }, 403);
+  const { data: row } = await db.from("venia_instagram").select("*").eq("id", "venia").maybeSingle();
+  if (!row) return json({ ok: true, connected: false });
+  const before = String(row.expires_at || "");
+  try { await liveToken(db, row, KEEPALIVE_WHEN_DAYS_LEFT); }
+  catch (e) {
+    await db.from("venia_instagram").update({
+      last_error: String((e as Error).message), updated_at: new Date().toISOString(),
+    }).eq("id", "venia");
+  }
+  const { data: after } = await db.from("venia_instagram").select("*").eq("id", "venia").maybeSingle();
+  const pub = publicRow(after);
+  return json({
+    ok: true, connected: true, expired: pub.expired, daysLeft: pub.daysLeft,
+    renewed: String(after?.expires_at || "") !== before, lastError: pub.lastError || "",
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -126,6 +166,8 @@ Deno.serve(async (req: Request) => {
     const b = await req.json().catch(() => ({}));
     const action = String(b.action || "status");
     const db = admin();
+
+    if (action === "keepalive") return await keepalive(db, String(b.secret || ""));
 
     let founder = "";
     try {
@@ -141,7 +183,20 @@ Deno.serve(async (req: Request) => {
     const { data: row } = await db.from("venia_instagram")
       .select("*").eq("id", "venia").maybeSingle();
 
-    if (action === "status") return json(publicRow(row));
+    if (action === "status") {
+      // Build 701: opening Social also renews a token that is ten days old,
+      // so the connection lives as long as either the app or the daily
+      // keepalive touches it. A failed renewal is recorded, not thrown.
+      if (row && !publicRow(row).expired) {
+        try {
+          await liveToken(db, row, KEEPALIVE_WHEN_DAYS_LEFT);
+          const { data: fresh } = await db.from("venia_instagram")
+            .select("*").eq("id", "venia").maybeSingle();
+          return json(publicRow(fresh || row));
+        } catch (_) { /* fall through to what we had */ }
+      }
+      return json(publicRow(row));
+    }
 
     if (action === "disconnect") {
       await db.from("venia_instagram").delete().eq("id", "venia");
