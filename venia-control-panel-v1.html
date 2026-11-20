@@ -4234,7 +4234,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '699';
+  const BUILD = '700';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -4383,7 +4383,17 @@ window.veniaYmd = veniaYmd;
   function unlock() {
     $('venia-auth-gate').classList.add('hidden');
     sessionStorage.setItem(KEY, '1');
+    // Build 700: Face ID, a remembered session and the founder sign-in all
+    // open the app without typing the access code, so a device whose stored
+    // copy was lost would reach Shopify, Claude and Stripe with nothing to
+    // show them, and fail quietly. Check once the app is up.
+    setTimeout(function(){ try { if (window.veniaACCheckDevice) window.veniaACCheckDevice('unlock'); } catch (e) {} }, 1500);
   }
+  // Build 700: checks a typed code against the gate, without unlocking
+  // anything, so the access-code sheet can say "that didn't match" at once.
+  window.veniaACMatches = async function(v){
+    try { return (await sha256(String(v || ''))) === HASH; } catch (e) { return false; }
+  };
   // A member signing in with her VENIA account has cleared a higher bar than
   // the access code; the sign-in form calls this so a reload does not drop her
   // back onto a gate she has no code for.
@@ -27010,10 +27020,121 @@ window.veniaAC = function(promptIfMissing, reason){
           if (typeof Headers !== 'undefined' && h instanceof Headers) { if (!h.has('x-venia-code')) h.set('x-venia-code', ac); }
           else if (!h['x-venia-code']) { h['x-venia-code'] = ac; init.headers = h; }
         }
+        // Build 700: a 401 that names the access code means this device can't
+        // reach the cloud. Say so with a sign-in sheet instead of letting every
+        // Shopify, Claude and Stripe call fail quietly. The caller still gets
+        // the same response; this only watches it.
+        const sent = (function(){ try {
+          const h = (init && init.headers) || {};
+          return (typeof Headers !== 'undefined' && h instanceof Headers) ? (h.get('x-venia-code') || '') : (h['x-venia-code'] || '');
+        } catch (e) { return ''; } })();
+        const p = _fetch(input, init);
+        p.then(function(r){ if (r && r.status === 401 && window.veniaACOn401) window.veniaACOn401(r, sent); }).catch(function(){});
+        return p;
       }
     } catch (e) {}
     return _fetch(input, init);
   };
+})();
+
+// ── THE ACCESS CODE THIS DEVICE LOST (Build 700) ─────────────────────────────
+// Face ID, a remembered session or the founder sign-in can open VENIA OS
+// without typing the access code. If this device's stored copy is gone (iOS
+// can clear a home-screen app's storage, and a failed bank or Enigma call
+// clears a mismatched one), every gated function answers 401 and the app used
+// to just show empty Shopify, Claude and Stripe panels. Now it asks, once, in
+// a sheet like the sign-in screen. "Not now" keeps it away for half an hour.
+// Founder devices only: a team member has no code and never sees this.
+;(function(){
+  let shown = false, snoozeUntil = 0, pending = null;
+  function founderContext(){
+    if (window.VENIA_TEAM || window.VENIA_AGENT || window.VENIA_SHARE || window.VENIA_SIGN || window.VENIA_PAY || window.VENIA_RECOVERY) return false;
+    const u = window.veniaAuthUser;
+    if (u && u.email && window.veniaIsFounderEmail && !window.veniaIsFounderEmail(u.email)) return false;
+    const gate = document.getElementById('venia-auth-gate');
+    if (gate && !gate.classList.contains('hidden')) return false;   // the gate itself is asking
+    return true;
+  }
+  function sheet(){
+    let o = document.getElementById('venia-ac-sheet');
+    if (o) return o;
+    o = document.createElement('div');
+    o.id = 'venia-ac-sheet';
+    o.setAttribute('role', 'dialog');
+    o.setAttribute('aria-modal', 'true');
+    o.setAttribute('aria-labelledby', 'vac-title');
+    o.style.cssText = 'position:fixed;inset:0;z-index:9400;background:#0a0a0a;color:#fff;display:none;flex-direction:column;align-items:center;justify-content:center;padding:calc(28px + var(--sat,0px)) 26px calc(28px + var(--sab,0px));font-family:\'Helvetica Neue\',Helvetica,Arial,sans-serif';
+    o.innerHTML =
+      (typeof brandMark === 'function' ? brandMark(150) : '')
+      + '<div id="vac-title" style="font-size:10px;letter-spacing:3px;text-transform:uppercase;color:#8a8a8a;margin-top:8px">Access code</div>'
+      + '<div id="vac-why" style="max-width:320px;text-align:center;font-size:12.5px;line-height:1.6;color:#b7b7b7;margin:22px 0 18px"></div>'
+      + '<form id="vac-form" style="width:100%;max-width:300px;display:flex;flex-direction:column;gap:10px" autocomplete="off">'
+      +   '<input id="vac-input" type="password" inputmode="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Access code" aria-label="Access code" style="width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;border:1px solid #333;border-radius:0;background:#151515;color:#fff;outline:none">'
+      +   '<button type="submit" style="width:100%;min-height:48px;background:#fff;color:#0a0a0a;border:none;border-radius:0;font-size:12px;letter-spacing:2px;text-transform:uppercase;font-weight:700;cursor:pointer">Reconnect</button>'
+      + '</form>'
+      + '<div id="vac-error" role="alert" style="font-size:12px;color:#e0736a;margin-top:14px;min-height:16px;text-align:center;max-width:300px;line-height:1.5"></div>'
+      + '<button id="vac-later" type="button" style="margin-top:16px;background:none;border:none;color:#8a8a8a;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;border-bottom:1px solid #3a3a3a;padding:0 0 3px">Not now</button>';
+    document.body.appendChild(o);
+    o.querySelector('#vac-form').addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const inp = o.querySelector('#vac-input'), err = o.querySelector('#vac-error');
+      const v = veniaACClean(inp.value);
+      if (!v) { err.textContent = 'Enter the access code first.'; return; }
+      err.textContent = 'Checking…';
+      const ok = window.veniaACMatches ? await window.veniaACMatches(v) : true;
+      if (!ok) {
+        err.textContent = 'That code didn’t match. It’s the one that unlocks VENIA OS at the login screen, and it’s case-sensitive.';
+        inp.value = ''; inp.focus(); return;
+      }
+      window.__ac = v;
+      try { localStorage.setItem('venia_ac', v); } catch (e) {}
+      inp.value = ''; err.textContent = '';
+      hide();
+      try { if (window.showToast) showToast('✓ Reconnected. Shopify, Claude and Stripe work on this device again.', 'success'); } catch (e) {}
+      try { window.dispatchEvent(new CustomEvent('venia:access-code')); } catch (e) {}
+      try { if (window.veniaRepaint) window.veniaRepaint(); else if (typeof render === 'function') render(); } catch (e) {}
+    });
+    o.querySelector('#vac-later').addEventListener('click', function(){
+      snoozeUntil = Date.now() + 30 * 60 * 1000;
+      hide();
+      try { if (window.showToast) showToast('Shopify, Claude and Stripe stay off on this device until the access code is entered.', 'info'); } catch (e) {}
+    });
+    return o;
+  }
+  function hide(){ const o = document.getElementById('venia-ac-sheet'); if (o) o.style.display = 'none'; shown = false; }
+  function show(kind){
+    if (shown || Date.now() < snoozeUntil || !founderContext()) return;
+    if (document.hidden) { pending = kind; return; }
+    const o = sheet();
+    o.querySelector('#vac-why').textContent = kind === 'wrong'
+      ? 'The access code saved on this device no longer matches, so Shopify, Claude and Stripe can’t load here. Enter it once to reconnect.'
+      : 'This device doesn’t have the VENIA OS access code saved, so Shopify, Claude and Stripe can’t load here. Enter it once to reconnect.';
+    o.querySelector('#vac-error').textContent = '';
+    o.style.display = 'flex';
+    shown = true;
+    setTimeout(function(){ try { o.querySelector('#vac-input').focus(); } catch (e) {} }, 50);
+  }
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden && pending) { const k = pending; pending = null; show(k); }
+  });
+  // On unlock: only a MISSING code is known for sure without asking a server.
+  window.veniaACCheckDevice = function(){ if (!window.veniaAC(false)) show('missing'); };
+  window.veniaACOn401 = async function(res, sentCode){
+    let text = '';
+    try { text = await res.clone().text(); } catch (e) {}
+    // The gate's own refusals say "access code", or (the background
+    // functions) say nothing at all. Any other 401 is about something else,
+    // like Shopify refusing its own key.
+    if (text.trim() && !/access code/i.test(text)) return;
+    // A few flows (bank, Enigma's cloud answers) re-ask on a 401 themselves.
+    // Give them a moment, so the same question isn't asked twice.
+    await new Promise(function(r){ setTimeout(r, 1500); });
+    const now = window.veniaAC(false);
+    if (!now) { show('missing'); return; }
+    if (sentCode && now === veniaACClean(sentCode)) show('wrong');
+  };
+  // Settings or the console can open it by hand.
+  window.veniaAskAccessCode = function(){ snoozeUntil = 0; shown = false; show(window.veniaAC(false) ? 'wrong' : 'missing'); };
 })();
 async function prStripe(action, payload){
   const headers = {'Content-Type':'application/json'};
@@ -64623,6 +64744,8 @@ window.veniaModulesRender = async function(){
 ;(function(){
   function sb(){ return window.__sbClient || null; }
   var EMAILS = ['keeter@veniacollection.com','christine@veniacollection.com'];
+  // Build 700: the access-code sheet is for founder devices only.
+  window.veniaIsFounderEmail = function(e){ return EMAILS.indexOf(String(e || '').trim().toLowerCase()) >= 0; };
   var SKIP_KEY = 'venia_signin_skipped';   // session-scoped so we don't nag repeatedly
 
   async function hasSession(){
