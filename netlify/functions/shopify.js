@@ -16,10 +16,17 @@ import { VENIA_ORIGINS } from './_shared/origins.js';
 //   SHOPIFY_ADMIN_TOKEN    the Admin API access token (shpat_…)
 //   SHOPIFY_API_VERSION    optional, defaults to 2024-10
 //
-// This proxy only ever issues GET requests to a fixed allowlist of read
-// endpoints. It accepts no arbitrary path, method, or body from the client, so
-// even a compromised page can only READ shop/orders/products — never write,
-// and never see the token.
+// This proxy issues GET requests to a fixed allowlist of read endpoints. It
+// accepts no arbitrary path, method, or body from the client.
+//
+// Build 717 adds ONE narrow write, 'stockReceive': it ADDS received units to a
+// variant's "available" stock at one active location, as Shopify's own
+// "received" adjustment. It can only add (never subtract, set, delete or touch
+// prices, products, orders or customers), only to tracked variants, only at a
+// location that exists and is active, and only within fixed caps. The person
+// confirms each receipt in the app before the call is made; the token is never
+// seen by the browser. Needs the token's write_inventory scope — without it
+// Shopify refuses and the app says so.
 // Live addresses plus this site's own preview deploys — see _shared/origins.js.
 const ALLOWED_ORIGINS = VENIA_ORIGINS;
 function corsHeaders(req) {
@@ -74,6 +81,93 @@ export default async (req) => {
 
   if (!domain || !token) {
     return json({ error: 'Shopify not configured — set SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN in Netlify environment variables.' }, 400, cors);
+  }
+
+  // ── Build 717: received units into Shopify stock ─────────────────────────
+  // stockPreview (read) tells the app which locations exist and what each
+  // variant holds there, so the person sees the numbers before they confirm.
+  // stockReceive (the one write) adds the confirmed units. Every id the client
+  // sends is re-read here: tracked-ness, the inventory item and the location
+  // all come from Shopify, never from the page.
+  if (action === 'stockPreview' || action === 'stockReceive') {
+    const gql = async (query, variables) => {
+      const r = await fetch(`https://${domain}/admin/api/${version}/graphql.json`, {
+        method: 'POST',
+        headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables: variables || {} }),
+      });
+      const txt = await r.text();
+      if (r.status === 401 || r.status === 403) { const e = new Error('Shopify rejected the credentials (' + r.status + ').'); e.status = 401; throw e; }
+      if (!r.ok) { const e = new Error('Shopify ' + r.status + ' (API ' + version + ')'); e.status = 502; throw e; }
+      let j; try { j = JSON.parse(txt); } catch (_) { const e = new Error('Shopify sent something that is not JSON'); e.status = 502; throw e; }
+      if (j.errors && j.errors.length) {
+        const m = j.errors.map(x => x && x.message || '').join('; ');
+        const denied = j.errors.some(x => x && x.extensions && x.extensions.code === 'ACCESS_DENIED') || /access denied|write_inventory/i.test(m);
+        const e = new Error(denied
+          ? 'The Shopify token can read stock but not change it. Add the write_inventory scope to the Admin API token, then try again.'
+          : 'Shopify: ' + m.slice(0, 200));
+        e.status = denied ? 403 : 502; throw e;
+      }
+      return j.data || {};
+    };
+    const numId = v => { const m = String(v == null ? '' : v).match(/^(?:gid:\/\/shopify\/(?:ProductVariant|Location)\/)?(\d{1,20})$/); return m ? m[1] : null; };
+    try {
+      const locData = await gql('query { locations(first: 25, includeInactive: false) { nodes { id name isActive } } }');
+      const locations = ((locData.locations || {}).nodes || []).filter(l => l && l.isActive)
+        .map(l => ({ id: numId(l.id), name: String(l.name || '') })).filter(l => l.id);
+      const rawIds = Array.isArray(body.variantIds) ? body.variantIds
+        : (Array.isArray(body.lines) ? body.lines.map(l => l && l.variantId) : []);
+      const ids = [...new Set(rawIds.map(numId).filter(Boolean))];
+      if (!ids.length || ids.length > 100) return json({ error: 'Give between 1 and 100 variants.' }, 400, cors);
+      const vData = await gql(`query($ids: [ID!]!) { nodes(ids: $ids) { ... on ProductVariant {
+          id sku title product { title }
+          inventoryItem { id tracked inventoryLevels(first: 25) { nodes { location { id } quantities(names: ["available"]) { name quantity } } } } } } }`,
+        { ids: ids.map(i => 'gid://shopify/ProductVariant/' + i) });
+      const variants = ((vData.nodes) || []).filter(n => n && n.id).map(n => {
+        const lv = {};
+        (((n.inventoryItem || {}).inventoryLevels || {}).nodes || []).forEach(l => {
+          const lid = numId(l && l.location && l.location.id);
+          const q = ((l && l.quantities) || []).find(x => x && x.name === 'available');
+          if (lid) lv[lid] = q ? Number(q.quantity) || 0 : 0;
+        });
+        return { id: numId(n.id), sku: String(n.sku || ''), title: String(n.title || ''),
+          product: String((n.product || {}).title || ''), tracked: !!(n.inventoryItem && n.inventoryItem.tracked),
+          inventoryItemId: (n.inventoryItem || {}).id || null, available: lv };
+      });
+      if (action === 'stockPreview') {
+        return json({ locations, variants: variants.map(v => ({ id: v.id, sku: v.sku, title: v.title, product: v.product, tracked: v.tracked, available: v.available })) }, 200, cors);
+      }
+      // stockReceive: validate everything before a single unit moves.
+      const locId = numId(body.locationId);
+      const loc = locations.find(l => l.id === locId);
+      if (!loc) return json({ error: 'Pick an active Shopify location.' }, 400, cors);
+      const lines = Array.isArray(body.lines) ? body.lines : [];
+      if (!lines.length || lines.length > 100) return json({ error: 'Give between 1 and 100 lines.' }, 400, cors);
+      const byId = {}; variants.forEach(v => { byId[v.id] = v; });
+      const changes = []; let total = 0;
+      for (const l of lines) {
+        const vid = numId(l && l.variantId);
+        const q = Number(l && l.qty);
+        if (!vid || !byId[vid]) return json({ error: 'A variant was not found in Shopify.' }, 400, cors);
+        if (!Number.isInteger(q) || q < 1 || q > 10000) return json({ error: 'Each line adds 1 to 10,000 units.' }, 400, cors);
+        if (!byId[vid].tracked || !byId[vid].inventoryItemId) return json({ error: (byId[vid].product + ' ' + byId[vid].title).trim() + " doesn't track stock in Shopify, so units can't be added to it." }, 400, cors);
+        total += q;
+        changes.push({ inventoryItemId: byId[vid].inventoryItemId, locationId: 'gid://shopify/Location/' + loc.id, delta: q });
+      }
+      if (total > 20000) return json({ error: 'One receipt adds at most 20,000 units.' }, 400, cors);
+      const ref = /^[A-Za-z0-9_-]{1,40}$/.test(String(body.ref || '')) ? String(body.ref) : 'receipt';
+      const out = await gql(`mutation($input: InventoryAdjustQuantitiesInput!) { inventoryAdjustQuantities(input: $input) {
+          inventoryAdjustmentGroup { createdAt changes { name delta quantityAfterChange item { id } } }
+          userErrors { field message } } }`,
+        { input: { reason: 'received', name: 'available', referenceDocumentUri: 'logistics://venia-os/receipt/' + ref, changes } });
+      const res = out.inventoryAdjustQuantities || {};
+      if (res.userErrors && res.userErrors.length) return json({ error: 'Shopify: ' + res.userErrors.map(e => e.message).join('; ').slice(0, 300) }, 400, cors);
+      const grp = res.inventoryAdjustmentGroup || {};
+      return json({ ok: true, at: grp.createdAt || new Date().toISOString(), location: loc, total,
+        changes: (grp.changes || []).map(c => ({ delta: c.delta, after: c.quantityAfterChange, item: c.item && c.item.id })) }, 200, cors);
+    } catch (e) {
+      return json({ error: String((e && e.message) || e).slice(0, 300) }, e && e.status || 502, cors);
+    }
   }
 
   // Aggregated order history: loops Shopify's pagination server-side so the
