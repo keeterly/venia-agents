@@ -41,16 +41,30 @@ export async function getUser(accessToken) {
 // Swap a refresh token for a fresh session. Supabase ROTATES refresh tokens:
 // the old one stops working shortly after use, so the caller must store the
 // new one straight away.
+//
+// Returns the new session, or { ended: true } when Supabase says the session
+// is gone for good (signed out, revoked, refresh token unknown), or
+// { transient: true } when Supabase could not be reached or failed on its own
+// side. Only an ENDED session may be thrown away: a Supabase blip used to
+// look the same as a sign-out, and either one deleted Claude's connection.
 export async function refreshSession(refreshToken) {
-  const r = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
-    method: 'POST', body: { refresh_token: refreshToken },
-  });
-  if (!r.ok || !r.data || !r.data.access_token) return null;
-  return {
-    access: r.data.access_token,
-    refresh: r.data.refresh_token,
-    exp: Date.now() + (Number(r.data.expires_in) || 3600) * 1000,
-  };
+  let r;
+  try {
+    r = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', body: { refresh_token: refreshToken },
+    });
+  } catch (_) { return { transient: true }; }
+  if (r.ok && r.data && r.data.access_token) {
+    return {
+      access: r.data.access_token,
+      refresh: r.data.refresh_token,
+      exp: Date.now() + (Number(r.data.expires_in) || 3600) * 1000,
+    };
+  }
+  // 400/401/403 are Supabase's own answer about this refresh token.
+  // Anything else (429, 5xx, an empty body) is not an answer at all.
+  if (r.status === 400 || r.status === 401 || r.status === 403) return { ended: true };
+  return { transient: true };
 }
 
 // Does this person have any access to the workspace at all? The same question
