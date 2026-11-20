@@ -19,7 +19,7 @@ import { VENIA_ORIGINS } from './_shared/origins.js';
 // This proxy issues GET requests to a fixed allowlist of read endpoints. It
 // accepts no arbitrary path, method, or body from the client.
 //
-// Build 711 adds ONE narrow write, 'stockReceive': it ADDS received units to a
+// Build 717 adds ONE narrow write, 'stockReceive': it ADDS received units to a
 // variant's "available" stock at one active location, as Shopify's own
 // "received" adjustment. It can only add (never subtract, set, delete or touch
 // prices, products, orders or customers), only to tracked variants, only at a
@@ -83,7 +83,7 @@ export default async (req) => {
     return json({ error: 'Shopify not configured — set SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN in Netlify environment variables.' }, 400, cors);
   }
 
-  // ── Build 711: received units into Shopify stock ─────────────────────────
+  // ── Build 717: received units into Shopify stock ─────────────────────────
   // stockPreview (read) tells the app which locations exist and what each
   // variant holds there, so the person sees the numbers before they confirm.
   // stockReceive (the one write) adds the confirmed units. Every id the client
