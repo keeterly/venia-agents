@@ -4234,7 +4234,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '710';
+  const BUILD = '711';
   const BUILD_DATE = '2026.11.20';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -19916,6 +19916,8 @@ window.poReceive = function(id){
   closeModal('po-modal');
   renderProduction();
   showToast(receivedNow + ' units received' + (left ? ' — ' + left + ' still open' : ' — PO complete'), 'success');
+  // Build 711: a style that sells in Shopify gets asked, never pushed silently.
+  try { if (poShopSells(po)) setTimeout(() => poShopStock(po.id), 250); } catch(e){}
 };
 window.poDelete = async function(id){
   if (!(await veniaConfirm('Delete ' + id + '?', { ok: 'Delete the PO', danger: true }))) return;
@@ -20509,6 +20511,16 @@ function rsCommit(){
   const pos = poList();
   if (d.id){
     const i = pos.findIndex(p => p.id === d.id);
+    // Build 711: receiving and the Shopify push write to the stored order, not
+    // to this page's draft. Saving the page must never undo them, or a run
+    // would forget what came in and offer the same units to Shopify twice.
+    if (i >= 0){
+      const was = pos[i], wasIt = (was.items||[])[0] || {};
+      if (wasIt.receivedQty) out.items[0].receivedQty = wasIt.receivedQty;
+      if (was.shopPushes) out.shopPushes = was.shopPushes;
+      if (was.receivedAt && !out.receivedAt) out.receivedAt = was.receivedAt;
+      if (['partial','received'].includes(was.status) && !['partial','received','cancelled'].includes(out.status)) out.status = was.status;
+    }
     if (i >= 0) pos[i] = Object.assign({}, pos[i], out);
   } else {
     out.id = 'PO-' + Date.now().toString(36).toUpperCase();
@@ -20653,6 +20665,166 @@ window.rsDelete = async function(){
   try { buildTodayFocus(); } catch(e){}
 };
 window.rsPayments = function(){ rsSave(true); setTimeout(() => poOpenModal(RS_DRAFT.id), 60); };
+// ── Build 711: received units into Shopify stock ─────────────────────────
+// Receiving a run adds units to the style's stock here. Shopify keeps its own
+// count, which is what customers can buy, so the person is asked, per receipt,
+// whether to add the same units there. Nothing moves in Shopify without that
+// tap; the server adds only, as Shopify's own "received" adjustment.
+function poShopPushed(po){ return (po && po.shopPushes || []).reduce((a, p) => a + (Number(p.total) || 0), 0); }
+function poShopReceived(po){ return (po && po.items || []).reduce((a, it) => a + (it.receivedQty || 0), 0); }
+function poShopPending(po){
+  if (!po || po.type === 'fabric' || po.type === 'trim') return 0;
+  return Math.max(0, poShopReceived(po) - poShopPushed(po));
+}
+function poShopStyle(po){ const it = (po && po.items || [])[0]; return it ? (STATE.styles||[]).find(s => s.id === it.styleId) : null; }
+// Does this style sell in Shopify? Known only from a sync or a link.
+function poShopSells(po){
+  const s = poShopStyle(po); if (!s || !poShopPending(po)) return false;
+  return s.shopifyStock != null || styleShopifyIds(s).length > 0 || (Array.isArray(s.shopifySkus) && s.shopifySkus.length > 0);
+}
+// The style's variants in the store: by SKU code (as Inventory matches), by a
+// linked product, or, failing both, by a product with the style's own name.
+function poShopVariants(s, products){
+  const linked = styleShopifyIds(s);
+  const nameKey = plmSalesNorm(s.name);
+  const pick = (test) => { const out = []; (products||[]).forEach(p => (p.variants||[]).forEach(v => { if (test(p, v)) out.push({ id: String(v.id), sku: v.sku || '', title: v.title || '', product: p.title || '', tracked: !!v.tracked }); })); return out; };
+  let v = pick((p, x) => invSkuStyleId(x.sku) === s.id || linked.includes(String(p.id)) || linked.includes(String(p.title)));
+  if (!v.length && nameKey) v = pick(p => plmSalesNorm(p.title) === nameKey);
+  return v;
+}
+// A first guess at the split, from the run's own size and colour breakdown.
+// Only a guess: the boxes stay editable and blank means nothing goes there.
+function poShopGuess(po, vars, pending){
+  const it = (po.items||[])[0] || {};
+  const sizes = it.sizes || {};
+  const col = String(it.colorway || '').toLowerCase();
+  const tracked = vars.filter(v => v.tracked);
+  const out = {};
+  if (tracked.length === 1){ out[tracked[0].id] = pending; return out; }
+  const tok = v => String(v.title||'').split('/').map(t => t.trim().toLowerCase());
+  const pool = col ? tracked.filter(v => tok(v).includes(col)) : tracked;
+  const use = pool.length ? pool : tracked;
+  if (use.length === 1){ out[use[0].id] = pending; return out; }
+  let w = 0; const wt = {};
+  use.forEach(v => { const sz = Object.keys(sizes).find(k => tok(v).includes(String(k).toLowerCase())); const n = sz ? (parseInt(sizes[sz],10)||0) : 0; wt[v.id] = n; w += n; });
+  if (!w) return out;
+  let left = pending;
+  use.forEach((v, i) => { const n = i === use.length - 1 ? left : Math.min(left, Math.round(pending * wt[v.id] / w)); if (n > 0){ out[v.id] = n; left -= n; } });
+  return out;
+}
+// The one Shopify write is sent ONCE. shopifyProxy retries other paths and
+// hosts on any error, which is right for a read and wrong for a write: a slow
+// answer could add the same units twice. Only a bare 404/405 (the request
+// never reached the function) moves on to the next path.
+async function poShopWrite(payload){
+  const bodyStr = JSON.stringify(payload);
+  for (const path of ['/api/shopify', '/.netlify/functions/shopify']) {
+    let resp;
+    try { resp = await fetch(location.origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bodyStr }); }
+    catch(e){ throw new Error("Couldn't reach Shopify (" + (e.message || e) + '). Check Shopify before trying again, in case it went through.'); }
+    if (resp.status === 404 || resp.status === 405) continue;
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || ('Shopify HTTP ' + resp.status));
+    return data;
+  }
+  throw new Error("Couldn't reach the Shopify connection on this site.");
+}
+let PO_SHOP = null;
+window.poShopStock = async function(poId){
+  const po = poList().find(p => p.id === poId); if (!po) return;
+  const pending = poShopPending(po);
+  if (!pending){ showToast('Everything received on ' + poId + ' is already in Shopify'); return; }
+  const s = poShopStyle(po);
+  if (!s){ showToast('This order has no style to match in Shopify'); return; }
+  const ex = document.getElementById('po-shop'); if (ex) ex.remove();
+  const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'po-shop';
+  ov.innerHTML = `<div class="modal" style="width:520px;max-width:94vw">
+    <div class="modal-head"><div class="modal-title">Add to Shopify stock?</div><button class="modal-close" aria-label="Close" onclick="closeModal('po-shop')">&#x2715;</button></div>
+    <div class="modal-body" id="po-shop-body" style="padding:18px 20px;font-size:12px">Asking Shopify for ${slEsc(s.name||'this style')}…</div></div>`;
+  document.body.appendChild(ov); openModal('po-shop');
+  const body = document.getElementById('po-shop-body');
+  const fail = (msg) => { if (body) body.innerHTML = `<div style="color:var(--red);margin-bottom:10px">${slEsc(msg)}</div><div style="color:var(--muted);font-size:11px;margin-bottom:12px">Nothing was changed in Shopify. The ${pending} units stay ready to add from the run's Receive stage.</div><button class="btn btn-ghost btn-sm" onclick="closeModal('po-shop')">Close</button>`; };
+  let vars, prev;
+  try {
+    let inv = await shopifyProxy('inventory', { status: 'active' });
+    vars = poShopVariants(s, inv.products);
+    if (!vars.length){ inv = await shopifyProxy('inventory', { status: 'draft' }); vars = poShopVariants(s, inv.products); }
+  } catch(e){ fail('Could not reach Shopify: ' + (e.message || e)); return; }
+  if (!vars.length){ fail('No Shopify product matches ' + (s.name||'this style') + ' yet. Link it in Inventory (give the style its Shopify SKU code), then add the units from the run.'); return; }
+  try { prev = await shopifyProxy('stockPreview', { variantIds: vars.slice(0, 100).map(v => v.id) }); }
+  catch(e){ fail(String(e.message || e)); return; }
+  const locs = prev.locations || [];
+  if (!locs.length){ fail('Shopify has no active location to add stock to.'); return; }
+  const byId = {}; (prev.variants||[]).forEach(v => { byId[v.id] = v; });
+  vars = vars.filter(v => byId[v.id]).map(v => Object.assign(v, { tracked: byId[v.id].tracked, available: byId[v.id].available || {} }));
+  PO_SHOP = { poId, pending, vars, locs, loc: locs[0].id };
+  const guess = poShopGuess(po, vars, pending);
+  const fld = 'width:72px;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:6px;font-size:12px;font-family:\'DM Mono\',monospace';
+  body.innerHTML = `<div style="margin-bottom:12px;line-height:1.6"><b>${pending}</b> unit${pending === 1 ? '' : 's'} of ${slEsc(s.name||'')} came in on ${slEsc(po.id)} and aren't in Shopify yet. Check the split, then add them. Shopify records it as stock received.</div>
+    ${locs.length > 1 ? `<div style="margin-bottom:10px"><div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:4px">Location</div><select id="po-shop-loc" onchange="poShopLoc(this.value)" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:8px;font-size:12px">${locs.map(l => `<option value="${slEsc(l.id)}">${slEsc(l.name)}</option>`).join('')}</select></div>` : `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">Location: ${slEsc(locs[0].name)}</div>`}
+    <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Variant</th><th>In Shopify now</th><th>Add</th></tr></thead><tbody>
+      ${vars.map(v => `<tr><td data-label="Variant">${slEsc(v.title && v.title !== 'Default Title' ? v.title : v.product)} <span style="color:var(--muted);font-size:10px;font-family:'DM Mono',monospace">${slEsc(v.sku)}</span></td>
+        <td data-label="In Shopify now" class="po-shop-now" data-v="${slEsc(v.id)}" style="font-family:'DM Mono',monospace">${v.available[PO_SHOP.loc] != null ? v.available[PO_SHOP.loc] : 0}</td>
+        <td data-label="Add">${v.tracked ? `<input type="number" min="0" step="1" class="po-shop-q" data-v="${slEsc(v.id)}" value="${guess[v.id] || ''}" placeholder="0" oninput="poShopTotal()" style="${fld}">` : '<span style="color:var(--muted);font-size:11px">Not tracked</span>'}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div id="po-shop-err" style="color:var(--red);font-size:11px;margin-top:8px"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <button class="btn btn-gold btn-sm" id="po-shop-go" onclick="poShopConfirm()">Add to Shopify</button>
+      <button class="btn btn-ghost btn-sm" onclick="closeModal('po-shop')">Not now</button>
+      <span id="po-shop-tot" style="font-size:11px;color:var(--muted)"></span>
+    </div>`;
+  poShopTotal();
+};
+window.poShopLoc = function(id){
+  if (!PO_SHOP) return; PO_SHOP.loc = id;
+  document.querySelectorAll('#po-shop .po-shop-now').forEach(td => { const v = PO_SHOP.vars.find(x => x.id === td.dataset.v); td.textContent = v && v.available[id] != null ? v.available[id] : 0; });
+};
+function poShopLines(){
+  return [].slice.call(document.querySelectorAll('#po-shop .po-shop-q')).map(i => ({ variantId: i.dataset.v, qty: parseInt(i.value, 10) || 0 })).filter(l => l.qty > 0);
+}
+window.poShopTotal = function(){
+  if (!PO_SHOP) return 0;
+  const n = poShopLines().reduce((a, l) => a + l.qty, 0);
+  const btn = document.getElementById('po-shop-go'), tot = document.getElementById('po-shop-tot');
+  const over = n > PO_SHOP.pending;
+  if (btn){ btn.disabled = !n || over; btn.textContent = n ? 'Add ' + n + ' to Shopify' : 'Add to Shopify'; }
+  if (tot){ tot.textContent = over ? 'Only ' + PO_SHOP.pending + ' came in' : (n < PO_SHOP.pending && n ? (PO_SHOP.pending - n) + ' stay to add later' : ''); tot.style.color = over ? 'var(--red)' : 'var(--muted)'; }
+  return n;
+};
+window.poShopConfirm = async function(){
+  const st = PO_SHOP; if (!st || st.busy) return;
+  const lines = poShopLines();
+  const n = lines.reduce((a, l) => a + l.qty, 0);
+  if (!n || n > st.pending) return;
+  // Re-read the order: another device may have added these units already.
+  const po = poList().find(p => p.id === st.poId);
+  if (!po || n > poShopPending(po)){ const e = document.getElementById('po-shop-err'); if (e) e.textContent = 'These units were already added. Nothing was sent.'; return; }
+  st.busy = true;
+  const btn = document.getElementById('po-shop-go'); if (btn){ btn.disabled = true; btn.textContent = 'Adding…'; }
+  let res;
+  try { res = await poShopWrite({ action: 'stockReceive', locationId: st.loc, ref: po.id, lines }); }
+  catch(e){
+    st.busy = false;
+    const el = document.getElementById('po-shop-err'); const m = String(e.message || e); if (el) el.textContent = /went through/.test(m) ? m : m + ' Nothing was added.';
+    if (btn){ btn.disabled = false; btn.textContent = 'Add ' + n + ' to Shopify'; }
+    return;
+  }
+  const loc = st.locs.find(l => l.id === st.loc) || {};
+  po.shopPushes = (po.shopPushes || []).concat([{ at: res.at || new Date().toISOString(), location: loc.name || '', total: res.total || n,
+    lines: lines.map(l => { const v = st.vars.find(x => x.id === l.variantId) || {}; return { variantId: l.variantId, sku: v.sku || '', title: v.title || '', qty: l.qty }; }) }]);
+  po.updatedAt = new Date().toISOString();
+  if (typeof RS_DRAFT !== 'undefined' && RS_DRAFT && RS_DRAFT.id === po.id) RS_DRAFT.shopPushes = po.shopPushes;
+  const s = poShopStyle(po);
+  if (s && s.shopifyStock != null) s.shopifyStock = (Number(s.shopifyStock) || 0) + (res.total || n);
+  save();
+  try { logActivity((res.total || n) + ' units of ' + (s ? s.name : po.id) + ' added to Shopify stock at ' + (loc.name || 'Shopify') + ' from ' + po.id); } catch(e){}
+  PO_SHOP = null;
+  closeModal('po-shop');
+  showToast((res.total || n) + ' units added to Shopify stock', 'success');
+  try { const rm = document.getElementById('rs-modal'); if (rm && rm.classList.contains('open') && RS_DRAFT && RS_DRAFT.id === po.id) rsRender(); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { window.updateInventoryNav && window.updateInventoryNav(); } catch(e){}
+};
 
 // ── Build 702: helpers for the run page ─────────────────────────────────
 function rsDaysBetween(a, b){ return Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 864e5); }
@@ -20999,6 +21171,8 @@ function rsRender(id){
   const landKeys = rsSteps(d).filter(k => ['exf','arrived','pickup','instock'].includes(k));
   const stage9 = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${landKeys.map(k => { const dn = rsMsDone(d, k); const m = (d.ms||{})[k] || {}; return `<span style="font-size:11px;padding:4px 8px;border:1px solid ${dn ? 'var(--green)' : 'var(--border)'};color:${dn ? 'var(--green)' : 'var(--ink)'}">${slEsc(rsStepLabel(d, k))}${dn ? ' ✓' : m.date ? ' · ' + slEsc(veniaDate(m.date)) : ''}</span>`; }).join('')}</div>
       <div style="font-size:12px;margin-bottom:10px">${recv ? `<b>${recv}</b> of ${units} received` : 'Nothing received yet.'}</div>
+      ${(() => { const sp = poList().find(p => p.id === d.id); if (!sp || !recv) return ''; const pushed = poShopPushed(sp), pend = poShopPending(sp);
+        return `<div style="font-size:12px;margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${pushed ? `<b>${pushed}</b> added to Shopify stock` : 'Not in Shopify stock yet.'}${pend && pushed ? ` · ${pend} still to add` : ''}</span>${pend ? `<button type="button" class="btn btn-ghost btn-sm" onclick="poShopStock('${slEsc(d.id)}')">Add ${pend} to Shopify stock</button>` : ''}</div>`; })()}
       <div><div style="${lbl}">Notes</div><textarea id="rs-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(d.notes||'')}</textarea></div>
       ${d.id ? `<div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="rsPayments()" title="Deposit, balance and receiving">Payments and receiving</button></div>` : ''}`;
   const nextBlock = (() => {
