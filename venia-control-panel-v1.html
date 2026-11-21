@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '720';
+  const BUILD = '721';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10613,14 +10613,13 @@ function rpActuals(season){
     const lc = landedCost(s); return lc>0 ? (s.retail-lc)/s.retail*100 : null;
   }).filter(m => m!=null);
   const avgMargin = margins.length ? margins.reduce((a,b)=>a+b,0)/margins.length : null;
-  // Sell-in booked = accepted quotes for this season (orders are created FROM
-  // accepted quotes, so counting the quote once covers both without doubling).
+  // Sell-in booked = this season's orders plus accepted quotes not booked yet
+  // (Build 721: slBookedDocs; the order is the record once there is one).
   // In dollars: a euro quote's total is euros (Build 587).
   // Build 690: with Sales off there are no quotes to count, and "$0 booked"
   // would read as a season that sold nothing. null means "not known here".
   let salesOn = true; try { salesOn = VeniaOS.enabled('sales'); } catch(e){}
-  const booked = !salesOn ? null : (VeniaOS.get('sales.quotes')||[]).filter(q => q.status==='accepted' && String(q.season||'').trim()===season)
-    .reduce((s,q)=>s+slToUsd(q.total||0, q.currency, q.fxRate),0);
+  const booked = !salesOn ? null : slBookedUsd(season);
   return { styles: styles.length, cats, avgMargin, booked, salesOn };
 }
 function renderRangePlan(){
@@ -10828,8 +10827,7 @@ function seasonRetroData(season){
   });
   // Build 690: null (unknown) with Sales off, never a sell-in of $0.
   let salesOn = true; try { salesOn = VeniaOS.enabled('sales'); } catch(e){}
-  const booked = !salesOn ? null : (VeniaOS.get('sales.quotes')||[]).filter(q => q.status === 'accepted' && String(q.season||'').trim() === season)
-    .reduce((a,q) => a + slToUsd(q.total||0, q.currency, q.fxRate), 0);
+  const booked = !salesOn ? null : slBookedUsd(season);   // Build 721
   const names = styles.map(s => String(s.name||'').toLowerCase()).filter(Boolean);
   const covN = (VeniaOS.get('growth.coverage')||[]).filter(c =>
     (c.stylesFeature||[]).some(n => names.includes(String(n||'').toLowerCase()))).length;
@@ -19879,14 +19877,34 @@ window.poOrderFabric = function(matId){
   renderMaterials();
   showToast('Fabric PO ' + po.id + ' created — track it in Production', 'success');
 };
+// Build 721: what buyers have booked this season. An order is the record once
+// a quote becomes one, so booked = wholesale orders (any status but draft and
+// cancelled) plus accepted quotes not booked as an order yet, never both.
+// Counting accepted quotes alone kept counting a line taken off the order.
+function slBookedDocs(season){
+  const inSeason = (sn) => !season || !sn || sn === season;
+  const out = [];
+  (VeniaOS.get('sales.orders')||[]).forEach(o => {
+    if (!o || ['draft','cancelled'].includes(o.status)) return;
+    if (!inSeason(ppOrderSeason(o))) return;
+    out.push({ kind: 'order', doc: o });
+  });
+  (VeniaOS.get('sales.quotes')||[]).forEach(q => {
+    if (!q || q.status !== 'accepted' || q.orderId) return;
+    if (season && String(q.season||'').trim() !== season) return;
+    out.push({ kind: 'quote', doc: q });
+  });
+  return out;
+}
+function slBookedUsd(season){
+  return slBookedDocs(season).reduce((a, x) => a + slToUsd(x.doc.total||0, x.doc.currency, x.doc.fxRate), 0);
+}
 function poSoldUnitsForStyle(styleId, season){
   let n = 0;
-  (VeniaOS.get('sales.quotes')||[]).filter(q => q.status === 'accepted' && (!season || String(q.season||'').trim() === season))
-    .forEach(q => (q.items||[]).forEach(it => {
-      if (it.styleId !== styleId) return;
-      const szSum = Object.values(it.sizes||{}).reduce((a,b) => a + (parseInt(b,10)||0), 0);
-      n += szSum || (it.qty||0);
-    }));
+  slBookedDocs(season).forEach(x => (x.doc.items||[]).forEach(it => {
+    if (it.styleId !== styleId) return;
+    n += ppItemUnits(it);
+  }));
   return n;
 }
 function poDemandRows(season){
@@ -20387,7 +20405,8 @@ window.poRecalc = function(){
 // Consolidate the season's won demand (accepted quotes, size-level) into PO lines.
 window.poPullDemand = function(){
   const season = (document.getElementById('po-season')?.value||'').trim();
-  const won = (VeniaOS.get('sales.quotes')||[]).filter(q=>q.status==='accepted' && (!season || String(q.season||'').trim()===season));
+  // Build 721: orders plus accepted quotes not booked yet (slBookedDocs).
+  const won = slBookedDocs(season).map(x => x.doc);
   const byStyle = {};
   won.forEach(q=>(q.items||[]).forEach(it=>{
     if (!it.styleId) return;
@@ -53206,6 +53225,54 @@ window.slCancelOrder = async function(id){
   slAfterOrderChange(id);
 };
 
+// Build 721: take one line off an order that hasn't shipped, and off the quote
+// it came from, so the quote, Demand Plan and Plan production all agree with
+// the order. Totals and units follow; payment links and Stripe invoices are
+// never touched (they are named in the confirmation when they exist).
+function slItemKey(it){ return [it.styleId||'', String(it.color||'').trim().toLowerCase(), _mStr(it.sizes||{}), it.qty||0].join('|'); }
+function slDropItem(doc, it){
+  const items = doc.items || [];
+  let i = items.findIndex(x => slItemKey(x) === slItemKey(it));
+  if (i < 0) i = items.findIndex(x => x.styleId === it.styleId && String(x.color||'').trim().toLowerCase() === String(it.color||'').trim().toLowerCase());
+  if (i < 0) return null;
+  const gone = items.splice(i, 1)[0];
+  const disc = (parseFloat(doc.discountPct)||0) / 100;
+  const value = Math.round((gone.qty||0) * (parseFloat(gone.ws)||0) * (1 - disc) * 100) / 100;
+  doc.total = Math.max(0, Math.round(((parseFloat(doc.total)||0) - value) * 100) / 100);
+  doc.units = items.reduce((a, x) => a + (x.qty||0), 0);
+  return { gone, value };
+}
+window.slRemoveOrderLine = async function(orderId, idx){
+  const o = (STATE.slOrders||[]).find(x => x.id === orderId); if (!o) return;
+  const it = (o.items||[])[idx]; if (!it) return;
+  if ((o.items||[]).length < 2){ showToast('That is the only line. Cancel the order instead'); return; }
+  if (['shipped','delivered','cancelled'].includes(o.status)){ showToast('This order has ' + o.status + '; its lines stay as they are'); return; }
+  const cur = o.currency || 'USD';
+  const disc = (parseFloat(o.discountPct)||0) / 100;
+  const value = Math.round((it.qty||0) * (parseFloat(it.ws)||0) * (1 - disc) * 100) / 100;
+  const q = (STATE.slQuotes||[]).find(x => x && (x.orderId === o.id || (o.quoteId && x.id === o.quoteId)));
+  const billed = (o.payments||[]).some(p => p && (p.url || p.linkId || p.paidAt)) || !!(o.payment && o.payment.invoiceId);
+  const msg = 'Remove ' + (it.name || it.styleId || 'this line') + ' from ' + (o.account || 'this') + '\'s order?\n\n'
+    + it.qty + ' × ' + slMoneyC(cur, it.ws) + ' comes off. The order total goes from ' + slMoneyC(cur, o.total||0) + ' to ' + slMoneyC(cur, Math.max(0, (o.total||0) - value)) + '.'
+    + (q ? ' The line comes off quote ' + q.id + ' too.' : '')
+    + (billed ? '\n\nPayment links and invoices already made stay as they are. Change them in Stripe if the amount owed changes.' : '')
+    + '\n\nNothing is sent to the buyer.';
+  if (!(await veniaConfirm(msg, { ok: 'Remove the line', cancel: 'Keep it' }))) return;
+  const items = (o.items||[]).slice(); const gone = items.splice(idx, 1)[0];
+  const stamp = new Date().toISOString();
+  const note = String(o.notes||'') + (o.notes ? ' · ' : '') + stamp.slice(0,10) + ': removed ' + (gone.name||gone.styleId||'a line') + ' (' + gone.qty + ' × ' + slMoneyC(cur, gone.ws) + ')';
+  slOrderCommit(o.id, { items, units: items.reduce((a, x) => a + (x.qty||0), 0),
+    total: Math.max(0, Math.round(((o.total||0) - value) * 100) / 100), notes: note, updatedAt: stamp });
+  if (q){
+    const r = slDropItem(q, gone);
+    if (r){ q.updatedAt = stamp; try { dbSet('slQuotes', STATE.slQuotes); } catch(e){} save(); }
+  }
+  try { logActivity('Order ' + o.id + ' (' + (o.account||'') + '): removed ' + (gone.name||gone.styleId||'a line') + ' · ' + gone.qty + ' × ' + slMoneyC(cur, gone.ws) + (q ? '; quote ' + q.id + ' follows' : '')); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  showToast('Line removed' + (q ? ' from the order and its quote' : '') + (billed ? '. Payment links unchanged' : ''), 'success', 4000);
+  slOpenOrderDetail(o.id);
+};
 window.slDeleteOrder = async function(id){
   const list = STATE.slOrders || [];
   const idx = list.findIndex(x => x.id === id); if (idx < 0) return;
@@ -53330,12 +53397,14 @@ function slOpenOrderDetail(id) {
       ? Object.keys(it.sizes).map(k => k + ' ' + it.sizes[k]).join('  ') : '';
     return s ? `<div style="font-size:9.5px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:2px">${slEsc(s)}</div>` : '';
   };
+  // Build 721: a line can come off an order that hasn't shipped.
+  const canRemove = (o.items||[]).length > 1 && !['shipped','delivered','cancelled'].includes(o.status);
   const itemsHtml = (o.items||[]).length
-    ? `<div><div style="${lbl}">Items · ${(o.units||o.items.reduce((s,it)=>s+(it.qty||0),0))} units</div>${o.items.map(it =>
+    ? `<div><div style="${lbl}">Items · ${(o.units||o.items.reduce((s,it)=>s+(it.qty||0),0))} units</div>${o.items.map((it, i) =>
         `<div style="padding:7px 0;border-bottom:1px solid var(--border)">
-          <div style="display:flex;justify-content:space-between;gap:8px;font-size:11px">
-            <span>${slEsc(it.name||it.styleId||'')}${it.color?' <span style="color:var(--muted)">· '+slEsc(it.color)+'</span>':''}</span>
-            <span style="font-family:'DM Mono',monospace;white-space:nowrap">${it.qty} × ${slMoneyC(cur,it.ws)} = ${slMoneyC(cur,(it.qty||0)*(it.ws||0))}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px">
+            <span style="min-width:0">${slEsc(it.name||it.styleId||'')}${it.color?' <span style="color:var(--muted)">· '+slEsc(it.color)+'</span>':''}</span>
+            <span style="display:flex;gap:8px;align-items:center"><span style="font-family:'DM Mono',monospace;white-space:nowrap">${it.qty} × ${slMoneyC(cur,it.ws)} = ${slMoneyC(cur,(it.qty||0)*(it.ws||0))}</span>${canRemove ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:2px 7px;font-size:9.5px;min-height:0" title="Take this line off the order and its quote" aria-label="Remove ${slEsc(it.name||'line')}" onclick="slRemoveOrderLine('${slEsc(o.id)}',${i})">Remove</button>` : ''}</span>
           </div>${sizeLine(it)}
         </div>`).join('')}</div>`
     : '';
