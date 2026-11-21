@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '723';
+  const BUILD = '724';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15280,7 +15280,8 @@ function tlSchedule(s){
   // Build 720: the style's lead is in weeks (the style form says so).
   const lead = styleLeadDays(s) || 45;
   const back = (days) => { const x = new Date(drop); x.setDate(x.getDate() - days); return x; };
-  const exf = 21, prod = exf + lead, top = prod + 10, sms = top + 21, proto = sms + 21, fabric = proto + 14;
+  // Build 724: a US factory (or LA) ships in days, not three weeks.
+  const exf = tlStyleDomestic(s) ? 6 : 21, prod = exf + lead, top = prod + 10, sms = top + 21, proto = sms + 21, fabric = proto + 14;
   const out = { fabric: back(fabric), proto: back(proto), sms: back(sms), top: back(top), prod: back(prod), exf: back(exf), drop, _src:{} };
   // Real dates beat the formula: a PO's ex-factory anchors exf (and production
   // start = ex-factory minus the lead), and logged sample rounds anchor the
@@ -15307,6 +15308,17 @@ function tlSchedule(s){
     });
   } catch(e){}
   return out;
+}
+function tlStyleDomestic(s){
+  if (!s) return false;
+  if (/^domestic/i.test(String(s.prodRegion||''))) return true;
+  const vs = STATE.vendors || [];
+  const v = vs.find(x => s.vendorId && x.id === s.vendorId) || vs.find(x => s.vendor && String(x.name||'').trim().toLowerCase() === String(s.vendor).trim().toLowerCase());
+  return !!(v && /^(us|usa|u\.s\.a?\.?|united states)/i.test(String(v.country||'').trim()));
+}
+// Build 724: a style with an open production run is tracked on the run.
+function tlRunStyleIds(){
+  try { return new Set(rsOpenRuns().map(po => po.styleId || ((po.items||[])[0]||{}).styleId).filter(Boolean)); } catch(e){ return new Set(); }
 }
 function tlDone(s, key){
   const st = s.status, smIdx = ['Proto','SMS1','SMS2','PP','TOP','Approved'].indexOf(s.sample || '');
@@ -15353,6 +15365,11 @@ function renderGantt(filter) {
   if (ganttFilter !== 'all') styles = styles.filter(s=>s.season===ganttFilter);
   const now = new Date();
   const fmt = (d) => d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+  // Build 724: one row per style. A style with an open run shows once, on
+  // the run calendar, and counts once in the tallies.
+  const rsTl = (typeof rsTimelineHTML === 'function') ? rsTimelineHTML(ganttFilter) : { html:'', late:0, risk:0, ok:0, styleIds: [] };
+  const onRun = new Set(rsTl.styleIds || []);
+  styles = styles.filter(s => !onRun.has(s.id));
   const dated = styles.filter(s=>s.drop).sort((a,b)=>String(a.drop).localeCompare(String(b.drop)));
   const undated = styles.filter(s=>!s.drop);
   let late = 0, risk = 0, ontrack = 0;
@@ -15399,7 +15416,6 @@ function renderGantt(filter) {
   const calSeason = ganttFilter !== 'all' ? ganttFilter : (rpSeasons()[0] || '');
   // Restocks (Build 674) are their own rows: an active style can't carry a
   // second production, so its run is tracked on the run's own milestones.
-  const rsTl = (typeof rsTimelineHTML === 'function') ? rsTimelineHTML(ganttFilter) : { html:'', late:0, risk:0, ok:0 };
   late += rsTl.late; risk += rsTl.risk; ontrack += rsTl.ok;
   document.getElementById('gantt-container').innerHTML = `
     ${calSeason ? scStripHTML(calSeason) : ''}
@@ -15409,14 +15425,15 @@ function renderGantt(filter) {
       <div style="background:var(--bg);padding:14px;text-align:center;${late?'box-shadow:inset 0 -3px 0 var(--red)':''}"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:${late?'var(--red)':'var(--muted)'};margin-bottom:6px">Late</div><div style="font-family:'DM Mono',monospace;font-size:24px;color:${late?'var(--red)':'var(--ink)'}">${late}</div></div>
     </div>
     ${rsTl.html}
+    ${rows.length ? `<div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin:4px 0 8px">Styles by drop date · no run yet</div>` : ''}
     ${rows.join('') || (rsTl.html ? '' : '<div style="padding:26px;text-align:center;color:var(--muted);font-size:11px">No styles with drop dates yet.</div>')}
-    ${undated.length ? `<div style="margin-top:18px">
-      <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">No drop date — not on the timeline</div>
+    ${undated.length ? `<details style="margin-top:18px">
+      <summary style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px;cursor:pointer">${undated.length} style${undated.length === 1 ? '' : 's'} with no drop date or run</summary>
       ${undated.map(s => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px">
         <span style="flex:1;min-width:0;cursor:pointer" onclick="openDp('${s.id}')">${s.name} <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${s.styleId}</span></span>
         <input type="date" onchange="updateGanttDrop('${s.id}',this.value)" style="font-size:9.5px;font-family:'DM Mono',monospace;border:none;border-bottom:1px solid var(--border-mid);background:transparent;color:var(--ink);padding:2px 0;outline:none;width:120px;min-width:120px">
       </div>`).join('')}
-    </div>` : ''}
+    </details>` : ''}
   `;
 }
 
@@ -20140,6 +20157,19 @@ function rsDeliveryCheck(po){
   if (!po.inStockBy || !dated.length)
     return { tone: 'mute', late: [], blockers, short: 'Not dated', text: po.inStockBy ? 'The calendar is not filled in yet.' : 'No in-stock date yet, so there is no calendar.' };
   const late = dated.filter(k => !rsMsDone(po, k) && ms[k].date < today);
+  // Build 724: a run planned from today can be on time step by step and
+  // still land after its delivery. Say so, with the day it lands.
+  const end = (ms.instock || {}).date || '';
+  if (!late.length && end && target && end > target && rsStepOn(po, 'instock') && !rsMsDone(po, 'instock')){
+    const over = rsDaysBetween(target, end);
+    return { tone: 'bad', late, blockers, lands: end, short: 'Can\'t make ' + veniaDate(target),
+      text: 'Can\'t make ' + what + ' on usual lead times. Planned from today it lands ' + veniaDate(end) + ', ' + over + ' day' + (over > 1 ? 's' : '') + ' late. Ask for a shorter lead or move the delivery.' };
+  }
+  if (!late.length && end && po.deliverBy && po.inStockBy && end > po.inStockBy && rsStepOn(po, 'instock') && !rsMsDone(po, 'instock')){
+    const nx = rsNextMs(po);
+    return { tone: 'warn', late, blockers, lands: end, short: 'In stock ' + veniaDate(end),
+      text: 'Planned from today it\'s in stock ' + veniaDate(end) + ', after your ' + veniaDate(po.inStockBy) + ' in-stock date but in time for ' + what + '.' + (nx ? ' Next: ' + nx.l + ' by ' + veniaDate(nx.date) + '.' : '') };
+  }
   if (!late.length){
     const nx = rsNextMs(po);
     return { tone: blockers.length ? 'warn' : 'ok', late, blockers, short: 'On track',
@@ -20509,7 +20539,10 @@ window.poOpenModal = function(id){
   const lbl='font-size:10px;color:var(--muted);margin-bottom:4px;letter-spacing:1px;text-transform:uppercase';
   const factories = vendorsLive(po && po.vendor).map(v=>`<option value="${slEsc(v.name)}"></option>`).join('');
   const curOpts = Object.keys(SL_CURRENCIES).map(c=>`<option value="${c}" ${cur===c?'selected':''}>${c} ${SL_CURRENCIES[c]}</option>`).join('');
-  const stOpts = Object.entries(PO_STATUSES).map(([k,v])=>`<option value="${k}" ${(po?po.status:'draft')===k?'selected':''}>${v}</option>`).join('');
+  // Build 724: Received and Partially received come from receiving units,
+  // never from this list; a run's status follows the run.
+  const stCur = po ? po.status : 'draft';
+  const stOpts = Object.entries(PO_STATUSES).map(([k,v])=>{ const lock = ['partial','received'].includes(k) && stCur !== k; return `<option value="${k}" ${stCur===k?'selected':''} ${lock?'disabled':''}>${v}${lock?' (receive to set)':''}</option>`; }).join('');
   const { dep, bal } = po ? poAmounts(po) : { dep:0, bal:0 };
   const payRow = (tag, amt, due, paidAt, dueId, btnFn) => `
     <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
@@ -20559,7 +20592,7 @@ window.poOpenModal = function(id){
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
         <div><div style="${lbl}">Deposit %</div><input id="po-deposit-pct" type="number" min="0" max="100" style="${fld}" value="${po?(po.depositPct!=null?po.depositPct:30):30}" oninput="poRecalc()"></div>
         <div><div style="${lbl}">Ex-factory date</div><input id="po-exfactory" type="date" style="${fld}" value="${slEsc(po?.exFactory||'')}"></div>
-        <div><div style="${lbl}">Status</div><select id="po-status" style="${fld}">${stOpts}</select></div>
+        <div><div style="${lbl}">Status</div>${po && po.kind === 'restock' ? `<div style="${fld};display:flex;align-items:center">${PO_STATUSES[po.status]||po.status||'Draft'}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">Follows the run page</div>` : `<select id="po-status" style="${fld}">${stOpts}</select>`}</div>
       </div>
       ${po ? `<div>
         <div style="${lbl};margin-bottom:2px">Payment schedule</div>
@@ -20601,7 +20634,7 @@ window.poSave = function(existingId){
     currency: document.getElementById('po-currency')?.value||'USD',
     depositPct: Math.min(Math.max(parseFloat(document.getElementById('po-deposit-pct')?.value)||0,0),100),
     exFactory: document.getElementById('po-exfactory')?.value||'',
-    status: document.getElementById('po-status')?.value||'draft',
+    status: document.getElementById('po-status')?.value || (existingId ? ((poList().find(p => p.id === existingId)||{}).status || 'draft') : 'draft'),
     notes: (document.getElementById('po-notes')?.value||'').trim(),
     items, units, total,
     updatedAt: new Date().toISOString(),
@@ -20630,6 +20663,7 @@ window.poSave = function(existingId){
   if (existingId){
     const idx = pos.findIndex(p=>p.id===existingId);
     if (idx>=0) pos[idx] = { ...pos[idx], ...data };
+    try { if (idx>=0 && pos[idx].kind === 'restock') pos[idx].status = rsStatusFor(pos[idx]); } catch(e){}
     try { if (idx>=0 && pos[idx].runId) rsSyncFromFabric(pos[idx].runId); } catch(e){}
     // A restock's ex-factory is also its milestone: keep the two the same.
     try { if (idx>=0 && pos[idx].kind === 'restock' && data.exFactory){ pos[idx].ms = pos[idx].ms || {}; const m = pos[idx].ms.exf || {}; if (m.date !== data.exFactory) pos[idx].ms.exf = { date: data.exFactory, done: !!m.done }; } } catch(e){}
@@ -20660,6 +20694,7 @@ window.poMsSet = function(id, k, patch){
   if (patch && 'done' in patch) m.done = !!patch.done;
   po.ms[k] = m;
   if (k === 'exf' && po.kind === 'restock' && m.date) po.exFactory = m.date;
+  try { if (po.kind === 'restock') po.status = rsStatusFor(po); } catch(e){}
   po.updatedAt = new Date().toISOString();
   save();
   try { logActivity('PO ' + id + ': ' + k + (m.done ? ' done' : ' moved to ' + m.date)); } catch(e){}
@@ -20862,7 +20897,41 @@ function rsSteps(po){ return RS_STEPS.filter(r => rsStepOn(po, r[0])).map(r => r
 // Steps the rest of the OS already knows are done: a sample round approved
 // in the style's sample log, a tech pack revision issued, every BOM line
 // sourced. Never stored, so un-approving a sample un-ticks the step.
+// Build 724: what has come in, how many were ordered, and whether the run
+// has been placed (or, on the LA route, started). Receiving and placing are
+// facts the steps follow, so a received run never reads late.
+function rsRecv(po){ return ((po && po.items) || []).reduce((a, it) => a + (parseInt(it.receivedQty, 10) || 0), 0); }
+function rsOrdered(po){
+  if (!po) return 0;
+  const q = parseInt(po.qty, 10) || 0; if (q) return q;
+  return ((po.items || []).reduce((a, it) => a + (parseInt(it.qty, 10) || 0), 0)) || parseInt(po.units, 10) || 0;
+}
+function rsPlaced(po){
+  if (!po || po.status === 'cancelled') return false;
+  return !!(po.placedAt || ['placed','production','shipped','partial','received'].includes(po.status)
+    || ((po.ms || {}).poPlaced && po.ms.poPlaced.done));
+}
+// The run's status follows its steps: draft until placed, in production once
+// it's cut, shipped once it leaves the factory, and partial or received only
+// by receiving units. Cancelled is the one status set by hand.
+function rsStatusFor(po){
+  if (!po) return 'draft';
+  if (po.status === 'cancelled') return 'cancelled';
+  const got = rsRecv(po), want = rsOrdered(po);
+  if (got > 0) return want > 0 && got >= want ? 'received' : 'partial';
+  if (!rsPlaced(po)) return 'draft';
+  const done = (k) => rsStepOn(po, k) && rsMsDone(po, k);
+  if (done('exf') || done('pickup') || done('arrived')) return 'shipped';
+  if (['marker','cut','sew','dye','finish','qc','packed','top'].some(done)) return 'production';
+  return 'placed';
+}
+window.rsStatusFor = rsStatusFor;
 function rsDerivedDone(po, k){
+  // Build 724: units in hand settle the steps before them.
+  const got = rsRecv(po), want = rsOrdered(po);
+  if (got > 0 && want > 0 && got >= want) return 'All ' + got + ' received';
+  if (got > 0 && k !== 'instock') return 'Units received';
+  if (k === 'poPlaced' && po && po.placedAt) return 'Placed ' + veniaDate(po.placedAt);
   const s = rsStyle(po); if (!s) return '';
   const log = s.sampleLog || [];
   const ok = (e) => ['approved','pass'].includes(String(e.result||'').toLowerCase());
@@ -21048,6 +21117,7 @@ function rsGuide(d){
     if (noRate.length) add('Add the rate for ' + noRate.length + ' work order' + (noRate.length>1?'s':''), 'rs-wrate-' + noRate[0].id);
   }
   if (!out.length && !d.id) add('Save the run', 'rs-save');
+  else if (!out.length && d.id && !rsPlaced(d) && d.status !== 'cancelled') add(cmt ? 'Start the run in LA' : 'Place the run with ' + (d.vendor || 'the factory'), '@place');
   return out;
 }
 window.rsGo = function(id){
@@ -21197,7 +21267,6 @@ function rsReadForm(){
   if (v('rs-deliver') !== undefined) d.deliverBy = v('rs-deliver');
   if (v('rs-lead') !== undefined) d.leadDays = parseInt(v('rs-lead'),10) || RS_DEFAULT_LEAD;
   if (v('rs-cost') !== undefined) d.cost = Math.max(0, parseFloat(v('rs-cost'))||0);
-  if (v('rs-status') !== undefined) d.status = v('rs-status');
   if (v('rs-notes') !== undefined) d.notes = v('rs-notes').trim();
   const fv = v('rs-factory');
   if (fv !== undefined){
@@ -21292,13 +21361,22 @@ function rsDateSteps(d, all){
   if (!d || !d.inStockBy) return;
   const sch = rsSchedule(d.inStockBy, d.leadDays, rsFabricLead(d), d);
   d.ms = d.ms || {};
-  RS_MS.forEach(([k]) => {
-    if (!rsStepOn(d, k) || !sch[k]) return;
+  const todo = RS_MS.map(([k]) => k).filter(k => {
+    if (!rsStepOn(d, k) || !sch[k]) return false;
     const cur = d.ms[k];
-    if ((cur && cur.done) || rsDerivedDone(d, k)) return;
-    if (!all && cur && cur.date) return;
-    d.ms[k] = Object.assign({}, cur || {}, { date: sch[k], done: false });
+    if ((cur && cur.done) || rsDerivedDone(d, k)) return false;
+    return all || !(cur && cur.date);
   });
+  // Build 724: a run planned after its work-back start can't do those steps
+  // in the past. Plan it from today at the usual gaps instead, so no step is
+  // late the day it's planned; the delivery check then says where it lands.
+  const today = rsIso(new Date());
+  const first = todo.reduce((a, k) => (!a || sch[k] < a) ? sch[k] : a, '');
+  const shift = first && first < today ? rsDaysBetween(first, today) : 0;
+  todo.forEach(k => {
+    d.ms[k] = Object.assign({}, d.ms[k] || {}, { date: shift ? rsBack(sch[k], -shift) : sch[k], done: false });
+  });
+  return shift;
 }
 window.rsAddLine = function(){ rsReadForm(); (RS_DRAFT.bom = RS_DRAFT.bom || []).push({ matName:'', matId:'', lineType:'Trim', qty:0, unit:'pc', waste:'', supplier:'', costPerUnit:0 }); rsRender(RS_DRAFT.id||null); };
 window.rsDelLine = function(i){ rsReadForm(); RS_DRAFT.bom.splice(i,1); rsRender(RS_DRAFT.id||null); };
@@ -21349,18 +21427,95 @@ function rsCommit(opts){
       if (was.receivedAt && !out.receivedAt) out.receivedAt = was.receivedAt;
       if (['partial','received'].includes(was.status) && !['partial','received','cancelled'].includes(out.status)) out.status = was.status;
     }
+    out.status = rsStatusFor(out);
     if (i >= 0) pos[i] = Object.assign({}, pos[i], out);
   } else {
     // Build 719: a random tail, so runs started in the same millisecond
     // (Plan production) never share an id.
     out.id = 'PO-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase();
     out.createdAt = out.updatedAt;
+    out.status = rsStatusFor(out);
     pos.unshift(out);
     RS_DRAFT.id = out.id;
   }
+  RS_DRAFT.status = out.status;
   save();
   return out.id;
 }
+// ── Build 724: placing, receiving and cancelling a run ─────────────────
+const rsLinkCss = 'background:none;border:0;padding:0;min-height:0;font:inherit;color:var(--ink);text-decoration:underline;cursor:pointer;letter-spacing:0;text-transform:none';
+function rsCanUnplace(d){
+  if (!d || !rsPlaced(d) || rsRecv(d)) return false;
+  return !['marker','cut','sew','dye','finish','qc','packed','top','exf','arrived','pickup'].some(k => rsStepOn(d, k) && rsMsDone(d, k));
+}
+window.rsPlace = async function(){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d) return;
+  const cmt = rsMaker(d) === 'cmt', units = d.qty || 0;
+  if (!cmt && !d.vendor){ showToast('Pick the factory first'); rsGo('rs-factory'); return; }
+  if (!(units > 0)){ showToast('Enter how many to make first'); rsGo('rs-qty'); return; }
+  if (!d.inStockBy){ showToast('Set the in-stock date first'); rsGo('rs-instock'); return; }
+  const open = rsGuide(d).filter(x => x.go !== '@place' && x.go !== 'rs-save').map(x => x.text);
+  const money = d.cost > 0 ? slMoneyC('USD', units * d.cost) + ' at ' + slMoneyC('USD', d.cost) + ' a unit' : 'no unit cost yet';
+  const head = cmt ? 'Start making ' + units + ' ' + rsTitle(d) + ' in LA?' : 'Place ' + units + ' ' + rsTitle(d) + ' with ' + d.vendor + '?';
+  const body = [money + ', in stock by ' + veniaDate(d.inStockBy) + '.',
+    cmt ? 'The run leaves draft, so its work orders and bills count in Money.' : 'The run leaves draft, so its deposit and balance count as owed in Money.',
+    'Nothing is sent to ' + (cmt ? 'anyone' : 'the factory') + ' from here.',
+    open.length ? 'Still open: ' + open.join('; ') + '.' : ''].filter(Boolean).join('\n');
+  if (!(await veniaConfirm(head + '\n' + body, { ok: cmt ? 'Start the run' : 'Place the run' }))) return;
+  d.placedAt = rsIso(new Date());
+  d.ms = d.ms || {};
+  if (rsStepOn(d, 'poPlaced')) d.ms.poPlaced = Object.assign({}, d.ms.poPlaced || {}, { date: (d.ms.poPlaced && d.ms.poPlaced.date) || d.placedAt, done: true });
+  const id = rsCommit();
+  try { logActivity((cmt ? 'Run started in LA ' : 'Run placed with ' + d.vendor + ' ') + id + ' — ' + rsTitle(d) + ' · ' + units + ' units'); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  rsRender(id);
+  showToast(cmt ? 'Run started' : 'Run placed with ' + d.vendor, 'success');
+};
+window.rsUnplace = async function(){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d || !rsCanUnplace(d)) return;
+  if (!(await veniaConfirm('Move this run back to draft?\nIts deposit and balance stop counting as owed until you place it again.', { ok: 'Back to draft' }))) return;
+  delete d.placedAt;
+  if (d.ms && d.ms.poPlaced) d.ms.poPlaced = Object.assign({}, d.ms.poPlaced, { done: false });
+  d.status = 'draft';
+  const id = rsCommit();
+  try { renderProduction(); } catch(e){}
+  rsRender(id);
+};
+window.rsCancel = async function(on){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d || !d.id) return;
+  if (on){
+    if (rsRecv(d)){ showToast('Units are already received on this run'); return; }
+    if (!(await veniaConfirm('Cancel this run?\nIt leaves the plan, the Timeline and Today. Nothing is deleted, and you can reopen it.', { ok: 'Cancel the run', danger: true, cancel: 'Keep it' }))) return;
+    d.status = 'cancelled';
+  } else {
+    d.status = d.placedAt ? 'placed' : 'draft';
+  }
+  const id = rsCommit();
+  try { logActivity('Run ' + id + (on ? ' cancelled' : ' reopened') + ' — ' + rsTitle(d)); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  rsRender(id);
+};
+window.rsReceive = function(){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d || !d.id || !rsPlaced(d)) return;
+  const id = rsCommit();
+  poReceive(id);
+  // Reopen from the stored run, so the page shows what came in.
+  setTimeout(() => { try { if (document.getElementById('rs-modal')) rsOpen(id); } catch(e){} }, 30);
+};
+window.rsReplan = function(){
+  rsReadForm();
+  const d = RS_DRAFT; if (!d) return;
+  if (!d.inStockBy){ showToast('Set the in-stock date first'); return; }
+  const shift = rsDateSteps(d, true);
+  rsRender(d.id || null);
+  showToast(shift ? 'Planned from today. Save to keep it' : 'Re-dated from the in-stock date. Save to keep it');
+};
 window.rsSave = function(close){
   rsReadForm();
   const d = RS_DRAFT; if (!d) return;
@@ -21978,7 +22133,9 @@ function rsRender(id){
         <div><div style="${lbl}">Delivery date</div><input id="rs-deliver" type="date" style="${fld}" value="${slEsc(d.deliverBy||'')}" onchange="rsRefresh()" title="When the buyer expects it. Leave blank for stock">${d.plan ? '<div style="font-size:10px;color:var(--muted);margin-top:3px">From the first order it serves</div>' : ''}</div>
         <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()">${d.deliverBy && d.inStockBy ? `<div style="font-size:10px;color:${d.inStockBy > d.deliverBy ? 'var(--red)' : 'var(--muted)'};margin-top:3px">${d.inStockBy > d.deliverBy ? 'After the delivery date' : rsDaysBetween(d.inStockBy, d.deliverBy) + ' days before delivery'}</div>` : ''}</div>
         <div><div style="${lbl}">Production lead · days</div><input id="rs-lead" type="number" min="1" style="${fld}" value="${slEsc(d.leadDays||RS_DEFAULT_LEAD)}">${leadNote}</div>
-        <div><div style="${lbl}">Status</div><select id="rs-status" style="${fld}">${stOpts}</select></div>
+        <div id="rs-status-box"><div style="${lbl}">Status</div><div style="${fld};display:flex;align-items:center;gap:8px;color:${PO_STATUS_COLORS[rsStatusFor(d)]||'var(--ink)'};font-weight:600">${slEsc(PO_STATUSES[rsStatusFor(d)]||'Draft')}${d.placedAt && rsStatusFor(d) !== 'cancelled' ? `<span style="font-weight:400;color:var(--muted);font-size:11px">since ${slEsc(veniaDate(d.placedAt))}</span>` : ''}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:3px;line-height:1.5">${rsStatusFor(d) === 'cancelled' ? 'Cancelled. <button type="button" onclick="rsCancel(false)" style="' + rsLinkCss + '">Reopen</button>'
+            : 'Follows the run: placing it, the cut, ex-factory and receiving move it on.' + (d.id && rsCanUnplace(d) ? ' <button type="button" onclick="rsUnplace()" style="' + rsLinkCss + '">Back to draft</button>' : '') + (d.id && !rsRecv(d) ? ' <button type="button" onclick="rsCancel(true)" style="' + rsLinkCss + '">Cancel the run</button>' : '')}</div></div>
       </div>`;
   const stage6 = `${rsGanttHTML(d)}
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0 6px">
@@ -22003,7 +22160,7 @@ function rsRender(id){
   const recv = ((d.items||[])[0] || {}).receivedQty || 0;
   const landKeys = rsSteps(d).filter(k => ['exf','arrived','pickup','instock'].includes(k));
   const stage9 = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${landKeys.map(k => { const dn = rsMsDone(d, k); const m = (d.ms||{})[k] || {}; return `<span style="font-size:11px;padding:4px 8px;border:1px solid ${dn ? 'var(--green)' : 'var(--border)'};color:${dn ? 'var(--green)' : 'var(--ink)'}">${slEsc(rsStepLabel(d, k))}${dn ? ' ✓' : m.date ? ' · ' + slEsc(veniaDate(m.date)) : ''}</span>`; }).join('')}</div>
-      <div style="font-size:12px;margin-bottom:10px">${recv ? `<b>${recv}</b> of ${units} received` : 'Nothing received yet.'}</div>
+      <div style="font-size:12px;margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${recv ? `<b>${recv}</b> of ${units} received` : 'Nothing received yet.'}</span>${d.id && rsPlaced(d) && recv < units ? `<button type="button" id="rs-receive" class="btn btn-ghost btn-sm" onclick="rsReceive()">${recv ? 'Receive more' : 'Receive units'}</button>` : (d.id && !rsPlaced(d) && d.status !== 'cancelled' ? '<span style="font-size:10px;color:var(--muted)">Place the run to receive into it.</span>' : '')}</div>
       ${(() => { const sp = poList().find(p => p.id === d.id); if (!sp || !recv) return ''; const pushed = poShopPushed(sp), pend = poShopPending(sp);
         return `<div style="font-size:12px;margin-bottom:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${pushed ? `<b>${pushed}</b> added to Shopify stock` : 'Not in Shopify stock yet.'}${pend && pushed ? ` · ${pend} still to add` : ''}</span>${pend ? `<button type="button" class="btn btn-ghost btn-sm" onclick="poShopStock('${slEsc(d.id)}')">Add ${pend} to Shopify stock</button>` : ''}</div>`; })()}
       <div><div style="${lbl}">Notes</div><textarea id="rs-notes" rows="2" style="${fld};font-family:inherit;resize:vertical" placeholder="Packing, labels, shipping terms…">${slEsc(d.notes||'')}</textarea></div>
@@ -22019,7 +22176,7 @@ function rsRender(id){
     return `<div id="rs-missing" style="font-size:11px;padding:10px 12px;border:1px solid var(--amber)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div style="color:var(--ink);min-width:0"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--amber);font-weight:700;margin-right:6px">Next · 1 of ${g.length}</span>${slEsc(first.text)}</div>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="rsGo('${first.go}')">Go</button>
+        ${first.go === '@place' ? `<button type="button" class="btn btn-primary btn-sm" onclick="rsPlace()">${rsMaker(d) === 'cmt' ? 'Start' : 'Place'}</button>` : `<button type="button" class="btn btn-ghost btn-sm" onclick="rsGo('${first.go}')">Go</button>`}
       </div>
       ${rest.length ? `<ol style="margin:8px 0 0 18px;padding:0;color:var(--muted);font-size:11px;line-height:1.7" start="2">${rest.map(x => `<li><button type="button" onclick="rsGo('${x.go}')" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:inherit;letter-spacing:0;text-transform:none;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--border)">${slEsc(x.text)}</button></li>`).join('')}</ol>` : ''}
       ${fresh}
@@ -22039,6 +22196,7 @@ function rsRender(id){
       ${forBits.length || d.deliverBy ? `<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px">${d.deliverBy ? 'Delivery ' + slEsc(veniaDate(d.deliverBy)) : 'Delivery'}${forBits.length ? ' · for ' + slEsc(forBits.join(', ')) : ''}</div>` : ''}
       <div style="color:${dc.tone === 'mute' ? 'var(--muted)' : col};font-size:12px;line-height:1.45">${slEsc(dc.text)}</div>
       ${dc.blockers.length ? `<div style="margin-top:4px;color:var(--amber)">Holding it up: ${slEsc(dc.blockers.join(' · '))}</div>` : ''}
+      ${dc.late.length && !rsRecv(d) ? `<div style="margin-top:8px"><button type="button" class="btn btn-ghost btn-sm" onclick="rsReplan()">Plan from today</button> <span style="font-size:10px;color:var(--muted);margin-left:6px">Moves the open steps on from today at their usual gaps, so the calendar shows where the run really lands.</span></div>` : ''}
     </div>`;
   })();
   const titles = ['Style and tech pack','BOM and materials','Sourcing and suppliers','Cost','Quantity and dates','Time and action calendar','Samples and approvals','Orders and money','Ship and receive'];
@@ -22082,6 +22240,7 @@ function rsRender(id){
         <span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700;padding:4px 8px;border:1px solid ${pill[1]};color:${pill[1]}">${pill[0]}</span>
         ${d.id ? `<button class="btn btn-ghost btn-sm" onclick="rsDelete()">Delete</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="closeModal('rs-modal')">Close</button>
+        ${d.id && !rsPlaced(d) && d.status !== 'cancelled' ? `<button id="rs-place" class="btn btn-primary btn-sm" onclick="rsPlace()">${rsMaker(d) === 'cmt' ? 'Start the run' : 'Place the run'}</button>` : ''}
         <button id="rs-save" class="btn btn-gold btn-sm" onclick="rsSave(false)">Save</button>
       </div>
     </div>
@@ -22145,12 +22304,14 @@ function rsRunsCalHTML(runs){
   const span = Math.max(1, rsDaysBetween(a, b));
   const pct = iso => Math.max(0, Math.min(100, rsDaysBetween(a, iso) / span * 100));
   const months = []; { const c = new Date(a + 'T12:00:00'); c.setDate(1); while (rsIso(c) <= b){ const iso = rsIso(c); if (iso >= a) months.push(iso); c.setMonth(c.getMonth() + 1); } }
-  const lateN = lanes.filter(l => l.segs.some(x => x.late)).length;
+  const lateN = lanes.filter(l => l.segs.some(x => x.late) || (() => { try { return (l.po.deliverBy || l.po.inStockBy) && rsDeliveryCheck(l.po).tone === 'bad'; } catch(e){ return false; } })()).length;
   const rows = lanes.map(l => {
     const po = l.po, lateSeg = l.segs.find(x => x.late);
-    const tone = lateSeg ? 'var(--red)' : l.next ? 'var(--ink)' : 'var(--green)';
-    const sub = lateSeg ? 'Late: ' + lateSeg.label + ' · ' + veniaDate(lateSeg.to)
-      : l.next ? 'Next: ' + l.next.label + ' · ' + veniaDate(l.next.to) : 'Every step done';
+    let dck = null; try { dck = (po.deliverBy || po.inStockBy) ? rsDeliveryCheck(po) : null; } catch(e){}
+    const cant = dck && dck.tone === 'bad';
+    const tone = lateSeg || cant ? 'var(--red)' : l.next ? 'var(--ink)' : 'var(--green)';
+    const sub = (cant ? dck.short + ' · ' : '') + (lateSeg ? 'Late: ' + lateSeg.label + ' · ' + veniaDate(lateSeg.to)
+      : l.next ? 'Next: ' + l.next.label + ' · ' + veniaDate(l.next.to) : 'Every step done');
     const bars = l.segs.map(x => `<span title="${slEsc(x.label)} · ${slEsc(veniaDate(x.to))}${x.done ? ' · done' : x.late ? ' · late' : ''}" style="position:absolute;top:7px;height:12px;left:${pct(x.from)}%;width:max(3px,${pct(x.to) - pct(x.from)}%);background:${x.done ? 'var(--green)' : x.late ? 'var(--red)' : 'var(--ink)'};opacity:${x.done ? .6 : .85};border-right:1px solid var(--bg)"></span>`).join('');
     const del = l.deliver ? `<span title="Delivery ${slEsc(veniaDate(l.deliver))}" style="position:absolute;top:2px;height:22px;left:calc(${pct(l.deliver)}% - 1px);border-left:2px solid var(--amber)"></span>` : '';
     return `<div class="rs-cal-row" onclick="rsOpen('${po.id}')" style="cursor:pointer;border-top:1px solid var(--border);min-height:40px;align-items:center">
@@ -22169,7 +22330,7 @@ function rsRunsCalHTML(runs){
   return `<style>.rs-cal{--rc-lw:160px;overflow-x:auto;border:1px solid var(--border);-webkit-overflow-scrolling:touch;background:var(--bg)}.rs-cal .rs-cal-in{min-width:640px;position:relative}.rs-cal .rs-cal-row{display:grid!important;grid-template-columns:var(--rc-lw) minmax(0,1fr)!important}@media(min-width:900px){.rs-cal{--rc-lw:250px}}.rs-cal .rs-cal-row>div:first-child{position:sticky;left:0;z-index:2;background:inherit}.rs-cal .rs-cal-row{background:var(--bg)}.rs-cal .rs-cal-row:hover>div:first-child{text-decoration:underline}</style>
   <div style="margin-bottom:18px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
     <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Time and action · every run</div>
-    <div style="font-size:10px;color:${lateN ? 'var(--red)' : 'var(--muted)'}">${lanes.length} run${lanes.length === 1 ? '' : 's'}${lateN ? ' · ' + lateN + ' with a late step' : ''}</div></div>
+    <div style="font-size:10px;color:${lateN ? 'var(--red)' : 'var(--muted)'}">${lanes.length} run${lanes.length === 1 ? '' : 's'}${lateN ? ' · ' + lateN + ' late or can\'t make its date' : ''}</div></div>
   <div class="rs-cal"><div class="rs-cal-in">
     <div class="rs-cal-row" style="background:var(--bg-off);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600;min-height:26px;align-items:center">
       <div style="padding:4px 8px">Run</div>
@@ -22183,7 +22344,8 @@ window.rsRunsCalHTML = rsRunsCalHTML;
 function rsTimelineHTML(season){
   const runs = rsOpenRuns().filter(po => (po.inStockBy || (po.ms && Object.keys(po.ms).length))
     && (!season || season === 'all' || String(po.season||'').trim() === season));
-  if (!runs.length) return { html: '', late: 0, risk: 0, ok: 0 };
+  if (!runs.length) return { html: '', late: 0, risk: 0, ok: 0, styleIds: [] };
+  const styleIds = runs.map(po => po.styleId || ((po.items||[])[0]||{}).styleId).filter(Boolean);
   const now = new Date(); const today = rsIso(now);
   let late = 0, risk = 0, ok = 0;
   const rows = runs.map(po => {
@@ -22203,10 +22365,13 @@ function rsTimelineHTML(season){
         <div style="font-size:9px;font-family:'DM Mono',monospace;color:${m.done||!m.date?'var(--muted)':color==='var(--border-mid)'?'var(--muted)':color}">${m.done?'✓':m.date?m.date.slice(5):'—'}</div>
       </div>`;
     }).join('');
-    if (status === 'late') late++; else if (status === 'risk') risk++; else ok++;
     const miss = rsMissing(po);
-    const dck = po.deliverBy ? rsDeliveryCheck(po) : null;
-    const badge = dck && dck.tone === 'bad' ? `<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">CAN'T MAKE ${slEsc(veniaDate(po.deliverBy)).toUpperCase()}</span>`
+    const dck = (po.deliverBy || po.inStockBy) ? rsDeliveryCheck(po) : null;
+    // Build 724: a run that can't make its date is late, even when no single
+    // step is past due yet.
+    if (dck && dck.tone === 'bad') status = 'late';
+    if (status === 'late') late++; else if (status === 'risk') risk++; else ok++;
+    const badge = dck && dck.tone === 'bad' ? `<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">${slEsc(dck.short).toUpperCase()}</span>`
       : status === 'late' ? '<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">LATE</span>'
       : status === 'risk' ? '<span style="color:var(--amber);font-size:10px;letter-spacing:1.5px;font-weight:700">AT RISK</span>'
       : '<span style="color:var(--green);font-size:10px;letter-spacing:1.5px;font-weight:700">ON TRACK</span>';
@@ -22224,7 +22389,9 @@ function rsTimelineHTML(season){
     </div>`;
   }).join('');
   let cal = ''; try { cal = rsRunsCalHTML(runs); } catch(e){ cal = ''; }
-  return { html: `${cal}<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Production runs</div>${rows}</div>`, late, risk, ok };
+  // Build 724: each run shows once. The calendar is the run's row; the step
+  // dots stay on the run page. They only show here if the calendar can't draw.
+  return { html: cal || `<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Production runs</div>${rows}</div>`, late, risk, ok, styleIds };
 }
 window.rsTimelineHTML = rsTimelineHTML;
 
@@ -33590,7 +33757,8 @@ function buildTodayFocus() {
     } catch(e){}
   });
   // 4. Timeline: styles late against their drop-date workback.
-  (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && s.drop).forEach(s => {
+  const tlOnRun = typeof tlRunStyleIds === 'function' ? tlRunStyleIds() : new Set();
+  (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived' && s.drop && !tlOnRun.has(s.id)).forEach(s => {
     try {
       const sched = typeof tlSchedule === 'function' ? tlSchedule(s) : null;
       if (!sched) return;
