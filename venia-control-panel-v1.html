@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '721';
+  const BUILD = '722';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20015,7 +20015,7 @@ function ppRows(season){
     const toPlan = Math.max(0, toMake - onPo - stock);
     const first = ord.src.map(x => x.date).filter(Boolean).sort()[0] || '';
     const deliverBy = first || (toMake > 0 ? (cal.deliveryStart || '') : '');
-    return { s, ord, extra, extraFromForecast: !ppHasExtra(s) && extra > 0, toMake, onPo, stock, toPlan,
+    return { s, ord, extra, extraFromForecast: !ppHasExtra(s) && extra > 0, toMake, onPo, stock, toPlan, gap: toMake - onPo - stock,
       deliverBy, deliverFromSeason: !first && !!deliverBy, run: runsBy[s.id] || null };
   });
 }
@@ -20023,7 +20023,84 @@ window.ppSetExtra = function(id, v){
   const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
   const t = String(v == null ? '' : v).trim();
   if (t === '') delete s.planExtra; else s.planExtra = Math.max(0, parseInt(t,10)||0);
+  // Build 722: a draft run follows the plan, so its units and sizes change
+  // with Extra. A run already placed with a factory is never changed here.
+  try {
+    const r = ppRows(String(s.season||'').trim()).find(x => x.s.id === id);
+    if (r && r.run && (r.run.status || 'draft') === 'draft' && r.gap){
+      const was = ppRunUnits(r.run), d = ppApplyRun(r);
+      if (d){ try { logActivity('Run ' + r.run.id + ' follows the plan: ' + was + ' → ' + (was + d) + ' units of ' + (s.name||'')); } catch(e){}
+        showToast('Run updated to ' + (was + d) + ' units', 'success'); }
+    }
+  } catch(e){}
   save(); renderProduction();
+  try { buildTodayFocus(); } catch(e){}
+};
+// ── Build 722: a run follows its plan ────────────────────────────────────
+// The run's units are what the plan still needs once everything else on a
+// PO or in stock is counted. Sizes move by the difference: added units are
+// spread across the size run, removed units come off the largest sizes. A
+// run never drops below what has already been received.
+function ppRunUnits(po){ return (((po && po.items) || [])[0] || {}).qty || 0; }
+function ppRunTarget(r){
+  const it = ((r.run.items || [])[0] || {});
+  return Math.max(it.receivedQty || 0, ppRunUnits(r.run) + (r.gap || 0));
+}
+function ppResize(sizes, list, delta){
+  const out = {};
+  Object.entries(sizes || {}).forEach(([k, v]) => { const n = parseInt(v, 10) || 0; if (n > 0) out[k] = n; });
+  if (delta > 0){
+    const keys = (list && list.length) ? list : Object.keys(out);
+    const sp = poSpreadSizes(keys, delta);
+    Object.keys(sp).forEach(k => { out[k] = (out[k] || 0) + sp[k]; });
+  } else if (delta < 0){
+    let n = -delta;
+    while (n > 0){
+      const k = Object.keys(out).sort((a, b) => out[b] - out[a])[0];
+      if (!k) break;
+      out[k]--; n--; if (!out[k]) delete out[k];
+    }
+  }
+  return out;
+}
+function ppApplyRun(r){
+  const po = r.run, it = (po.items || [])[0]; if (!it) return 0;
+  const was = it.qty || 0, target = ppRunTarget(r);
+  if (target === was) return 0;
+  // When this run is all there is (nothing else on order, nothing in stock),
+  // its sizes are simply the orders' sizes plus Extra spread across the size
+  // run, the same split Plan production gives a new run. Otherwise only the
+  // difference moves.
+  const runOut = Math.max(0, was - (it.receivedQty || 0));
+  let fresh = null;
+  if (target === r.toMake && r.onPo === runOut && !r.stock){
+    const list = rsSizesFor(r.s), sz = Object.assign({}, r.ord.sizes || {});
+    if (r.extra > 0){ const sp = poSpreadSizes(list.length ? list : Object.keys(sz), r.extra); Object.keys(sp).forEach(k => { sz[k] = (sz[k] || 0) + sp[k]; }); }
+    if (Object.values(sz).reduce((a, b) => a + (b || 0), 0) === target) fresh = sz;
+  }
+  it.sizes = fresh || ppResize(it.sizes, rsSizesFor(r.s), target - was);
+  it.qty = target; po.units = target;
+  po.total = Math.round(target * (it.cost || 0) * 100) / 100;
+  if (po.plan) po.plan.extra = r.extra;
+  po.updatedAt = new Date().toISOString();
+  if (typeof RS_DRAFT !== 'undefined' && RS_DRAFT && RS_DRAFT.id === po.id){ RS_DRAFT.qty = target; RS_DRAFT.sizes = Object.assign({}, it.sizes); RS_DRAFT.units = target; }
+  return target - was;
+}
+// The button on a run that no longer matches the plan. A draft just follows;
+// a placed run asks first, because the factory already has the old number.
+window.ppUpdateRun = async function(styleId, season){
+  const r = ppRows(season).find(x => x.s.id === styleId); if (!r || !r.run) return;
+  const was = ppRunUnits(r.run), target = ppRunTarget(r);
+  if (target === was){ showToast('The run already matches the plan'); return; }
+  if ((r.run.status || 'draft') !== 'draft'){
+    const ok = await veniaConfirm('Change the run to ' + target + ' units?\nThe factory has this order at ' + was + '. VENIA OS changes its own record only, so tell the factory too.', { ok: 'Change to ' + target, cancel: 'Keep ' + was });
+    if (!ok) return;
+  }
+  const d = ppApplyRun(r); if (!d) return;
+  save();
+  try { logActivity('Run ' + r.run.id + ' follows the plan: ' + was + ' → ' + target + ' units of ' + (r.s.name||'')); } catch(e){}
+  showToast('Run updated to ' + target + ' units', 'success');
+  renderProduction();
   try { buildTodayFocus(); } catch(e){}
 };
 window.ppToggleAll = function(){ PP_SHOW_ALL = !PP_SHOW_ALL; renderProduction(); };
@@ -20140,7 +20217,7 @@ function poDemandHTML(season, seasons){
     const forLine = ppFor(r.ord.src);
     const dc = r.run ? rsDeliveryCheck(r.run) : null;
     const runCell = r.run
-      ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px" onclick="rsOpen('${r.run.id}')">Open run</button><div style="font-size:10px;margin-top:3px;color:${ppTone(dc.tone)}">${slEsc(dc.short)}${r.toPlan > 0 ? ' · ' + r.toPlan + ' more than it covers' : ''}</div>`
+      ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px" onclick="rsOpen('${r.run.id}')">Open run</button><div style="font-size:10px;margin-top:3px;color:${ppTone(dc.tone)}">${slEsc(dc.short)}</div>${(() => { if (!r.gap) return ''; const has = ppRunUnits(r.run), want = ppRunTarget(r); if (want === has) return ''; return `<div style="font-size:10px;margin-top:4px;color:var(--amber)">Run has ${has}, plan says ${want}</div><button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px;margin-top:3px" onclick="ppUpdateRun('${s.id}','${slEsc(season)}')">Update run to ${want}</button>`; })()}`
       : r.toPlan > 0 ? '<span style="font-size:10px;color:var(--muted)">Not planned</span>' : '<span style="font-size:10px;color:var(--muted)">—</span>';
     return `<tr>
       <td data-label=""><div class="t-name">${slEsc(s.name||'')}</div><div class="t-id">${slEsc(s.styleId||'')}</div></td>
@@ -20148,7 +20225,7 @@ function poDemandHTML(season, seasons){
       <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders"></td>
       <td data-label="To make" style="${num};font-weight:700">${r.toMake}</td>
       <td data-label="Have" style="${num};color:var(--muted)" title="On a PO ${r.onPo} · in stock ${r.stock}">${r.onPo + r.stock}</td>
-      <td data-label="To plan" style="${num};font-weight:700;color:${r.toPlan > 0 && !r.run ? 'var(--red)' : r.toMake > 0 ? 'var(--green)' : 'var(--muted)'}">${r.toPlan > 0 ? r.toPlan : r.toMake > 0 ? '✓' : '—'}</td>
+      <td data-label="To plan" style="${num};font-weight:700;color:${r.toPlan > 0 && !r.run ? 'var(--red)' : r.toPlan > 0 ? 'var(--amber)' : r.toMake > 0 ? 'var(--green)' : 'var(--muted)'}">${r.toPlan > 0 ? r.toPlan : r.toMake > 0 ? '✓' : '—'}</td>
       <td data-label="Delivery" style="${num};font-size:10px">${r.deliverBy ? slEsc(veniaDate(r.deliverBy)) + (r.deliverFromSeason ? '<div style="color:var(--muted)">season start</div>' : '') : '<span style="color:var(--muted)">—</span>'}</td>
       <td data-label="Run">${runCell}</td>
     </tr>`;
