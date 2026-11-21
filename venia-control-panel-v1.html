@@ -4411,8 +4411,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '717';
-  const BUILD_DATE = '2026.11.20';
+  const BUILD = '719';
+  const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -19771,6 +19771,7 @@ function poOpen(po){ return !['received','cancelled'].includes(po.status); }
 function poOwed(po){
   if (po && po.kind === 'restock' && po.maker === 'cmt') return (po.bills||[]).filter(b => !b.paidAt).reduce((a,b) => a + (b.amount||0), 0);
   if (!poOpen(po) && po.status !== 'received') return 0;   // cancelled owes nothing
+  if (po && po.status === 'draft') return 0;   // Build 719: a draft isn't placed, nothing is owed yet
   const { dep, bal } = poAmounts(po);
   return (po.depositPaidAt ? 0 : dep) + (po.balancePaidAt ? 0 : bal);
 }
@@ -19927,55 +19928,318 @@ window.poFromGaps = function(season){
   }));
   showToast(gaps.length + ' gap line' + (gaps.length>1?'s':'') + ' pulled from the forecast — sizes spread evenly, adjust the curve');
 };
+// ── Plan production (Build 719) ─────────────────────────────────────────────
+// Per season and style: units ordered by buyers (wholesale orders, plus
+// accepted quotes not booked as orders yet, never both), the extra VENIA wants
+// on top, what's already on a PO or in stock, and what is still to plan. Plan
+// production starts one run per style (as + Produce does), with its calendar
+// worked back from the earliest delivery date of the orders it serves, and
+// says plainly when a step is already late or something holds it up.
+const PP_BUFFER_DEFAULT = 7;     // in stock this many days before delivery
+let PP_SHOW_ALL = false;
+let PP_BUFFER = PP_BUFFER_DEFAULT;
+function ppOrderSeason(o){
+  if (!o) return '';
+  if (o.season) return String(o.season).trim();
+  const q = o.quoteId ? (VeniaOS.get('sales.quotes')||[]).find(x => x && x.id === o.quoteId) : null;
+  if (q && q.season) return String(q.season).trim();
+  const m = String(o.notes||'').match(/·\s*([A-Za-z]{2}\d{2})\b/);
+  return m ? m[1].toUpperCase() : '';
+}
+function ppItemUnits(it){
+  const sz = Object.values((it && it.sizes)||{}).reduce((a,b) => a + (parseInt(b,10)||0), 0);
+  return sz || (parseInt(it && it.qty,10)||0);
+}
+// What buyers have ordered of one style this season, by order. Shipped and
+// delivered orders are already made; drafts and cancelled ones don't count.
+function ppOrderedFor(styleId, season){
+  const out = { units: 0, sizes: {}, src: [] };
+  const take = (items) => {
+    let n = 0;
+    (items||[]).forEach(it => {
+      if (!it || it.styleId !== styleId) return;
+      n += ppItemUnits(it);
+      Object.entries(it.sizes||{}).forEach(([k, v]) => { const q = parseInt(v,10)||0; if (q) out.sizes[k] = (out.sizes[k]||0) + q; });
+    });
+    return n;
+  };
+  const orders = VeniaOS.get('sales.orders') || [];
+  orders.forEach(o => {
+    if (!o || ['draft','cancelled','shipped','delivered'].includes(o.status) || o.inventoryApplied) return;
+    const os = ppOrderSeason(o); if (season && os && os !== season) return;
+    const n = take(o.items);
+    if (n){ out.units += n; out.src.push({ kind: 'order', id: o.id, account: o.account || '', date: slOrderShipDate(o), qty: n }); }
+  });
+  (VeniaOS.get('sales.quotes') || []).forEach(q => {
+    if (!q || q.status !== 'accepted' || q.orderId) return;   // booked quotes count through their order
+    if (season && String(q.season||'').trim() && String(q.season).trim() !== season) return;
+    const n = take(q.items);
+    if (n){ out.units += n; out.src.push({ kind: 'quote', id: q.id, account: q.buyerName || '', date: String(q.shipStart||'').slice(0,10), qty: n }); }
+  });
+  out.src.sort((a, b) => String(a.date||'9').localeCompare(String(b.date||'9')));
+  return out;
+}
+function ppHasExtra(s){ return s && s.planExtra !== undefined && s.planExtra !== null && s.planExtra !== ''; }
+function ppRows(season){
+  const runsBy = {};
+  rsOpenRuns().forEach(po => { const sid = po.styleId || ((po.items||[])[0]||{}).styleId; if (sid && !runsBy[sid]) runsBy[sid] = po; });
+  const cal = (STATE.seasonCal||{})[season] || {};
+  return (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season).map(s => {
+    const ord = ppOrderedFor(s.id, season);
+    const f = parseInt(s.forecastUnits,10)||0;
+    // Extra on top of orders. A forecast set before Build 719 (a total to
+    // make) shows as the part orders don't cover yet, until Extra is typed.
+    const extra = ppHasExtra(s) ? (parseInt(s.planExtra,10)||0) : Math.max(0, f - ord.units);
+    const toMake = ord.units + extra;
+    const onPo = poUnitsForStyle(s.id);
+    const stock = (function(){ try { return invStockEffective(s).units || 0; } catch(e){ return parseInt(s.stock,10)||0; } })();
+    const toPlan = Math.max(0, toMake - onPo - stock);
+    const first = ord.src.map(x => x.date).filter(Boolean).sort()[0] || '';
+    const deliverBy = first || (toMake > 0 ? (cal.deliveryStart || '') : '');
+    return { s, ord, extra, extraFromForecast: !ppHasExtra(s) && extra > 0, toMake, onPo, stock, toPlan,
+      deliverBy, deliverFromSeason: !first && !!deliverBy, run: runsBy[s.id] || null };
+  });
+}
+window.ppSetExtra = function(id, v){
+  const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return;
+  const t = String(v == null ? '' : v).trim();
+  if (t === '') delete s.planExtra; else s.planExtra = Math.max(0, parseInt(t,10)||0);
+  save(); renderProduction();
+  try { buildTodayFocus(); } catch(e){}
+};
+window.ppToggleAll = function(){ PP_SHOW_ALL = !PP_SHOW_ALL; renderProduction(); };
+window.ppGo = function(season){
+  if (season) PO_DEMAND_SEASON = season;
+  try { cpGoto('plm'); } catch(e){}
+  setTimeout(function(){ goTo('production', document.querySelector('[data-page=production]')); }, 150);
+};
+
+// Which steps a missing piece holds up, so the calendar can say so.
+function rsBlockedSteps(po){
+  const out = {};
+  const put = (keys, why) => keys.forEach(k => { if (!out[k]) out[k] = why; });
+  rsMissing(po).forEach(m => {
+    if (m === 'no factory') put(['techpack','poPlaced','costing'], m);
+    else if (m === 'no quantity') put(['poPlaced','fabricOrd','trimsOrd'], m);
+    else if (m === 'no dye decision') put(['labdip','dye'], m);
+    else if (m === 'no BOM' || /without usage/.test(m)) put(['sourced','fabricOrd'], m);
+    else if (m === 'fabric not ordered') put(['fabricOrd'], m);
+    else if (m === 'no cutter') put(['cut','marker'], m);
+    else if (m === 'no sewing contractor') put(['sew'], m);
+    else if (/trims? not ordered/.test(m)) put(['trimsOrd'], m);
+    else if (/without a rate/.test(m)) put(['costing'], m);
+  });
+  return out;
+}
+// Can this run make its delivery? Reads its calendar against today: steps
+// already past their date, and if so, where the run lands even if every late
+// step were done today (the rest at their usual gaps).
+function rsDeliveryCheck(po){
+  const today = rsIso(new Date());
+  const ms = po.ms || {};
+  const target = po.deliverBy || po.inStockBy || '';
+  const what = po.deliverBy ? 'the ' + veniaDate(po.deliverBy) + ' delivery' : 'in stock by ' + veniaDate(po.inStockBy);
+  const blockers = rsMissing(po);
+  const dated = rsSteps(po).filter(k => (ms[k]||{}).date);
+  if (!po.inStockBy || !dated.length)
+    return { tone: 'mute', late: [], blockers, short: 'Not dated', text: po.inStockBy ? 'The calendar is not filled in yet.' : 'No in-stock date yet, so there is no calendar.' };
+  const late = dated.filter(k => !rsMsDone(po, k) && ms[k].date < today);
+  if (!late.length){
+    const nx = rsNextMs(po);
+    return { tone: blockers.length ? 'warn' : 'ok', late, blockers, short: 'On track',
+      text: 'On track for ' + what + '.' + (nx ? ' Next: ' + nx.l + ' by ' + veniaDate(nx.date) + '.' : '') };
+  }
+  // The late step closest to production decides the slip; earlier ones must
+  // be done by then too.
+  const last = late.reduce((a, k) => ms[k].date > ms[a].date ? k : a, late[0]);
+  const slip = rsDaysBetween(ms[last].date, today);
+  const lands = rsBack(po.inStockBy, -slip);
+  const n = late.length, steps = n + ' step' + (n > 1 ? 's' : '');
+  const lastLbl = rsStepLabel(po, last) + ' was due ' + veniaDate(ms[last].date);
+  if (lands <= target){
+    const by = rsBack(ms[last].date, -rsDaysBetween(po.inStockBy, target));
+    return { tone: 'warn', late, blockers, last, lands, short: n + ' late',
+      text: steps + ' late (' + lastLbl + '). Still makes ' + what + ' if ' + (n > 1 ? 'they\'re' : 'it\'s') + ' done by ' + veniaDate(by) + '.' };
+  }
+  const over = rsDaysBetween(target, lands);
+  return { tone: 'bad', late, blockers, last, lands, short: 'Can\'t make ' + veniaDate(target),
+    text: 'Can\'t make ' + what + ' on usual lead times. ' + lastLbl + ', so even with ' + (n > 1 ? 'all ' + n + ' late steps' : 'it') + ' done today it lands ' + veniaDate(lands) + ', ' + over + ' day' + (over > 1 ? 's' : '') + ' late. Ask for a shorter lead or move the delivery.' };
+}
+window.rsDeliveryCheck = rsDeliveryCheck;
+function ppTone(t){ return { ok: 'var(--green)', warn: 'var(--amber)', bad: 'var(--red)', mute: 'var(--muted)' }[t] || 'var(--muted)'; }
+function ppFor(src){
+  if (!src.length) return '';
+  const a = src[0];
+  const who = src.length === 1 ? (a.account || 'Order') + (a.kind === 'quote' ? ' (quote)' : '') : src.length + ' orders';
+  return who + (a.date ? ' · ' + veniaDate(a.date) : '');
+}
+
+// A run drafted from a plan row: quantity, sizes, dates, and what it's for.
+function ppDraft(r, season, buffer){
+  const s = r.s;
+  const d = rsNewDraft(s);
+  d.qty = r.toPlan;
+  const sizes = rsSizesFor(s);
+  let sz = {};
+  if (r.onPo + r.stock === 0){
+    sz = Object.assign({}, r.ord.sizes);
+    if (r.extra > 0){ const sp = poSpreadSizes(sizes.length ? sizes : Object.keys(sz), r.extra); Object.keys(sp).forEach(k => { sz[k] = (sz[k]||0) + sp[k]; }); }
+  }
+  const sum = Object.values(sz).reduce((a,b) => a + (b||0), 0);
+  d.sizes = sum === d.qty ? sz : (sizes.length ? poSpreadSizes(sizes, d.qty) : {});
+  d.deliverBy = r.deliverBy || '';
+  d.inStockBy = r.deliverBy ? rsBack(r.deliverBy, buffer) : '';
+  d.plan = { season, extra: r.extra, buffer, at: new Date().toISOString(),
+    orders: r.ord.src.map(x => ({ kind: x.kind, id: x.id, account: x.account, date: x.date, qty: x.qty })) };
+  rsDateSteps(d, true);
+  return d;
+}
+function ppCandidates(season){ return ppRows(season).filter(r => r.toPlan > 0 && !r.run); }
+
+// The season table on Production.
 function poDemandHTML(season, seasons){
-  const rows = poDemandRows(season);
+  const rows = ppRows(season);
   const selOpts = (seasons && seasons.length ? seasons : [season])
     .map(x => `<option value="${slEsc(x)}" ${x===season?'selected':''}>${slEsc(x)}</option>`).join('');
+  const shown = PP_SHOW_ALL ? rows : rows.filter(r => r.toMake > 0 || r.run);
+  const cands = rows.filter(r => r.toPlan > 0 && !r.run);
+  const orderIds = new Set(); rows.forEach(r => r.ord.src.forEach(x => orderIds.add(x.kind + x.id)));
+  const totOrd = rows.reduce((a, r) => a + r.ord.units, 0);
+  const firstDel = rows.map(r => r.deliverBy).filter(Boolean).sort()[0] || '';
+  const runs = rows.filter(r => r.run);
+  const checks = runs.map(r => rsDeliveryCheck(r.run));
+  const cant = checks.filter(c => c.tone === 'bad').length;
   const cal = (STATE.seasonCal||{})[season];
-  let commitLine;
-  if (cal && cal.factoryCommit){
-    const t0 = new Date(); const mid = new Date(t0.getFullYear(), t0.getMonth(), t0.getDate());
-    const days = Math.round((new Date(cal.factoryCommit + 'T00:00:00') - mid) / 86400000);
-    commitLine = days >= 0
-      ? `Factory commit ${cal.factoryCommit} (${days===0?'today':'in '+days+'d'})`
-      : `Factory commit passed ${cal.factoryCommit}`;
-  } else {
-    commitLine = 'No factory-commit date yet — set the season calendar on the Timeline so the gap deadline is real';
-  }
-  let totF=0, totSold=0, totPo=0, totStock=0, totGap=0, anyGap=false;
-  const trs = rows.map(r => {
-    totF+=r.f; totSold+=r.sold; totPo+=r.onPo; totStock+=r.stock; totGap+=r.gap;
-    if (r.f>0 && r.gap>0) anyGap = true;
-    const cover = r.f>0 ? Math.round(r.sold/r.f*100) : null;
-    const over = r.f>0 && r.sold>r.f;
+  const bits = [];
+  bits.push(totOrd ? totOrd + ' unit' + (totOrd>1?'s':'') + ' ordered on ' + orderIds.size + ' order' + (orderIds.size>1?'s':'') : 'No orders for ' + season + ' yet');
+  if (firstDel) bits.push('first delivery ' + veniaDate(firstDel));
+  if (runs.length) bits.push(runs.length + ' run' + (runs.length>1?'s':'') + ' planned' + (cant ? ', ' + cant + ' can\'t make delivery' : ''));
+  if (cal && cal.factoryCommit && cal.factoryCommit < rsIso(new Date())) bits.push('factory commit was ' + veniaDate(cal.factoryCommit));
+  const num = "font-family:'DM Mono',monospace;font-size:11px";
+  const trs = shown.map(r => {
+    const s = r.s;
+    const forLine = ppFor(r.ord.src);
+    const dc = r.run ? rsDeliveryCheck(r.run) : null;
+    const runCell = r.run
+      ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px" onclick="rsOpen('${r.run.id}')">Open run</button><div style="font-size:10px;margin-top:3px;color:${ppTone(dc.tone)}">${slEsc(dc.short)}${r.toPlan > 0 ? ' · ' + r.toPlan + ' more than it covers' : ''}</div>`
+      : r.toPlan > 0 ? '<span style="font-size:10px;color:var(--muted)">Not planned</span>' : '<span style="font-size:10px;color:var(--muted)">—</span>';
     return `<tr>
-      <td data-label=""><div class="t-name">${r.s.name}</div><div class="t-id">${r.s.styleId}</div></td>
-      <td data-label="Forecast"><input type="number" min="0" class="fi fi-mono" style="width:70px;font-size:11px;padding:4px 0;min-height:auto" value="${r.f||''}" placeholder="0" onchange="poSetForecast('${r.s.id}',this.value)" title="Units you're committing to make"></td>
-      <td data-label="Sold" style="font-family:'DM Mono',monospace;font-size:11px;color:${over?'var(--amber)':'var(--ink)'}">${r.sold}${cover!=null?` <span style="color:${over?'var(--amber)':'var(--muted)'};font-size:10px">(${cover}%)</span>`:''}</td>
-      <td data-label="On PO" style="font-family:'DM Mono',monospace;font-size:11px">${r.onPo}</td>
-      <td data-label="Stock" style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)">${r.stock}</td>
-      <td data-label="Gap to commit" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${r.f>0 ? (r.gap>0?'var(--red)':'var(--green)') : 'var(--muted)'}">${r.f>0 ? (r.gap>0?r.gap:'✓') : '—'}</td>
+      <td data-label=""><div class="t-name">${slEsc(s.name||'')}</div><div class="t-id">${slEsc(s.styleId||'')}</div></td>
+      <td data-label="Ordered" style="${num}">${r.ord.units || '<span style="color:var(--muted)">0</span>'}${forLine ? `<div style="font-family:inherit;font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap" title="${slEsc(r.ord.src.map(x => (x.account||x.id) + ' ' + x.qty + (x.date ? ' · ' + x.date : '')).join('\n'))}">${slEsc(forLine)}</div>` : ''}</td>
+      <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders"></td>
+      <td data-label="To make" style="${num};font-weight:700">${r.toMake}</td>
+      <td data-label="Have" style="${num};color:var(--muted)" title="On a PO ${r.onPo} · in stock ${r.stock}">${r.onPo + r.stock}</td>
+      <td data-label="To plan" style="${num};font-weight:700;color:${r.toPlan > 0 && !r.run ? 'var(--red)' : r.toMake > 0 ? 'var(--green)' : 'var(--muted)'}">${r.toPlan > 0 ? r.toPlan : r.toMake > 0 ? '✓' : '—'}</td>
+      <td data-label="Delivery" style="${num};font-size:10px">${r.deliverBy ? slEsc(veniaDate(r.deliverBy)) + (r.deliverFromSeason ? '<div style="color:var(--muted)">season start</div>' : '') : '<span style="color:var(--muted)">—</span>'}</td>
+      <td data-label="Run">${runCell}</td>
     </tr>`;
   }).join('');
-  return `<div style="margin-bottom:22px">
-    <div class="sec-head"><div class="sec-title">Demand Plan — ${slEsc(season)}</div>
-      <div class="sec-actions" style="display:flex;gap:6px;align-items:center">
-        <select onchange="PO_DEMAND_SEASON=this.value;renderProduction()" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${selOpts}</select>
-        ${anyGap ? `<button class="btn btn-gold btn-sm" onclick="poFromGaps('${slEsc(season)}')">Build PO from gaps</button>` : ''}
+  const sum = (k) => shown.reduce((a, r) => a + (typeof k === 'function' ? k(r) : r[k]), 0);
+  const total = shown.length > 1 ? `<tr style="border-top:2px solid var(--border-mid)"><td data-label="" style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase">Total</td>
+      <td data-label="Ordered" style="${num};font-weight:700">${sum(r => r.ord.units)}</td>
+      <td data-label="Extra" style="${num};font-weight:700">${sum('extra')}</td>
+      <td data-label="To make" style="${num};font-weight:700">${sum('toMake')}</td>
+      <td data-label="Have" style="${num};font-weight:700;color:var(--muted)">${sum(r => r.onPo + r.stock)}</td>
+      <td data-label="To plan" style="${num};font-weight:700">${sum(r => r.run ? 0 : r.toPlan) || '✓'}</td>
+      <td data-label="Delivery"></td><td data-label="Run"></td></tr>` : '';
+  const hidden = rows.length - shown.length;
+  return `<div id="pp-season" style="margin-bottom:22px">
+    <div class="sec-head"><div class="sec-title">Plan production — ${slEsc(season)}</div>
+      <div class="sec-actions" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <select onchange="PO_DEMAND_SEASON=this.value;renderProduction()" aria-label="Season" style="background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:5px 8px;font-size:10px;letter-spacing:1px">${selOpts}</select>
+        ${cands.length ? `<button id="pp-plan-btn" class="btn btn-gold btn-sm" onclick="ppOpen('${slEsc(season)}')">Plan production · ${cands.length}</button>` : ''}
       </div></div>
-    <div style="font-size:9.5px;color:var(--muted);margin:2px 0 10px;line-height:1.5">${commitLine} · Forecast = what you commit to make pre-season; Sold reconciles against it as orders land. Gap = forecast − on PO − stock.</div>
-    ${rows.length ? `<div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
-      <th>Style</th><th>Forecast</th><th>Sold</th><th>On PO</th><th>Stock</th><th>Gap to commit</th>
-    </tr></thead><tbody>${trs}
-      ${rows.length>1 ? `<tr style="border-top:2px solid var(--border-mid)"><td data-label="" style="font-size:10px;font-weight:700;letter-spacing:1px;text-transform:uppercase">Total</td>
-        <td data-label="Forecast" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totF}</td>
-        <td data-label="Sold" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totSold}</td>
-        <td data-label="On PO" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700">${totPo}</td>
-        <td data-label="Stock" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:var(--muted)">${totStock}</td>
-        <td data-label="Gap to commit" style="font-family:'DM Mono',monospace;font-size:11px;font-weight:700;color:${totGap>0?'var(--red)':'var(--green)'}">${totGap>0?totGap:'✓'}</td></tr>` : ''}
-    </tbody></table></div>` : `<div style="padding:16px;border:1px solid var(--border);font-size:11px;color:var(--muted)">No styles in ${slEsc(season)} yet.</div>`}
+    <div style="font-size:11px;color:var(--ink);margin:2px 0 4px;line-height:1.5">${slEsc(bits.join(' · '))}</div>
+    <div style="font-size:9.5px;color:var(--muted);margin:0 0 10px;line-height:1.5">Ordered comes from wholesale orders. Extra is what VENIA wants on top. Plan production starts a run for each style still to plan, with its calendar worked back from the first delivery.</div>
+    ${shown.length ? `<div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
+      <th>Style</th><th>Ordered</th><th>Extra</th><th>To make</th><th>Have</th><th>To plan</th><th>Delivery</th><th>Run</th>
+    </tr></thead><tbody>${trs}${total}</tbody></table></div>`
+    : `<div style="padding:16px;border:1px solid var(--border);font-size:11px;color:var(--muted)">${rows.length ? 'Nothing ordered for ' + slEsc(season) + ' yet. Show all styles to add extra units.' : 'No styles in ' + slEsc(season) + ' yet.'}</div>`}
+    ${rows.length && (hidden > 0 || PP_SHOW_ALL) ? `<div style="margin-top:8px"><button type="button" class="btn btn-ghost btn-sm" onclick="ppToggleAll()">${PP_SHOW_ALL ? 'Show only styles to make' : 'Show all ' + rows.length + ' ' + slEsc(season) + ' styles'}</button></div>` : ''}
   </div>`;
 }
+
+// The Plan production sheet: one line per style still to plan, each with the
+// run it would start and whether that run can make its delivery.
+window.ppOpen = function(season){
+  const ex = document.getElementById('pp-modal'); if (ex) ex.remove();
+  const cands = ppCandidates(season);
+  if (!cands.length){ showToast('Every ' + season + ' style that is ordered already has a run'); return; }
+  const drafts = cands.map(r => ({ r, d: ppDraft(r, season, PP_BUFFER) }));
+  const fld = 'background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:6px;font-size:12px;min-height:34px';
+  const cant = drafts.filter(x => rsDeliveryCheck(Object.assign({}, x.d, { units: x.d.qty })).tone === 'bad').length;
+  const lines = drafts.map((x, i) => {
+    const d = x.d, r = x.r, s = r.s;
+    const dc = rsDeliveryCheck(Object.assign({}, d, { units: d.qty }));
+    const who = rsMaker(d) === 'cmt' ? 'We run it (LA)' : (d.vendor || 'No factory yet');
+    const forLine = ppFor(r.ord.src) + (r.extra ? (r.ord.units ? ' + ' : '') + r.extra + ' extra' : '');
+    const cut = (d.ms||{}).cut && d.ms.cut.date;
+    return `<div class="pp-line" data-pp="${i}" style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--border)">
+      <input id="pp-on-${i}" type="checkbox" checked style="width:16px;height:16px;min-height:0;flex:0 0 16px;margin:3px 0 0" aria-label="Plan ${slEsc(s.name||'')}">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline">
+          <div style="min-width:0"><span style="font-size:12px;font-weight:700">${slEsc(s.name||'')}</span> <span style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${slEsc(s.styleId||'')}</span></div>
+          <label style="font-size:10px;color:var(--muted);display:flex;gap:6px;align-items:center">Units <input id="pp-qty-${i}" type="number" min="1" value="${d.qty}" style="${fld};width:70px"></label>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${slEsc(forLine)} · ${slEsc(who)} · ${slEsc(RS_PATHS[rsPath(d)])}${d.inStockBy ? ' · in stock by ' + slEsc(veniaDate(d.inStockBy)) : ''}${cut ? ' · cut by ' + slEsc(veniaDate(cut)) : ''}</div>
+        <div style="font-size:11px;margin-top:4px;color:${ppTone(dc.tone)}">${slEsc(dc.text)}</div>
+        ${dc.blockers.length ? `<div style="font-size:10px;margin-top:2px;color:var(--amber)">Holding it up: ${slEsc(dc.blockers.join(' · '))}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  const ov = document.createElement('div');
+  ov.className = 'overlay'; ov.id = 'pp-modal'; ov.dataset.season = season;
+  ov.innerHTML = `<div class="modal" role="dialog" aria-label="Plan production ${slEsc(season)}" style="max-width:720px;width:100%">
+    <div class="modal-head">
+      <div><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:600">Production · ${slEsc(season)}</div>
+        <div class="modal-title" style="margin-top:2px">Plan production</div></div>
+      <button class="modal-close" aria-label="Close" onclick="closeModal('pp-modal')">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;line-height:1.5;margin-bottom:10px">${drafts.length} run${drafts.length>1?'s':''} to start${cant ? `, <span style="color:var(--red)">${cant} can't make ${cant>1?'their':'its'} delivery as things stand</span>` : ''}. Each starts as a draft with its calendar from the first delivery. Nothing goes to a factory.</div>
+      <label style="font-size:11px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap">In stock <input id="pp-buffer" type="number" min="0" max="60" value="${PP_BUFFER}" style="${fld};width:60px" onchange="PP_BUFFER=Math.max(0,parseInt(this.value,10)||0);ppOpen('${slEsc(season)}')"> days before delivery, to pack and ship</label>
+      <div style="margin-top:8px">${lines}</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" onclick="closeModal('pp-modal')">Cancel</button>
+      <button id="pp-start" class="btn btn-gold" onclick="ppStart('${slEsc(season)}')">Start runs</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  openModal('pp-modal');
+};
+window.ppStart = function(season){
+  const cands = ppCandidates(season);
+  const picked = [];
+  cands.forEach((r, i) => {
+    const on = document.getElementById('pp-on-' + i);
+    if (!on || !on.checked) return;
+    const q = parseInt((document.getElementById('pp-qty-' + i)||{}).value, 10) || 0;
+    if (q <= 0) return;
+    picked.push({ r, q });
+  });
+  if (!picked.length){ showToast('Tick at least one style'); return; }
+  const keepDraft = RS_DRAFT;
+  const ids = []; let cant = 0;
+  picked.forEach(({ r, q }) => {
+    const d = ppDraft(r, season, PP_BUFFER);
+    if (q !== d.qty){ d.qty = q; const sz = rsSizesFor(r.s); d.sizes = sz.length ? poSpreadSizes(sz, q) : {}; }
+    RS_DRAFT = d;
+    const id = rsCommit({ keepStyleBom: true });
+    ids.push(id);
+    const stored = poList().find(p => p.id === id);
+    if (stored && rsDeliveryCheck(stored).tone === 'bad') cant++;
+  });
+  RS_DRAFT = keepDraft;
+  save();
+  try { logActivity('Plan production ' + season + ': ' + ids.length + ' run' + (ids.length>1?'s':'') + ' started as drafts (' + ids.join(', ') + ')'); } catch(e){}
+  closeModal('pp-modal');
+  try { window.updateInventoryNav && window.updateInventoryNav(); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  showToast(ids.length + ' run' + (ids.length>1?'s':'') + ' started as drafts' + (cant ? ' · ' + cant + ' can\'t make delivery' : ''), cant ? 'warning' : 'success', 5000);
+};
+
 
 function renderProduction(){
   const el = document.getElementById('production-content');
@@ -20000,6 +20264,8 @@ function renderProduction(){
     const pay = (paidAt, amt, tag) => `<span title="${tag} ${veniaMoney(amt, { cents: 'auto' })}" style="font-family:'DM Mono',monospace;font-size:10px;color:${paidAt?'var(--green)':'var(--muted)'}">${tag} ${paidAt?'✓':'○'}</span>`;
     const msLine = po.kind === 'restock' ? (() => {
       const nx = rsNextMs(po), miss = rsMissing(po);
+      const dck = po.deliverBy ? rsDeliveryCheck(po) : null;
+      if (dck && dck.tone === 'bad') return `<div style="font-size:10px;margin-top:3px;color:var(--red)">${slEsc(dck.short)}${miss.length ? ' · to settle: ' + slEsc(miss.join(' · ')) : ''}</div>`;
       if (miss.length) return `<div style="font-size:10px;margin-top:3px;color:var(--amber)">To settle: ${slEsc(miss.join(' · '))}</div>`;
       if (!nx) return '';
       const late = nx.date < new Date().toISOString().slice(0,10);
@@ -20739,9 +21005,15 @@ window.rsStart = function(styleId, path){
   const s = (STATE.styles||[]).find(x => x.id === styleId); if (!s) return;
   const open = rsOpenRuns().find(po => po.styleId === s.id);
   if (open){ rsOpen(open.id); showToast('This style already has an open production run — opened it'); return; }
+  RS_DRAFT = rsNewDraft(s, path);
+  rsRender(null);
+};
+// A new run for a style, as + Produce starts it. Build 719: shared with Plan
+// production, which starts several at once from a season's orders.
+function rsNewDraft(s, path){
   const qty = parseInt(s.reorderQty,10) || 0;
   const sizes = rsSizesFor(s);
-  RS_DRAFT = {
+  return {
     kind: 'restock', path: RS_PATHS[path] ? path : rsSuggestPath(s), stepSet: {}, styleId: s.id, colour: s.colors || '',
     qty, sizes: sizes.length ? poSpreadSizes(sizes, qty) : {},
     inStockBy: '', leadDays: (parseInt(s.lead,10) >= 21 ? parseInt(s.lead,10) : RS_DEFAULT_LEAD),
@@ -20750,8 +21022,7 @@ window.rsStart = function(styleId, path){
     bom: rsBomFromStyle(s), bomShared: true, fabricPoIds: [], ms: {},
     season: String(s.season||'').trim(), currency: 'USD', depositPct: 30, status: 'draft', notes: '',
   };
-  rsRender(null);
-};
+}
 window.rsOpen = function(id){
   const po = poList().find(p => p.id === id); if (!po) return;
   RS_DRAFT = JSON.parse(JSON.stringify(po));
@@ -20806,6 +21077,7 @@ function rsReadForm(){
   } else if (v('rs-qty') !== undefined) d.qty = Math.max(0, parseInt(v('rs-qty'),10)||0);
   if (v('rs-colour') !== undefined) d.colour = v('rs-colour').trim();
   if (v('rs-instock') !== undefined) d.inStockBy = v('rs-instock');
+  if (v('rs-deliver') !== undefined) d.deliverBy = v('rs-deliver');
   if (v('rs-lead') !== undefined) d.leadDays = parseInt(v('rs-lead'),10) || RS_DEFAULT_LEAD;
   if (v('rs-cost') !== undefined) d.cost = Math.max(0, parseFloat(v('rs-cost'))||0);
   if (v('rs-status') !== undefined) d.status = v('rs-status');
@@ -20895,6 +21167,12 @@ window.rsFillDates = function(all){
   rsReadForm();
   const d = RS_DRAFT; if (!d) return;
   if (!d.inStockBy){ showToast('Set the in-stock date first'); return; }
+  rsDateSteps(d, all);
+  rsRender(d.id || null);
+};
+// Lay the calendar out from the in-stock date. all = re-date every open step.
+function rsDateSteps(d, all){
+  if (!d || !d.inStockBy) return;
   const sch = rsSchedule(d.inStockBy, d.leadDays, rsFabricLead(d), d);
   d.ms = d.ms || {};
   RS_MS.forEach(([k]) => {
@@ -20902,10 +21180,9 @@ window.rsFillDates = function(all){
     const cur = d.ms[k];
     if ((cur && cur.done) || rsDerivedDone(d, k)) return;
     if (!all && cur && cur.date) return;
-    d.ms[k] = { date: sch[k], done: false };
+    d.ms[k] = Object.assign({}, cur || {}, { date: sch[k], done: false });
   });
-  rsRender(d.id || null);
-};
+}
 window.rsAddLine = function(){ rsReadForm(); (RS_DRAFT.bom = RS_DRAFT.bom || []).push({ matName:'', matId:'', lineType:'Trim', qty:0, unit:'pc', waste:'', supplier:'', costPerUnit:0 }); rsRender(RS_DRAFT.id||null); };
 window.rsDelLine = function(i){ rsReadForm(); RS_DRAFT.bom.splice(i,1); rsRender(RS_DRAFT.id||null); };
 window.rsReloadBom = function(){
@@ -20925,7 +21202,7 @@ window.rsSaveBomToStyle = async function(){
   try { logActivity('BOM for ' + (s.name||'') + ' updated from its restock'); } catch(e){}
   showToast('Saved to the style\'s BOM', 'success');
 };
-function rsCommit(){
+function rsCommit(opts){
   const d = RS_DRAFT; const s = rsStyle(d);
   // Build 702: the first date each milestone is saved with is its plan.
   d.msBase = d.msBase || {};
@@ -20933,7 +21210,9 @@ function rsCommit(){
   const item = { styleId: d.styleId, name: (s && s.styleId ? s.styleId + ' ' : '') + (s ? s.name : ''), qty: d.qty||0, sizes: d.sizes||{}, cost: d.cost||0 };
   if (d.colour) item.colorway = d.colour;
   if (rsMaker(d) === 'cmt'){ d.vendor = 'VENIA (LA)'; d.vendorId = ''; }
-  if (d.bomShared) rsBomToStyle(d);
+  // Build 719: runs started in bulk by Plan production leave the style's BOM
+  // alone; it is read fresh when the run is opened (bomShared).
+  if (d.bomShared && !(opts && opts.keepStyleBom)) rsBomToStyle(d);
   const out = Object.assign({}, d, {
     items: [item], units: d.qty||0, total: Math.round((d.qty||0) * (d.cost||0) * 100)/100,
     exFactory: (d.ms && d.ms.exf && d.ms.exf.date) || d.exFactory || '',
@@ -20955,7 +21234,9 @@ function rsCommit(){
     }
     if (i >= 0) pos[i] = Object.assign({}, pos[i], out);
   } else {
-    out.id = 'PO-' + Date.now().toString(36).toUpperCase();
+    // Build 719: a random tail, so runs started in the same millisecond
+    // (Plan production) never share an id.
+    out.id = 'PO-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase();
     out.createdAt = out.updatedAt;
     pos.unshift(out);
     RS_DRAFT.id = out.id;
@@ -21434,6 +21715,7 @@ function rsRender(id){
   // Steps by phase: a tick to use the step, its date and done. Off steps stay
   // listed (greyed) so any of them can be added back.
   const phases = ['Develop','Commit','Make','Land'];
+  const blocked = rsBlockedSteps(Object.assign({}, d, { units }));
   const stepRow = (row) => {
     const k = row[0];
     if (k === 'approval' && !(d.ms && d.ms.approval)) return '';
@@ -21442,11 +21724,12 @@ function rsRender(id){
     const m = (d.ms||{})[k] || {};
     const done = !!m.done || !!derived;
     const late = on && m.date && !done && m.date < today;
+    const blk = on && !done ? (blocked[k] || '') : '';
     const why = !on ? (auto || (d.stepSet && d.stepSet[k] === false ? 'Off by hand' : 'Off for ' + RS_PATHS[rsPath(d)].toLowerCase()))
-      : derived ? derived + ' ✓' : autoOn ? autoOn : '';
+      : derived ? derived + ' ✓' : blk ? 'Held up: ' + blk : autoOn ? autoOn : '';
     return `<div class="rs-step" style="display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;padding:6px 0;border-top:1px solid var(--border);${on?'':'opacity:.5'}">
       <input id="rs-on-${k}" data-on="${on?'1':'0'}" type="checkbox" style="width:16px;height:16px;min-height:0;flex:0 0 16px;margin:0" ${on?'checked':''} ${k==='approval'?'disabled':''} onchange="rsRefresh()" aria-label="Use ${slEsc(rsStepLabel(d,k))}" title="${on?'Switch this step off':'Add this step back'}">
-      <div style="min-width:0;flex:1 1 180px"><div style="font-size:12px;color:${late?'var(--red)':'var(--ink)'}">${slEsc(rsStepLabel(d,k))}${late?' · late':''}</div>${why?`<div style="font-size:10px;color:${derived?'var(--green)':'var(--muted)'}">${slEsc(why)}</div>`:''}</div>
+      <div style="min-width:0;flex:1 1 180px"><div style="font-size:12px;color:${late?'var(--red)':'var(--ink)'}">${slEsc(rsStepLabel(d,k))}${late?' · late':''}</div>${why?`<div style="font-size:10px;color:${derived?'var(--green)':blk?'var(--amber)':'var(--muted)'}">${slEsc(why)}</div>`:''}</div>
       ${on ? `<input id="rs-mso-${k}" type="text" value="${slEsc(m.owner||'')}" list="rs-owner-list" placeholder="Owner" aria-label="Owner of ${slEsc(rsStepLabel(d,k))}" style="${fld};width:120px;flex:0 1 120px;padding:4px;min-height:32px;margin-left:auto">` : ''}
       <input id="rs-ms-${k}" type="date" value="${slEsc(m.date||'')}" style="${fld};width:150px;flex:0 0 150px;padding:4px;min-height:32px;${on?'':'margin-left:auto;'}${late?'border-color:var(--red)':''}" ${on?'':'disabled'}>
       <label style="font-size:10px;color:var(--muted);display:flex;gap:4px;align-items:center;cursor:pointer;flex:0 0 58px"><input id="rs-msd-${k}" type="checkbox" style="width:14px;height:14px;min-height:0;margin:0" ${done?'checked':''} ${on && !derived?'':'disabled'}> done</label>
@@ -21575,7 +21858,8 @@ function rsRender(id){
   const stage5 = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px">
         ${qtyBlock}
         <div><div style="${lbl}">Colour</div><input id="rs-colour" type="text" style="${fld}" value="${slEsc(d.colour||'')}" placeholder="e.g. Black"></div>
-        <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()"></div>
+        <div><div style="${lbl}">Delivery date</div><input id="rs-deliver" type="date" style="${fld}" value="${slEsc(d.deliverBy||'')}" onchange="rsRefresh()" title="When the buyer expects it. Leave blank for stock">${d.plan ? '<div style="font-size:10px;color:var(--muted);margin-top:3px">From the first order it serves</div>' : ''}</div>
+        <div><div style="${lbl}">In stock by</div><input id="rs-instock" type="date" style="${fld}" value="${slEsc(d.inStockBy||'')}" onchange="rsRefresh()">${d.deliverBy && d.inStockBy ? `<div style="font-size:10px;color:${d.inStockBy > d.deliverBy ? 'var(--red)' : 'var(--muted)'};margin-top:3px">${d.inStockBy > d.deliverBy ? 'After the delivery date' : rsDaysBetween(d.inStockBy, d.deliverBy) + ' days before delivery'}</div>` : ''}</div>
         <div><div style="${lbl}">Production lead · days</div><input id="rs-lead" type="number" min="1" style="${fld}" value="${slEsc(d.leadDays||RS_DEFAULT_LEAD)}">${leadNote}</div>
         <div><div style="${lbl}">Status</div><select id="rs-status" style="${fld}">${stOpts}</select></div>
       </div>`;
@@ -21622,6 +21906,22 @@ function rsRender(id){
       </div>
       ${rest.length ? `<ol style="margin:8px 0 0 18px;padding:0;color:var(--muted);font-size:11px;line-height:1.7" start="2">${rest.map(x => `<li><button type="button" onclick="rsGo('${x.go}')" style="background:none;border:0;padding:0;min-height:0;font:inherit;color:inherit;letter-spacing:0;text-transform:none;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-color:var(--border)">${slEsc(x.text)}</button></li>`).join('')}</ol>` : ''}
       ${fresh}
+    </div>`;
+  })();
+  // Build 719: what this run is for (the orders behind it) and whether it can
+  // make its delivery, with what holds it up.
+  const deliveryBlock = (() => {
+    const pl = d.plan || null;
+    const dc = rsDeliveryCheck(Object.assign({}, d, { units }));
+    if (!pl && !d.deliverBy && dc.tone === 'mute') return '';
+    const forBits = [];
+    if (pl && (pl.orders||[]).length) pl.orders.forEach(o => forBits.push((o.account || o.id) + (o.kind === 'quote' ? ' (quote)' : '') + ' ' + o.qty + (o.date ? ' · ' + veniaDate(o.date) : '')));
+    if (pl && pl.extra) forBits.push(pl.extra + ' extra');
+    const col = ppTone(dc.tone);
+    return `<div id="rs-delivery" style="font-size:11px;padding:10px 12px;border:1px solid ${col};border-left-width:3px">
+      ${forBits.length || d.deliverBy ? `<div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:4px">${d.deliverBy ? 'Delivery ' + slEsc(veniaDate(d.deliverBy)) : 'Delivery'}${forBits.length ? ' · for ' + slEsc(forBits.join(', ')) : ''}</div>` : ''}
+      <div style="color:${dc.tone === 'mute' ? 'var(--muted)' : col};font-size:12px;line-height:1.45">${slEsc(dc.text)}</div>
+      ${dc.blockers.length ? `<div style="margin-top:4px;color:var(--amber)">Holding it up: ${slEsc(dc.blockers.join(' · '))}</div>` : ''}
     </div>`;
   })();
   const titles = ['Style and tech pack','BOM and materials','Sourcing and suppliers','Cost','Quantity and dates','Time and action calendar','Samples and approvals','Orders and money','Ship and receive'];
@@ -21671,6 +21971,7 @@ function rsRender(id){
     <div class="rs-page-body">
       <nav class="rs-rail" aria-label="Stages">${rail}</nav>
       <div class="rs-main modal-body">
+        ${deliveryBlock}
         ${nextBlock}
         ${sec(1, 'Style and tech pack', stage1, 'From the style')}
         ${sec(2, 'BOM and materials', stage2, d.bomShared ? 'The style\'s BOM. A change here changes the style when you save' : 'This run\'s own BOM. The style\'s BOM is separate')}
@@ -21724,7 +22025,9 @@ function rsTimelineHTML(season){
     }).join('');
     if (status === 'late') late++; else if (status === 'risk') risk++; else ok++;
     const miss = rsMissing(po);
-    const badge = status === 'late' ? '<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">LATE</span>'
+    const dck = po.deliverBy ? rsDeliveryCheck(po) : null;
+    const badge = dck && dck.tone === 'bad' ? `<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">CAN'T MAKE ${slEsc(veniaDate(po.deliverBy)).toUpperCase()}</span>`
+      : status === 'late' ? '<span style="color:var(--red);font-size:10px;letter-spacing:1.5px;font-weight:700">LATE</span>'
       : status === 'risk' ? '<span style="color:var(--amber);font-size:10px;letter-spacing:1.5px;font-weight:700">AT RISK</span>'
       : '<span style="color:var(--green);font-size:10px;letter-spacing:1.5px;font-weight:700">ON TRACK</span>';
     return `<div style="background:var(--bg);border:1px solid var(--border);padding:14px;margin-bottom:10px${status==='late'?';box-shadow:inset 3px 0 0 var(--red)':''}">
@@ -21748,7 +22051,11 @@ window.rsTimelineHTML = rsTimelineHTML;
 function rsTodayItems(midnight){
   const items = [];
   const days = (d) => Math.round((new Date(d + 'T00:00:00') - midnight) / 86400000);
+  // Build 719: runs started by Plan production show as one line per season,
+  // so a season of drafts doesn't fill Today.
+  const plans = {};
   rsOpenRuns().forEach(po => {
+    if (po.plan && po.plan.season){ (plans[po.plan.season] = plans[po.plan.season] || []).push(po); return; }
     const act = "rsOpen('" + po.id + "')";
     const name = rsTitle(po);
     const miss = rsMissing(po);
@@ -21760,6 +22067,23 @@ function rsTodayItems(midnight){
       if (dd >= 0 && dd <= 7) items.push({ key: 'rs|' + po.id + '|next|' + nx.k, pri: dd <= 2 ? 'med' : 'low',
         text: `${name} ${rsKindWord(po)}: ${nx.l} ${dd===0?'today':'in '+dd+'d'}${po.vendor?' at '+po.vendor:''}`, act });
     }
+  });
+  Object.keys(plans).forEach(sn => {
+    const runs = plans[sn], checks = runs.map(rsDeliveryCheck);
+    const cant = checks.filter(c => c.tone === 'bad').length;
+    const late = checks.filter(c => c.tone === 'warn' && c.late.length).length;
+    const settle = checks.filter(c => c.blockers.length).length;
+    const parts = [];
+    if (cant) parts.push(cant + ' can\'t make delivery');
+    if (late) parts.push(late + ' with late steps');
+    if (settle) parts.push(settle + ' with things to settle');
+    if (!parts.length){
+      const soon = runs.map(po => rsNextMs(po)).filter(nx => nx && days(nx.date) >= 0 && days(nx.date) <= 7).length;
+      if (soon) parts.push(soon + ' with a step due this week');
+    }
+    if (!parts.length) return;
+    items.push({ key: 'rs|plan|' + sn, sig: [cant, late, settle].join('|'), pri: cant ? 'high' : 'med',
+      text: `${sn} production (${runs.length} run${runs.length>1?'s':''}): ${parts.join(', ')}`, act: "ppGo('" + String(sn).replace(/[^A-Za-z0-9 _-]/g,'') + "')" });
   });
   return items;
 }
@@ -33203,7 +33527,7 @@ function buildTodayFocus() {
       if (xd >= 0 && xd <= 7) items.push({key:'po|'+po.id+'|exf', pri:'med', text:`PO ${po.id} ships ex-factory in ${xd}d — ${po.units||0} units (${po.vendor})`, act});
     }
     // WIP milestones: a factory quietly slipping shows up here, not at ex-factory.
-    if (po.type !== 'fabric' && po.ms) {
+    if (po.type !== 'fabric' && po.ms && !(po.kind === 'restock' && po.plan)) {
       const MS_LBL = Object.assign({}, (typeof RS_MS_LBL === 'object' ? RS_MS_LBL : {}), { cut:'Cutting', mid:'Mid-production check', top:'Top-of-production approval', dye:'Dye / wash', packed:'Packing' });
       const msAct = po.kind === 'restock' ? "rsOpen('" + po.id + "')" : act;
       Object.entries(po.ms).forEach(([k, m]) => {
@@ -57027,7 +57351,8 @@ function cmdMoneyData(opts) {
       const bal = Math.round((po.total||0)-dep);
       if (po.depositPaidAt && po.depositPaidAt >= jan1iso) poPaidYtd += dep;
       if (po.balancePaidAt && po.balancePaidAt >= jan1iso) poPaidYtd += bal;
-      if (!['received','cancelled'].includes(po.status)) {
+      // Build 719: a draft run or PO isn't committed until it is placed.
+      if (!['received','cancelled','draft'].includes(po.status)) {
         if (!po.depositPaidAt) poCommitted += dep;
         if (!po.balancePaidAt) poCommitted += bal;
       }
