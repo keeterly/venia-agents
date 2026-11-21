@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '722';
+  const BUILD = '723';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -22117,6 +22117,69 @@ function rsRender(id){
 }
 
 // ── Timeline rows: one per open restock, its own milestones ────────────────
+// ── Build 723: every open run on one calendar ───────────────────────────
+// One row per run on a shared month axis, so runs can be read against each
+// other in time. Each dated step is a bar from the step before it: green
+// when done, red when its date has passed undone, dark when still ahead. A
+// tick marks the delivery date. Tap a row to open the run.
+function rsRunsCalHTML(runs){
+  const today = rsIso(new Date());
+  const lanes = runs.map(po => {
+    const ms = po.ms || {};
+    const keys = rsSteps(po).filter(k => (ms[k] || {}).date);
+    let prev = null;
+    const segs = keys.map(k => {
+      const d = ms[k].date, done = rsMsDone(po, k), late = !done && d < today;
+      const from = prev && prev < d ? prev : rsBack(d, 2); prev = d;
+      return { k, from, to: d, done, late, label: rsStepLabel(po, k) };
+    });
+    const next = segs.find(x => !x.done);
+    return { po, segs, next, deliver: po.deliverBy || '' };
+  }).filter(l => l.segs.length);
+  if (!lanes.length) return '';
+  const all = [];
+  lanes.forEach(l => { l.segs.forEach(x => { all.push(x.from, x.to); }); if (l.deliver) all.push(l.deliver); });
+  all.push(today);
+  let a = all.reduce((x, y) => y < x ? y : x), b = all.reduce((x, y) => y > x ? y : x);
+  a = rsBack(a, 3); b = rsBack(b, -3);
+  const span = Math.max(1, rsDaysBetween(a, b));
+  const pct = iso => Math.max(0, Math.min(100, rsDaysBetween(a, iso) / span * 100));
+  const months = []; { const c = new Date(a + 'T12:00:00'); c.setDate(1); while (rsIso(c) <= b){ const iso = rsIso(c); if (iso >= a) months.push(iso); c.setMonth(c.getMonth() + 1); } }
+  const lateN = lanes.filter(l => l.segs.some(x => x.late)).length;
+  const rows = lanes.map(l => {
+    const po = l.po, lateSeg = l.segs.find(x => x.late);
+    const tone = lateSeg ? 'var(--red)' : l.next ? 'var(--ink)' : 'var(--green)';
+    const sub = lateSeg ? 'Late: ' + lateSeg.label + ' · ' + veniaDate(lateSeg.to)
+      : l.next ? 'Next: ' + l.next.label + ' · ' + veniaDate(l.next.to) : 'Every step done';
+    const bars = l.segs.map(x => `<span title="${slEsc(x.label)} · ${slEsc(veniaDate(x.to))}${x.done ? ' · done' : x.late ? ' · late' : ''}" style="position:absolute;top:7px;height:12px;left:${pct(x.from)}%;width:max(3px,${pct(x.to) - pct(x.from)}%);background:${x.done ? 'var(--green)' : x.late ? 'var(--red)' : 'var(--ink)'};opacity:${x.done ? .6 : .85};border-right:1px solid var(--bg)"></span>`).join('');
+    const del = l.deliver ? `<span title="Delivery ${slEsc(veniaDate(l.deliver))}" style="position:absolute;top:2px;height:22px;left:calc(${pct(l.deliver)}% - 1px);border-left:2px solid var(--amber)"></span>` : '';
+    return `<div class="rs-cal-row" onclick="rsOpen('${po.id}')" style="cursor:pointer;border-top:1px solid var(--border);min-height:40px;align-items:center">
+      <div style="padding:5px 8px;min-width:0"><div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${slEsc(rsTitle(po))} <span style="font-weight:400;color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${po.units || 0}</span></div>
+        <div style="font-size:10px;color:${tone};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${slEsc(sub)}</div></div>
+      <div style="position:relative;height:26px;margin-right:8px">${bars}${del}</div></div>`;
+  }).join('');
+  const todayLine = `<span style="position:absolute;top:0;bottom:0;left:${pct(today)}%;border-left:1px solid var(--red)" title="Today"></span>`;
+  // On a narrow screen the calendar scrolls sideways; open it on today.
+  setTimeout(() => { try { document.querySelectorAll('.rs-cal').forEach(c => {
+    if (c.scrollWidth <= c.clientWidth + 1) return;
+    const inner = c.querySelector('.rs-cal-in'); if (!inner) return;
+    const x = 160 + (inner.scrollWidth - 168) * pct(today) / 100;
+    c.scrollLeft = Math.max(0, x - 160 - (c.clientWidth - 160) / 3);
+  }); } catch(e){} }, 0);
+  return `<style>.rs-cal{--rc-lw:160px;overflow-x:auto;border:1px solid var(--border);-webkit-overflow-scrolling:touch;background:var(--bg)}.rs-cal .rs-cal-in{min-width:640px;position:relative}.rs-cal .rs-cal-row{display:grid!important;grid-template-columns:var(--rc-lw) minmax(0,1fr)!important}@media(min-width:900px){.rs-cal{--rc-lw:250px}}.rs-cal .rs-cal-row>div:first-child{position:sticky;left:0;z-index:2;background:inherit}.rs-cal .rs-cal-row{background:var(--bg)}.rs-cal .rs-cal-row:hover>div:first-child{text-decoration:underline}</style>
+  <div style="margin-bottom:18px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+    <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Time and action · every run</div>
+    <div style="font-size:10px;color:${lateN ? 'var(--red)' : 'var(--muted)'}">${lanes.length} run${lanes.length === 1 ? '' : 's'}${lateN ? ' · ' + lateN + ' with a late step' : ''}</div></div>
+  <div class="rs-cal"><div class="rs-cal-in">
+    <div class="rs-cal-row" style="background:var(--bg-off);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600;min-height:26px;align-items:center">
+      <div style="padding:4px 8px">Run</div>
+      <div style="position:relative;height:26px;margin-right:8px">${months.map(iso => `<span style="position:absolute;top:6px;left:${pct(iso)}%;white-space:nowrap">${new Date(iso + 'T12:00:00').toLocaleString('en-US', { month: 'short' })}</span>`).join('')}</div>
+    </div>
+    <div style="position:relative">${rows}<div style="position:absolute;top:0;bottom:0;left:var(--rc-lw);right:8px;pointer-events:none">${todayLine}</div></div>
+  </div></div>
+  <div style="font-size:10px;color:var(--muted);margin-top:6px">Each bar is a step: green done, red late, dark still ahead · amber tick = delivery · red line = today. Tap a run to open it.</div></div>`;
+}
+window.rsRunsCalHTML = rsRunsCalHTML;
 function rsTimelineHTML(season){
   const runs = rsOpenRuns().filter(po => (po.inStockBy || (po.ms && Object.keys(po.ms).length))
     && (!season || season === 'all' || String(po.season||'').trim() === season));
@@ -22160,7 +22223,8 @@ function rsTimelineHTML(season){
       ${miss.length ? `<div style="font-size:10px;color:var(--amber);margin-top:8px">Still to settle: ${miss.map(slEsc).join(' · ')}</div>` : (next && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${slEsc(next)}</div>` : '')}
     </div>`;
   }).join('');
-  return { html: `<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Production runs</div>${rows}</div>`, late, risk, ok };
+  let cal = ''; try { cal = rsRunsCalHTML(runs); } catch(e){ cal = ''; }
+  return { html: `${cal}<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Production runs</div>${rows}</div>`, late, risk, ok };
 }
 window.rsTimelineHTML = rsTimelineHTML;
 
