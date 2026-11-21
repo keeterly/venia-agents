@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '719';
+  const BUILD = '720';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -15279,7 +15279,8 @@ function tlSchedule(s){
   if (!s.drop) return null;
   const drop = new Date(s.drop + 'T12:00:00');
   if (isNaN(drop)) return null;
-  const lead = parseInt(s.lead) || 45;
+  // Build 720: the style's lead is in weeks (the style form says so).
+  const lead = styleLeadDays(s) || 45;
   const back = (days) => { const x = new Date(drop); x.setDate(x.getDate() - days); return x; };
   const exf = 21, prod = exf + lead, top = prod + 10, sms = top + 21, proto = sms + 21, fabric = proto + 14;
   const out = { fabric: back(fabric), proto: back(proto), sms: back(sms), top: back(top), prod: back(prod), exf: back(exf), drop, _src:{} };
@@ -15392,7 +15393,7 @@ function renderGantt(filter) {
         <input type="date" value="${s.drop||''}" onchange="updateGanttDrop('${s.id}',this.value)" title="Drop date" style="font-size:9.5px;font-family:'DM Mono',monospace;border:none;border-bottom:1px solid var(--border-mid);background:transparent;color:var(--ink);padding:2px 0;outline:none;width:120px;min-width:120px">
       </div>
       <div style="display:flex;gap:2px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:4px">${cells}</div>
-      ${nextMs && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${nextMs} · production lead ${parseInt(s.lead)||45} days</div>` : ''}
+      ${nextMs && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${nextMs} · production lead ${styleLeadDays(s)||45} days</div>` : ''}
     </div>`;
   });
   // The season calendar strip leads the page: the filtered season's key dates,
@@ -18806,8 +18807,8 @@ window.poSeedMilestones = function(){
   if (!exf){ showToast('Set the ex-factory date first','warning'); return; }
   const vName = (document.getElementById('po-vendor')?.value||'').trim().toLowerCase();
   const v = (STATE.vendors||[]).find(x => String(x.name||'').toLowerCase() === vName);
-  const leadW = parseFloat(v && v.lead) || 12;
-  const L = Math.max(14, Math.round(leadW * 7));
+  // Build 720: the factory's lead is in days (the Sourcing form says so).
+  const L = Math.max(14, parseInt(v && v.lead, 10) || 84);
   const exD = new Date(exf + 'T00:00:00');
   const iso = (back) => { const d = new Date(exD); d.setDate(d.getDate() - back); return d.toISOString().slice(0,10); };
   // Cut starts ~70% of the lead before shipping, mid-line inspection near the
@@ -20791,7 +20792,25 @@ function rsMsDone(po, k){ return !!((po.ms||{})[k] && po.ms[k].done) || !!rsDeri
 window.rsMsDone = rsMsDone; window.rsStepOn = rsStepOn;
 const RS_DEFAULT_LEAD = 45;       // the OS's production default (tlSchedule)
 const RS_FABRIC_LEAD = 21;        // when a material has no lead days of its own
-const RS_TRANSIT = 14;            // ex-factory → arrived
+const RS_TRANSIT = 14;            // ex-factory → arrived, from overseas
+const RS_TRANSIT_DOMESTIC = 3;    // Build 720: a US factory ships in days
+// Build 720: a style's lead is typed in weeks ("Lead time (wks)"); a factory's
+// in Sourcing is typed in days ("Avg Lead Time (days)"). Read each that way.
+function leadWeeksToDays(v){ const n = parseFloat(v); return n > 0 ? Math.round(n * 7) : 0; }
+function styleLeadDays(s){ return leadWeeksToDays(s && s.lead); }
+function rsVendor(po){
+  if (!po) return null;
+  const vs = STATE.vendors || [];
+  return vs.find(v => po.vendorId && v.id === po.vendorId)
+    || vs.find(v => po.vendor && String(v.name||'').trim().toLowerCase() === String(po.vendor).trim().toLowerCase()) || null;
+}
+// Domestic: made in LA, or a factory whose country is the US.
+function rsIsDomestic(po){
+  if (rsMaker(po) === 'cmt') return true;
+  const v = rsVendor(po);
+  return !!(v && /^(us|usa|u\.s\.a?\.?|united states)/i.test(String(v.country||'').trim()));
+}
+function rsTransit(po){ return po && rsIsDomestic(po) ? RS_TRANSIT_DOMESTIC : RS_TRANSIT; }
 function rsIsRun(po){ return !!(po && po.kind === 'restock'); }
 function rsRuns(){ return poList().filter(rsIsRun); }
 function rsOpenRuns(){ return rsRuns().filter(poOpen); }
@@ -20836,7 +20855,7 @@ function rsSchedule(inStockBy, lead, fabricLead, po){
     gap = { proto:21, fit:3, sizerun:4, tpIssued:3, labdip:0, sourced:0, costing:4, pattern:3, trimsOrd:0, fabricOrd:F, atCutter:2, marker:2 };
     chain = ['proto','fit','sizerun','tpIssued','labdip','sourced','costing','pattern','trimsOrd','fabricOrd','atCutter','marker'];
   } else {
-  const arrived = 3, exf = arrived + RS_TRANSIT, packed = exf + 3, dye = packed + 8, cut = exf + L, top = Math.max(dye + 1, cut - 10);
+  const arrived = 3, exf = arrived + (po ? rsTransit(po) : RS_TRANSIT), packed = exf + 3, dye = packed + 8, cut = exf + L, top = Math.max(dye + 1, cut - 10);
   off = { instock:0, arrived, exf, packed, dye, cut, top, approval: cut + 7 };
   gap = { techpack:21, proto:21, fit:3, sizerun:4, tpIssued:3, labdip:0, sourced:0, costing:4, poPlaced:3, fabricOrd:F, fabricIn: on('pp') ? 10 : 7, pp:7 };
   chain = ['techpack','proto','fit','sizerun','tpIssued','labdip','sourced','costing','poPlaced','fabricOrd','fabricIn','pp'];
@@ -21016,7 +21035,9 @@ function rsNewDraft(s, path){
   return {
     kind: 'restock', path: RS_PATHS[path] ? path : rsSuggestPath(s), stepSet: {}, styleId: s.id, colour: s.colors || '',
     qty, sizes: sizes.length ? poSpreadSizes(sizes, qty) : {},
-    inStockBy: '', leadDays: (parseInt(s.lead,10) >= 21 ? parseInt(s.lead,10) : RS_DEFAULT_LEAD),
+    // Build 720: the style's lead (weeks), else its factory's (days, as the
+    // Sourcing form takes it), else the default.
+    inStockBy: '', leadDays: styleLeadDays(s) || (parseInt((rsVendor({ vendorId: s.vendorId, vendor: s.vendor })||{}).lead,10) || 0) || RS_DEFAULT_LEAD,
     vendor: s.vendor || '', vendorId: s.vendorId || '', dyeHouse: '',
     cost: Math.round((landedCost(s)||0)*100)/100,
     bom: rsBomFromStyle(s), bomShared: true, fabricPoIds: [], ms: {},
@@ -21749,7 +21770,7 @@ function rsRender(id){
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${sub}</div></button>`;
   }).join('');
   const stOpts = Object.entries(PO_STATUSES).map(([k,v]) => `<option value="${k}" ${(d.status||'draft')===k?'selected':''}>${v}</option>`).join('');
-  const leadNote = (s.lead && parseInt(s.lead,10) < 21) ? `<div style="font-size:10px;color:var(--muted);margin-top:3px">The style's lead says ${slEsc(s.lead)}. If that's weeks, enter ${parseInt(s.lead,10)*7}.</div>` : '';
+  const leadNote = styleLeadDays(s) ? `<div style="font-size:10px;color:${styleLeadDays(s) === (parseInt(d.leadDays,10)||0) ? 'var(--muted)' : 'var(--amber)'};margin-top:3px">The style's lead is ${slEsc(String(s.lead))} week${parseFloat(s.lead) === 1 ? '' : 's'} (${styleLeadDays(s)} days)${styleLeadDays(s) === (parseInt(d.leadDays,10)||0) ? '' : '. This run uses its own'}.</div>` : '';
   const qtyBlock = sizes.length
     ? `<div style="grid-column:1/-1"><div style="${lbl}">Quantity by size · ${units} total</div><div style="display:flex;gap:6px;flex-wrap:wrap">${sizes.map(sz =>
         `<label style="display:flex;flex-direction:column;font-size:10px;color:var(--muted);gap:2px">${slEsc(sz)}<input id="rs-sz-${slEsc(sz)}" type="number" min="0" style="${fld};width:62px" value="${(d.sizes||{})[sz]||''}" onchange="rsRefresh()"></label>`).join('')}</div></div>`
@@ -21869,7 +21890,7 @@ function rsRender(id){
         <div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsFillDates(false)">Fill blank dates</button><button class="btn btn-ghost btn-sm" onclick="rsFillDates(true)" title="Re-date every milestone that isn't done">Re-date all</button></div>
       </div>
       <datalist id="rs-owner-list">${rsOwnerNames(d).map(n => `<option value="${slEsc(n)}">`).join('')}</datalist><div>${msCells}</div>
-      <div style="font-size:10px;color:var(--muted);margin-top:6px">Tick a step to use it, untick to leave it out. Give each one an owner and a note. The first dates you save are kept as the plan, so a slip shows against it. ${rsMaker(d) === 'cmt' ? `Dates work back from the in-stock date: about a week to finish, QC and pick up, two weeks when it's dyed, and the fabric's own lead (or ${RS_FABRIC_LEAD} days).` : `Dates use the lead above, the fabric's own lead (or ${RS_FABRIC_LEAD} days) and ${RS_TRANSIT} days in transit.`}</div>`;
+      <div style="font-size:10px;color:var(--muted);margin-top:6px">Tick a step to use it, untick to leave it out. Give each one an owner and a note. The first dates you save are kept as the plan, so a slip shows against it. ${rsMaker(d) === 'cmt' ? `Dates work back from the in-stock date: about a week to finish, QC and pick up, two weeks when it's dyed, and the fabric's own lead (or ${RS_FABRIC_LEAD} days).` : `Dates use the lead above, the fabric's own lead (or ${RS_FABRIC_LEAD} days) and ${rsTransit(d)} days in transit${rsIsDomestic(d) ? ' (domestic)' : ''}.`}</div>`;
   const log = (s.sampleLog || []).slice().sort((a, b) => String(b.date||'').localeCompare(String(a.date||''))).slice(0, 6);
   const smpSteps = ['proto','fit','pp','top'].filter(k => rsStepOn(d, k));
   const stage7 = `${smpSteps.length ? `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${smpSteps.map(k => { const dn = rsMsDone(d, k); const m = (d.ms||{})[k] || {}; return `<span style="font-size:11px;padding:4px 8px;border:1px solid ${dn ? 'var(--green)' : 'var(--border)'};color:${dn ? 'var(--green)' : 'var(--ink)'}">${slEsc(rsStepLabel(d, k))}${dn ? ' ✓' : m.date ? ' · ' + slEsc(veniaDate(m.date)) : ''}</span>`; }).join('')}</div>` : `<div style="font-size:11px;color:var(--muted);margin-bottom:10px">No sample approvals on this ${rsKindWord(d)}. Add Proto, Fit, PP or TOP in the calendar if you need one.</div>`}
