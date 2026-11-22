@@ -4443,8 +4443,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '727';
-  const BUILD_DATE = '2026.11.21';
+  const BUILD = '728';
+  const BUILD_DATE = '2026.11.22';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -48253,7 +48253,7 @@ let SL_FILTER = { q: '', stage: '', tier: '', due: false, flagged: false, sort: 
   // '' all · 'none' nobody has approached · 'agent' the showroom did · 'us' we did
   // · 'conn' we know someone there.
   reach: '' };
-let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier)
+let SL_SELECTED = new Set();   // buyer ids checked for a bulk edit (tier, stage)
 // Buyers CRM view: the phase-grouped pipeline, or a flat spreadsheet-style
 // table with click-to-sort column headers. Device preference, not synced.
 let SL_VIEW = localStorage.getItem('venia-sl-view') || 'pipeline';
@@ -48814,10 +48814,14 @@ function slRenderBulkBar(){
   const bs = 'background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.35);color:#fff;font-size:10px;padding:4px 11px;cursor:pointer;border-radius:4px;letter-spacing:.5px';
   const tierBtns = [['dream','Dream'],['strong','Strong'],['reach','Reach'],['','Clear tier']]
     .map(([k,v]) => `<button style="${bs}" onclick="slBulkTier('${k}')">${v}</button>`).join('');
+  const stageOpts = `<option value="">Move to…</option>` + Object.entries(SL_STAGES)
+    .map(([k,v]) => `<option value="${k}">${v}</option>`).join('');
   bar.innerHTML = `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 13px;background:var(--ink);color:#fff;margin-bottom:12px;border-radius:4px">
     <span style="font-size:11px;font-weight:700">${n} selected</span>
     <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.65;margin-left:2px">Set tier</span>
     ${tierBtns}
+    <span style="font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.65;margin-left:8px">Set stage</span>
+    <select aria-label="Set stage for selected buyers" style="${bs};padding:4px 8px;background:var(--ink)" onchange="var v=this.value;this.value='';if(v)slBulkStage(v)">${stageOpts}</select>
     <button style="${bs};margin-left:auto;background:none;border-color:rgba(255,255,255,.25)" onclick="slClearSelection()">Deselect all</button>
   </div>`;
 }
@@ -48830,6 +48834,58 @@ function slBulkTier(tier){
   slRefreshBuyers();
   showToast(n + ' account' + (n!==1?'s':'') + ' → ' + (AGENT_TIER_LABEL[tier] || 'no tier'));
 }
+
+// BULK STAGE (Build 728). The bar could set a tier for 24 buyers but not move
+// them, so a batch of approaches meant 24 trips into 24 cards.
+//
+// It writes exactly what a single move writes (slBuyerStageSet: the stage, a
+// "Stage: A → B" line on the buyer's own log, updatedAt), so a buyer moved in
+// bulk reads the same as one moved by hand. A single move has no other side
+// effects for Ordered or Stockist, so neither does this.
+//
+// It looks the buyers up again AFTER the confirm, from the workspace as it is
+// then. A sync or a new build landing while the sheet is open swaps in fresh
+// records; writing to the copies read before the question is how Dormant marks
+// from Today were lost on Nov 13 (see Build 618). And every buyer goes in one
+// save, so there is one local write and one push, not 24 half-finished ones.
+async function slBulkStage(stage){
+  if (!SL_STAGES[stage]) return;
+  const ids = Array.from(SL_SELECTED); if (!ids.length) return;
+  const label = SL_STAGES[stage];
+  const pre = (STATE.slBuyers || []).filter(b => b && ids.indexOf(b.id) >= 0);
+  const already = pre.filter(b => b.stage === stage).length;
+  const moving = pre.length - already;
+  if (!moving) { showToast('All ' + pre.length + ' already ' + label, 'info'); return; }
+  const ok = await veniaConfirm('Move ' + moving + ' buyer' + (moving !== 1 ? 's' : '') + ' to ' + label + '?\n'
+    + 'Each move is logged on that buyer\'s history.'
+    + (already ? ' ' + already + ' already in ' + label + ' stay as they are.' : ''),
+    { ok: 'Move ' + moving, cancel: 'Cancel' });
+  if (!ok) return;
+  const live = (STATE.slBuyers || []).filter(b => b && ids.indexOf(b.id) >= 0);
+  const today = new Date().toISOString().slice(0,10), now = new Date().toISOString();
+  let n = 0, stillOrdered = 0;
+  live.forEach(b => {
+    if (b.stage === stage) return;
+    const from = SL_STAGES[b.stage] || 'To Reach';
+    b.stage = stage;
+    if (!Array.isArray(b.log)) b.log = [];
+    b.log.unshift({ d: today, t: 'Stage: ' + from + ' → ' + label });
+    b.updatedAt = now;
+    n++;
+    // A live order still reads as Ordered (slBuyerStage), as it does for a single move.
+    try { if (slBuyerStage(b) !== stage) stillOrdered++; } catch(e){}
+  });
+  if (!n) return;
+  save();
+  try { logActivity('Wholesale: moved ' + n + ' buyer' + (n !== 1 ? 's' : '') + ' to ' + label); } catch(e){}
+  SL_SELECTED.clear();
+  slRenderBulkBar();
+  slRefreshBuyers();
+  try { if (typeof buildTodayFocus === 'function') buildTodayFocus(); } catch(e){}
+  showToast(n + ' buyer' + (n !== 1 ? 's' : '') + ' → ' + label
+    + (stillOrdered ? ' · ' + stillOrdered + ' with a live order still ' + (stillOrdered === 1 ? 'shows' : 'show') + ' Ordered' : ''), 'success');
+}
+window.slBulkStage = slBulkStage;
 
 function slOpenBuyerModal(id) {
   if (!STATE.slBuyers) STATE.slBuyers = [];
