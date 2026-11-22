@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '725';
+  const BUILD = '726';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -6999,7 +6999,7 @@ window.veniaModById = function(id){ return (window.VENIA_MODS || []).find(functi
            table, closed by default. Profit by season is Money's (Money › P&L);
            this keeps the per-style view that picks a sheet to open. -->
       <details id="cost-season-summary" style="background:var(--bg);border:1px solid var(--border);margin-bottom:20px">
-        <summary style="cursor:pointer;padding:16px 20px;font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Season summary</summary>
+        <summary style="cursor:pointer;padding:16px 20px;font-size:10px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:700">Season summary<span id="cs-need-note" style="color:var(--amber);margin-left:8px"></span></summary>
         <div style="padding:0 20px 20px">
           <div style="font-size:11px;color:var(--muted);margin-bottom:16px;line-height:1.5">Profit by season lives in <a href="javascript:void(0)" onclick="cpGoto('cmd');setTimeout(function(){try{cmdShowSection('cmd-money',document.querySelector('#cp-screen-cmd .ag-nav-item[onclick*=&quot;cmd-money&quot;]'))}catch(e){}},150)" style="color:var(--ink);text-decoration:underline;text-underline-offset:2px">Money › P&amp;L</a>.</div>
           <div id="cost-pl" style="margin-bottom:24px"></div>
@@ -8280,6 +8280,10 @@ const CATALOG_STYLE_FIELDS = [
   'bestSeller', 'carryOver',
   // Where this style sits in the running order of its category — same reason.
   'lsRank',
+  // Build 726: whether the style is on the line sheet, and when it was made
+  // (new styles join the sheet once ready to sell), and the origin typed in
+  // the styles table, so the sheet's "Made in" reads the same for Sales.
+  'lsInclude', 'createdAt', 'origin',
 ];
 // WHAT STAYS OUT OF BRAND'S OWN ROW (Build 691). The Brand library also
 // holds what Money files there (the weekly money brief, the CFO's financial
@@ -10150,9 +10154,15 @@ function buildSkus() {
     // carries fabric + color (VN-SS27-O01-WML-BLK). Legacy colors-string styles
     // keep the old 3-letter slice so their SKU strings don't churn.
     const cwList = (s.colorways||[]).filter(cw => cw.name);
+    const legacy = String(s.colors||'').split(',').map(c => c.trim()).filter(Boolean).map(c => ({ name: c, code: c.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3) }));
+    // Build 726: the quick colour picker writes the colours list only. A
+    // colour added there joins the structured colourways' SKUs instead of
+    // being dropped because the style already had one colourway.
+    const cwNames = new Set(cwList.map(cw => String(cw.name).trim().toLowerCase()));
     const colors = cwList.length
       ? cwList.map(cw => ({ name: cw.name, code: (cw.code || cw.name.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3)).toUpperCase() }))
-      : String(s.colors||'').split(',').map(c => c.trim()).filter(Boolean).map(c => ({ name: c, code: c.replace(/[^A-Z0-9]/gi,'').toUpperCase().slice(0,3) }));
+          .concat(legacy.filter(c => !cwNames.has(c.name.toLowerCase())))
+      : legacy;
     if (!colors.length) return;
     const sizes = expandSizes(s.sizes);
     colors.forEach(colorObj => {
@@ -10369,14 +10379,14 @@ function renderDashboard() {
     { label:'Line Sheet', icon:'▤', action:"cpGoto('sl');setTimeout(function(){agNavSl('linesheets')},160)" },
   ];
   const attention = [
-    noCogs.length ? { text:`${noCogs.length} style${noCogs.length>1?'s':''} missing COGS`, color:'var(--amber)', action:"goTo('costs',document.querySelector('[data-page=costs]'))" } : null,
+    noCogs.length ? { text:`${noCogs.length} style${noCogs.length>1?'s':''} missing COGS`, color:'var(--amber)', action:"csShowNeeds()" } : null,
     noBom.length ? { text:`${noBom.length} style${noBom.length>1?'s':''} missing BOM`, color:'var(--amber)', action:"goTo('techpack',document.querySelector('[data-page=techpack]'))" } : null,
     overdue.length ? { text:`${overdue.length} style${overdue.length>1?'s':''} past drop date`, color:'var(--red)', action:"goTo('styles',document.querySelector('[data-page=styles]'))" } : null,
     // Build 706: the one item from the old Alerts list that said something the
     // attention list did not. The Alerts block itself is hidden (it repeated
     // the COGS and BOM lines above).
     (function(){
-      const nl = active.filter(s => ['production','active','sale'].includes(s.status) && (!s.fiberContent || !s.coo));
+      const nl = active.filter(s => ['production','active','sale'].includes(s.status) && (!s.fiberContent || !styleCooOwn(s)));
       return nl.length ? { text:`${nl.length} style${nl.length>1?'s':''} missing label content (fibre or origin)`, color:'var(--amber)', action:`openDp('${nl[0].id}')` } : null;
     })(),
   ].filter(Boolean);
@@ -10528,7 +10538,7 @@ function renderDashboard() {
 
   // Label compliance: fibre content + origin are legally required on EU labels.
   // Nag once a style is headed for bulk (production/active/sale).
-  const noLabel = active.filter(s => ['production','active','sale'].includes(s.status) && (!s.fiberContent || !s.coo));
+  const noLabel = active.filter(s => ['production','active','sale'].includes(s.status) && (!s.fiberContent || !styleCooOwn(s)));
   if (noLabel.length) alerts.push({type:'amber', msg:`${noLabel.length} style${noLabel.length>1?'s':''} missing label content (fibre/origin) — required for EU wholesale`, id: noLabel[0].id});
 
   // SMS awaiting
@@ -10680,7 +10690,7 @@ function renderRangePlan(){
   const mMet = mAct!=null && mTgt>0 && mAct>=mTgt;
   const sMet = a.booked != null && p.sellIn>0 && a.booked>=p.sellIn;
   const seasonStyles = (STATE.styles||[]).filter(s => s.status !== 'archived' && String(s.season||'').trim() === season);
-  const co = seasonStyles.filter(s => s.carryover).length;
+  const co = seasonStyles.filter(s => styleIsCarry(s)).length;
   // One-row stage strip: where the season's styles stand. Each opens Styles
   // filtered to the season and that stage.
   const stOrder = [['concept','Concept'],['design','Design'],['sms','SMS'],['development','Dev'],['production','Prod'],['active','Active'],['sale','Sale']];
@@ -11457,7 +11467,7 @@ const ST_CELL = {
   baseSize: (s) => `<td class="cell-edit" style="font-size:10px;font-family:'DM Mono',monospace" title="Base / sample size — click to change" onclick="szOpen('${s.id}',this,event)">${s.baseSize?`<b>${esc(s.baseSize)}</b>`:'<span style="color:var(--muted)">＋</span>'}</td>`,
   vendor:   (s) => `<td class="cell-edit" style="font-size:10px" title="${styleVendor(s) ? esc(styleVendor(s)) + ' — click to change' : 'Assign a factory'}" onclick="stEnumOpen('vendor','${s.id}',this,event)"><div class="col-clip">${styleVendor(s) ? esc(styleVendor(s)) : '<span style="color:var(--muted)">＋ factory</span>'}</div></td>`,
   origin:   (s) => {
-    const o = styleOrigin(s), own = !!(s.origin && String(s.origin).trim());
+    const o = styleOrigin(s), own = !!styleCooOwn(s);
     return `<td class="cell-edit" style="font-size:10px" title="${o ? (own ? 'Set on this style' : 'From the assigned factory') + ' — click to change' : 'Assign a factory, or set it here'}" onclick="stEnumOpen('origin','${s.id}',this,event)"><span style="color:${own ? 'var(--ink)' : 'var(--muted)'}">${o ? esc(o) : '＋'}</span></td>`;
   },
   // NOT "notes". This cell said "＋ notes" and its tooltip said "design notes",
@@ -11483,7 +11493,7 @@ const ST_CELL = {
       : open.length
         ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--ink);border:1px solid var(--border-mid);padding:1px 4px;margin-right:6px">${open.length}</span>${top.kind === 'rev' ? `<span style="font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);letter-spacing:1px;margin-right:4px">STAMP</span>` : ''}${esc(top.text)}`
         : `<span style="color:var(--green)">✓ all done</span>`}</div></td>`; },
-  season:   (s) => `<td class="cell-edit" style="font-size:10px" title="${s.season ? esc(s.season) + ' — click to move this style to another season' : 'Set the season'}" onclick="stEnumOpen('season','${s.id}',this,event)">${s.season ? esc(s.season) : '<span style="color:var(--muted)">＋</span>'}${s.carryover?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
+  season:   (s) => `<td class="cell-edit" style="font-size:10px" title="${s.season ? esc(s.season) + ' — click to move this style to another season' : 'Set the season'}" onclick="stEnumOpen('season','${s.id}',this,event)">${s.season ? esc(s.season) : '<span style="color:var(--muted)">＋</span>'}${styleIsCarry(s)?' <span title="Carryover from a previous season" style="color:var(--muted)">↺</span>':''}</td>`,
   status:   (s) => `<td>${stageBadge(s.status)}</td>`,
   drop:     (s) => `<td style="font-size:10px;color:var(--muted)">${s.drop||'—'}</td>`,
   delivery: (s) => {
@@ -15933,6 +15943,11 @@ function hasCostSheet(s) {
   try { const d = JSON.parse(localStorage.getItem('venia-cost-sheets') || '{}')[s.id]; return !!(d && ((d.material||0)+(d.labor||0)+(d.overhead||0)+(d.duties||0)+(d.freight||0)) > 0); } catch(e){ return false; }
 }
 function costPrefs(){ if (!STATE.costPrefs) STATE.costPrefs = { ret: 60, ws: 30 }; return STATE.costPrefs; }
+// Build 726: one retail margin target for a style, read the same way on the
+// style panel and on Cost Sheets: its season's range plan target, else the
+// Cost Sheets target.
+function styleRetTarget(s){ const t = Number((((STATE.rangePlan||{})[s && s.season])||{}).targetMargin); return t > 0 ? t : (Number(costPrefs().ret) || 60); }
+window.styleRetTarget = styleRetTarget;
 window.setCostTarget = function(k, v){ costPrefs()[k] = Math.max(0, Math.min(95, parseFloat(v) || 0)); save(); renderCosts(); };
 window.editCostSheet = function(styleId){
   const sel = document.getElementById('cs-style-sel');
@@ -15982,47 +15997,60 @@ function renderCosts(seasonFilter) {
   // Populate season filter (archived seasons drop out of the P&L)
   const seasons = [...new Set(STATE.styles.filter(s=>s.status!=='archived').map(s=>s.season))].sort();
   const sel = document.getElementById('cost-season-filter');
-  if (sel && sel.options.length <= 1) {
-    seasons.forEach(s => { const o = document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+  // Build 726: the season list follows the line (it was filled once, so a
+  // season added later never appeared).
+  if (sel) {
+    const keep = seasonFilter || sel.value || 'all';
+    const want = ['all'].concat(seasons.filter(Boolean));
+    const have = [...sel.options].map(o => o.value);
+    if (want.join('|') !== have.join('|')) {
+      sel.innerHTML = '';
+      want.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v === 'all' ? 'All Seasons' : v; sel.appendChild(o); });
+    }
+    sel.value = want.includes(keep) ? keep : 'all';
   }
   const sf = seasonFilter || (sel?.value) || 'all';
 
   const all = STATE.styles.filter(s => s.status !== 'archived');
-  const priced = all.filter(s => s.retail && s.cogs);
+  // Build 726: a style is costed when it has a landed cost and a retail price.
+  // Margins everywhere on this page read the landed cost, as the rows do.
+  const costOf = (s) => landedCost(s) || 0;
+  const priced = all.filter(s => s.retail && costOf(s) > 0);
   const filtered = sf === 'all' ? priced : priced.filter(s=>s.season===sf);
+  const needs = all.filter(s => !(s.retail && costOf(s) > 0) && (sf === 'all' || s.season === sf));
 
   // KPI stats
-  const retMargins = priced.map(s=>((s.retail-s.cogs)/s.retail)*100);
-  const wsMargins = priced.filter(s=>s.wholesale).map(s=>((s.wholesale-s.cogs)/s.wholesale)*100);
+  const retMargins = priced.map(s=>((s.retail-costOf(s))/s.retail)*100);
+  const wsMargins = priced.filter(s=>s.wholesale).map(s=>((s.wholesale-costOf(s))/s.wholesale)*100);
   const avgRet = retMargins.length ? (retMargins.reduce((a,b)=>a+b,0)/retMargins.length).toFixed(1) : 0;
   const avgWs = wsMargins.length ? (wsMargins.reduce((a,b)=>a+b,0)/wsMargins.length).toFixed(1) : 0;
   const totalRetailVal = priced.filter(s=>['active','sale'].includes(s.status)).reduce((sum,s)=>sum+(s.retail||0),0);
-  const uncosted = all.filter(s=>!s.cogs&&['development','production','active'].includes(s.status)).length;
+  const uncosted = all.filter(s=>!(costOf(s) > 0)&&['development','production','active'].includes(s.status)).length;
 
   const tgt = costPrefs();
-  const underTarget = priced.filter(s => { const l = landedCost(s); return s.retail && ((s.retail - l) / s.retail) * 100 < tgt.ret; }).length;
+  const underTarget = priced.filter(s => { const l = landedCost(s); return s.retail && ((s.retail - l) / s.retail) * 100 < styleRetTarget(s); }).length;
   document.getElementById('cost-stats').innerHTML = `
     <div class="stat-card"><div class="stat-label">Avg Retail Margin</div><div class="stat-val" style="color:${avgRet>tgt.ret?'var(--green)':avgRet<tgt.ret-15?'var(--red)':'var(--ink)'}">${avgRet}%</div><div class="stat-sub">${priced.length} styles costed</div></div>
     <div class="stat-card"><div class="stat-label">Targets</div><div style="display:flex;gap:10px;align-items:baseline;margin-top:2px">
       <span style="font-size:10px;color:var(--muted)">RET</span><input type="number" value="${tgt.ret}" min="0" max="95" onchange="setCostTarget('ret',this.value)" style="width:44px;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;border:none;border-bottom:1px solid var(--border);background:transparent;color:var(--ink);outline:none">%
       <span style="font-size:10px;color:var(--muted)">WS</span><input type="number" value="${tgt.ws}" min="0" max="95" onchange="setCostTarget('ws',this.value)" style="width:44px;font-family:'DM Mono',monospace;font-size:16px;font-weight:700;border:none;border-bottom:1px solid var(--border);background:transparent;color:var(--ink);outline:none">%
-    </div><div class="stat-sub">margin floors — rows flag below</div></div>
+    </div><div class="stat-sub">retail floor where a season has no range plan target</div></div>
     <div class="stat-card" style="${underTarget?'border-left:3px solid var(--red)':''}"><div class="stat-label">Below Target</div><div class="stat-val" style="color:${underTarget?'var(--red)':'var(--green)'}">${underTarget}</div><div class="stat-sub">styles under ${tgt.ret}% retail margin</div></div>
-    <div class="stat-card" style="${uncosted?'border-left:3px solid var(--amber)':''}"><div class="stat-label">Missing COGS</div><div class="stat-val" style="color:${uncosted?'var(--amber)':'var(--ink)'}">${uncosted}</div><div class="stat-sub">Active/Dev styles</div></div>
+    <div class="stat-card" ${needs.length ? 'onclick="csShowNeeds()" title="Show the styles still to cost" ' : ''}style="${uncosted?'border-left:3px solid var(--amber)':''}${needs.length?';cursor:pointer':''}"><div class="stat-label">Missing COGS</div><div class="stat-val" style="color:${uncosted?'var(--amber)':'var(--ink)'}">${uncosted}</div><div class="stat-sub">Active/Dev styles</div></div>
   `;
 
   // Season P&L
   const plByseason = {};
   seasons.forEach(season => {
     const ss = all.filter(s=>s.season===season);
-    const costed = ss.filter(s=>s.cogs&&s.retail);
+    const costed = ss.filter(s=>costOf(s) > 0&&s.retail);
     plByseason[season] = {
       total: ss.length,
       costed: costed.length,
-      totalCogs: costed.reduce((sum,s)=>sum+(s.cogs||0),0),
+      totalCogs: costed.reduce((sum,s)=>sum+costOf(s),0),
       totalRetail: costed.reduce((sum,s)=>sum+(s.retail||0),0),
       totalWs: costed.filter(s=>s.wholesale).reduce((sum,s)=>sum+(s.wholesale||0),0),
-      avgRetM: costed.length ? (costed.map(s=>((s.retail-s.cogs)/s.retail)*100).reduce((a,b)=>a+b,0)/costed.length).toFixed(1) : null,
+      avgRetM: costed.length ? (costed.map(s=>((s.retail-costOf(s))/s.retail)*100).reduce((a,b)=>a+b,0)/costed.length).toFixed(1) : null,
     };
   });
 
@@ -16054,11 +16082,27 @@ function renderCosts(seasonFilter) {
 
   // Costs table
   const sorted = [...filtered].sort((a,b) => ((b.retail-landedCost(b))/b.retail) - ((a.retail-landedCost(a))/a.retail));
-  document.getElementById('costs-table').innerHTML = sorted.map(s => {
+  // Build 726: styles still to cost are listed first, with what's missing, so
+  // the dashboard's "missing COGS" link lands on them.
+  const editIco = '<svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/></svg>';
+  const needRows = needs.length ? `<tr class="cs-need-h"><td colspan="10" style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--amber);font-weight:700;padding-top:14px">Needs costing · ${needs.length}</td></tr>`
+    + needs.map(s => { const miss = [!(costOf(s) > 0) ? 'no cost yet' : '', !s.retail ? 'no retail price' : ''].filter(Boolean).join(' · ');
+      return `<tr onclick="openDp('${s.id}')" style="box-shadow:inset 3px 0 0 var(--amber)">
+      <td><div class="t-name">${s.name}</div><div class="t-id">${s.styleId||''}</div></td>
+      <td style="font-size:10px">${s.season||''}</td>
+      <td class="t-mono" style="color:var(--muted)">${costOf(s) > 0 ? '$' + costOf(s).toFixed(0) : '—'}</td>
+      <td class="t-mono">${s.wholesale?'$'+s.wholesale:'—'}</td>
+      <td class="t-mono">${s.retail?'$'+s.retail:'—'}</td>
+      <td colspan="4" style="font-size:10px;color:var(--amber)">${miss}</td>
+      <td onclick="event.stopPropagation()"><button class="btn btn-ghost btn-sm" style="font-size:10px;padding:4px 8px" onclick="editCostSheet('${s.id}')">${editIco} Cost it</button></td>
+    </tr>`; }).join('')
+    + (sorted.length ? `<tr class="cs-need-h"><td colspan="10" style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;padding-top:14px">Costed · ${sorted.length}</td></tr>` : '') : '';
+  try { const nn = document.getElementById('cs-need-note'); if (nn) nn.textContent = needs.length ? '· ' + needs.length + ' to cost' : ''; } catch(e){}
+  document.getElementById('costs-table').innerHTML = needRows + sorted.map(s => {
     const landed = landedCost(s);
     const retM = s.retail ? Math.round(((s.retail-landed)/s.retail)*100) : 0;
     const wsM = s.wholesale ? Math.round(((s.wholesale-landed)/s.wholesale)*100) : null;
-    const below = retM < tgt.ret;
+    const below = retM < styleRetTarget(s);
     const sales = (typeof styleSalesFor === 'function') ? styleSalesFor(s) : null;
     // Gross profit is units × margin, so a shared unit count would multiply one
     // silhouette's profit by the number of fabrications it comes in. Only an
@@ -16077,7 +16121,7 @@ function renderCosts(seasonFilter) {
       <td class="t-mono cs-gp" style="color:${gp!==null?'var(--green)':'var(--muted)'}" title="Realized gross profit — live Shopify units × (retail − landed)">${gp!==null?'$'+Math.round(gp).toLocaleString('en-US')+' <span style="color:var(--muted);font-weight:400">×'+sales.u+'</span>':'—'}</td>
       <td onclick="event.stopPropagation()"><button class="btn btn-ghost btn-sm" style="font-size:10px;padding:4px 8px" onclick="editCostSheet('${s.id}')"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg> Sheet</button></td>
     </tr>`;
-  }).join('');
+  }).join('') + (!needs.length && !sorted.length ? '<tr><td colspan="10" style="padding:26px;text-align:center;color:var(--muted);font-size:11px">No styles in this season yet.</td></tr>' : '');
   // Build 706: GP Realized needs live Shopify units; with none it was a column
   // of dashes. It shows once any style has a figure.
   try {
@@ -16086,6 +16130,16 @@ function renderCosts(seasonFilter) {
   } catch(e){}
 }
 
+// Build 726: the style list sits in the closed Season summary, so the
+// "missing COGS" links open it on the styles still to cost.
+window.csShowNeeds = function(){
+  if (STATE.currentPage !== 'costs') goTo('costs', document.querySelector('[data-page=costs]'));
+  setTimeout(() => {
+    const d = document.getElementById('cost-season-summary'); if (d) d.open = true;
+    const h = document.querySelector('#costs-table .cs-need-h') || document.getElementById('costs-table');
+    try { h && h.scrollIntoView({ block: 'start', behavior: 'smooth' }); } catch(e){}
+  }, 120);
+};
 function renderScenario() {
   const cogs = parseFloat(document.getElementById('sc-cogs')?.value);
   const ws = parseFloat(document.getElementById('sc-ws')?.value);
@@ -16243,7 +16297,7 @@ function openDp(styleId) {
   const dpMargin = s.retail && dpLanded > 0 ? Math.round(((s.retail-dpLanded)/s.retail)*100) : null;
   // Margin judged against THIS season's target when one is set (range plan),
   // not a generic 60/40 rule.
-  const dpTm = (((STATE.rangePlan||{})[s.season])||{}).targetMargin || 0;
+  const dpTm = styleRetTarget(s);
   const dpMCol = dpMargin == null ? 'var(--ink)'
     : dpTm ? (dpMargin >= dpTm ? 'var(--green)' : dpMargin < dpTm - 5 ? 'var(--red)' : 'var(--amber)')
     : (dpMargin > 60 ? 'var(--green)' : dpMargin < 40 ? 'var(--red)' : 'var(--ink)');
@@ -16275,7 +16329,7 @@ function openDp(styleId) {
     <div class="dp-tags" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px">
       ${stageBadge(s.status)}
       ${s.category ? `<span class="b-tag">${esc(s.category)}</span>` : ''}
-      <span class="b-tag" onclick="dpToggleCarryover('${s.id}')" title="Tap to toggle — carryover styles repeat from a previous season" style="cursor:pointer;${s.carryover?'border-color:var(--ink);color:var(--ink);font-weight:700':''}">${s.carryover?'↺ Carryover':'New'}</span>
+      <span class="b-tag" onclick="dpToggleCarryover('${s.id}')" title="Tap to toggle — carryover styles repeat from a previous season" style="cursor:pointer;${styleIsCarry(s)?'border-color:var(--ink);color:var(--ink);font-weight:700':''}">${styleIsCarry(s)?'↺ Carryover':'New'}</span>
       <span style="font-size:10px;color:var(--muted)">${s.season}</span>
       ${s.drop?`<span style="font-size:10px;color:var(--muted)">Drop ${veniaDate(s.drop)}</span>`:''}
     </div>
@@ -16353,7 +16407,7 @@ function openDp(styleId) {
       ${dpRow('Sample Round', s.sample||'—')}
       ${dpRow('Lead Time', s.lead ? s.lead+' weeks' : '—')}
       ${dpRow('Factory', styleVendor(s) || '—')}
-      ${dpRow('Country of Origin', styleOrigin(s) ? esc(styleOrigin(s)) + (s.origin ? '' : ' <span style="font-size:9px;color:var(--muted)">from the factory</span>') : '—')}
+      ${dpRow('Country of Origin', styleOrigin(s) ? esc(styleOrigin(s)) + (styleCooOwn(s) ? '' : ' <span style="font-size:9px;color:var(--muted)">from the factory</span>') : '—')}
       ${(() => {
         // Which fabrications this silhouette has, and a way to join or leave a
         // family. Same-name styles group themselves; this is for the ones that
@@ -16665,9 +16719,16 @@ function dpAdvanceStage() {
   renderStyles();
 }
 
+// Build 726: the panel's tag wrote 'carryover' while the editor, the line
+// sheet and the catalogue read 'carryOver'. One key now, read one way.
+function styleIsCarry(s){ return !!(s && (s.carryOver || s.carryover)); }
+window.styleIsCarry = styleIsCarry;
 window.dpToggleCarryover = function(styleId){
   const s = STATE.styles.find(x => x.id === styleId); if (!s) return;
-  if (s.carryover) delete s.carryover; else s.carryover = true;
+  const next = !styleIsCarry(s);
+  delete s.carryover;
+  if (next) s.carryOver = true; else delete s.carryOver;
+  s.updatedAt = new Date().toISOString();
   save(); openDp(styleId);
   try { renderStyles(); } catch(e){}
 };
@@ -16744,8 +16805,12 @@ function styleGender(s){
 // style may still override it, because a factory can cut in more than one
 // country and the label has to say the truth for this garment.
 function styleVendor(s){ return String((s && s.vendor) || '').trim(); }
+// Build 726: the styles table writes 'origin', the tech pack and care label
+// write 'coo'. Either one typed is the style's own country of origin.
+function styleCooOwn(s){ return String((s && (s.coo || s.origin)) || '').trim(); }
+window.styleCooOwn = styleCooOwn;
 function styleOrigin(s){
-  const own = String((s && s.origin) || '').trim();
+  const own = styleCooOwn(s);
   if (own) return own;
   const name = styleVendor(s); if (!name) return '';
   const v = ((typeof STATE !== 'undefined' && STATE.vendors) || [])
@@ -16946,7 +17011,7 @@ function openStyleModal(id=null) {
     });
     document.getElementById('sm-ws').value = s.wholesale||'';
     document.getElementById('sm-bestseller').checked = !!s.bestSeller;
-    document.getElementById('sm-carryover').checked  = !!s.carryOver;
+    document.getElementById('sm-carryover').checked  = styleIsCarry(s);
     window.__smFlagsFor = s.id;        // now the boxes describe THIS style
     document.getElementById('sm-priority').value = s.priority||'mid';
     document.getElementById('sm-clo-status').value = s.cloStatus||'none';
@@ -17115,7 +17180,19 @@ function saveStyle() {
     const idx = STATE.styles.findIndex(x=>x.id===id);
     if (idx!==-1) {
       const prevSample = STATE.styles[idx].sample;
+      const prevFabric = String(STATE.styles[idx].fabric || '').trim();
       STATE.styles[idx] = {...STATE.styles[idx],...data};
+      delete STATE.styles[idx].carryover;   // Build 726: carryOver is the one key
+      // Build 726: a new fabric typed here links to that material, or to none.
+      // It kept the old material's id, so the BOM check and the swatch still
+      // pointed at the fabric this style had left.
+      try {
+        const nowFab = String(STATE.styles[idx].fabric || '').trim();
+        if (nowFab.toLowerCase() !== prevFabric.toLowerCase()){
+          const mat = nowFab ? (STATE.materials||[]).find(m => String(m.name||'').trim().toLowerCase() === nowFab.toLowerCase()) : null;
+          if (mat) STATE.styles[idx].fabricMatId = mat.id; else delete STATE.styles[idx].fabricMatId;
+        }
+      } catch(e){}
       // Build 681: the factory link follows the name typed here. It kept the
       // old factory's id, so its country, its renames and Production's picker
       // still pointed at the factory this style had left.
@@ -17146,6 +17223,7 @@ function saveStyle() {
   } else {
     data.styleId = genStyleId(season, cat, gender);
     data.id = 'STY'+Date.now();
+    data.createdAt = new Date().toISOString();
     data.notes = [];
     data.family = (document.getElementById('sm-family')||{}).value || styleNameKey(name);
     // A style created already mid-development gets its starting round on the
@@ -23053,7 +23131,7 @@ function tpReadiness(s){
     { sec:'pom',  label:'Base size measured',         ok: specced.length > 0 && !!String(s.baseSize||'').trim() },
     { sec:'pom',  label:'Graded across the size run', ok: graded },
     { sec:'con',  label:'Sewing operations',          ok: ops.length > 0 },
-    { sec:'care', label:'Fiber content + origin',     ok: !!String(s.fiberContent||'').trim() && !!String(s.coo||'').trim() },
+    { sec:'care', label:'Fiber content + origin',     ok: !!String(s.fiberContent||'').trim() && !!styleCooOwn(s) },
     { sec:'care', label:'Care instructions',          ok: !!String(s.careInstructions||'').trim() || ((cl.codes||[]).length > 0) },
   ];
   return { items, missing: items.filter(i => !i.ok).length };
@@ -23706,7 +23784,7 @@ function renderCareLabelSVG(s, opts){
   const standard=careEffStandard(s,opts); const wantWords=standard!=='ginetex'; const wantSym=standard!=='astm';
   const codes=(cl.codes||[]).filter(c=>CARE_SYMBOLS[c]);
   const fiber=(cl.fiber||s.fiberContent||'').trim();
-  const coo=(cl.coo||s.coo||cfg.defaultCoo||'').trim();
+  const coo=(cl.coo||styleCooOwn(s)||cfg.defaultCoo||'').trim();
   const size=(cl.size||'').trim();
   const story=(cl.story||'').trim();
   const add=(cl.additional||'').trim();
@@ -23922,7 +24000,7 @@ function careSectionHTML(s){
           <div class="tpf tpff"><div class="tpl">Fiber Composition <button type="button" class="btn btn-ghost btn-sm" style="margin-left:8px;padding:2px 8px;vertical-align:middle" onclick="careDeriveFiber('${s.id}')">↻ Pull from BOM</button></div>
             <input class="tpi" value="${_cattr(cl.fiber||s.fiberContent||'')}" placeholder="e.g. 100% Wool · Lining: 100% Cupro" onchange="careField('${s.id}','fiber',this.value)"></div>
           <div class="tpg2" style="margin:12px 0">
-            <div class="tpf"><div class="tpl">Country of Origin</div><input class="tpi" value="${_cattr(cl.coo||s.coo||cfg.defaultCoo||'')}" placeholder="Made in Portugal" onchange="careField('${s.id}','coo',this.value)"></div>
+            <div class="tpf"><div class="tpl">Country of Origin</div><input class="tpi" value="${_cattr(cl.coo||styleCooOwn(s)||cfg.defaultCoo||'')}" placeholder="Made in Portugal" onchange="careField('${s.id}','coo',this.value)"></div>
             <div class="tpf"><div class="tpl">Size (optional)</div><input class="tpi" value="${_cattr(cl.size||'')}" placeholder="e.g. M — blank = size-agnostic" onchange="careField('${s.id}','size',this.value)"></div>
           </div>
           <div class="tpg2" style="margin-bottom:0">
@@ -27485,9 +27563,9 @@ function renderTechPackPrint(s) {
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid #e0e0e0">
           <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;font-weight:700">Label Content — Legal</div>
           ${field('Fibre Content', s.fiberContent)}
-          ${field('Origin', s.coo)}
+          ${field('Origin', styleCooOwn(s))}
           ${field('Care', s.careInstructions)}
-          ${(!s.fiberContent||!s.coo) ? `<div style="font-size:7px;color:#c0392b;font-style:italic;margin-top:2px">⚠ Fibre content &amp; origin required on EU labels — confirm before bulk.</div>` : ''}
+          ${(!s.fiberContent||!styleCooOwn(s)) ? `<div style="font-size:7px;color:#c0392b;font-style:italic;margin-top:2px">⚠ Fibre content &amp; origin required on EU labels — confirm before bulk.</div>` : ''}
         </div>
         <div style="margin-top:12px;padding-top:10px;border-top:1px solid #e0e0e0">
           <div style="font-size:7px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;font-weight:700">Labeling</div>
@@ -49295,8 +49373,40 @@ function slLsRank(s){
   const r = Number(s && s.lsRank);
   return (isFinite(r) && r >= 0) ? r : Infinity;
 }
-function slLsStyles(){
+// Build 726: what goes on the line sheet. Styles already on the line keep
+// their place exactly as before, so a sheet buyers have seen doesn't change.
+// A style made from Build 726 on joins once it's ready to sell: past Concept
+// and Design, with a wholesale price. Either way, the switch on the line
+// sheet preview puts a style on or takes it off by hand (lsInclude).
+const LS_READY_FROM = '2026-11-22';
+function slLsReady(s){ return !['concept','design'].includes(String(s.status||'').toLowerCase()) && Number(s.wholesale) > 0; }
+function slLsIsNew(s){ return String(s.createdAt || '') >= LS_READY_FROM; }
+function slLsOnSheet(s){
+  if (s.lsInclude === true) return true;
+  if (s.lsInclude === false) return false;
+  return slLsIsNew(s) ? slLsReady(s) : true;
+}
+function slLsWhyOff(s){
+  if (s.lsInclude === false) return 'Taken off by hand';
+  if (!Number(s.wholesale)) return 'No wholesale price yet';
+  return 'Still in ' + String(s.status||'concept').toLowerCase();
+}
+window.slLsSetOn = function(id, on){
+  // Same rule as the MOQ: the style is Product's, so a catalogue projection
+  // can't publish the change.
+  if (window.VENIA_STYLES_PROJECTED){ showToast('What\'s on the sheet is set in Product — ask a founder','warning'); return; }
+  const st = (VeniaOS.get('core.catalog')||[]).find(x => x.id === id);
+  if (!st) return;
+  const def = slLsIsNew(st) ? slLsReady(st) : true;
+  if (!!on === def) delete st.lsInclude; else st.lsInclude = !!on;
+  st.updatedAt = new Date().toISOString();
+  save();
+  try { logActivity((on ? 'On the line sheet: ' : 'Off the line sheet: ') + (st.styleId || '') + ' ' + (st.name || '')); } catch(e){}
+  agNavSl('linesheets');
+};
+function slLsStyles(all){
   return (VeniaOS.get('core.catalog')||[]).filter(s => s.status !== 'archived'
+    && (all || slLsOnSheet(s))
     && (!SL_LS_SEASON || SL_LS_SEASON === 'all' || String(s.season||'').trim() === SL_LS_SEASON))
     .slice()
     .sort((a,b) => {
@@ -49508,22 +49618,27 @@ function agBuildLineSheetsSection() {
   if (!SL_LS_SEASON || (SL_LS_SEASON !== 'all' && !seasons.includes(SL_LS_SEASON))) SL_LS_SEASON = seasons[0] || 'all';
   const seasonLabel = SL_LS_SEASON === 'all' ? 'All Seasons' : SL_LS_SEASON;
   const styles = slLsStyles();
+  // Build 726: the preview lists every style in the season, with a switch.
+  const allStyles = slLsStyles(true);
+  const offN = allStyles.length - styles.length;
+  const canEdit = !window.VENIA_STYLES_PROJECTED;
   const moqDefault = (STATE.slPrefs && STATE.slPrefs.moq) || '';
   const seasonOpts = [`<option value="all" ${SL_LS_SEASON==='all'?'selected':''}>All seasons</option>`]
     .concat(seasons.map(x => `<option value="${slEsc(x)}" ${SL_LS_SEASON===x?'selected':''}>${slEsc(x)}</option>`)).join('');
 
-  const styleTable = styles.length === 0
+  const styleTable = allStyles.length === 0
     ? `<div style="padding:32px;text-align:center;color:var(--muted);font-size:11px">No styles${SL_LS_SEASON!=='all'?' in '+slEsc(SL_LS_SEASON):''} — add styles to build a line sheet</div>`
-    : `<div class="ag-list">
+    : `<div style="font-size:10.5px;color:var(--muted);margin:0 0 8px">${styles.length} on the sheet${offN ? ' · ' + offN + ' left off' : ''}. Styles already on the line stay as they are; new styles join once they're past Design with a wholesale price. Tick a style to put it on or take it off.</div>
+      <div class="ag-list">
         <div class="ag-list-row ag-list-row-h"><div>Style</div><div>Category</div><div>Wholesale</div><div>MOQ</div><div>Status</div></div>
-        ${styles.map(s => `
-          <div class="ag-list-row">
-            <div><div class="ag-lr-name">${s.styleId||''} — ${s.name||''}</div><div class="ag-lr-sub">${s.season||''} · ${s.fabric||''}</div></div>
+        ${allStyles.map(s => { const on = slLsOnSheet(s); return `
+          <div class="ag-list-row"${on ? '' : ' style="opacity:.6"'}>
+            <div style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" ${on ? 'checked' : ''} ${canEdit ? '' : 'disabled'} onchange="slLsSetOn('${slEsc(s.id)}', this.checked)" title="${on ? 'On the line sheet' : 'Left off the line sheet'}" aria-label="On the line sheet" style="margin-top:2px;flex:0 0 auto"><div style="min-width:0"><div class="ag-lr-name">${s.styleId||''} — ${s.name||''}</div><div class="ag-lr-sub">${s.season||''} · ${s.fabric||''}${on ? '' : ' · <span style="color:var(--amber)">' + slEsc(slLsWhyOff(s)) + '</span>'}</div></div></div>
             <div class="ag-lr-mono" style="font-size:10px">${(s.category||'').toUpperCase()}</div>
             <div class="ag-lr-mono">$${s.wholesale||'—'}</div>
             <div><input type="text" class="ag-lr-mono" style="width:64px;background:transparent;border:none;border-bottom:1px dashed var(--border-mid);color:var(--ink);font-size:10px;padding:2px 0;outline:none" value="${slEsc(s.wsMoq||'')}" placeholder="${slEsc(moqDefault||'—')}" title="Wholesale minimum for this style (blank = Sales-settings default)" onchange="slSetWsMoq('${s.id}',this.value)"></div>
             <div><span class="ag-badge ag-b-${s.status==='active'?'active':'draft'}">${s.status||'draft'}</span></div>
-          </div>`).join('')}
+          </div>`; }).join('')}
       </div>`;
 
   const snaps = (STATE.slLinesheets||[]).slice().sort((a,b)=>String(b.frozenAt||'').localeCompare(String(a.frozenAt||'')));
