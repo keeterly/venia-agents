@@ -103,6 +103,16 @@ const lc = (s) => String(s == null ? '' : s).toLowerCase();
 const nameOf = (r) => (r && (r.name || r.title || r.client || r.outlet || r.headline || r.text || r.desc || r.id)) || '';
 const has = (r, text) => !text || lc(JSON.stringify(r)).includes(lc(text));
 const eqi = (a, b) => lc(a).trim() === lc(b).trim();
+// Buyer stages are stored as keys (new, approached, warm, quoted, active,
+// inactive) but asked for by their names. Build 729 folded Ordered into
+// Stockist, so 'closed' and 'ordered' both mean Stockist.
+const BUYER_STAGE = { 'to reach': 'new', new: 'new', approached: 'approached', talking: 'warm', warm: 'warm',
+  quoted: 'quoted', stockist: 'active', active: 'active', ordered: 'active', closed: 'active', dormant: 'inactive', inactive: 'inactive' };
+const stageIs = (b, want) => {
+  const k = BUYER_STAGE[lc(want).trim()];
+  if (!k) return eqi(b.stage || b.status, want);
+  return (BUYER_STAGE[lc(b.stage || 'new').trim()] || lc(b.stage)) === k;
+};
 const clampLimit = (n, d = 50) => Math.max(1, Math.min(200, Number(n) || d));
 
 function text(obj) {
@@ -346,7 +356,7 @@ const readTools = [
       const list = arr(mods, 'sales', 'slBuyers');
       if (!list) return noAccess('Sales');
       const out = list.filter((b) => has(b, a.text)
-        && (!a.stage || eqi(b.stage || b.status, a.stage))
+        && (!a.stage || stageIs(b, a.stage))
         && (!a.country || eqi(b.country, a.country)));
       return text({ total: out.length, buyers: out.slice(0, clampLimit(a.limit)).map((b) => compact(b,
         ['id', 'name', 'location', 'country', 'type', 'tier', 'stage', 'status', 'contactName', 'email', 'lastTouch', 'nextAction', 'nextDue'])) });
