@@ -4411,7 +4411,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '724';
+  const BUILD = '725';
   const BUILD_DATE = '2026.11.21';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -7296,6 +7296,7 @@ window.veniaModById = function(id){ return (window.VENIA_MODS || []).find(functi
       <!-- Build 690: the line list and the photo viewer could send a style to a
            board; the style itself could not. Hidden with Boards. -->
       <button class="btn btn-ghost btn-sm" data-needs-boards style="width:100%;font-size:10px;padding:8px;margin-bottom:4px;letter-spacing:1px" onclick="dpSendToBoards()" title="Put this style on a board in Boards">▦ Send to a board</button>
+      <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px;padding:8px;margin-bottom:4px;letter-spacing:1px" onclick="dpDuplicate()" title="A new style to start from this one: same specs, BOM, measurements and cost, with its own code">⧉ Duplicate style</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px;padding:8px;letter-spacing:1px" onclick="dpAddFabrication()" title="The same silhouette in another material — a separate style with its own fabric, cost and BOM">◫ Add another fabrication</button>
       <button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px;padding:8px;margin-top:4px;letter-spacing:1px" onclick="dpUploadHero(STATE.currentStyleId)" title="Change the style photo">◑ Replace photo</button>
       <button class="btn btn-danger btn-sm perm-archive" style="width:100%;font-size:10px;padding:8px;margin-top:4px" onclick="dpArchive()">⌸ Archive</button>
@@ -13420,33 +13421,58 @@ function bulkRevertStatus() {
   if (moved) logActivity('Bulk stage revert: ' + moved + ' styles');
 }
 
+// Build 725: one duplicate for a style, from the panel or the bulk bar. The
+// copy is a new style in the house code format, with the BOM, measurements
+// and cost sheet; it does not carry the factory link, issued tech packs,
+// samples, Shopify links, stock or comments, which belong to the original.
+function styleDuplicate(id){
+  const s = (STATE.styles||[]).find(x => x.id === id); if (!s) return null;
+  const c = JSON.parse(JSON.stringify(s));
+  const now = new Date().toISOString();
+  ['shareToken','issued','rev','shopifyProductIds','shopifySkus','shopifyStock','shopifyAt','fromShopify','sampleLog',
+   'comments','checklist','stock','prevStyleId','builtFrom','planExtra','carryOver','carryover','bestSeller','flag','drop',
+   'reorderPoint','reorderQty','fitPhotos','tpProdStatus'].forEach(k => { delete c[k]; });
+  c.id = 'STY' + Date.now() + Math.random().toString(36).slice(2,6);
+  c.name = (s.name || 'Style') + ' (copy)';
+  c.family = styleNameKey(c.name);
+  c.season = s.season || smDefaultSeason();
+  c.styleId = genStyleId(c.season, styleCategory(s), styleGender(s));
+  c.status = 'concept';
+  c.sample = 'Proto';
+  c.notes = typeof s.notes === 'string' ? s.notes : '';
+  c.createdAt = now; c.updatedAt = now;
+  STATE.styles.unshift(c);
+  const tail = () => '-' + Math.random().toString(36).slice(2,7);
+  STATE.bom = STATE.bom || {}; STATE.pom = STATE.pom || {};
+  if (Array.isArray(STATE.bom[s.id]) && STATE.bom[s.id].length)
+    STATE.bom[c.id] = JSON.parse(JSON.stringify(STATE.bom[s.id])).map(l => Object.assign(l, l.id ? { id: l.id + tail() } : {}));
+  if (Array.isArray(STATE.pom[s.id]) && STATE.pom[s.id].length)
+    STATE.pom[c.id] = JSON.parse(JSON.stringify(STATE.pom[s.id])).map(p => Object.assign(p, p.id ? { id: p.id + tail() } : {}));
+  try {
+    const cs = csRead(s.id);
+    if (cs && Object.keys(cs).length){ const x = JSON.parse(JSON.stringify(cs)); delete x.history; delete x.revs; delete x.revisions; csWrite(c.id, x); }
+  } catch(e){}
+  try { logActivity('Style duplicated: ' + (s.styleId||s.name) + ' → ' + c.styleId + ' ' + c.name); } catch(e){}
+  return c;
+}
+window.styleDuplicate = styleDuplicate;
+window.dpDuplicate = function(){
+  const id = STATE.currentStyleId; if (!id) return;
+  const c = styleDuplicate(id); if (!c) return;
+  save(); buildSkus(); populateStyleSelects();
+  try { renderStyles(); } catch(e){}
+  closeDp();
+  setTimeout(() => { openDp(c.id); showToast('Copied as ' + c.styleId + ' ' + c.name + '. BOM, measurements and cost came with it; samples, tech pack issues and Shopify links did not', 'success'); }, 60);
+};
 function bulkDuplicate() {
   if (!BULK_SELECTED.size) return;
-  const newIds = [];
-  BULK_SELECTED.forEach(id => {
-    const s = STATE.styles.find(x=>x.id===id);
-    if (!s) return;
-    const newStyle = JSON.parse(JSON.stringify(s));
-    newStyle.id = 'STY'+Date.now()+Math.random().toString(36).slice(2,6);
-    newStyle.name = s.name + ' (COPY)';
-    newStyle.status = 'concept';
-    newStyle.sample = 'Proto';
-    newStyle.notes = [];
-    newStyle.comments = [];
-    newStyle.checklist = [];
-    newStyle.colorways = [];
-    // Give new style ID
-    const seasonCode = s.season.replace(' ','').toUpperCase();
-    const num = String(STATE.styles.filter(x=>x.season===s.season).length+1).padStart(3,'0');
-    newStyle.styleId = `VN-${seasonCode}-${num}`;
-    STATE.styles.unshift(newStyle);
-    newIds.push(newStyle.id);
-  });
+  const made = [];
+  BULK_SELECTED.forEach(id => { const c = styleDuplicate(id); if (c) made.push(c); });
   save(); buildSkus(); populateStyleSelects();
   BULK_SELECTED.clear();
   renderStyles();
-  toast(`${newIds.length} style${newIds.length>1?'s':''} duplicated`);
-  logActivity(`Bulk duplicate: ${newIds.length} styles`);
+  toast(`${made.length} style${made.length>1?'s':''} duplicated with their BOM, measurements and cost`);
+  logActivity(`Bulk duplicate: ${made.length} styles`);
 }
 
 // Setting one of the enum columns across a selection — 56 styles is too many
@@ -18823,7 +18849,8 @@ window.poSeedMilestones = function(){
   const vName = (document.getElementById('po-vendor')?.value||'').trim().toLowerCase();
   const v = (STATE.vendors||[]).find(x => String(x.name||'').toLowerCase() === vName);
   // Build 720: the factory's lead is in days (the Sourcing form says so).
-  const L = Math.max(14, parseInt(v && v.lead, 10) || 84);
+  const L = Math.max(14, parseInt(v && v.lead, 10) || RS_DEFAULT_LEAD);
+  const leadW = Math.round(L / 7);   // Build 725: the toast named leadW and it was never defined
   const exD = new Date(exf + 'T00:00:00');
   const iso = (back) => { const d = new Date(exD); d.setDate(d.getDate() - back); return d.toISOString().slice(0,10); };
   // Cut starts ~70% of the lead before shipping, mid-line inspection near the
@@ -20427,7 +20454,7 @@ function renderProduction(){
       try { return poDemandHTML(PO_DEMAND_SEASON, seasons); } catch(e){ return ''; }
     })()}
     <div class="sec-head"><div class="sec-title">Purchase Orders</div>
-      <div class="sec-actions" style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsPickStyle()" title="Start a first run or a restock of any style">+ Produce</button><button class="btn btn-gold btn-sm" onclick="poOpenModal(null)">+ New PO</button></div></div>
+      <div class="sec-actions" style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="rsPickStyle()" title="Start a first run or a restock of any style">+ Produce</button><button class="btn btn-gold btn-sm" onclick="poNewChoose()">+ New PO</button></div></div>
     ${pos.length ? `<div class="tbl-wrap"><table class="stack-tbl"><thead><tr>
       <th>PO / Factory</th><th>Units</th><th>Total</th><th>Payments</th><th>Ex-factory</th><th>Status</th>
     </tr></thead><tbody>${rows}</tbody></table></div>`
@@ -20510,6 +20537,28 @@ window.poRecalc = function(){
   if (split) split.textContent = pct>0 ? `deposit ${slMoneyC(cur, total*pct/100)} · balance ${slMoneyC(cur, total*(100-pct)/100)}` : '';
 };
 // Consolidate the season's won demand (accepted quotes, size-level) into PO lines.
+// Build 725: a new order starts where it will be tracked. One style is a
+// run (run page, Timeline, Today); a season's orders go through Plan
+// production; a PO across several styles still opens the PO window, and
+// shows on the Timeline calendar with its own milestones.
+window.poNewChoose = async function(){
+  const season = (typeof PO_DEMAND_SEASON !== 'undefined' && PO_DEMAND_SEASON) || '';
+  const v = await veniaChoose({ title: 'What are you ordering?', body: 'Runs plan their own time and action calendar and show on the Timeline and Today.',
+    choices: [
+      { label: 'Produce one style', value: 'run', style: 'primary' },
+      season ? { label: 'Plan ' + season + ' from orders', value: 'plan' } : null,
+      { label: 'A PO for several styles', value: 'po' },
+    ], cancel: 'Not now' });
+  if (v === 'run') rsPickStyle();
+  else if (v === 'plan') ppOpen(season);
+  else if (v === 'po') poOpenModal(null);
+};
+window.poToPlan = function(){
+  const season = (document.getElementById('po-season')?.value||'').trim() || ((typeof PO_DEMAND_SEASON !== 'undefined' && PO_DEMAND_SEASON) || '');
+  closeModal('po-modal');
+  if (!season){ showToast('Pick a season first'); return; }
+  setTimeout(() => ppOpen(season), 60);
+};
 window.poPullDemand = function(){
   const season = (document.getElementById('po-season')?.value||'').trim();
   // Build 721: orders plus accepted quotes not booked yet (slBookedDocs).
@@ -20578,7 +20627,7 @@ window.poOpenModal = function(id){
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;gap:8px;flex-wrap:wrap">
           <div style="${lbl};margin:0">Order lines — style · colorway · size run · unit cost</div>
           <div style="display:flex;gap:6px">
-            <button class="btn btn-ghost btn-sm" onclick="poPullDemand()" title="Sum the size runs from this season's accepted quotes">⇊ From won orders</button>
+            <button class="btn btn-ghost btn-sm" onclick="poToPlan()" title="Plan production takes this season's orders, leaves out what's shipped, on order or in stock, and starts a run per style">⇊ Plan from orders</button>
             <button class="btn btn-ghost btn-sm" onclick="poAddItem()">+ Add style</button>
           </div>
         </div>
@@ -21067,7 +21116,7 @@ function rsMissing(po){
   const noUse = bom.filter(l => !(parseFloat(l.qty) > 0)).length;
   if (noUse) out.push(noUse + ' BOM line' + (noUse>1?'s':'') + ' without usage');
   const ordered = new Set(po.fabricPoIds||[]);
-  const linkedMats = new Set(poList().filter(x => ordered.has(x.id)).map(x => x.materialId));
+  const linkedMats = new Set(poList().filter(x => ordered.has(x.id) && x.status !== 'cancelled').map(x => x.materialId));
   const unordered = bom.filter(l => rsIsFabricLine(l) && !linkedMats.has(l.matId)
     && !(l.matId && matIsVendorManaged(bomMatFor(l.matId)))).length;
   if (unordered) out.push('fabric not ordered');
@@ -21100,7 +21149,7 @@ function rsGuide(d){
   const bom = d.bom || [];
   if (!bom.length) add('Add the fabric to the BOM', 'rs-bom');
   const ordered = new Set(d.fabricPoIds||[]);
-  const linkedMats = new Set(poList().filter(x => ordered.has(x.id)).map(x => x.materialId));
+  const linkedMats = new Set(poList().filter(x => ordered.has(x.id) && x.status !== 'cancelled').map(x => x.materialId));
   bom.forEach((l, i) => {
     const fab = rsIsFabricLine(l);
     const m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
@@ -21408,6 +21457,7 @@ function rsCommit(opts){
   // Build 719: runs started in bulk by Plan production leave the style's BOM
   // alone; it is read fresh when the run is opened (bomShared).
   if (d.bomShared && !(opts && opts.keepStyleBom)) rsBomToStyle(d);
+  try { rsSyncOrders(d); } catch(e){}
   const out = Object.assign({}, d, {
     items: [item], units: d.qty||0, total: Math.round((d.qty||0) * (d.cost||0) * 100)/100,
     exFactory: (d.ms && d.ms.exf && d.ms.exf.date) || d.exFactory || '',
@@ -21489,8 +21539,10 @@ window.rsCancel = async function(on){
   const d = RS_DRAFT; if (!d || !d.id) return;
   if (on){
     if (rsRecv(d)){ showToast('Units are already received on this run'); return; }
-    if (!(await veniaConfirm('Cancel this run?\nIt leaves the plan, the Timeline and Today. Nothing is deleted, and you can reopen it.', { ok: 'Cancel the run', danger: true, cancel: 'Keep it' }))) return;
+    if (!(await veniaConfirm('Cancel this run?\nIt leaves the plan, the Timeline and Today, and its draft fabric and trim orders are cancelled too. Nothing is deleted, and you can reopen it.', { ok: 'Cancel the run', danger: true, cancel: 'Keep it' }))) return;
     d.status = 'cancelled';
+    const left = rsCancelDraftOrders(d);
+    if (left.length) showToast(left.length + ' fabric or trim order' + (left.length > 1 ? 's were' : ' was') + ' already placed; cancel with the mill if needed');
   } else {
     d.status = d.placedAt ? 'placed' : 'draft';
   }
@@ -21530,26 +21582,84 @@ window.rsSave = function(close){
 };
 // Order one fabric line: a fabric PO for exactly this run's need, linked both
 // ways (fabric PO .runId, run .fabricPoIds). Same rails as Materials' order.
-window.rsOrderFabric = function(i){
+// Build 725: the orders behind one BOM line, and what they cover. Fabric
+// matches by material, trims by line. Cancelled orders don't count.
+function rsLineOrders(d, l){
+  const ids = new Set(d.fabricPoIds || []);
+  return poList().filter(p => ids.has(p.id) && p.status !== 'cancelled'
+    && (rsIsFabricLine(l) ? (p.type !== 'trim' && p.materialId && p.materialId === l.matId) : (p.type === 'trim' && p.lineKey === rsLineKey(l))));
+}
+function rsLineCovered(d, l){ return rsLineOrders(d, l).reduce((a, p) => a + (parseFloat(p.qty) || 0) + (parseFloat(p.fromStock) || 0), 0); }
+// Keep draft fabric and trim orders the size the run needs now. A placed
+// order is the mill's, so it is never changed here; the BOM line shows the gap.
+function rsSyncOrders(d){
+  const units = d.qty || d.units || 0;
+  (d.bom || []).forEach(l => {
+    const orders = rsLineOrders(d, l); if (!orders.length) return;
+    const drafts = orders.filter(p => p.status === 'draft'); if (!drafts.length) return;
+    const need = Math.ceil(rsLineNeed(l, units));
+    const fixed = orders.filter(p => p.status !== 'draft').reduce((a, p) => a + (parseFloat(p.qty) || 0), 0)
+      + orders.reduce((a, p) => a + (parseFloat(p.fromStock) || 0), 0);
+    const want = Math.max(0, need - fixed);
+    drafts.forEach((p, n) => {
+      const q = n === 0 ? want : 0;
+      if ((parseFloat(p.qty) || 0) === q) return;
+      const per = (parseFloat(p.qty) || 0) > 0 ? (p.total || 0) / p.qty : 0;
+      p.qty = q; p.total = Math.round(q * per * 100) / 100; p.updatedAt = new Date().toISOString();
+      if (!q){ p.status = 'cancelled'; p.notes = (p.notes ? p.notes + ' · ' : '') + 'Cancelled: the run no longer needs it'; }
+    });
+  });
+}
+// Draft orders for a run that is deleted or cancelled are cancelled with it.
+function rsCancelDraftOrders(d){
+  const ids = new Set(d.fabricPoIds || []);
+  const linked = poList().filter(p => ids.has(p.id) && p.status !== 'cancelled');
+  linked.forEach(p => {
+    const back = parseFloat(p.fromStock) || 0;
+    if (back && p.materialId){ const m = (STATE.materials||[]).find(x => x.id === p.materialId); if (m) m.qtyOnHand = Math.round(((parseFloat(m.qtyOnHand)||0) + back) * 100) / 100; p.fromStock = 0; }
+    if (p.status === 'draft' || (back && !(parseFloat(p.qty) > 0))){ p.status = 'cancelled'; p.updatedAt = new Date().toISOString(); p.notes = (p.notes ? p.notes + ' · ' : '') + 'Cancelled with ' + (d.id || 'its run') + (back ? '; ' + back + ' back in stock' : ''); }
+  });
+  return linked.filter(p => p.status !== 'cancelled' && p.status !== 'draft');
+}
+window.rsOrderFabric = async function(i){
   rsReadForm();
   const d = RS_DRAFT; const l = (d.bom||[])[i]; if (!l) return;
   const m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
   if (!m){ showToast('Pick the material from Sourcing first, so the order has a supplier and a price'); return; }
   if (!(parseFloat(l.qty) > 0)){ showToast('Add the usage per unit first — the order is usage × quantity'); return; }
   if (!(d.qty > 0)){ showToast('Set the quantity first'); return; }
-  const need = rsLineNeed(l, d.qty);
+  const need = Math.ceil(rsLineNeed(l, d.qty));
+  const covered = rsLineCovered(d, l);
+  const gap = Math.max(0, need - covered);
+  if (!gap){ showToast('Already covered: ' + covered + ' ' + (m.unit||'yd') + ' ordered for a need of ' + need); return; }
+  const unit = m.unit || l.unit || 'yd';
+  // Fabric already on the shelf can go into the run instead of being bought.
+  let fromStock = 0;
+  const onHand = Math.floor(parseFloat(m.qtyOnHand) || 0);
+  if (onHand > 0 && !covered){
+    const use = Math.min(onHand, gap);
+    const v = await veniaChoose({ title: onHand + ' ' + unit + ' of ' + m.name + ' on hand',
+      body: 'This run needs ' + need + ' ' + unit + '. Use what you have and order the rest, or order it all new?',
+      choices: [ { label: 'Use ' + use + ' on hand, order ' + (gap - use), value: 'use', style: 'primary' }, { label: 'Order all ' + gap + ' ' + unit, value: 'all' } ], cancel: 'Not now' });
+    if (!v) return;
+    if (v === 'use') fromStock = use;
+  }
+  const qty = gap - fromStock;
   const runId = rsCommit();
-  const qty = Math.ceil(need);
   const cost = parseFloat(m.costPerUnit)||0;
   const fpo = {
     id: 'PO-' + Date.now().toString(36).toUpperCase() + Math.random().toString(36).slice(2,4).toUpperCase(),
     type: 'fabric', materialId: m.id, runId,
     vendor: m.supplier || 'Mill', season: d.season || '',
-    qty, unit: m.unit || l.unit || 'yd', units: 0, items: [],
+    qty, fromStock, unit, units: 0, items: [],
     currency: 'USD', depositPct: 50, total: Math.round(qty * cost * 100)/100,
-    exFactory: '', status: 'draft', notes: 'Fabric for ' + runId + ' — ' + rsTitle(d) + ' ' + rsKindWord(d) + rsShipToNote(d),
+    exFactory: '', status: qty > 0 ? 'draft' : 'received', notes: 'Fabric for ' + runId + ' — ' + rsTitle(d) + ' ' + rsKindWord(d) + rsShipToNote(d) + (fromStock ? ' · ' + fromStock + ' ' + unit + ' from stock' : ''),
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   };
+  if (!qty) fpo.receivedAt = fpo.createdAt;
+  // Fabric taken from stock is set aside for this run, so the next run isn't
+  // offered the same yards. Deleting or cancelling the run puts it back.
+  if (fromStock) m.qtyOnHand = Math.round(((parseFloat(m.qtyOnHand)||0) - fromStock) * 100) / 100;
   poList().unshift(fpo);
   const run = poList().find(p => p.id === runId);
   run.fabricPoIds = (run.fabricPoIds||[]).concat(fpo.id);
@@ -21559,10 +21669,11 @@ window.rsOrderFabric = function(i){
   if (!run.ms.fabricOrd || !run.ms.fabricOrd.done) run.ms.fabricOrd = { date: (run.ms.fabricOrd && run.ms.fabricOrd.date) || rsIso(new Date()), done: false };
   d.ms = JSON.parse(JSON.stringify(run.ms));
   save();
-  try { logActivity('Fabric PO ' + fpo.id + ' drafted for ' + runId + ' — ' + qty + ' ' + fpo.unit + ' of ' + m.name); } catch(e){}
+  try { if (!qty) rsSyncFromFabric(runId); } catch(e){}
+  try { logActivity('Fabric PO ' + fpo.id + ' drafted for ' + runId + ' — ' + qty + ' ' + unit + ' of ' + m.name + (fromStock ? ' (+' + fromStock + ' from stock)' : '')); } catch(e){}
   try { renderProduction(); } catch(e){}
   rsRender(runId);
-  showToast('Fabric PO ' + fpo.id + ' drafted — ' + qty + ' ' + fpo.unit + '. Place it from Production when the mill confirms', 'success');
+  showToast(qty ? 'Fabric PO ' + fpo.id + ' drafted — ' + qty + ' ' + unit + (fromStock ? ' plus ' + fromStock + ' from stock' : '') + '. Place it from Production when the mill confirms' : 'Covered from stock: ' + fromStock + ' ' + unit, 'success');
 };
 function rsShipToNote(d){
   if (rsMaker(d) !== 'cmt') return '';
@@ -21643,7 +21754,13 @@ window.rsBillPaid = function(billId){
 };
 window.rsDelete = async function(){
   const d = RS_DRAFT; if (!d || !d.id) { closeModal('rs-modal'); return; }
-  if (!(await veniaConfirm('Delete ' + d.id + ' (' + rsTitle(d) + ' ' + rsKindWord(d) + ')? Linked fabric POs stay.', { ok: 'Delete the run', danger: true }))) return;
+  const ids = new Set(d.fabricPoIds || []);
+  const live = poList().filter(p => ids.has(p.id) && p.status !== 'cancelled');
+  const drafts = live.filter(p => p.status === 'draft').length, placed = live.length - drafts;
+  const note = [drafts ? 'Its ' + drafts + ' draft fabric or trim order' + (drafts > 1 ? 's are' : ' is') + ' cancelled with it.' : '',
+    placed ? placed + ' order' + (placed > 1 ? 's' : '') + ' already placed with a mill stay' + (placed > 1 ? '' : 's') + '; cancel ' + (placed > 1 ? 'them' : 'it') + ' with the mill if you no longer need ' + (placed > 1 ? 'them' : 'it') + '.' : ''].filter(Boolean).join(' ');
+  if (!(await veniaConfirm('Delete ' + d.id + ' (' + rsTitle(d) + ' ' + rsKindWord(d) + ')?' + (note ? '\n' + note : ''), { ok: 'Delete the run', danger: true }))) return;
+  rsCancelDraftOrders(d);
   STATE.pos = poList().filter(p => p.id !== d.id);
   save(); closeModal('rs-modal');
   try { renderProduction(); } catch(e){}
@@ -21842,7 +21959,7 @@ function rsStageInfo(d, s){
   const noUse = bom.filter(l => !(parseFloat(l.qty) > 0)).length;
   const run = rsRunState(d);
   const late = rsSteps(d).filter(k => { const m = (d.ms||{})[k]||{}; return m.date && !rsMsDone(d,k) && m.date < rsIso(new Date()); });
-  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id));
+  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id) && p.status !== 'cancelled');
   const target = (() => { try { const m = typeof csModel === 'function' ? csModel(s) : null; return m && m.basis > 0 ? m.basis : (+s.cogs||0); } catch(e){ return +s.cogs||0; } })();
   const smp = ['proto','fit','pp','top'].filter(k => rsStepOn(d, k));
   const smpDone = smp.filter(k => rsMsDone(d, k)).length;
@@ -21945,7 +22062,7 @@ function rsRender(id){
   const matOpts = (sel) => `<option value="">— type a name or pick —</option>` + (STATE.materials||[]).map(m =>
     `<option value="${slEsc(m.id)}" ${sel===m.id?'selected':''}>${slEsc(m.name)}${m.supplier?' · '+slEsc(m.supplier):''}</option>`).join('');
   const types = ['Fabric','Lining','Trim','Label','Packaging','Dye','Thread','Hardware'];
-  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id));
+  const linked = poList().filter(p => (d.fabricPoIds||[]).includes(p.id) && p.status !== 'cancelled');
   const bomRows = (d.bom||[]).map((l, i) => {
     const need = rsLineNeed(l, units);
     const noUse = !(parseFloat(l.qty) > 0);
@@ -21956,7 +22073,10 @@ function rsRender(id){
         : tpo ? `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[tpo.status]||tpo.status)}</span>`
         : `<button class="btn btn-ghost btn-sm" onclick="rsOrderTrim(${i})">Order</button>`)
       : vm ? '<span style="font-size:10px;color:var(--muted)">Factory buys it</span>'
-      : fpo ? `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[fpo.status]||fpo.status)}</span>`
+      : fpo ? (() => { const cov = rsLineCovered(d, l), gapN = Math.ceil(need) - cov;
+          return gapN > 0 && !noUse
+            ? `<span style="font-size:10px;color:var(--amber);font-family:'DM Mono',monospace;white-space:nowrap">${cov} ordered · ${gapN} short</span> <button class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order ${gapN} more</button>`
+            : `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[fpo.status]||fpo.status)}${fpo.fromStock ? ' · ' + fpo.fromStock + ' from stock' : ''}</span>`; })()
       : (l.matId && (() => { const mm = (STATE.materials||[]).find(x => x.id === l.matId); return mm && String(mm.supplier||'').trim() && parseFloat(mm.costPerUnit) > 0; })())
         ? `<button id="rs-of-${i}" class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order fabric</button>`
         : '';
@@ -22281,8 +22401,9 @@ function rsRender(id){
 // other in time. Each dated step is a bar from the step before it: green
 // when done, red when its date has passed undone, dark when still ahead. A
 // tick marks the delivery date. Tap a row to open the run.
-function rsRunsCalHTML(runs){
+function rsRunsCalHTML(runs, plain){
   const today = rsIso(new Date());
+  const plainLanes = (plain || []).map(p => { const segs = tlPlainLane(p); return { po: p, plain: true, segs, next: segs.find(x => !x.done), deliver: '' }; }).filter(l => l.segs.length);
   const lanes = runs.map(po => {
     const ms = po.ms || {};
     const keys = rsSteps(po).filter(k => (ms[k] || {}).date);
@@ -22294,7 +22415,7 @@ function rsRunsCalHTML(runs){
     });
     const next = segs.find(x => !x.done);
     return { po, segs, next, deliver: po.deliverBy || '' };
-  }).filter(l => l.segs.length);
+  }).filter(l => l.segs.length).concat(plainLanes);
   if (!lanes.length) return '';
   const all = [];
   lanes.forEach(l => { l.segs.forEach(x => { all.push(x.from, x.to); }); if (l.deliver) all.push(l.deliver); });
@@ -22304,18 +22425,19 @@ function rsRunsCalHTML(runs){
   const span = Math.max(1, rsDaysBetween(a, b));
   const pct = iso => Math.max(0, Math.min(100, rsDaysBetween(a, iso) / span * 100));
   const months = []; { const c = new Date(a + 'T12:00:00'); c.setDate(1); while (rsIso(c) <= b){ const iso = rsIso(c); if (iso >= a) months.push(iso); c.setMonth(c.getMonth() + 1); } }
-  const lateN = lanes.filter(l => l.segs.some(x => x.late) || (() => { try { return (l.po.deliverBy || l.po.inStockBy) && rsDeliveryCheck(l.po).tone === 'bad'; } catch(e){ return false; } })()).length;
+  const lateN = lanes.filter(l => l.segs.some(x => x.late) || (() => { try { return !l.plain && (l.po.deliverBy || l.po.inStockBy) && rsDeliveryCheck(l.po).tone === 'bad'; } catch(e){ return false; } })()).length;
   const rows = lanes.map(l => {
     const po = l.po, lateSeg = l.segs.find(x => x.late);
-    let dck = null; try { dck = (po.deliverBy || po.inStockBy) ? rsDeliveryCheck(po) : null; } catch(e){}
+    let dck = null; try { dck = !l.plain && (po.deliverBy || po.inStockBy) ? rsDeliveryCheck(po) : null; } catch(e){}
     const cant = dck && dck.tone === 'bad';
     const tone = lateSeg || cant ? 'var(--red)' : l.next ? 'var(--ink)' : 'var(--green)';
     const sub = (cant ? dck.short + ' · ' : '') + (lateSeg ? 'Late: ' + lateSeg.label + ' · ' + veniaDate(lateSeg.to)
       : l.next ? 'Next: ' + l.next.label + ' · ' + veniaDate(l.next.to) : 'Every step done');
     const bars = l.segs.map(x => `<span title="${slEsc(x.label)} · ${slEsc(veniaDate(x.to))}${x.done ? ' · done' : x.late ? ' · late' : ''}" style="position:absolute;top:7px;height:12px;left:${pct(x.from)}%;width:max(3px,${pct(x.to) - pct(x.from)}%);background:${x.done ? 'var(--green)' : x.late ? 'var(--red)' : 'var(--ink)'};opacity:${x.done ? .6 : .85};border-right:1px solid var(--bg)"></span>`).join('');
     const del = l.deliver ? `<span title="Delivery ${slEsc(veniaDate(l.deliver))}" style="position:absolute;top:2px;height:22px;left:calc(${pct(l.deliver)}% - 1px);border-left:2px solid var(--amber)"></span>` : '';
-    return `<div class="rs-cal-row" onclick="rsOpen('${po.id}')" style="cursor:pointer;border-top:1px solid var(--border);min-height:40px;align-items:center">
-      <div style="padding:5px 8px;min-width:0"><div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${slEsc(rsTitle(po))} <span style="font-weight:400;color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${po.units || 0}</span></div>
+    const nm = l.plain ? ((po.vendor || 'PO') + ' · ' + (po.items||[]).length + ' style' + ((po.items||[]).length === 1 ? '' : 's')) : rsTitle(po);
+    return `<div class="rs-cal-row" onclick="${l.plain ? 'poOpenModal' : 'rsOpen'}('${po.id}')" style="cursor:pointer;border-top:1px solid var(--border);min-height:40px;align-items:center">
+      <div style="padding:5px 8px;min-width:0"><div style="font-size:11px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${slEsc(nm)} <span style="font-weight:400;color:var(--muted);font-family:'DM Mono',monospace;font-size:10px">${po.units || 0}</span></div>
         <div style="font-size:10px;color:${tone};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${slEsc(sub)}</div></div>
       <div style="position:relative;height:26px;margin-right:8px">${bars}${del}</div></div>`;
   }).join('');
@@ -22330,7 +22452,7 @@ function rsRunsCalHTML(runs){
   return `<style>.rs-cal{--rc-lw:160px;overflow-x:auto;border:1px solid var(--border);-webkit-overflow-scrolling:touch;background:var(--bg)}.rs-cal .rs-cal-in{min-width:640px;position:relative}.rs-cal .rs-cal-row{display:grid!important;grid-template-columns:var(--rc-lw) minmax(0,1fr)!important}@media(min-width:900px){.rs-cal{--rc-lw:250px}}.rs-cal .rs-cal-row>div:first-child{position:sticky;left:0;z-index:2;background:inherit}.rs-cal .rs-cal-row{background:var(--bg)}.rs-cal .rs-cal-row:hover>div:first-child{text-decoration:underline}</style>
   <div style="margin-bottom:18px"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:8px">
     <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700">Time and action · every run</div>
-    <div style="font-size:10px;color:${lateN ? 'var(--red)' : 'var(--muted)'}">${lanes.length} run${lanes.length === 1 ? '' : 's'}${lateN ? ' · ' + lateN + ' late or can\'t make its date' : ''}</div></div>
+    <div style="font-size:10px;color:${lateN ? 'var(--red)' : 'var(--muted)'}">${(() => { const nP = lanes.filter(x => x.plain).length, nR = lanes.length - nP; return [nR ? nR + ' run' + (nR === 1 ? '' : 's') : '', nP ? nP + ' PO' + (nP === 1 ? '' : 's') : ''].filter(Boolean).join(' · '); })()}${lateN ? ' · ' + lateN + ' late or can\'t make its date' : ''}</div></div>
   <div class="rs-cal"><div class="rs-cal-in">
     <div class="rs-cal-row" style="background:var(--bg-off);font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:600;min-height:26px;align-items:center">
       <div style="padding:4px 8px">Run</div>
@@ -22341,11 +22463,35 @@ function rsRunsCalHTML(runs){
   <div style="font-size:10px;color:var(--muted);margin-top:6px">Each bar is a step: green done, red late, dark still ahead · amber tick = delivery · red line = today. Tap a run to open it.</div></div>`;
 }
 window.rsRunsCalHTML = rsRunsCalHTML;
+// Build 725: a garment PO made in the PO window (several styles) is a lane on
+// the calendar too, from its WIP milestones and ex-factory date.
+function tlPlainPos(season){
+  return poList().filter(p => p.type !== 'fabric' && p.type !== 'trim' && !rsIsRun(p) && poOpen(p)
+    && (p.exFactory || Object.values(p.ms||{}).some(m => m && m.date))
+    && (!season || season === 'all' || String(p.season||'').trim() === season));
+}
+function tlPlainLane(p){
+  const today = rsIso(new Date()), ms = p.ms || {};
+  const keys = PO_MILESTONES.map(r => r[0]).filter(k => (ms[k]||{}).date).sort((a, b) => ms[a].date.localeCompare(ms[b].date));
+  const shipped = ['shipped','partial','received'].includes(p.status);
+  let prev = null;
+  const segs = keys.map(k => { const d = ms[k].date, done = !!ms[k].done || shipped, late = !done && d < today;
+    const from = prev && prev < d ? prev : rsBack(d, 2); prev = d; return { k, from, to: d, done, late, label: (PO_MILESTONES.find(r => r[0] === k)||[])[1] || k }; });
+  if (p.exFactory){ const d = p.exFactory, done = shipped, late = !done && d < today; segs.push({ k: 'exf', from: prev && prev < d ? prev : rsBack(d, 2), to: d, done, late, label: 'Ex-factory' }); }
+  return segs;
+}
 function rsTimelineHTML(season){
   const runs = rsOpenRuns().filter(po => (po.inStockBy || (po.ms && Object.keys(po.ms).length))
     && (!season || season === 'all' || String(po.season||'').trim() === season));
+  const plain = tlPlainPos(season);
+  if (!runs.length && plain.length){
+    let late = 0, ok = 0; plain.forEach(p => { if (tlPlainLane(p).some(x => x.late)) late++; else ok++; });
+    let cal = ''; try { cal = rsRunsCalHTML([], plain); } catch(e){}
+    return { html: cal, late, risk: 0, ok, styleIds: [].concat(...plain.map(p => (p.items||[]).map(it => it.styleId))).filter(Boolean) };
+  }
   if (!runs.length) return { html: '', late: 0, risk: 0, ok: 0, styleIds: [] };
-  const styleIds = runs.map(po => po.styleId || ((po.items||[])[0]||{}).styleId).filter(Boolean);
+  const styleIds = runs.map(po => po.styleId || ((po.items||[])[0]||{}).styleId).filter(Boolean)
+    .concat(...plain.map(p => (p.items||[]).map(it => it.styleId))).filter(Boolean);
   const now = new Date(); const today = rsIso(now);
   let late = 0, risk = 0, ok = 0;
   const rows = runs.map(po => {
@@ -22388,7 +22534,8 @@ function rsTimelineHTML(season){
       ${miss.length ? `<div style="font-size:10px;color:var(--amber);margin-top:8px">Still to settle: ${miss.map(slEsc).join(' · ')}</div>` : (next && status !== 'ontrack' ? `<div style="font-size:10px;color:${status==='late'?'var(--red)':'var(--amber)'};margin-top:8px">Next: ${slEsc(next)}</div>` : '')}
     </div>`;
   }).join('');
-  let cal = ''; try { cal = rsRunsCalHTML(runs); } catch(e){ cal = ''; }
+  plain.forEach(p => { if (tlPlainLane(p).some(x => x.late)) late++; else ok++; });
+  let cal = ''; try { cal = rsRunsCalHTML(runs, plain); } catch(e){ cal = ''; }
   // Build 724: each run shows once. The calendar is the run's row; the step
   // dots stay on the run page. They only show here if the calendar can't draw.
   return { html: cal || `<div style="margin-bottom:18px"><div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:8px">Production runs</div>${rows}</div>`, late, risk, ok, styleIds };
