@@ -4443,7 +4443,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '730';
+  const BUILD = '731';
   const BUILD_DATE = '2026.11.22';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -20204,18 +20204,32 @@ function ppRows(season){
     const f = parseInt(s.forecastUnits,10)||0;
     // Extra on top of orders. A forecast set before Build 719 (a total to
     // make) shows as the part orders don't cover yet, until Extra is typed.
-    const extra = ppHasExtra(s) ? (parseInt(s.planExtra,10)||0) : Math.max(0, f - ord.units);
-    const toMake = ord.units + extra;
+    let extra = ppHasExtra(s) ? (parseInt(s.planExtra,10)||0) : Math.max(0, f - ord.units);
     const onPo = poUnitsForStyle(s.id);
     // Build 727: units already shipped to buyers are made; ones on their way
     // are still in the stock figure until delivered, so they come off it.
     const shipped = ord.shipped || 0;
     const stock = Math.max(0, (function(){ try { return invStockEffective(s).units || 0; } catch(e){ return parseInt(s.stock,10)||0; } })() - (ord.inTransit || 0));
+    // UNITS PUT ON A RUN BY HAND ARE EXTRA (Build 731). Keeter makes runs of 8
+    // or 10 where buyers ordered 2: the rest is stock VENIA wants. With no
+    // Extra typed, the plan said "Run has 8, plan says 2 · Update run to 2",
+    // reading the run as a mistake. Now, until Extra is typed, the run's units
+    // beyond what is ordered count as Extra (shown as "on the run"), so the
+    // row adds up. Typing Extra still sets it, and a draft run follows.
+    let extraFromRun = 0;
+    const run = runsBy[s.id] || null;
+    if (!ppHasExtra(s) && run){
+      const over = (shipped + onPo + stock) - (ord.units + extra);
+      const it = (run.items || [])[0] || {};
+      const runOpen = Math.max(0, (it.qty || 0) - (it.receivedQty || 0));
+      if (over > 0) { extraFromRun = Math.min(over, runOpen); extra += extraFromRun; }
+    }
+    const toMake = ord.units + extra;
     const toPlan = Math.max(0, toMake - shipped - onPo - stock);
     const first = ord.src.map(x => x.date).filter(Boolean).sort()[0] || '';
     const deliverBy = first || (toMake - shipped > 0 ? (cal.deliveryStart || '') : '');
-    return { s, ord, extra, extraFromForecast: !ppHasExtra(s) && extra > 0, toMake, shipped, onPo, stock, toPlan, gap: toMake - shipped - onPo - stock,
-      deliverBy, deliverFromSeason: !first && !!deliverBy, run: runsBy[s.id] || null };
+    return { s, ord, extra, extraFromRun, extraFromForecast: !ppHasExtra(s) && extra - extraFromRun > 0, toMake, shipped, onPo, stock, toPlan, gap: toMake - shipped - onPo - stock,
+      deliverBy, deliverFromSeason: !first && !!deliverBy, run };
   });
 }
 // Sets Extra on a style and lets a draft run follow it. Returns the new run
@@ -20469,7 +20483,7 @@ function poDemandHTML(season, seasons){
     return `<tr>
       <td data-label=""><div class="t-name">${slEsc(s.name||'')}</div>${styleVersionText(s) ? `<div style="font-size:10px;margin-top:3px">${styleVersionHTML(s)}</div>` : ''}<div class="t-id">${slEsc(s.styleId||'')}</div></td>
       <td data-label="Ordered" style="${num}">${r.ord.units || '<span style="color:var(--muted)">0</span>'}${forLine ? `<div class="pp-for" style="font-family:inherit;font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap" title="${slEsc(r.ord.src.map(x => (x.account||x.id) + ' ' + x.qty + (x.date ? ' · ' + x.date : '')).join('\n'))}">${slEsc(forLine)}</div>` : ''}${r.shipped ? `<div style="font-family:inherit;font-size:10px;color:var(--teal);margin-top:2px;white-space:nowrap" title="${slEsc(r.ord.shippedSrc.map(x => (x.account||x.id) + ' ' + x.qty).join('\n'))}">${r.shipped} shipped</div>` : ''}</td>
-      <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')} ${slEsc(styleVersionText(s))} ${slEsc(s.styleId||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders"></td>
+      <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')} ${slEsc(styleVersionText(s))} ${slEsc(s.styleId||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromRun ? 'The run makes ' + r.extraFromRun + ' more than is ordered, so they count as extra. Type a number to set Extra yourself; a draft run follows it. ' : ''}${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders">${r.extraFromRun ? `<div style="font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap">${r.extraFromRun} on the run</div>` : ''}</td>
       <td data-label="To make" class="pp-ph-hide" style="${num};font-weight:700">${r.toMake}</td>
       <td data-label="Have" class="pp-ph-hide" style="${num};color:var(--muted)" title="On a PO ${r.onPo} · in stock ${r.stock}${r.shipped ? ' · shipped ' + r.shipped : ''}">${r.onPo + r.stock + (r.shipped || 0)}</td>
       <td data-label="To plan" style="${num};font-weight:700;color:${r.toPlan > 0 && !r.run ? 'var(--red)' : r.toPlan > 0 ? 'var(--amber)' : r.toMake > 0 ? 'var(--green)' : 'var(--muted)'}">${r.toPlan > 0 ? r.toPlan : r.toMake > 0 ? '✓' : '—'}</td>
