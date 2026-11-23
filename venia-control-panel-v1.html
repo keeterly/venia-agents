@@ -1451,7 +1451,7 @@ html.share-mode #techpack-content{ padding:0 0 calc(24px + var(--sab)) !importan
 /* ── PRINT ── */
 @media print{
   .sidebar,.topbar,.mob-header,.mob-nav,.mob-drawer,.mob-drawer-overlay,
-  .dpanel,.dpanel-overlay,.overlay,.toast,.sec-actions,.filters,#tp-style-select,
+  .dpanel,.dpanel-overlay,.overlay,.toast,.sec-actions,.filters,#tp-style-select,#tp-style-select-sp,
   #sk-launch,#sk-dock,.cp-global-bar,#fc-panel{display:none!important}
   body{background:white;overflow:visible!important;display:block}
   .main{margin-left:0!important;overflow:visible!important}
@@ -1657,6 +1657,19 @@ body:has(#cp-screen-boards.active) #sk-launch{ display:none !important; }
 .dr4-pick-t{font-size:12.5px;font-weight:600}
 .dr4-pick-v{font-size:11px}
 .dr4-pick-c{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace}
+.sp-wrap{position:relative;min-width:0}
+.sp-q{width:100%;box-sizing:border-box;height:34px;padding:0 10px;border:0;border-bottom:1px solid var(--border-mid,#ccc);background:transparent;font:inherit;font-size:13px;color:var(--ink);text-overflow:ellipsis}
+.sp-q:focus{outline:none;border-bottom-color:var(--ink);background:#fff}
+.sp-list{position:fixed;z-index:400;max-height:min(360px,60vh);overflow-y:auto;background:#fff;border:1px solid var(--border-mid,#ccc);box-shadow:0 8px 24px rgba(0,0,0,.08)}
+.sp-list[hidden]{display:none}
+.sp-row{display:flex;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer}
+.sp-row:hover,.sp-row.hi{background:#f7f6f3}
+.sp-row.on{box-shadow:inset 3px 0 0 var(--ink)}
+.sp-m{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.sp-t{font-size:12.5px;font-weight:600}
+.sp-v{font-size:11px}
+.sp-c{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace}
+.sp-none{padding:10px;font-size:12px;color:var(--muted)}
 .dr4-search{min-width:240px;height:34px;padding:0 11px;border:1px solid var(--border-mid,#ccc);background:#fff;font:inherit;font-size:13px;color:var(--ink)}
 .dr4-btn{height:34px;padding:0 14px;border:1px solid var(--ink);background:#fff;color:var(--ink);font:inherit;font-size:12px;letter-spacing:.3px;cursor:pointer;white-space:nowrap;max-width:280px;overflow:hidden;text-overflow:ellipsis}
 .dr4-btn:hover{background:#f4f3f0}
@@ -4453,7 +4466,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '732';
+  const BUILD = '734';
   const BUILD_DATE = '2026.11.22';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -10237,7 +10250,143 @@ function populateStyleSelects() {
     if (!el) return;
     el.innerHTML = '<option value="">— Select Style —</option>' +
       STATE.styles.filter(s => s.status !== 'archived').map(s => `<option value="${s.id}">${s.styleId} — ${s.name}</option>`).join('');
+    stylePickerMount(el);
   });
+}
+
+// ── Style picker: search by name ──
+// The style dropdowns (BOM, Measurements, Tech Pack) were sorted by code, so a
+// style was hard to find by name. The <select> stays as the source of truth
+// (everything that sets .value or listens for change keeps working) but is
+// hidden behind a search box over a list sorted by name, with photo, swatch,
+// colour, fabric, code and season on each row.
+function stylePickerMount(sel){
+  if (!sel || !sel.id) return;
+  let wrap = document.getElementById(sel.id + '-sp');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = sel.id + '-sp';
+    wrap.className = 'sp-wrap';
+    wrap.style.cssText = sel.style.cssText; // keep the select's flex / min-width
+    wrap.innerHTML = '<input class="sp-q" type="search" autocomplete="off" spellcheck="false" placeholder="Search styles by name, colour or code" aria-label="Style">';
+    sel.insertAdjacentElement('afterend', wrap);
+    // The list lives on <body>: the filter bars it would sit in clip anything
+    // that hangs below them (on a phone it was cut off after one row).
+    const pl = document.createElement('div');
+    pl.id = sel.id + '-sp-list'; pl.className = 'sp-list'; pl.setAttribute('role', 'listbox'); pl.hidden = true;
+    pl.dataset.for = sel.id;
+    document.body.appendChild(pl);
+    sel.style.display = 'none';
+    sel.setAttribute('aria-hidden', 'true');
+    // Code all over the app sets sel.value directly; keep the box's text in step.
+    const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+    try {
+      Object.defineProperty(sel, 'value', { configurable: true,
+        get(){ return desc.get.call(this); },
+        set(v){ desc.set.call(this, v); stylePickerLabel(this); } });
+    } catch(e){}
+    sel.addEventListener('change', () => stylePickerLabel(sel));
+    const q = wrap.querySelector('.sp-q'), list = pl;
+    q.addEventListener('focus', () => { stylePickerOpen(sel); q.select(); });
+    q.addEventListener('input', () => { if (list.hidden) stylePickerOpen(sel); stylePickerFilter(sel, q.value); });
+    q.addEventListener('keydown', (e) => {
+      const rows = [...list.querySelectorAll('.sp-row')].filter(r => r.style.display !== 'none');
+      let i = rows.findIndex(r => r.classList.contains('hi'));
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault(); if (list.hidden) stylePickerOpen(sel);
+        i = e.key === 'ArrowDown' ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
+        rows.forEach((r, k) => r.classList.toggle('hi', k === i));
+        if (rows[i]) rows[i].scrollIntoView({ block: 'nearest' });
+      } else if (e.key === 'Enter') {
+        e.preventDefault(); const r = rows[i >= 0 ? i : 0]; if (r) stylePickerChoose(sel, r.dataset.id);
+      } else if (e.key === 'Escape') { list.hidden = true; stylePickerLabel(sel); q.blur(); }
+    });
+    q.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== q) { list.hidden = true; stylePickerLabel(sel); } }, 150));
+    // mousedown, not click: picking must win over the box's blur.
+    list.addEventListener('mousedown', (e) => {
+      const r = e.target.closest('.sp-row'); if (!r) return;
+      e.preventDefault(); stylePickerChoose(sel, r.dataset.id);
+    });
+  }
+  wrap.dataset.stale = '1';
+  stylePickerLabel(sel);
+}
+function stylePickerLabel(sel){
+  const wrap = sel && document.getElementById(sel.id + '-sp'); if (!wrap) return;
+  const q = wrap.querySelector('.sp-q');
+  const pl = document.getElementById(sel.id + '-sp-list');
+  if (document.activeElement === q && pl && !pl.hidden) return;
+  const s = (STATE.styles || []).find(x => x.id === sel.value);
+  q.value = s ? [s.name || '', s.styleId || ''].filter(Boolean).join(' — ') : '';
+}
+function stylePickerOpen(sel){
+  const wrap = document.getElementById(sel.id + '-sp'); if (!wrap) return;
+  const list = document.getElementById(sel.id + '-sp-list'); if (!list) return;
+  // The list is every live style, the same set populateStyleSelects puts in
+  // the <select>. If the select's options fell behind (styles added or loaded
+  // since), refill them so choosing a row can always set its value.
+  const live = (STATE.styles || []).filter(s => s.status !== 'archived');
+  if (sel.options.length - 1 !== live.length) {
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">— Select Style —</option>' + live.map(s => '<option value="' + esc(s.id) + '">' + esc(s.styleId || '') + ' — ' + esc(s.name || '') + '</option>').join('');
+    if (keep) sel.value = keep;
+    wrap.dataset.stale = '1';
+  }
+  if (wrap.dataset.stale === '1' || !list.childElementCount) {
+    const line = live.slice().sort((a, b) =>
+      String(a.name || a.styleId || '').localeCompare(String(b.name || b.styleId || ''), undefined, { sensitivity: 'base' })
+      || styleVersionText(a).localeCompare(styleVersionText(b)));
+    list.innerHTML = line.length ? line.map(s => '<div class="sp-row" role="option" data-id="' + esc(s.id) + '" data-n="'
+        + esc(String([s.name, s.styleId, s.season, styleVersionText(s)].join(' ')).toLowerCase()) + '">'
+        + styleThumbHTML(s, 32) + '<span class="sp-m"><span class="sp-t">' + esc(s.name || s.styleId || '') + '</span>'
+        + '<span class="sp-v">' + styleVersionHTML(s) + '</span>'
+        + '<span class="sp-c">' + esc([s.styleId, s.season].filter(Boolean).join(' · ')) + '</span></span></div>').join('')
+      : '<div class="sp-none">No styles yet</div>';
+    wrap.dataset.stale = '';
+  }
+  list.querySelectorAll('.sp-row').forEach(r => { r.style.display = ''; r.classList.toggle('on', r.dataset.id === sel.value); r.classList.remove('hi'); });
+  // Pinned under the box, in viewport space.
+  const r = wrap.querySelector('.sp-q').getBoundingClientRect();
+  const below = window.innerHeight - r.bottom - 12;
+  list.style.left = Math.max(8, r.left) + 'px';
+  list.style.width = Math.min(window.innerWidth - 16, Math.max(r.width, 300)) + 'px';
+  list.style.top = r.bottom + 'px';
+  list.style.maxHeight = Math.max(160, Math.min(380, below)) + 'px';
+  list.hidden = false;
+  if (!stylePickerOpen._wired) {
+    stylePickerOpen._wired = true;
+    // Close an open list when the page underneath scrolls or resizes; it is
+    // pinned to where the box was.
+    const close = (e) => {
+      if (e && e.target && e.target.closest && e.target.closest('.sp-list')) return;
+      document.querySelectorAll('.sp-list:not([hidden])').forEach(l => {
+        const w = document.getElementById(l.dataset.for + '-sp'); const q = w && w.querySelector('.sp-q');
+        if (window.innerWidth <= 760 && document.activeElement === q && e && e.type === 'resize') return; // phone keyboard opening
+        l.hidden = true; const sl = document.getElementById(l.dataset.for); if (sl) stylePickerLabel(sl);
+      });
+    };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+  }
+  const on = list.querySelector('.sp-row.on'); if (on) on.scrollIntoView({ block: 'nearest' });
+}
+function stylePickerFilter(sel, q){
+  const wrap = document.getElementById(sel.id + '-sp'); if (!wrap) return;
+  const words = String(q || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let first = true;
+  const list = document.getElementById(sel.id + '-sp-list'); if (!list) return;
+  list.querySelectorAll('.sp-row').forEach(r => {
+    const show = !words.length || words.every(w => r.dataset.n.includes(w));
+    r.style.display = show ? '' : 'none';
+    r.classList.toggle('hi', show && first && words.length > 0); if (show) first = false;
+  });
+}
+function stylePickerChoose(sel, id){
+  const wrap = document.getElementById(sel.id + '-sp');
+  const pl = document.getElementById(sel.id + '-sp-list'); if (pl) pl.hidden = true;
+  if (wrap) wrap.querySelector('.sp-q').blur();
+  if (sel.value !== id) { sel.value = id; sel.dispatchEvent(new Event('change', { bubbles: true })); }
+  stylePickerLabel(sel);
 }
 
 // ═══════════════════════════════════════════════
