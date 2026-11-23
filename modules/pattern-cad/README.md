@@ -85,3 +85,6 @@ whole, with the fold line drawn, and lays whole in markers. A piece marked "DO N
 through Tuka's curve points, and each allowance corner is cut as the file cuts it. Importing the same
 file again can replace the pieces with the same names in place; the style is saved as a version first
 and markers keep the pieces. Patterns imported before are not changed.
+
+Build 737: Output › Print and plot can print every piece, cut pieces only, or templates only (the
+do-not-cut pieces), on the tiled PDF, the 60" plot, the wide PDF and SVG.
