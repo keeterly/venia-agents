@@ -61,3 +61,18 @@ New pattern.
   events to the shell as `pattern-cad:dr4ft-event`. The shell calls Dr4ft's commands through the
   frame's `window.dr4ft.command` (same origin). The contract is keeterly/venia-pattern-cad
   `docs/venia-os-contract.md`, version 2. Send to a tech pack stays off until Dr4ft switches it on.
+
+## Sourcing fabrics and the BOM (Build 733)
+
+Dr4ft's marker lists the Sourcing fabrics first ("From VENIA OS Sourcing"), each with a usable width
+read from the width typed in Sourcing (a range like `52" / 53"` uses the narrower, and the marker
+says so). The typed width is never changed.
+
+- **Save this width to VENIA OS Sourcing** keeps the marker's width, selvage, shrinkage, stretch and
+  nap on the material as `cutting`, with the one before it as `cutting.previous`. Only an empty width
+  text is filled. Sourcing shows it as "Cut width (Dr4ft)".
+- A marker cut in a Sourcing fabric, on a pattern linked to a style, sends its yield per garment after
+  each Auto nest (and on **Send yield to the BOM**). It fills that fabric's BOM line when the line is
+  empty or still holds the last yield from Dr4ft, adds the line if the style has none, and keeps a
+  Pattern Card line's yield in step. A quantity typed by hand changes only when **Replace** is
+  pressed in Dr4ft; the old quantity is kept on the line (`_fromDr4ft.replaced`).
