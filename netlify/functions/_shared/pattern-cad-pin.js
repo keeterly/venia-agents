@@ -1,6 +1,6 @@
 // Written by modules/pattern-cad/scripts/sync.mjs. The commit of the pattern CAD that VENIA OS serves.
 export const PIN = {
   "repo": "keeterly/venia-pattern-cad",
-  "commit": "25e39a49b47e1d38b523f6bcc0a65ad511719c84",
-  "pageSha256": "cdf4af52be50e93cab7936aa90a83d832d1f2793a0a52b9a97397c7e7ea7b928"
+  "commit": "d4eab7b1a97e97f82a86c5f86caac0d07fcb12dd",
+  "pageSha256": "64c50dacc3e4dd8b2db76ea0433661a68ebc60334eb04391fb4f03693587a303"
 };

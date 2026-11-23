@@ -92,3 +92,8 @@ do-not-cut pieces), on the tiled PDF, the 60" plot, the wide PDF and SVG.
 Build 738: a marker can be deleted (Delete beside +, undoable), and the marker panel and Check list
 any piece cut from fabric that no marker cuts, per material, with a button to add it or make a
 marker for that material.
+
+Build 739: the marker panel reads in the order a marker is made: 1 Fabric and sizes (fabric, width,
+sizes, plies, pieces), 2 Nest (results and yield to the BOM), 3 Plot and export. Spread, shrinkage,
+nap, size steps, stripes and splices fold under Fine-tune; cut order plan, costing and the fabric
+library under Plan and compare. A piece left out of every marker shows at the top. Nothing removed.
