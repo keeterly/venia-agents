@@ -88,3 +88,7 @@ and markers keep the pieces. Patterns imported before are not changed.
 
 Build 737: Output › Print and plot can print every piece, cut pieces only, or templates only (the
 do-not-cut pieces), on the tiled PDF, the 60" plot, the wide PDF and SVG.
+
+Build 738: a marker can be deleted (Delete beside +, undoable), and the marker panel and Check list
+any piece cut from fabric that no marker cuts, per material, with a button to add it or make a
+marker for that material.
