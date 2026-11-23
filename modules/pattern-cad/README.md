@@ -76,3 +76,12 @@ says so). The typed width is never changed.
   empty or still holds the last yield from Dr4ft, adds the line if the style has none, and keeps a
   Pattern Card line's yield in step. A quantity typed by hand changes only when **Replace** is
   pressed in Dr4ft; the old quantity is kept on the line (`_fromDr4ft.replaced`).
+
+## TUKAcad files (Build 736)
+
+Dr4ft reads a TUKAcad DXF export the way Tuka shows it. A piece with a mirror line (fold) opens
+whole, with the fold line drawn, and lays whole in markers. A piece marked "DO NOT CUT" or
+"TEMPLATE" stays out of markers. Notches written as points come in once each, a smooth curve runs
+through Tuka's curve points, and each allowance corner is cut as the file cuts it. Importing the same
+file again can replace the pieces with the same names in place; the style is saved as a version first
+and markers keep the pieces. Patterns imported before are not changed.
