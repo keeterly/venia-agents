@@ -62,7 +62,7 @@ New pattern.
   frame's `window.dr4ft.command` (same origin). The contract is keeterly/venia-pattern-cad
   `docs/venia-os-contract.md`, version 2. Send to a tech pack stays off until Dr4ft switches it on.
 
-## Sourcing fabrics and the BOM (Build 733)
+## Sourcing fabrics and the BOM (Build 735)
 
 Dr4ft's marker lists the Sourcing fabrics first ("From VENIA OS Sourcing"), each with a usable width
 read from the width typed in Sourcing (a range like `52" / 53"` uses the narrower, and the marker

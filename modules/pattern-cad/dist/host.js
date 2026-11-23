@@ -144,7 +144,7 @@
             return list.map(function (s) { return { id: s.id, code: s.styleId || '', name: s.name || '', season: s.season || '' }; });
           });
         },
-        // Build 733: Sourcing's fabrics in the marker, a marker's width saved
+        // Build 735: Sourcing's fabrics in the marker, a marker's width saved
         // back to its Sourcing fabric, and a marker's yield to the style's
         // BOM. The shell answers (veniaDr4ftFabrics, veniaDr4ftSaveFabric,
         // veniaDr4ftSendYield); it never changes a width someone typed, and
