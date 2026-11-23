@@ -4,7 +4,7 @@
 // None of its code is in this public repository: this loader fetches it from
 // the pattern-cad function, which hands it only to a signed-in Product member,
 // at the commit pinned by scripts/sync.mjs. This file is the only VENIA OS
-// code that touches the CAD, and besides loading it, it does two things:
+// code that touches the CAD, and besides loading it, it does these things:
 //
 // 1. KEEPS THE CAD'S STYLES OUT OF VENIA OS'S OWN STORAGE. On its own the CAD
 //    saves every style, version and block in localStorage. Inside VENIA OS
@@ -144,10 +144,28 @@
             return list.map(function (s) { return { id: s.id, code: s.styleId || '', name: s.name || '', season: s.season || '' }; });
           });
         },
+        // Build 735: Sourcing's fabrics in the marker, a marker's width saved
+        // back to its Sourcing fabric, and a marker's yield to the style's
+        // BOM. The shell answers (veniaDr4ftFabrics, veniaDr4ftSaveFabric,
+        // veniaDr4ftSendYield); it never changes a width someone typed, and
+        // asks (through Dr4ft) before replacing a BOM quantity typed by hand.
+        listFabrics: function () { return shell('veniaDr4ftFabrics', []); },
+        saveFabric: function (id, f) { return shell('veniaDr4ftSaveFabric', [id, f]); },
+        sendYield: function (y) { return shell('veniaDr4ftSendYield', [y]); },
       });
     }, function () {});
   }
   var ask2 = function () { return Promise.resolve({ payload: { styles: [] } }); };
+  // A shell function (same origin), called with a copy of the arguments so
+  // nothing the frame holds is shared with the page.
+  function shell(name, args) {
+    return new Promise(function (resolve, reject) {
+      var fn = null;
+      try { fn = window.parent[name]; } catch (e) { fn = null; }
+      if (typeof fn !== 'function') { reject(new Error('VENIA OS can\'t do that here yet. Reload VENIA OS.')); return; }
+      try { resolve(fn.apply(null, JSON.parse(JSON.stringify(args || [])))); } catch (e) { reject(e); }
+    });
+  }
 
   function post(type, payload) {
     if (!embedded) return;
