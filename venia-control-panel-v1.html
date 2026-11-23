@@ -4443,7 +4443,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '729';
+  const BUILD = '730';
   const BUILD_DATE = '2026.11.22';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -11644,7 +11644,14 @@ window.veniaQuietly = function(fn){
 window.veniaRepaint = function(){ return window.veniaQuietly(veniaRepaintNow); };
 function veniaRepaintNow(){
   var act = document.activeElement;
-  var typing = act && /^(INPUT|TEXTAREA|SELECT)$/.test(act.tagName || '');
+  // Build 730: FOCUS IS NOT TYPING, here too (veniaMidEdit learned it in an
+  // earlier build). A search box that kept focus after its panel closed made
+  // every repaint stand down, so a change from another window or device never
+  // reached the page you were on until you moved. A field counts as being
+  // typed in when it is on screen and a key went into it in the last 6 seconds.
+  var typing = !!(act && /^(INPUT|TEXTAREA|SELECT)$/.test(act.tagName || '')
+    && act.getClientRects && act.getClientRects().length
+    && (Date.now() - (window.__veniaLastKey || 0)) < 6000);
   try {
     if (!typing && window.STATE && STATE.currentPage && typeof renderPage === 'function') renderPage(STATE.currentPage);
   } catch (e) {}
@@ -14995,6 +15002,36 @@ function colorSwatches(csv, max, size){
   }).join('');
   const rest = list.length - Math.min(list.length, cap);
   return `<div style="display:flex;align-items:center;gap:4px" title="${esc(list.join(', '))}">${dots}${rest?`<span style="font-size:9px;color:var(--muted);font-family:'DM Mono',monospace">+${rest}</span>`:''}</div>`;
+}
+
+// WHICH VERSION OF A STYLE (Build 730). VENIA keeps one style per
+// fabrication, so RHIZOPHORA in oxblood jacquard and RHIZOPHORA in parchment
+// viscose are two styles with one name. Anywhere a style is picked for a run,
+// or a run is listed, the name alone does not say which one; the colour (with
+// its swatch) and the fabric do. A run's own colour wins over the style's list.
+function styleVersionText(s, colour){
+  const col = String(colour != null && String(colour).trim() !== '' ? colour : ((s && s.colors) || '')).trim();
+  const fab = String((s && s.fabric) || '').trim();
+  return [col, fab].filter(Boolean).join(' · ');
+}
+function styleVersionHTML(s, colour, opts){
+  opts = opts || {};
+  const col = String(colour != null && String(colour).trim() !== '' ? colour : ((s && s.colors) || '')).trim();
+  const words = styleVersionText(s, colour);
+  if (!words) return opts.empty ? '<span class="sv-ver" style="color:var(--muted)">No colour or fabric on file</span>' : '';
+  return '<span class="sv-ver" style="display:inline-flex;align-items:center;gap:6px;min-width:0;max-width:100%;vertical-align:middle">'
+    + (col ? '<span style="flex:none;display:inline-flex">' + colorSwatches(col, 3, opts.px || 12) + '</span>' : '')
+    + '<span style="overflow-wrap:anywhere;min-width:0">' + esc(words) + '</span></span>';
+}
+// The style's photo, or its first colour as a flat chip when there is none.
+function styleThumbHTML(s, px){
+  px = px || 40;
+  const box = 'width:' + px + 'px;height:' + px + 'px;flex:0 0 ' + px + 'px;border:1px solid var(--border);display:block';
+  if (s && /^https:\/\//i.test(String(s.photoUrl || '').trim()))
+    return '<img src="' + esc(String(s.photoUrl).trim()) + '" alt="" loading="lazy" style="' + box + ';object-fit:cover;background:var(--bg-off)">';
+  const first = String((s && s.colors) || '').split(',')[0].trim();
+  const bg = (first && colorCss(first)) || 'var(--bg-off)';
+  return '<span aria-hidden="true" style="' + box + ';background:' + bg + '"></span>';
 }
 
 function matSwatchBlock(m, fallback){
@@ -20430,9 +20467,9 @@ function poDemandHTML(season, seasons){
       ? `<button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px" onclick="rsOpen('${r.run.id}')">Open run</button><div style="font-size:10px;margin-top:3px;color:${ppTone(dc.tone)}">${slEsc(dc.short)}</div>${(() => { if (!r.gap) return ''; const has = ppRunUnits(r.run), want = ppRunTarget(r); if (want === has) return ''; return `<div style="font-size:10px;margin-top:4px;color:var(--amber)">Run has ${has}, plan says ${want}</div><button type="button" class="btn btn-ghost btn-sm" style="padding:3px 8px;margin-top:3px" onclick="ppUpdateRun('${s.id}','${slEsc(season)}')">Update run to ${want}</button>`; })()}`
       : r.toPlan > 0 ? '<span style="font-size:10px;color:var(--muted)">Not planned</span>' : '<span style="font-size:10px;color:var(--muted)">—</span>';
     return `<tr>
-      <td data-label=""><div class="t-name">${slEsc(s.name||'')}</div><div class="t-id">${slEsc(s.styleId||'')}</div></td>
+      <td data-label=""><div class="t-name">${slEsc(s.name||'')}</div>${styleVersionText(s) ? `<div style="font-size:10px;margin-top:3px">${styleVersionHTML(s)}</div>` : ''}<div class="t-id">${slEsc(s.styleId||'')}</div></td>
       <td data-label="Ordered" style="${num}">${r.ord.units || '<span style="color:var(--muted)">0</span>'}${forLine ? `<div class="pp-for" style="font-family:inherit;font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap" title="${slEsc(r.ord.src.map(x => (x.account||x.id) + ' ' + x.qty + (x.date ? ' · ' + x.date : '')).join('\n'))}">${slEsc(forLine)}</div>` : ''}${r.shipped ? `<div style="font-family:inherit;font-size:10px;color:var(--teal);margin-top:2px;white-space:nowrap" title="${slEsc(r.ord.shippedSrc.map(x => (x.account||x.id) + ' ' + x.qty).join('\n'))}">${r.shipped} shipped</div>` : ''}</td>
-      <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders"></td>
+      <td data-label="Extra"><input type="number" min="0" class="fi fi-mono" style="width:64px;font-size:11px;padding:4px 0;min-height:auto" value="${r.extra||''}" placeholder="0" aria-label="Extra units of ${slEsc(s.name||'')} ${slEsc(styleVersionText(s))} ${slEsc(s.styleId||'')}" onchange="ppSetExtra('${s.id}',this.value)" title="${r.extraFromForecast ? 'From your forecast of ' + (parseInt(s.forecastUnits,10)||0) + ' less what is ordered. ' : ''}Units VENIA wants to make on top of orders"></td>
       <td data-label="To make" class="pp-ph-hide" style="${num};font-weight:700">${r.toMake}</td>
       <td data-label="Have" class="pp-ph-hide" style="${num};color:var(--muted)" title="On a PO ${r.onPo} · in stock ${r.stock}${r.shipped ? ' · shipped ' + r.shipped : ''}">${r.onPo + r.stock + (r.shipped || 0)}</td>
       <td data-label="To plan" style="${num};font-weight:700;color:${r.toPlan > 0 && !r.run ? 'var(--red)' : r.toPlan > 0 ? 'var(--amber)' : r.toMake > 0 ? 'var(--green)' : 'var(--muted)'}">${r.toPlan > 0 ? r.toPlan : r.toMake > 0 ? '✓' : '—'}</td>
@@ -20484,7 +20521,7 @@ window.ppOpen = function(season){
       <input id="pp-on-${i}" type="checkbox" checked style="width:16px;height:16px;min-height:0;flex:0 0 16px;margin:3px 0 0" aria-label="Plan ${slEsc(s.name||'')}">
       <div style="flex:1;min-width:0">
         <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline">
-          <div style="min-width:0"><span style="font-size:12px;font-weight:700">${slEsc(s.name||'')}</span> <span style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${slEsc(s.styleId||'')}</span></div>
+          <div style="min-width:0"><span style="font-size:12px;font-weight:700">${slEsc(s.name||'')}</span> <span style="font-size:10px;color:var(--muted);font-family:'DM Mono',monospace">${slEsc(s.styleId||'')}</span>${styleVersionText(s, d.colour) ? `<div style="font-size:11px;margin-top:3px">${styleVersionHTML(s, d.colour)}</div>` : ''}</div>
           <label style="font-size:10px;color:var(--muted);display:flex;gap:6px;align-items:center">Units <input id="pp-qty-${i}" type="number" min="1" value="${d.qty}" style="${fld};width:70px"></label>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">${slEsc(forLine)} · ${slEsc(who)} · ${slEsc(RS_PATHS[rsPath(d)])}${d.inStockBy ? ' · in stock by ' + slEsc(veniaDate(d.inStockBy)) : ''}${cut ? ' · cut by ' + slEsc(veniaDate(cut)) : ''}</div>
@@ -20547,6 +20584,35 @@ window.ppStart = function(season){
 };
 
 
+// A REPAINT THAT CHANGES NOTHING TOUCHES NOTHING (Build 730). Production was
+// redrawn from scratch every time a save landed, another window or device
+// saved, or the app came back into view, which on a busy evening was every few
+// seconds: the table flashed, the field you were in lost its cursor and the
+// row you were pointing at lost its highlight. A background repaint whose
+// page would come out the same now leaves the page alone, and any redraw puts
+// the cursor back in the field it was in.
+function veniaSwapHTML(el, html){
+  if (!el) return false;
+  if (window.__veniaQuiet && el.__vHtml === html && el.childNodes.length) return false;
+  const a = document.activeElement;
+  let sel = null, ss = null, se = null;
+  if (a && a !== el && el.contains(a)) {
+    const q = (v) => String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    if (a.id) sel = '#' + (window.CSS && CSS.escape ? CSS.escape(a.id) : a.id);
+    else if (a.getAttribute('aria-label')) sel = a.tagName.toLowerCase() + '[aria-label="' + q(a.getAttribute('aria-label')) + '"]';
+    try { ss = a.selectionStart; se = a.selectionEnd; } catch (e) {}
+  }
+  el.innerHTML = html;
+  el.__vHtml = html;
+  if (sel) {
+    try {
+      const b = el.querySelector(sel);
+      if (b) { b.focus({ preventScroll: true }); if (ss != null && typeof b.setSelectionRange === 'function') b.setSelectionRange(ss, se); }
+    } catch (e) {}
+  }
+  return true;
+}
+
 function renderProduction(){
   const el = document.getElementById('production-content');
   if (!el) return;
@@ -20585,7 +20651,7 @@ function renderProduction(){
       }).filter(Boolean).join('')}</div>`;
     })() : '';
     return `<tr onclick="${po.kind==='restock'?'rsOpen':'poOpenModal'}('${po.id}')" style="cursor:pointer">
-      <td data-label=""><div class="t-name">${po.id}${po.type==='fabric'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">FABRIC</span>':''}${po.type==='trim'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">TRIM</span> <span style="font-size:11px;font-weight:400">'+slEsc(po.itemName||'')+'</span>':''}${po.kind==='restock'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">'+rsPathLabel(po)+'</span> <span style="font-size:11px;font-weight:400">'+slEsc(rsTitle(po))+'</span>':''}${po.runId?' <span style="font-size:10px;color:var(--muted)">for '+slEsc(po.runId)+'</span>':''}</div><div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div>${msLine}</td>
+      <td data-label=""><div class="t-name">${po.id}${po.type==='fabric'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">FABRIC</span>':''}${po.type==='trim'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">TRIM</span> <span style="font-size:11px;font-weight:400">'+slEsc(po.itemName||'')+'</span>':''}${po.kind==='restock'?' <span style="font-size:10px;letter-spacing:1px;color:var(--teal);font-weight:700">'+rsPathLabel(po)+'</span> <span style="font-size:11px;font-weight:400">'+slEsc(rsTitle(po))+'</span>':''}${po.runId?' <span style="font-size:10px;color:var(--muted)">for '+slEsc(po.runId)+'</span>':''}</div>${po.kind==='restock' && styleVersionText(rsStyle(po), po.colour) ? '<div style="font-size:10px;margin-top:3px">' + styleVersionHTML(rsStyle(po), po.colour) + '</div>' : ''}<div class="t-id">${slEsc(po.vendor||'—')}${po.season?' · '+slEsc(po.season):''}</div>${msLine}</td>
       <td data-label="Units" style="font-family:'DM Mono',monospace;font-size:11px">${po.type==='fabric' ? (po.qty||0)+' '+slEsc(po.unit||'yd') : po.type==='trim' ? (po.qty||0)+' '+slEsc(po.unit||'pc') : (po.units||0) + ((po.items||[]).some(it=>it.receivedQty) ? ' <span style="color:var(--teal)">('+(po.items||[]).reduce((a,it)=>a+(it.receivedQty||0),0)+' in)</span>' : '')}</td>
       <td data-label="Total" style="font-family:'DM Mono',monospace;font-size:11px">${slMoneyC(po.currency, po.total||0)}</td>
       <td data-label="Payments" class="po-pay-cell">${po.kind==='restock' && rsMaker(po)==='cmt' ? (() => { const bs = po.bills||[], open = bs.filter(b => !b.paidAt); return `<span style="font-size:11px;color:${open.length?'var(--amber)':'var(--muted)'}">${bs.length ? (open.length ? open.length + ' bill' + (open.length>1?'s':'') + ' to pay' : 'Bills paid') : 'Paid per work order'}</span>`; })() : pay(po.depositPaidAt, dep, 'D') + pay(po.balancePaidAt, bal, 'B')}</td>
@@ -20593,7 +20659,7 @@ function renderProduction(){
       <td data-label="Status"><span style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;font-weight:600;color:${PO_STATUS_COLORS[po.status]||'var(--muted)'}">${PO_STATUSES[po.status]||po.status||''}</span></td>
     </tr>`;
   }).join('');
-  el.innerHTML = `
+  const html = `
     <div class="stats-row stats-4" style="margin-bottom:20px">
       <div class="stat-card"><div class="stat-label">Open POs</div><div class="stat-val">${open.length}</div><div class="stat-sub">${pos.length} all time</div></div>
       <div class="stat-card"><div class="stat-label">Units on order</div><div class="stat-val">${unitsOnOrder.toLocaleString()}</div><div class="stat-sub">not yet received</div></div>
@@ -20612,6 +20678,7 @@ function renderProduction(){
       <th>PO / Factory</th><th>Units</th><th>Total</th><th>Payments</th><th>Ex-factory</th><th>Status</th>
     </tr></thead><tbody>${rows}</tbody></table></div>`
     : `<div class="empty"><div class="empty-icon">▲</div><div class="empty-text">No purchase orders yet.<br><span style="font-size:10px">Build one from your won wholesale orders — quantities per size roll up automatically.</span></div></div>`}`;
+  veniaSwapHTML(el, html);
 }
 
 function poStyleOpts(sel){
@@ -22365,6 +22432,7 @@ function rsRender(id){
       ${s.photoUrl ? `<img src="${slEsc(s.photoUrl)}" alt="" style="width:84px;height:84px;object-fit:cover;border:1px solid var(--border);flex:0 0 84px">` : ''}
       <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:4px;font-size:12px">
         <div><b>${slEsc(s.name||'')}</b> <span style="color:var(--muted);font-family:'DM Mono',monospace;font-size:11px">${slEsc(s.styleId||'')}${s.season?' · '+slEsc(s.season):''}</span></div>
+        <div>${styleVersionHTML(s, null, { empty: true })}</div>
         <div>Tech pack: ${lastIssue ? `<span style="color:var(--green)">Rev ${slEsc(String(lastIssue.rev||s.rev||''))} issued ${slEsc(veniaDate(lastIssue.at))}</span>` : `<span style="color:var(--amber)">not issued yet</span>`}${s.shareToken ? ' · factory link on' : ''}</div>
         <div style="color:var(--muted);font-size:11px">${rsMaker(d) === 'cmt' ? 'Your cutter and sewers work from the issued tech pack.' : 'The factory works from the issued tech pack.'}</div>
       </div>
@@ -22508,9 +22576,10 @@ function rsRender(id){
       <div style="min-width:0">
         <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:600">Production · ${slEsc(RS_PATHS[rsPath(d)])}${d.id ? ' · ' + slEsc(d.id) : ' · not saved yet'}</div>
         <div class="modal-title" style="margin-top:2px">${slEsc(s.name||'')}</div>
+        <div style="font-size:12px;margin-top:5px">${styleVersionHTML(s, d.colour, { empty: true, px: 14 })}</div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;font-size:11px;color:var(--muted);margin-top:4px">
           <span>${rsMaker(d) === 'cmt' ? 'We run it (LA)' : (d.vendor ? slEsc(d.vendor) : 'No factory yet')}</span>
-          <span>${units ? units + ' units' : 'No quantity yet'}${d.colour ? ' · ' + slEsc(d.colour) : ''}</span>
+          <span>${units ? units + ' units' : 'No quantity yet'}</span>
           <span>${d.inStockBy ? 'In stock by ' + slEsc(veniaDate(d.inStockBy)) : 'No in-stock date'}</span>
           <span>${stock} in stock now</span>
         </div>
@@ -22746,21 +22815,30 @@ window.rsTodayItems = rsTodayItems;
 // Production's "+ Restock": pick the style first (typable list), then the card.
 window.rsPickStyle = function(){
   const ex0 = document.getElementById('rs-pick'); if (ex0) ex0.remove();
-  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived').slice().sort((a,b) => String(a.name||'').localeCompare(String(b.name||'')));
+  // Build 730: versions of one name sit together, each with its swatch,
+  // colour, fabric and photo, so it is clear which one the run is for.
+  const styles = (STATE.styles||[]).filter(s => s.status !== 'archived').slice().sort((a,b) =>
+    String(a.name||'').localeCompare(String(b.name||'')) || styleVersionText(a).localeCompare(styleVersionText(b)));
   const ov = document.createElement('div'); ov.className = 'overlay'; ov.id = 'rs-pick';
   ov.innerHTML = `<div class="modal" style="width:440px;max-width:94vw">
     <div class="modal-head"><div class="modal-title">Produce which style?</div><button class="modal-close" aria-label="Close" onclick="closeModal('rs-pick')">&#x2715;</button></div>
     <div class="modal-body" style="padding:18px 20px;display:flex;flex-direction:column;gap:10px">
-      <input id="rs-pick-q" type="search" placeholder="Type a style name" autocomplete="off" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:10px;font-size:13px" oninput="rsPickFilter(this.value)">
+      <input id="rs-pick-q" type="search" placeholder="Type a style, colour or fabric" autocomplete="off" style="width:100%;background:var(--bg-off);border:1px solid var(--border);color:var(--ink);padding:10px;font-size:13px" oninput="rsPickFilter(this.value)">
       <div id="rs-pick-list" style="max-height:52vh;overflow-y:auto;display:flex;flex-direction:column">${styles.map(s =>
-        `<button class="rs-pick-row" data-n="${slEsc(String((s.name||'')+' '+(s.styleId||'')).toLowerCase())}" onclick="closeModal('rs-pick');rsStart('${s.id}')" style="text-align:left;background:none;border:none;border-bottom:1px solid var(--border);color:var(--ink);padding:10px 4px;font-size:12px;cursor:pointer">${slEsc(s.name||'')} <span style="color:var(--muted);font-size:10px;font-family:'DM Mono',monospace">${slEsc(s.styleId||'')} ${slEsc(s.season||'')}</span></button>`).join('')}</div>
+        `<button class="rs-pick-row" data-n="${slEsc(String((s.name||'')+' '+(s.styleId||'')+' '+styleVersionText(s)+' '+(s.season||'')).toLowerCase())}" onclick="closeModal('rs-pick');rsStart('${s.id}')" style="text-align:left;background:none;border:none;border-bottom:1px solid var(--border);color:var(--ink);padding:10px 4px;font-size:12px;cursor:pointer;display:flex;flex:0 0 auto;gap:12px;align-items:center;width:100%;min-height:0;letter-spacing:0;text-transform:none">${styleThumbHTML(s, 40)}<span style="flex:1;min-width:0;display:block"><span style="display:block;font-weight:600">${slEsc(s.name||'')}</span><span style="display:block;margin-top:3px;font-size:11px">${styleVersionHTML(s, null, { empty: true })}</span><span style="display:block;margin-top:2px;color:var(--muted);font-size:10px;font-family:'DM Mono',monospace">${slEsc(s.styleId||'')} ${slEsc(s.season||'')}</span></span></button>`).join('')}</div>
     </div></div>`;
   document.body.appendChild(ov); openModal('rs-pick');
   setTimeout(() => { const q = document.getElementById('rs-pick-q'); if (q) q.focus(); }, 30);
 };
 window.rsPickFilter = function(q){
   q = String(q||'').trim().toLowerCase();
-  document.querySelectorAll('#rs-pick-list .rs-pick-row').forEach(b => { b.hidden = !!q && !b.dataset.n.includes(q); });
+  // Build 730: words in any order ("oxblood rhizo"), and display set directly:
+  // the rows are flex boxes now, which the hidden attribute alone won't hide.
+  const words = q.split(/\s+/).filter(Boolean);
+  document.querySelectorAll('#rs-pick-list .rs-pick-row').forEach(b => {
+    const off = words.length > 0 && !words.every(w => b.dataset.n.includes(w));
+    b.hidden = off; b.style.display = off ? 'none' : 'flex';
+  });
 };
 
 // ═══════════════════════════════════════════════
@@ -65089,6 +65167,9 @@ window.veniaModulesRender = async function(){
   // So every exit arms a retry, and the app can say out loud that it is
   // holding work the cloud has not accepted.
   var pushDirty = false, retryTimer = null, retryStep = 0;
+  // Build 730: a push the server actually refused (or that could not reach it),
+  // as opposed to one held back on purpose while the app finishes starting.
+  var pushFailedLoud = false;
   var RETRY_MS = [3000, 8000, 20000, 45000, 90000];
   // A retry nobody can see is still a silent failure while it runs. While this
   // device holds work the cloud has not accepted, it says so — appended to
@@ -65136,6 +65217,7 @@ window.veniaModulesRender = async function(){
   // badge nobody reads on the day it matters.
   function pushFailed(why, quiet){
     pushDirty = true;
+    if (!quiet) pushFailedLoud = true;
     window.__syncRetryArmed = true;
     // The leg itself, not just the retry note. `quiet` governs the BADGE — it
     // never meant "do not record the failure", and reading it that way left the
@@ -65226,6 +65308,7 @@ window.veniaModulesRender = async function(){
     var settled = !startedAt || !owed || owed <= startedAt;
     if (settled) { try { localStorage.removeItem(OWED_KEY); } catch (e) {} }
     pushDirty = !settled; retryStep = 0;
+    pushFailedLoud = false;
     window.__syncRetryArmed = false;
     _syncErrToasted = false;
     try { pendingBadge(false); } catch(e){}
@@ -65238,9 +65321,24 @@ window.veniaModulesRender = async function(){
   // An edit is "not saved" once its push is overdue, not during the 1.5
   // seconds it waits for one: Build 587 counted the wait too, so the label
   // flashed "Not saved" after every edit (Build 588).
+  //
+  // SAVING IS NOT "NOT SAVED" (Build 730). This said "not saved" once an edit
+  // had waited 8 seconds, however the save was going. A save carries the whole
+  // workspace and the server takes 5 to 15 seconds to take it in on a normal
+  // day (Nov 22: every one of 254 saves landed, the slowest in 25 seconds), so
+  // most edits read as failures while they were being saved. Now the label
+  // says Not saved only when a save was refused or could not reach the
+  // server, or an edit has waited 30 seconds with no save under way (90 while
+  // one is), and Saving while one is going.
   window.__syncPending = function(){
+    if (pushFailedLoud) return true;
     var o = owedAt();
-    return !!pushDirty || (!!o && Date.now() - o > 8000);
+    if (!o) return false;
+    var age = Date.now() - o;
+    return age > ((pushInFlight || mirrorBusy) ? 90000 : 30000);
+  };
+  window.__syncSaving = function(){
+    return !!pushInFlight || !!owedAt() || (!!pushDirty && !pushFailedLoud);
   };
 
   // A LAPSED SIGN-IN IS NOT A FLAKY NETWORK.
@@ -65601,8 +65699,13 @@ window.veniaModulesRender = async function(){
     rerender();
     window.__syncStat.tabSync = { t: new Date().toISOString(), ok: true, via: 'sibling tab' };
     // The merge may carry records this tab holds and the other does not, so the
-    // result still owes the cloud a push.
-    schedulePush();
+    // result still owes the cloud a push. Build 730: only then. When it is just
+    // the other tab's change, that tab is already saving it, and saving the same
+    // thing again from here doubled every save while two tabs were open.
+    try {
+      var adds = (window.SYNC_KEYS || []).some(function(k){ return _mStr(merged[k]) !== _mStr(incoming[k]); });
+      if (adds) schedulePush();
+    } catch (e) { schedulePush(); }
   }
   window.addEventListener('storage', function(e){
     if (!e || e.key !== 'venia-plm-v2' || !e.newValue) return;
@@ -65806,6 +65909,38 @@ window.veniaModulesRender = async function(){
   // asked for mid-flight is remembered and run once the current one finishes,
   // from a fresh snapshot.
   var pushInFlight = false, pushAgain = false, pushStartedAt = 0;
+  // THE MIRROR (Build 730): the whole workspace in one row, still kept for the
+  // factory share link and as a recovery copy. Written after a save lands, at
+  // most once every 45 seconds, never two at once and never while a save is
+  // going; a refusal is retried and shown in the sync panel, and does not mark
+  // the edit unsaved (the module rows already hold it).
+  var mirrorData = null, mirrorTimer = null, mirrorLastAt = 0, mirrorBusy = false, MIRROR_MS = 45000;
+  function mirrorQueue(data){
+    mirrorData = data;
+    if (mirrorTimer || mirrorBusy) return;
+    mirrorTimer = setTimeout(mirrorWrite, Math.max(1500, MIRROR_MS - (Date.now() - mirrorLastAt)));
+  }
+  async function mirrorWrite(){
+    mirrorTimer = null;
+    if (!mirrorData) return;
+    var c = sb();
+    if (!c || pushInFlight || mirrorBusy) { mirrorTimer = setTimeout(mirrorWrite, pushInFlight ? 3000 : 20000); return; }
+    var data = mirrorData; mirrorData = null; mirrorBusy = true; mirrorLastAt = Date.now();
+    var t = new Date().toISOString();
+    try {
+      var r = await c.from('venia_workspace').upsert({ id: WS_ID, data: data, updated_by: clientId(),
+        updated_at: t, rev: Date.now() }, { onConflict: 'id' });
+      if (r && r.error) throw new Error(r.error.message || r.error.code || 'refused');
+      window.__syncStat.mirror = { t: t, ok: true };
+    } catch (e) {
+      window.__syncStat.mirror = { t: t, ok: false, err: String((e && e.message) || e).slice(0, 140) };
+      if (!mirrorData) mirrorData = data;
+    } finally {
+      mirrorBusy = false;
+      if (mirrorData && !mirrorTimer) mirrorTimer = setTimeout(mirrorWrite, (window.__syncStat.mirror || {}).ok ? MIRROR_MS : 60000);
+    }
+  }
+  window.__syncMirrorNow = function(){ clearTimeout(mirrorTimer); mirrorTimer = null; return mirrorWrite(); };
   async function pushNow(){
     if (pushInFlight) { pushAgain = true; return; }
     pushInFlight = true; pushAgain = false;
@@ -65891,9 +66026,32 @@ window.veniaModulesRender = async function(){
         parts[id] = moduleCorePart(id, cloudParts[id] || {}, parts[id]);
         return true;
       });
+      // ONLY THE ROWS THAT CHANGED (Build 730). Every save sent all nine rows,
+      // 1.35 MB, however small the edit, and then the 1.3 MB mirror below: on
+      // Nov 22 a save took 5 to 15 seconds and showed "Not saved" for most of
+      // that. A row identical to the one the cloud holds right now (read just
+      // above) is not sent: writing it would change nothing. The rows this
+      // device may write are kept apart from the ones it will write, so
+      // "nothing changed" is never read as "not allowed to write".
+      var writableIds = ids.slice();
+      if (cloudRow && cloudRow._rows) {
+        var cloudRaw = {};
+        cloudRow._rows.forEach(function(r){ if (r && r.module) cloudRaw[r.module] = r.data; });
+        ids = ids.filter(function(id){
+          var cr = cloudRaw[id]; if (!cr || !parts[id]) return true;
+          try {
+            var a = Object.assign({}, parts[id]); delete a._who;
+            var b = Object.assign({}, cr); delete b._who;
+            return _mStr(a) !== _mStr(b);
+          } catch (e) { return true; }
+        });
+      }
+      window.__syncStat.rowsSkipped = writableIds.length - ids.length;
       // Build 691: Brand's own row, written only once a pull has seen it (its
       // database update applied) and only by someone its policy lets write.
-      var brandPart = null, brandGrowthToo = ids.indexOf('growth') >= 0;
+      // Build 730: a growth row left out because the cloud already holds it
+      // carries the same Brand keys, so it counts as going up with it.
+      var brandPart = null, brandGrowthToo = writableIds.indexOf('growth') >= 0;
       if (parts.brand && window.__veniaBrandRowSeen && moduleWritable('brand', roles)) {
         brandPart = Object.assign({}, parts.brand);
         delete brandPart._who;
@@ -65933,12 +66091,15 @@ window.veniaModulesRender = async function(){
       // refuses them — which means, without this, a Sales member would fail
       // every push and get an auth toast on every keystroke. Skip it, and let
       // the module rows be the write that counts.
+      // Build 730: the mirror no longer holds the save up. It took 5.7 seconds
+      // on average (25 at worst) for a copy only the factory share link reads,
+      // and the edit was not called saved until it landed. The module rows are
+      // the save; the mirror follows within a minute, in the background, and is
+      // only written when a row actually changed.
       var res = (!writesBlob || (modErr && ids.length))
         ? (modErr ? { error: { message: modErr } } : { skipped: true })
-        : await c.from('venia_workspace').upsert({
-            id: WS_ID, data: toPush, updated_by: clientId(),
-            updated_at: stamp, rev: rev
-          }, { onConflict:'id' });
+        : { skipped: true, mirror: true };
+      if (res.mirror && (ids.length || brandPart)) mirrorQueue(toPush);
       // A MODULE WRITE THAT FAILED MUST FAIL THE PUSH.
       //
       // `res` is the BLOB result. For a founder the blob almost always succeeds,
@@ -65978,7 +66139,7 @@ window.veniaModulesRender = async function(){
           return;
         }
       }
-      if (!ids.length && Object.keys(parts).length && !(brandPart && !brandErr)) {
+      if (!writableIds.length && Object.keys(parts).length && !(brandPart && !brandErr)) {
         syncFail('push', 'this device is not allowed to write any module — nothing has been '
           + 'published. Your work is safe on this device; do not clear the app.');
         window.__syncStat.push = { t: new Date().toISOString(), ok: false,
@@ -66094,6 +66255,7 @@ window.veniaModulesRender = async function(){
   // the owed marker above makes the next boot finish the job.
   function flushOnLeave(){
     if (!window.__sbSyncDone || applyingRemote) return;
+    if (mirrorData && !mirrorBusy) { try { clearTimeout(mirrorTimer); mirrorTimer = null; mirrorWrite(); } catch (e) {} }
     if (!pushTimer && !pushDirty && !owedAt()) return;
     clearTimeout(pushTimer); pushTimer = null;
     try { pushNow(); } catch (e) {}
@@ -66140,7 +66302,8 @@ window.veniaModulesRender = async function(){
       try { brandCtx.seen = JSON.parse(sessionStorage.getItem('venia-brand-seen') || 'null'); } catch (e) {}
       var assembled = moduleAssemble(rows, getBase(), brandCtx);
       if (brandCtx.next) { try { sessionStorage.setItem('venia-brand-seen', JSON.stringify(brandCtx.next)); } catch (e) {} }
-      return { data: assembled, updated_at: newest.updated_at,
+      // Build 730: the rows as stored, so a push can tell which ones it changes.
+      return { _rows: rows, data: assembled, updated_at: newest.updated_at,
                updated_by: newest.updated_by, rev: newest.rev, _fromModules: true };
     } catch(e){ window.__syncStat.modulePull = { ok:false, err: e && e.message }; return null; }
   }
@@ -66222,7 +66385,10 @@ window.veniaModulesRender = async function(){
     if (veniaMidEdit()){ showReloadPill(row); return; }                // don't clobber a live edit
     if (!absorbRemote(row, via || 'realtime')) return;                  // merged to the same thing — nothing to show
     rerender();
-    if (typeof showToast === 'function') showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
+    // Build 730: a change from your own other window or device is not news
+    // worth a toast. (Production's second draw here changes nothing on
+    // screen now: an identical background redraw is skipped.)
+    if (typeof showToast === 'function' && (row.data._who || '') !== who()) showToast((row.data._who||'Partner') + '’s changes synced ✓','info');
   }
 
   // If a remote change arrives mid-edit, offer a one-tap load instead of clobbering.
@@ -66382,6 +66548,9 @@ window.veniaModulesRender = async function(){
       cls = 'bad'; label = 'Not saved';
       why = 'Changes on this device have not reached the server yet — they are safe here '
           + 'and being retried. Do not clear the app or sign out. Tap for detail.';
+    } else if (typeof window.__syncSaving === 'function' && window.__syncSaving()){
+      cls = 'wait'; label = 'Saving';
+      why = 'Saving your last change to the server';
     } else if ((st.push && st.push.ok === false) || (st.pull && st.pull.ok === false)
                || (st.modules && st.modules.ok === false)){
       var leg = (st.push && st.push.ok === false) ? st.push
@@ -66406,7 +66575,7 @@ window.veniaModulesRender = async function(){
   }
   window.veniaSyncPill = veniaSyncPill;
   veniaSyncPill();
-  setInterval(veniaSyncPill, 5000);
+  setInterval(veniaSyncPill, 1000);
   if (typeof window.addEventListener === 'function'){
     window.addEventListener('online', veniaSyncPill);
     window.addEventListener('offline', veniaSyncPill);
