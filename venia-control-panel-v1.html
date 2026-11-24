@@ -4466,8 +4466,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '739';
-  const BUILD_DATE = '2026.11.22';
+  const BUILD = '740';
+  const BUILD_DATE = '2026.11.24';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -8261,8 +8261,23 @@ window.STATE = STATE;
 // ═══════════════════════════════════════════════
 function init() {
   const stored = localStorage.getItem('venia-plm-v2');
+  // A COPY THAT CANNOT BE READ IS NOT AN EMPTY WORKSPACE (Build 740).
+  //
+  // JSON.parse used to throw straight out of init(). Every other start-up step
+  // still ran, sync included, against a STATE that was never loaded: the empty
+  // defaults above. That is the state that erased the line, the press pulls and
+  // Brainstorm on Nov 23. Now an unreadable copy is left exactly where it is,
+  // the app opens, and sync treats this browser as fresh (the cloud copy is
+  // taken whole, nothing from here is pushed until it has been).
+  let parsed = null;
   if (stored) {
-    const parsed = JSON.parse(stored);
+    try { parsed = JSON.parse(stored); } catch (e) { parsed = null; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      window.__veniaLocalUnreadable = true;
+      try { console.warn('[VENIA] this browser\'s saved copy could not be read; the cloud copy will be used'); } catch (e) {}
+    }
+  }
+  if (parsed) {
     Object.assign(STATE, parsed);
     if (!STATE.activityLog) STATE.activityLog = [];
     if (!STATE.dump)       STATE.dump       = [];
@@ -8274,6 +8289,8 @@ function init() {
     if (!STATE.mkCalendar) STATE.mkCalendar = [];
     if (!STATE.prPrefs)    STATE.prPrefs    = {};
     try { if (typeof mkSocialInit === 'function') mkSocialInit(); } catch(e){}
+  } else if (window.__veniaLocalUnreadable) {
+    // Nothing is saved over the unreadable copy here: the cloud fills STATE.
   } else {
     // Real data only — the demo seed era is over. A fresh workspace is empty.
     STATE.styles = [];
@@ -8284,7 +8301,13 @@ function init() {
     STATE.activityLog = [];
     save();
   }
+  // What each section holds now, so a later save can tell a person clearing
+  // one from a sync that never had it (see veniaNoteEmptied).
+  try { if (typeof veniaNoteEmptied === 'function') veniaNoteEmptied(true); } catch (e) {}
   window.__veniaBooted = true;
+  // Sync waits for this (Build 740): it may not merge or push until the
+  // workspace saved on this device is in STATE.
+  try { window.dispatchEvent(new Event('venia:booted')); } catch (e) {}
   buildSkus();
   renderPage('dashboard');
   populateStyleSelects();
@@ -9438,8 +9461,119 @@ function veniaStampUpdated(refreshOnly) {
   }
 }
 window.veniaStampUpdated = veniaStampUpdated;
+// ══ WIPE GUARD (Build 740) ══════════════════════════════════════════════════
+//
+// On Nov 23 at 11:08 PM a reloaded tab merged with the cloud before it had
+// loaded its own saved copy. Its STATE was still the empty defaults, its merge
+// base (kept per tab in sessionStorage) still held everything, so the merge
+// read every style, material, vendor, press pull and Brainstorm note as
+// "deleted on this device" and published that. 116 styles became 0.
+//
+// Three locks, each enough on its own for that night:
+//   1. sync does not merge or push until init() has loaded STATE (sbLiveStart,
+//      absorbRemote, adoptFromSiblingTab and pushNowOnce all wait for it);
+//   2. a merge may never empty a section the other side still holds unless a
+//      person emptied it on this device (veniaKeepNonEmpty, below);
+//   3. the database refuses such a save too (venia_refuse_emptying).
+//
+// "A person emptied it" is noted here, in save(), the one place every edit
+// passes through: a section that held something at the last save and holds
+// nothing now, while no remote copy is being applied, was emptied by this
+// device on purpose. The mark rides up with the push (_emptyOk) so the
+// database can tell the two apart as well.
+function veniaCount(v) {
+  if (v == null) return 0;
+  if (Array.isArray(v)) return v.length;
+  if (typeof v === 'object') return Object.keys(v).length;
+  return 1;
+}
+window.veniaCount = veniaCount;
+var VENIA_EMPTY_OK_MS = 3 * 864e5;
+function veniaEmptyOkMap() {
+  let m = null;
+  try { m = JSON.parse(localStorage.getItem('venia-empty-ok') || '{}'); } catch (e) { m = null; }
+  if (!m || typeof m !== 'object' || Array.isArray(m)) m = {};
+  const cut = Date.now() - VENIA_EMPTY_OK_MS;
+  Object.keys(m).forEach(function (k) { if (!(Number(m[k]) > cut)) delete m[k]; });
+  return m;
+}
+window.veniaEmptyOkMap = veniaEmptyOkMap;
+function veniaEmptyOk(k) { return !!veniaEmptyOkMap()[k]; }
+window.veniaEmptyOk = veniaEmptyOk;
+function veniaNoteEmptied(resetOnly) {
+  const keys = window.SYNC_KEYS || [];
+  const prev = window.__vCounts, now = {};
+  for (let i = 0; i < keys.length; i++) now[keys[i]] = veniaCount(STATE[keys[i]]);
+  if (!resetOnly && prev && window.__veniaBooted && !window.__vApplyingRemote) {
+    let m = null;
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (prev[k] > 0 && now[k] === 0) { if (!m) m = veniaEmptyOkMap(); m[k] = Date.now(); }
+      else if (now[k] > 0 && m && m[k]) delete m[k];
+    }
+    if (m) { try { localStorage.setItem('venia-empty-ok', JSON.stringify(m)); } catch (e) {} }
+  }
+  window.__vCounts = now;
+}
+window.veniaNoteEmptied = veniaNoteEmptied;
+// The ids a section holds: records' ids, and for {styleId: [rows]} maps both
+// the style ids and the rows' ids. Used to take back tombstones a refused
+// merge wrote for records it was about to drop.
+function veniaIdsIn(v, into) {
+  into = into || Object.create(null);
+  if (Array.isArray(v)) v.forEach(function (r) { if (r && typeof r === 'object' && r.id != null) into[String(r.id)] = 1; });
+  else if (v && typeof v === 'object') Object.keys(v).forEach(function (k) { into[k] = 1; veniaIdsIn(v[k], into); });
+  return into;
+}
+// Lock 2. `out` is a merge result about to be applied or published; `other`
+// is the copy it was merged against (the cloud, or a sibling tab). Any section
+// `other` still holds that `out` has emptied, without this device's mark, is
+// put back from `other`. Tombstones written since `tombBefore` (a key set) for
+// records in a section put back are taken back too: they were never deletes.
+// Returns the sections put back.
+function veniaKeepNonEmpty(out, other, tombBefore, via) {
+  const kept = [];
+  if (!out || !other || typeof other !== 'object') return kept;
+  const keys = window.SYNC_KEYS || [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!(k in other) || veniaCount(other[k]) === 0) continue;
+    if (veniaCount(out[k]) > 0 || veniaEmptyOk(k)) continue;
+    out[k] = other[k];
+    kept.push(k);
+  }
+  if (!kept.length) return kept;
+  try {
+    const tomb = (typeof STATE !== 'undefined' && STATE && STATE._tomb) || null;
+    if (tomb && tombBefore) {
+      const ids = Object.create(null);
+      kept.forEach(function (k) { veniaIdsIn(other[k], ids); });
+      Object.keys(tomb).forEach(function (id) { if (!tombBefore[id] && ids[id]) delete tomb[id]; });
+      if (out._tomb && out._tomb !== tomb) Object.keys(out._tomb).forEach(function (id) { if (!tombBefore[id] && ids[id]) delete out._tomb[id]; });
+    }
+  } catch (e) {}
+  try {
+    window.__syncStat = window.__syncStat || {};
+    window.__syncStat.wipeGuard = { t: new Date().toISOString(), via: via || '', kept: kept.slice() };
+    console.warn('[VENIA] wipe guard kept ' + kept.join(', ') + ' (' + (via || 'merge') + ')');
+  } catch (e) {}
+  return kept;
+}
+window.veniaKeepNonEmpty = veniaKeepNonEmpty;
+function veniaTombKeys() {
+  const t = (typeof STATE !== 'undefined' && STATE && STATE._tomb) || {};
+  const o = Object.create(null);
+  Object.keys(t).forEach(function (k) { o[k] = 1; });
+  return o;
+}
+window.veniaTombKeys = veniaTombKeys;
+// ══ end WIPE GUARD ══════════════════════════════════════════════════════════
 function save() {
   if (!window.__vApplyingRemote) { try { veniaStampUpdated(false); } catch (e) {} }
+  // Before init() has loaded this device's copy, STATE is the empty defaults:
+  // writing it would replace the saved workspace with nothing (Build 740).
+  if (!window.__veniaBooted) return;
+  try { veniaNoteEmptied(false); } catch (e) {}
   const out = {};
   for (const k of SYNC_KEYS) if (STATE[k] !== undefined) out[k] = STATE[k];
   try {
@@ -65822,7 +65956,7 @@ window.veniaModulesRender = async function(){
       var p = window.__syncStat && window.__syncStat.push;
       if (!pushDirty || !p || p.ok !== false) return false;
       if (navigator.onLine === false) return false;
-      if (/sync not started|no client/i.test(String(p.raw || ''))) return false;
+      if (/sync not started|no client|app still opening/i.test(String(p.raw || ''))) return false;
       if (/^no network connection/i.test(String(p.err || ''))) return false;
       return true;
     } catch (e) { return false; }
@@ -66031,9 +66165,18 @@ window.veniaModulesRender = async function(){
   // the phone came out of a pocket, and on a desk once at boot and every four
   // minutes. The change test was already here; the repaint now waits for it.
   function absorbRemote(row, via){
+    // Not before init() has loaded STATE (Build 740): merged against the empty
+    // defaults, every record the base holds reads as deleted here.
+    if (!window.__veniaBooted) {
+      window.__syncStat.held = { t: new Date().toISOString(), via: (via || 'pull') + ' held: app still opening' };
+      return false;
+    }
     var before = null;
     try { before = _mStr(snapshot()); } catch (e) { before = null; }
-    applySnapshot(mergeSnapshots(getBase(), snapshot(), row.data), true);
+    var tombBefore = veniaTombKeys();
+    var merged = mergeSnapshots(getBase(), snapshot(), row.data);
+    veniaKeepNonEmpty(merged, row.data, tombBefore, via || 'pull');
+    applySnapshot(merged, true);
     setBase(row.data);
     window.__syncStat.apply = { t: new Date().toISOString(), ok: true, via: via || 'pull' };
     var changed = true;
@@ -66069,6 +66212,7 @@ window.veniaModulesRender = async function(){
   var _tabSyncTimer = null;
   function adoptFromSiblingTab(raw){
     if (!raw) return;
+    if (!window.__veniaBooted) return;   // Build 740: not before this tab has loaded its own copy
     if (veniaMidEdit()) {
       clearTimeout(_tabSyncTimer);
       _tabSyncTimer = setTimeout(function(){ adoptFromSiblingTab(raw); }, 1200);
@@ -66084,7 +66228,9 @@ window.veniaModulesRender = async function(){
     var merged;
     try {
       if (_mStr(incoming) === _mStr(mine)) return;
+      var tombBefore = veniaTombKeys();
       merged = mergeSnapshots(getBase(), mine, incoming);
+      veniaKeepNonEmpty(merged, incoming, tombBefore, 'sibling tab');
       if (_mStr(merged) === _mStr(mine)) return;
     } catch (e) { return; }
     applySnapshot(merged);
@@ -66348,6 +66494,8 @@ window.veniaModulesRender = async function(){
     // data and save()s during init — pushing that would clobber the real
     // workspace before we've even looked at it.
     if (!window.__sbSyncDone) { pushFailed('sync not started', true); return; }
+    // Build 740: and never before init() has loaded this device's copy.
+    if (!window.__veniaBooted) { pushFailed('sync not started: app still opening', true); return; }
     var c = sb(); if (!c) { pushFailed('no client', true); return; }
     // No session means RLS will refuse every write. Hold, don't hammer.
     if (!(await hasAuthSession())) { pauseForSignIn('no session'); return; }
@@ -66356,6 +66504,7 @@ window.veniaModulesRender = async function(){
     pushStartedAt = rev;
     try {
       var localSnap = snapshot();
+      var tombBefore = veniaTombKeys();
       // WHAT THIS DEVICE DELETED, read once, here, against the snapshot it last
       // agreed with the cloud. Doing it at the push rather than at each delete
       // button means every path is covered — including the ones nobody has
@@ -66370,6 +66519,13 @@ window.veniaModulesRender = async function(){
       // read fails (offline), fall back to pushing local as-is.
       var cloudRow = await pullRow();
       var toPush = (cloudRow && cloudRow.data) ? mergeSnapshots(getBase(), localSnap, cloudRow.data) : localSnap;
+      // Lock 2 (Build 740): a section the cloud holds is not published empty
+      // unless a person emptied it here. Put back, it is adopted after the push
+      // like any record the merge carried, so the screen gets it back too.
+      if (cloudRow && cloudRow.data && toPush !== localSnap) veniaKeepNonEmpty(toPush, cloudRow.data, tombBefore, 'push');
+      // The sections a person emptied here go up marked, so the database can
+      // tell them from a wipe (venia_refuse_emptying).
+      var emptyOk = veniaEmptyOkMap();
       var stamp = new Date().toISOString();
       // ── PER-MODULE ROWS: the new home of the workspace ──
       // Written first and treated as the write that counts. Only the modules
@@ -66432,8 +66588,8 @@ window.veniaModulesRender = async function(){
         ids = ids.filter(function(id){
           var cr = cloudRaw[id]; if (!cr || !parts[id]) return true;
           try {
-            var a = Object.assign({}, parts[id]); delete a._who;
-            var b = Object.assign({}, cr); delete b._who;
+            var a = Object.assign({}, parts[id]); delete a._who; delete a._emptyOk;
+            var b = Object.assign({}, cr); delete b._who; delete b._emptyOk;
             return _mStr(a) !== _mStr(b);
           } catch (e) { return true; }
         });
@@ -66452,7 +66608,8 @@ window.veniaModulesRender = async function(){
         // and the mark is cleared.
         if (!brandGrowthToo) brandPart._brandAhead = true;
         var brandCloud = window.__veniaBrandCloud ? Object.assign({}, window.__veniaBrandCloud) : null;
-        if (brandCloud) delete brandCloud._who;
+        if (brandCloud) { delete brandCloud._who; delete brandCloud._emptyOk; }
+        delete brandPart._emptyOk;
         // Nothing new for it: leave the row alone (no write, no realtime echo).
         try { if (brandCloud && _mStr(brandCloud) === _mStr(brandPart)) brandPart = null; } catch (e) {}
       }
@@ -66461,6 +66618,9 @@ window.veniaModulesRender = async function(){
           ids.map(function(id){
             var part = parts[id];
             part._who = toPush._who;
+            var ok = null;
+            Object.keys(emptyOk).forEach(function(k){ if (k in part) { (ok = ok || {})[k] = emptyOk[k]; } });
+            if (ok) part._emptyOk = ok; else delete part._emptyOk;
             return { workspace_id: WS_ID, module: id, data: part,
                      updated_by: clientId(), updated_at: stamp, rev: rev };
           }), { onConflict: 'workspace_id,module' }) : null;
@@ -66515,6 +66675,9 @@ window.veniaModulesRender = async function(){
       if (brandPart && !(modErr && ids.length)) {
         try {
           brandPart._who = toPush._who;
+          var bOk = null;
+          Object.keys(emptyOk).forEach(function(k){ if (k in brandPart) { (bOk = bOk || {})[k] = emptyOk[k]; } });
+          if (bOk) brandPart._emptyOk = bOk;
           var bRes = await c.from('venia_module_data').upsert({ workspace_id: WS_ID, module: 'brand', data: brandPart,
             updated_by: clientId(), updated_at: stamp, rev: rev }, { onConflict: 'workspace_id,module' });
           brandErr = bRes && bRes.error ? (bRes.error.message || bRes.error.code) : null;
@@ -66983,6 +67146,8 @@ window.veniaModulesRender = async function(){
     // that failed this check IGNORED the cloud (Brainstorm items included) and
     // pushed its own stale state. Any real content now marks the cloud usable.
     var d0 = row && row.data;
+    // Build 740: a saved copy init() could not read counts as no copy at all.
+    var fresh = !!(FRESH_BROWSER || window.__veniaLocalUnreadable);
     var cloudOk = !!(d0 && (
       (Array.isArray(d0.styles) && d0.styles.length) ||
       (Array.isArray(d0.dump) && d0.dump.length) ||
@@ -66991,7 +67156,7 @@ window.veniaModulesRender = async function(){
       (Array.isArray(d0.prPulls) && d0.prPulls.length) ||
       (Array.isArray(d0.materials) && d0.materials.length)
     ));
-    if (cloudOk && !FRESH_BROWSER && localIsStale()){
+    if (cloudOk && !fresh && localIsStale()){
       _logDecision('cloudOk=true, local copy older than 48h → set aside (backup kept), cloud applied');
       setAsideStaleLocal(row, 'boot');
       return;
@@ -67003,15 +67168,15 @@ window.veniaModulesRender = async function(){
       // (i.e. a partner device wrote after us). Otherwise local wins: devices
       // from before this fix have real local data but no watermark — pushing
       // it up beats letting a stale/seed cloud copy overwrite real work.
-      _logDecision('cloudOk=true, fresh=' + !!FRESH_BROWSER + ', myRev=' + myRev + ', cloudRev=' + cloudRev + (FRESH_BROWSER || (myRev && cloudRev >= myRev) ? ' → apply cloud' : ' → local wins, push'));
-      if (FRESH_BROWSER || (myRev && cloudRev >= myRev)){
+      _logDecision('cloudOk=true, fresh=' + fresh + ', myRev=' + myRev + ', cloudRev=' + cloudRev + (fresh || (myRev && cloudRev >= myRev) ? ' → apply cloud' : ' → local wins, push'));
+      if (fresh || (myRev && cloudRev >= myRev)){
         if (row.updated_by !== clientId()){
           // Fresh browser holds only seed data → let cloud win wholesale. A
           // returning device has real local work → 3-way merge so unpushed local
           // edits survive alongside the cloud's.
           // Build 696: a returning device repaints only when the merge
           // changed something; an identical cloud copy leaves the screen be.
-          if (FRESH_BROWSER) { applySnapshot(row.data); setBase(row.data); rerender(); }
+          if (fresh) { applySnapshot(row.data); setBase(row.data); rerender(); }
           else if (absorbRemote(row, 'boot')) rerender();
         } else {
           // Last cloud write was ours — but that is not proof our copy matches
@@ -67044,6 +67209,10 @@ window.veniaModulesRender = async function(){
         if (row && row.data && absorbRemote(row, 'boot (local newer — merged, not overwritten)')) rerender();
         pushNow();                    // publish the union (pushNow sets base)
       }
+    } else if (window.__veniaLocalUnreadable) {
+      // Build 740: nothing readable here and nothing usable there. Publishing
+      // the empty defaults would be the wipe itself, so wait for a person.
+      _logDecision('cloudOk=false and this browser\'s copy unreadable → nothing pushed');
     } else {
       _logDecision('cloudOk=false (no usable cloud content) → pushing local');
       pushNow();                      // no (usable) workspace yet → seed it from this device
@@ -67066,7 +67235,12 @@ window.veniaModulesRender = async function(){
     startRealtime();
     // Flag when the first cloud snapshot has landed — the ?tag boot path waits
     // for this so a fresh Safari session decides against real data, not seeds.
-    initialSync().finally(function(){
+    // Build 740: and not before init() has loaded this device's copy into
+    // STATE. The client can exist before that (the sync library already on the
+    // page at parse time), and a boot merge against the empty defaults is what
+    // erased the line on Nov 23. If init() never finishes, sync never starts,
+    // and the start-up check offers Reload (nothing is published from here).
+    whenBooted(function(){ initialSync().finally(function(){
       window.__sbSyncDone = true;
       // Whatever this device still owes the cloud from before the reload goes
       // up now. pushNow merges with the cloud first, so this publishes the
@@ -67075,8 +67249,18 @@ window.veniaModulesRender = async function(){
       // After the workspace has landed, so a pull cannot race the merge.
       try { if (typeof bankDailySync === 'function') setTimeout(bankDailySync, 2500); } catch(e){}
       try { checkSignedIn(); } catch(e){}
-    });
+    }); });
   };
+  function whenBooted(fn){
+    if (window.__veniaBooted) { fn(); return; }
+    window.__syncStat.decision = 'waiting for the app to finish opening before syncing';
+    var done = false;
+    var go = function(){ if (done || !window.__veniaBooted) return; done = true; window.removeEventListener('venia:booted', go); fn(); };
+    window.addEventListener('venia:booted', go);
+    // Belt and braces for a browser that drops the event: look again briefly.
+    var tries = 0;
+    (function look(){ if (done) return; if (window.__veniaBooted) { go(); return; } if (++tries < 1200) setTimeout(look, 250); })();
+  }
 
   // Re-patch save() to also push the full blob (debounced).
   ;(function(){
