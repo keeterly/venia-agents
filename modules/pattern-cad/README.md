@@ -97,3 +97,10 @@ Build 739: the marker panel reads in the order a marker is made: 1 Fabric and si
 sizes, plies, pieces), 2 Nest (results and yield to the BOM), 3 Plot and export. Spread, shrinkage,
 nap, size steps, stripes and splices fold under Fine-tune; cut order plan, costing and the fabric
 library under Plan and compare. A piece left out of every marker shows at the top. Nothing removed.
+
+Build 743: block fusing and colorways. A marker's Cut from offers `Self / Fuse (block fused)`: the
+fused pieces laid as blocks in a marker of their own, whose yield fills its own BOM line (the shell
+now keeps one Dr4ft line per fabric and cut; a line with no cut stays the fabric's main line). And
+Production › Colorways in other fabrics: one shared pattern, each colorway with its own piece
+materials, markers and linked style (CLO-style). The library also shelves a pattern under each
+colorway's style and opens it on that colorway. No table or function changed.

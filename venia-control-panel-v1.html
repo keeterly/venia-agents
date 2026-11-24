@@ -4509,7 +4509,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '742';
+  const BUILD = '743';
   const BUILD_DATE = '2026.11.24';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14333,7 +14333,7 @@ function bomSelectStyle(styleId) {
 function bomRowHtml(styleId, item, idx, typeColors) {
   const lineColor = typeColors[item.lineType||item.matType||'Custom'] || 'var(--muted)';
   const d4 = item._fromDr4ft && Math.abs((parseFloat(item.qty) || 0) - (+item._fromDr4ft.qty || 0)) < 0.005 ? item._fromDr4ft : null;
-  const d4Title = d4 ? 'Yield from Dr4ft' + (d4.marker ? ', ' + d4.marker : '') + (d4.pattern ? ' (' + d4.pattern + ')' : '') + (d4.widthMm ? ', ' + veniaFmtWidthMm(+d4.widthMm) + ' wide' : '') + (d4.efficiency ? ', ' + (d4.efficiency * 100).toFixed(1) + '% used' : '') + (d4.at ? ', ' + veniaDr4ftShort(d4.at) : '') : '';
+  const d4Title = d4 ? 'Yield from Dr4ft' + (d4.marker ? ', ' + d4.marker : '') + (d4.cut && d4.cut !== 'Self' ? ', cut ' + d4.cut : '') + (d4.pattern ? ' (' + d4.pattern + (d4.colorway ? ', ' + d4.colorway : '') + ')' : '') + (d4.widthMm ? ', ' + veniaFmtWidthMm(+d4.widthMm) + ' wide' : '') + (d4.efficiency ? ', ' + (d4.efficiency * 100).toFixed(1) + '% used' : '') + (d4.at ? ', ' + veniaDr4ftShort(d4.at) : '') : '';
   const syncBadge = d4
     ? `<span title="${esc(d4Title)}" style="font-size:7px;letter-spacing:1px;text-transform:uppercase;background:var(--ink);color:#fff;padding:1px 5px;margin-left:6px;white-space:nowrap">↔ Dr4ft</span>`
     : item._fromPattern
@@ -32826,6 +32826,12 @@ window.veniaDr4ftSaveFabric = function(id, f){
   return { ok: true, fabric: veniaDr4ftFabric(m),
     message: m.name + ': ' + veniaFmtWidthMm(m.cutting.widthMm) + ' saved to Sourcing' + (filled ? '' : ' (its width text stays ' + m.width + ')') + '.' };
 };
+// What a marker cuts, as a BOM line names it: Self, Self / Fuse, Lining…
+function veniaDr4ftCut(v){
+  const t = String(v == null ? '' : v).replace(/\s*\(block fused\)\s*$/i, '').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ').trim();
+  if (!t || /^(self|shell|main|body)$/i.test(t) || /^cut\s*\d/i.test(t)) return 'Self';
+  return t.replace(/^self(?= \/)/i, 'Self');
+}
 window.veniaDr4ftSendYield = function(y){
   y = y || {};
   if (!veniaDr4ftAllowed()) return { ok: false, message: 'The BOM isn’t open to you here.' };
@@ -32839,7 +32845,19 @@ window.veniaDr4ftSendYield = function(y){
   if (!bomAll || typeof bomAll !== 'object') return { ok: false, message: 'The BOM isn’t open to you here.' };
   const items = bomAll[st.id] || [];
   const key = String(m.name || '').trim().toLowerCase();
-  let ln = items.find(i => i && i.matId === m.id) || items.find(i => i && !i.matId && String(i.matName || '').trim().toLowerCase() === key) || null;
+  // Build 743: a line per fabric AND cut. A block-fused marker (Self / Fuse)
+  // cuts the same fabric as the Self marker but is its own marker, so it
+  // fills its own line instead of replacing the Self yield. A line already
+  // on the BOM with no cut (typed by hand, or filled before 741) is the
+  // fabric's main line: the first cut that isn't a block-fuse cut takes it
+  // and keeps it. Nothing is merged or removed.
+  const cut = veniaDr4ftCut(y.cut || y.material);
+  const fuse = /\/\s*fuse$/i.test(cut);
+  const sameMat = (i) => i && (i.matId === m.id || (!i.matId && String(i.matName || '').trim().toLowerCase() === key));
+  const lineCut = (i) => i.cut ? veniaDr4ftCut(i.cut) : (String(i.id || '').indexOf('bl-dr4ft-') === 0 && i.placement && !/^shell$/i.test(i.placement) ? veniaDr4ftCut(i.placement) : null);
+  let ln = items.find(i => sameMat(i) && lineCut(i) === cut)
+    || (!fuse ? (items.find(i => sameMat(i) && i.matId === m.id && !lineCut(i)) || items.find(i => sameMat(i) && !lineCut(i))) : null)
+    || null;
   const unitOf = (u) => /^(m|mt|mtr|mtrs|meter|meters|metre|metres)$/i.test(String(u || '').trim()) ? 'm' : /^(yd|yds|yard|yards)$/i.test(String(u || '').trim()) ? 'yd' : null;
   const unit = ln ? (ln.unit || m.unit || 'yd') : (m.unit || 'yd');
   const kind = unitOf(unit);
@@ -32848,37 +32866,42 @@ window.veniaDr4ftSendYield = function(y){
   const lab = (q) => (+q).toFixed(2) + ' ' + unit;
   const now = new Date().toISOString();
   const src = { qty: qty, unit: unit, marker: String(y.markerName || ''), pattern: String(y.patternName || ''), libraryId: y.libraryId || null,
+    cut: veniaDr4ftCut(y.cut || y.material), colorway: y.colorway ? String(y.colorway) : null,
     widthMm: +y.widthMm || null, efficiency: +y.efficiency || null, garments: y.garments == null ? null : +y.garments,
     shrinkL: +y.shrinkL || 0, shrinkW: +y.shrinkW || 0, at: now };
   const tell = (msg) => { try { if ((document.getElementById('bom-style-select') || {}).value === st.id) bomSelectStyle(st.id); } catch(e){} return msg; };
   if (!ln) {
     if (!bomAll[st.id]) bomAll[st.id] = [];
-    bomAll[st.id].push({ id: 'bl-dr4ft-' + m.id, matName: m.name, matId: m.id, lineType: 'Fabric', matType: m.type || 'Fabric',
+    const lid = 'bl-dr4ft-' + m.id + (cut === 'Self' ? '' : '-' + cut.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+    bomAll[st.id].push({ id: items.some(i => i && i.id === lid) ? lid + '-' + Date.now().toString(36) : lid, matName: m.name, matId: m.id, lineType: 'Fabric', matType: m.type || 'Fabric',
       qty: qty, unit: unit, costPerUnit: parseFloat(m.costPerUnit) || 0, supplier: m.supplier || '',
-      placement: !y.material || /^self$/i.test(y.material) ? 'Shell' : String(y.material), waste: 0, _fromDr4ft: src });
+      placement: cut === 'Self' ? 'Shell' : (fuse ? cut + ' (block fused)' : cut), cut: cut, waste: 0, _fromDr4ft: src });
     save();
-    try { logActivity(st.name + ': ' + m.name + ' added to the BOM from Dr4ft, ' + lab(qty)); } catch(e){}
-    return { ok: true, filled: true, message: tell('Added ' + m.name + ' to the ' + st.name + ' BOM: ' + lab(qty) + ' per garment.') };
+    try { logActivity(st.name + ': ' + m.name + (cut === 'Self' ? '' : ' (' + cut + ')') + ' added to the BOM from Dr4ft, ' + lab(qty)); } catch(e){}
+    return { ok: true, filled: true, message: tell('Added ' + m.name + (cut === 'Self' ? '' : ' (' + cut + ')') + ' to the ' + st.name + ' BOM: ' + lab(qty) + ' per garment.') };
   }
   const cur = parseFloat(ln.qty) || 0;
   const fromHere = ln._fromDr4ft && Math.abs(cur - (+ln._fromDr4ft.qty || 0)) < 0.005;
+  const cutLab = cut === 'Self' ? m.name : m.name + ' (' + cut + ')';
   if (Math.abs(cur - qty) < 0.005) {
+    if (!ln.cut) ln.cut = cut;
     ln._fromDr4ft = Object.assign({}, src, { replaced: (ln._fromDr4ft && ln._fromDr4ft.replaced) || null }); save();
-    return { ok: true, filled: false, message: 'The ' + st.name + ' BOM already has ' + lab(qty) + ' of ' + m.name + '.' };
+    return { ok: true, filled: false, message: 'The ' + st.name + ' BOM already has ' + lab(qty) + ' of ' + cutLab + '.' };
   }
   if (cur > 0 && !fromHere && !y.replace) {
     return { ok: false, needsConfirm: true, current: { qty: cur, unit: unit, label: lab(cur) }, proposed: { qty: qty, unit: unit, label: lab(qty) },
-      message: 'The ' + st.name + ' BOM has ' + lab(cur) + ' of ' + m.name + ' typed by hand. This marker gives ' + lab(qty) + ' per garment.' };
+      message: 'The ' + st.name + ' BOM has ' + lab(cur) + ' of ' + cutLab + ' typed by hand. This marker gives ' + lab(qty) + ' per garment.' };
   }
   const replaced = (cur > 0 && !fromHere) ? { qty: cur, unit: unit, at: now, yield: (st.yieldByMat && st.yieldByMat[m.id] != null) ? st.yieldByMat[m.id] : null }
     : ((ln._fromDr4ft && ln._fromDr4ft.replaced) || null);
   ln.qty = qty;
+  if (!ln.cut) ln.cut = cut;
   ln._fromDr4ft = Object.assign({}, src, { replaced: replaced });
   // A line synced from the Pattern Card keeps the card's yield in step, so ↻ Pattern doesn't undo it.
-  if (ln._fromPattern) { st.yieldByMat = st.yieldByMat || {}; st.yieldByMat[m.id] = qty; st.updatedAt = now; }
+  if (ln._fromPattern && cut === 'Self') { st.yieldByMat = st.yieldByMat || {}; st.yieldByMat[m.id] = qty; st.updatedAt = now; }
   save();
-  try { logActivity(st.name + ': ' + m.name + ' yield ' + lab(qty) + ' from Dr4ft' + (replaced && replaced.at === now ? ' (was ' + lab(cur) + ', typed)' : '')); } catch(e){}
-  return { ok: true, filled: true, message: tell(st.name + ' BOM: ' + m.name + ' set to ' + lab(qty) + ' per garment' + (replaced && replaced.at === now ? ', replacing ' + lab(cur) + ' (kept on the line)' : '') + '.') };
+  try { logActivity(st.name + ': ' + cutLab + ' yield ' + lab(qty) + ' from Dr4ft' + (replaced && replaced.at === now ? ' (was ' + lab(cur) + ', typed)' : '')); } catch(e){}
+  return { ok: true, filled: true, message: tell(st.name + ' BOM: ' + cutLab + ' set to ' + lab(qty) + ' per garment' + (replaced && replaced.at === now ? ', replacing ' + lab(cur) + ' (kept on the line)' : '') + '.') };
 };
 // Sourcing changed: Dr4ft (if open) reads its fabrics again.
 window.veniaDr4ftFabricsChanged = function(){
@@ -32976,6 +32999,13 @@ window.mmWidthHint = function(){
         const r = await c.from('venia_patterns').select(LIST_COLS).eq('workspace_id', WS()).order('updated_at', { ascending: false }).limit(1000);
         if (r.error) throw r.error;
         DR4.rows = r.data || [];
+        // Build 743: a pattern made in more than one colorway (Dr4ft
+        // Colorways) is also shelved under each colorway's own style. Only
+        // the colorways' names and styles are read, never the pattern.
+        try {
+          const cw = await c.from('venia_patterns').select('id,cw:doc->colorways').eq('workspace_id', WS()).not('doc->colorways', 'is', null).limit(1000);
+          if (cw && !cw.error && Array.isArray(cw.data)) cw.data.forEach(x => { const row = rowOf(x.id); if (row) row.colorways = cwList(x.cw, row); });
+        } catch(e){}
         const q = await c.from('venia_pattern_recent').select('pattern_id,view,opened_at').eq('workspace_id', WS()).eq('email', email).order('opened_at', { ascending: false }).limit(50);
         DR4.recent = (q && !q.error && q.data) || [];
         DR4.ok = true;
@@ -32989,6 +33019,16 @@ window.mmWidthHint = function(){
   }
   window.veniaDr4ftLoad = load;
   const rowOf = (id) => DR4.rows.find(r => r.id === id);
+  // A pattern's colorways as the library shows them: [{ id, name, style: { id, code, name } | null }].
+  // The first colorway's style is the pattern's own unless it was given another.
+  function cwList(list, row){
+    if (!Array.isArray(list)) return [];
+    return list.filter(c => c && c.id).map((c, i) => {
+      const v = c.style || c.venia || null;
+      const st = v && (v.id || v.code) ? { id: v.id || null, code: v.code || '', name: v.name || '' } : (i === 0 && row && row.style_id ? { id: row.style_id, code: row.style_code || '', name: row.style_name || '' } : null);
+      return { id: String(c.id), name: String(c.name || 'Colorway'), style: st };
+    });
+  }
 
   // ── Dr4ft, through its frame ──
   function frame(){ return document.querySelector('#cp-screen-patterncad iframe'); }
@@ -33071,6 +33111,7 @@ window.mmWidthHint = function(){
     const p = pend[id] || (pend[id] = {});
     p.patch = patchFrom(d);
     const r = rowOf(id);
+    if (r && Array.isArray(d.colorways)) r.colorways = cwList(d.colorways, { style_id: p.patch.style_id, style_code: p.patch.style_code, style_name: p.patch.style_name });
     if (r) Object.assign(r, { name: p.patch.name, style_id: p.patch.style_id, style_code: p.patch.style_code, style_name: p.patch.style_name,
       season: p.patch.season, base_size: p.patch.base_size, sizes: p.patch.sizes, thumb: p.patch.thumb || r.thumb,
       piece_count: p.patch.piece_count != null ? p.patch.piece_count : r.piece_count, updated_at: new Date().toISOString() });
@@ -33162,13 +33203,16 @@ window.mmWidthHint = function(){
   function card(r, opts){
     opts = opts || {};
     const st = r.style_id ? styleOf(r.style_id) : null;
-    const sub = [r.style_code || (st && st.styleId) || '', r.base_size ? 'base ' + r.base_size : '', (r.sizes || []).length ? (r.sizes[0] + '–' + r.sizes[r.sizes.length - 1]) : '',
+    // shelved under a colorway's style: opens on that colorway
+    const cw = opts.cw || null, open = cw ? `dr4Open('${esc(r.id)}','${esc(cw.id)}')` : `dr4Open('${esc(r.id)}')`;
+    const cwNote = cw ? cw.name + ' colorway' : ((r.colorways || []).length > 1 ? r.colorways.length + ' colorways' : '');
+    const sub = [cwNote, r.style_code || (st && st.styleId) || '', r.base_size ? 'base ' + r.base_size : '', (r.sizes || []).length ? (r.sizes[0] + '–' + r.sizes[r.sizes.length - 1]) : '',
       r.piece_count ? r.piece_count + ' piece' + (r.piece_count === 1 ? '' : 's') : ''].filter(Boolean).join(' · ');
     const pic = r.thumb && r.piece_count && /^data:image\/svg\+xml/.test(r.thumb) ? `<img alt="" src="${esc(r.thumb)}">` : `<span class="dr4-noimg">${r.kind === 'block' ? 'Block' : 'No drawing yet'}</span>`;
     const act = opts.trash
       ? `<button class="dr4-mini" onclick="event.stopPropagation();dr4Restore('${esc(r.id)}')">Restore</button>`
       : `<button class="dr4-mini" title="Move to Trash" aria-label="Move ${esc(r.name)} to Trash" onclick="event.stopPropagation();dr4Trash('${esc(r.id)}')">Trash</button>`;
-    return `<div class="dr4-card${DR4.current === r.id ? ' on' : ''}" ${opts.trash ? '' : `onclick="dr4Open('${esc(r.id)}')" role="button" tabindex="0" onkeydown="if(event.key==='Enter')dr4Open('${esc(r.id)}')"`}>
+    return `<div class="dr4-card${DR4.current === r.id ? ' on' : ''}" ${opts.trash ? '' : `onclick="${open}" role="button" tabindex="0" onkeydown="if(event.key==='Enter')${open}"`}>
       <div class="dr4-pic">${pic}</div>
       <div class="dr4-meta"><div class="dr4-name">${esc(r.name)}</div><div class="dr4-sub">${esc(sub)}</div>
       <div class="dr4-when">${esc(ago(r.updated_at))}${r.updated_by ? ' · ' + esc(who(r.updated_by)) : ''}</div></div>${act}</div>`;
@@ -33212,6 +33256,12 @@ window.mmWidthHint = function(){
       const loose = shown.filter(r => r.kind !== 'block' && !r.style_id);
       const seasons = {};
       styled.forEach(r => { const s = r.season || (styleOf(r.style_id) || {}).season || 'No season'; (seasons[s] = seasons[s] || []).push(r); });
+      // each other colorway's style shelves the pattern too, opening on that colorway
+      shown.filter(r => r.kind !== 'block').forEach(r => (r.colorways || []).forEach(cw => {
+        if (!cw.style || !cw.style.id || cw.style.id === r.style_id || !styleOf(cw.style.id)) return;
+        const s = (styleOf(cw.style.id) || {}).season || r.season || 'No season';
+        (seasons[s] = seasons[s] || []).push(Object.assign({}, r, { style_id: cw.style.id, style_code: cw.style.code, style_name: cw.style.name, _cw: cw }));
+      }));
       Object.keys(seasons).sort((a, b) => a === 'No season' ? 1 : b === 'No season' ? -1 : b.localeCompare(a)).forEach(sn => {
         const byStyle = {};
         seasons[sn].forEach(r => { (byStyle[r.style_id] = byStyle[r.style_id] || []).push(r); });
@@ -33219,7 +33269,7 @@ window.mmWidthHint = function(){
         Object.keys(byStyle).forEach(sid => {
           const rs = byStyle[sid], st = styleOf(sid);
           const label = st ? [st.styleId, st.name].filter(Boolean).join(' · ') : [rs[0].style_code, rs[0].style_name].filter(Boolean).join(' · ');
-          html += `<div class="dr4-style"><div class="dr4-style-h">${esc(label || 'Style')}<button class="dr4-link" onclick="dr4NewPattern('${esc(sid)}')">+ Pattern</button></div><div class="dr4-grid">${rs.map(r => card(r)).join('')}</div></div>`;
+          html += `<div class="dr4-style"><div class="dr4-style-h">${esc(label || 'Style')}<button class="dr4-link" onclick="dr4NewPattern('${esc(sid)}')">+ Pattern</button></div><div class="dr4-grid">${rs.map(r => card(r, { cw: r._cw || ((r.colorways || []).find(c => c.style && c.style.id === sid) || null) })).join('')}</div></div>`;
         });
         html += `</section>`;
       });
@@ -33233,7 +33283,7 @@ window.mmWidthHint = function(){
   window.dr4Render = render;
 
   // ── open, start, trash ──
-  window.dr4Open = async function(id){
+  window.dr4Open = async function(id, cwId){
     const r = rowOf(id); if (!r) return;
     delete r._copiedTo;
     setStatus('Opening ' + r.name + '…');
@@ -33245,7 +33295,9 @@ window.mmWidthHint = function(){
       const doc = got.data && got.data.doc;
       if (got.data && got.data.rev != null) r.rev = got.data.rev;
       const mine = DR4.recent.find(x => x.pattern_id === id);
-      const view = mine && mine.view ? mine.view : undefined;
+      let view = mine && mine.view ? mine.view : undefined;
+      // opened from a colorway's style: Dr4ft opens on that colorway
+      if (cwId) view = Object.assign({}, view || {}, { colorway: cwId });
       if (doc) await cmd('open', { libraryId: id, pattern: doc, view: view });
       else {
         // Started but never saved: start it in Dr4ft with what the library knows.
