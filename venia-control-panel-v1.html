@@ -4509,8 +4509,8 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '743';
-  const BUILD_DATE = '2026.11.24';
+  const BUILD = '744';
+  const BUILD_DATE = '2026.11.25';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
   const CRED = 'venia_faceid_cred';   // stored passkey id (base64url)
@@ -14303,9 +14303,9 @@ function bomSelectStyle(styleId) {
     </div>` : ''}
     <div style="margin-bottom:14px" id="bom-inline-wrap"></div>
     ${shown.length ? `<div class="bom-row-view bom-col-head">
-      <div>Material</div><div>Qty</div><div>Unit</div><div>Placement</div><div>Supplier</div><div>Cost / unit</div><div>Extended</div><div></div>
+      <div>Material</div><div>Qty</div><div>Unit</div><div>Cut / placement</div><div>Supplier</div><div>Cost / unit</div><div>Extended</div><div></div>
     </div>` : ''}
-    <div id="bom-rows-wrap">
+    <div id="bom-rows-wrap">${bomCutDatalist()}
       ${shown.length ? shown.map(x => bomRowHtml(styleId, x.item, x.idx, typeColors)).join('') : `
         <div style="padding:32px;text-align:center;border:1px solid var(--border);background:var(--bg)">
           <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)">${items.length ? 'Nothing of that type on this BOM' : 'No materials added yet'}</div>
@@ -14331,6 +14331,21 @@ function bomSelectStyle(styleId) {
 }
 
 function bomRowHtml(styleId, item, idx, typeColors) {
+  // Build 744: fabric lines say which cut they are (Self, Self / Fuse, Pocketing…).
+  const all = (STATE.bom || {})[styleId] || [];
+  const isFab = rsIsFabricLine(item);
+  const cutNow = bomCutOf(item);
+  const sameMat = isFab && item.matId ? all.filter(x => x && x !== item && x.matId === item.matId && rsIsFabricLine(x)).length : 0;
+  const clash = bomCutClash(all, item);
+  const placeCell = isFab
+    ? (cutNow ? `<span class="b-tag" title="What this line is cut as">${bomEsc(cutNow)}</span>${item.placement && bomCutOf({ placement: item.placement }) !== cutNow && !/^shell$/i.test(item.placement) ? ` <span style="font-size:10px;color:var(--muted)">${bomEsc(item.placement)}</span>` : ''}`
+      : sameMat ? `<span style="font-size:10px;color:var(--amber)">Set the cut</span>` : `<span class="b-tag">${bomEsc(item.placement || '—')}</span>`)
+    : `<span class="b-tag">${bomEsc(item.placement || '—')}</span>`;
+  const clashHtml = clash ? `<div style="padding:8px 14px;background:var(--bg-off);border-top:1px solid var(--border);font-size:11px;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">
+      <span style="flex:1 1 100%"><strong style="color:var(--amber)">Check:</strong> ${bomEsc(clash.cut)} is cut from ${bomEsc(clash.matName)}, the same fabric as the Self line. If it should be a lining, pick it here.</span>
+      <select class="fs" aria-label="Fabric the ${bomEsc(clash.cut)} is cut from" style="flex:1 1 200px;max-width:340px" onchange="bomCutSwap('${styleId}',${idx},this.value)">${bomCutMatOpts(item.matId)}</select>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="bomCutOk('${styleId}',${idx})" title="It really is cut from the shell fabric">Keep ${bomEsc(clash.matName)}</button>
+    </div>` : '';
   const lineColor = typeColors[item.lineType||item.matType||'Custom'] || 'var(--muted)';
   const d4 = item._fromDr4ft && Math.abs((parseFloat(item.qty) || 0) - (+item._fromDr4ft.qty || 0)) < 0.005 ? item._fromDr4ft : null;
   const d4Title = d4 ? 'Yield from Dr4ft' + (d4.marker ? ', ' + d4.marker : '') + (d4.cut && d4.cut !== 'Self' ? ', cut ' + d4.cut : '') + (d4.pattern ? ' (' + d4.pattern + (d4.colorway ? ', ' + d4.colorway : '') + ')' : '') + (d4.widthMm ? ', ' + veniaFmtWidthMm(+d4.widthMm) + ' wide' : '') + (d4.efficiency ? ', ' + (d4.efficiency * 100).toFixed(1) + '% used' : '') + (d4.at ? ', ' + veniaDr4ftShort(d4.at) : '') : '';
@@ -14357,12 +14372,13 @@ function bomRowHtml(styleId, item, idx, typeColors) {
         </div>
         <div data-l="Qty" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:${item.qty>0?'var(--silver)':'var(--red)'}">${item.qty}${parseFloat(item.waste)>0?`<span style="color:var(--muted);font-size:10px"> +${item.waste}%</span>`:''}${item.qty>0?'':'<span style="font-size:9px;letter-spacing:.5px"> set yield</span>'}</div>
         <div data-l="Unit" style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.unit}</div>
-        <div data-l="Placement" style="padding:11px 14px"><span class="b-tag">${item.placement||'—'}</span></div>
+        <div data-l="Cut / placement" style="padding:11px 14px">${placeCell}</div>
         <div data-l="Supplier" style="padding:11px 14px;font-size:10px;color:var(--muted)">${item.supplier||'—'}</div>
         <div data-l="Cost / unit" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--silver)">$${item.costPerUnit.toFixed(2)}</div>
         <div data-l="Extended" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);font-weight:700">$${bomExt(item).toFixed(2)}</div>
         <div class="bom-pencil" style="padding:11px 14px;font-size:10px;color:var(--muted)"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg></div>
       </div>
+      ${clashHtml}
       <!-- EDIT MODE -->
       <div class="bom-edit-${idx}" style="display:none;padding:14px;background:var(--bg-off);border-top:1px solid var(--border)">
         ${d4 ? `<div style="margin-bottom:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border-mid);font-size:10px;color:var(--muted);letter-spacing:.5px">↔ ${esc(d4Title)}.${(d4.shrinkL || d4.shrinkW) ? ' The marker already allows ' + esc(String(d4.shrinkL || 0)) + '% / ' + esc(String(d4.shrinkW || 0)) + '% shrinkage.' : ''}${d4.replaced ? ' It replaced ' + esc((+d4.replaced.qty).toFixed(2) + ' ' + (d4.replaced.unit || item.unit)) + ' typed before.' : ''} Edit Qty here to override; the next marker then asks before changing it.</div>` : ''}
@@ -14374,7 +14390,8 @@ function bomRowHtml(styleId, item, idx, typeColors) {
           <div class="fg"><label class="fl">Placement</label><input class="fi" id="be-place-${idx}" value="${item.placement||''}"></div>
           <div class="fg"><label class="fl" title="An input to the cost sheet: the BOM lines make up its material cost">Cost/unit · feeds cost sheet</label><input class="fi fi-mono" id="be-cost-${idx}" type="number" step="0.01" value="${item.costPerUnit}"></div>
         </div>
-        <div style="display:grid;grid-template-columns:1.2fr 0.8fr 1fr 1.4fr;gap:10px;margin-bottom:12px;align-items:end">
+        <div style="display:grid;grid-template-columns:1fr 1.2fr 0.8fr 1fr 1.4fr;gap:10px;margin-bottom:12px;align-items:end">
+          <div class="fg"><label class="fl" title="What this line is cut as: Self, Self / Fuse, Lining, Pocketing…">Cut</label><input class="fi" id="be-cut-${idx}" list="bom-cut-list" autocomplete="off" value="${bomEsc(item.cut ? bomCutNorm(item.cut) : '')}" placeholder="${bomEsc(cutNow || (isFab ? 'Self, Lining…' : '—'))}"></div>
           <div class="fg"><label class="fl">Supplier</label><input class="fi" id="be-supplier-${idx}" value="${item.supplier||''}"></div>
           <div class="fg"><label class="fl">Waste %</label><input class="fi fi-mono" id="be-waste-${idx}" type="number" step="0.5" min="0" placeholder="0" value="${item.waste||''}"></div>
           <div class="fg"><label class="fl">Type</label>
@@ -14392,6 +14409,30 @@ function bomRowHtml(styleId, item, idx, typeColors) {
       </div>
     </div>`;
 }
+
+// Build 744: pick the fabric a Lining / Pocketing line is cut from, or keep it.
+window.bomCutSwap = function(styleId, idx, matId){
+  const l = ((STATE.bom || {})[styleId] || [])[idx]; if (!l || !matId) return;
+  if (matId === '__new'){
+    l.matId = ''; l.matName = ''; l.supplier = ''; l.costPerUnit = 0; delete l.vendorId;
+    save();
+    bomSelectStyle(styleId);
+    bomToggleEdit(styleId, idx);
+    setTimeout(() => { const el = document.getElementById('be-name-' + idx); if (el){ el.value = ''; el.placeholder = 'Name the lining, e.g. cupro lining'; el.focus(); } }, 50);
+    toast('Type the lining\'s name and Save. Add it to Sourcing too, so it can be ordered');
+    return;
+  }
+  const mat = (STATE.materials || []).find(x => x.id === matId); if (!mat) return;
+  bomSwapMat(l, mat);
+  save();
+  try { logActivity('BOM: ' + (bomCutOf(l) || 'a line') + ' now cut from ' + mat.name); } catch(e){}
+  bomSelectStyle(styleId);
+  toast((bomCutOf(l) || 'This line') + ' is now cut from ' + mat.name + '. In Dr4ft, set that marker\'s fabric to ' + mat.name + ' too and send it again, so the yield uses its width');
+};
+window.bomCutOk = function(styleId, idx){
+  const l = ((STATE.bom || {})[styleId] || [])[idx]; if (!l) return;
+  l.cutOk = true; save(); bomSelectStyle(styleId);
+};
 
 function bomToggleEdit(styleId, idx) {
   const view = document.querySelector(`.bom-view-${idx}`);
@@ -14418,6 +14459,9 @@ function saveBomEdit(styleId, idx) {
     lineType: document.getElementById(`be-type-${idx}`).value,
     notes: document.getElementById(`be-notes-${idx}`).value,
   };
+  // Build 744: the cut. Cleared by hand → the line goes back to its placement.
+  const cutEl = document.getElementById(`be-cut-${idx}`);
+  if (cutEl){ const c = bomCutNorm(cutEl.value); if (c) STATE.bom[styleId][idx].cut = c; else delete STATE.bom[styleId][idx].cut; }
   // If this is a pattern-synced fabric line, push qty back to yield
   if (prev._fromPattern && prev.matId) {
     syncBOMToYield(styleId, prev.matId, newQty);
@@ -16896,7 +16940,7 @@ function openDp(styleId) {
         <span>BOM <span style="color:var(--muted)">(${bomItems.length} items)</span></span>
         <span style="font-size:10px;color:var(--muted)">$${bomTotal.toFixed(2)} total</span>
       </div>
-      ${bomItems.length ? bomItems.map(i=>`<div class="dp-row"><div class="dp-key">${i.matName}</div><div class="dp-val"><span style="color:var(--soft);font-size:10px">${i.qty} ${i.unit} · ${i.placement||''}</span><br><span style="color:var(--gold);font-family:'DM Mono',monospace;font-size:10px">$${(i.qty*i.costPerUnit).toFixed(2)}</span></div></div>`).join('') : '<div style="font-size:11px;color:var(--muted);font-style:italic">No BOM items. Go to BOM tab to add materials.</div>'}
+      ${bomItems.length ? bomItems.map(i=>`<div class="dp-row"><div class="dp-key">${i.matName}</div><div class="dp-val"><span style="color:var(--soft);font-size:10px">${i.qty} ${i.unit} · ${bomEsc(bomCutPlace(i))}</span><br><span style="color:var(--gold);font-family:'DM Mono',monospace;font-size:10px">$${(i.qty*i.costPerUnit).toFixed(2)}</span></div></div>`).join('') : '<div style="font-size:11px;color:var(--muted);font-style:italic">No BOM items. Go to BOM tab to add materials.</div>'}
     </div>
 
     ${typeof window.veniaDr4ftStyleBlock === 'function' ? window.veniaDr4ftStyleBlock(s, 'dp') : ''}
@@ -20430,7 +20474,7 @@ function fnDemand(opts){
     const qty = perMat * (1 + waste / 100) * units;
     const row = { label: src.label, styleId: src.styleId, poId: src.poId || '', kind: src.kind, units,
       per: perMat, perRaw: per, unitRaw: line.unit || m.unit || '', converted: fnUnitKey(line.unit) && fnUnitKey(m.unit) && fnUnitKey(line.unit) !== fnUnitKey(m.unit),
-      waste, placement: String(line.cut || line.placement || '').trim(), qty };
+      waste, placement: (typeof bomCutPlace === 'function' ? bomCutPlace(line) : String(line.cut || line.placement || '')).trim(), qty }; // Build 744: the cut, as the BOM tables show it
     if (src.kind === 'booked') { e.booked += qty; e.bookedLines.push(row); }
     else { e.need += qty; e.lines.push(row); }
   };
@@ -21802,6 +21846,90 @@ function rsLineNeed(line, units){
   return Math.round(q * (1 + w/100) * (units||0) * 10) / 10;
 }
 function rsIsFabricLine(l){ return /^(fabric|lining)$/i.test(String(l.lineType || l.matType || '')); }
+// ── BOM CUTS (Build 744) ────────────────────────────────────────────────
+// Keeter: "from draft, i sent it to bom, but its unclear which section the
+// fabric goes to". Dr4ft saves the cut on every yield line (line.cut: Self,
+// Self / Fuse, Pocketing…); the BOM tables now show it and let it be set by
+// hand. A line typed by hand has no cut; its placement may say (Shell → Self).
+const BOM_CUTS = ['Self', 'Self / Fuse', 'Lining', 'Pocketing', 'Fusing', 'Interlining'];
+function bomEsc(v){ return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function bomCutNorm(v){
+  const t = String(v == null ? '' : v).replace(/\s*\(block fused\)\s*$/i, '').replace(/\s*\/\s*/g, ' / ').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  const hit = BOM_CUTS.find(x => x.toLowerCase() === t.toLowerCase());
+  return hit || t;
+}
+// The cut a line is for, or '' when nothing says.
+function bomCutOf(l){
+  if (!l) return '';
+  const c = bomCutNorm(l.cut);
+  if (c) return c;
+  const p = bomCutNorm(l.placement);
+  if (!p) return '';
+  if (/^(self|shell|main|body)$/i.test(p)) return 'Self';
+  return BOM_CUTS.indexOf(p) >= 0 ? p : '';
+}
+// A lining, pocketing or fusing line cut from the same fabric as the Self
+// line. Often the lining just hasn't been picked yet (Dr4ft cuts every marker
+// from the pattern's fabric until another is set). Self-fabric pocketing is
+// real too, so the warning can be kept quiet per line (cutOk).
+function bomCutClash(lines, l){
+  if (!l || !l.matId || l.cutOk) return null;
+  const c = bomCutOf(l);
+  if (!/^(lining|pocketing|fusing|interlining)$/i.test(c)) return null;
+  const self = (lines || []).find(x => x && x !== l && x.matId === l.matId && bomCutOf(x) === 'Self');
+  return self ? { cut: c, matName: self.matName || l.matName || 'the shell fabric' } : null;
+}
+// Materials to pick instead: linings first, then other fabrics, then a new one.
+function bomCutMatOpts(curId){
+  const mats = (STATE.materials || []).filter(m => m && !m.archived && m.id !== curId && String(m.name || '').trim());
+  const isLin = (m) => /lining|pocket|fus|interlin/i.test(String(m.type || '') + ' ' + String(m.name || ''));
+  const lin = mats.filter(isLin), fab = mats.filter(m => !isLin(m) && /^(fabric|lining)?$/i.test(String(m.type || '').trim()));
+  const o = (m) => `<option value="${bomEsc(m.id)}">${bomEsc(m.name)}${m.supplier ? ' · ' + bomEsc(m.supplier) : ''}</option>`;
+  return `<option value="">Pick the fabric it's cut from…</option>`
+    + (lin.length ? `<optgroup label="Linings">${lin.map(o).join('')}</optgroup>` : '')
+    + (fab.length ? `<optgroup label="Fabrics">${fab.map(o).join('')}</optgroup>` : '')
+    + `<option value="__new">A lining not in Sourcing yet…</option>`;
+}
+// Text for a "Cut / placement" cell: a fabric line's cut, then any other placement.
+function bomCutPlace(l){
+  if (!l) return '';
+  const c = rsIsFabricLine(l) || l.cut ? bomCutOf(l) : '';
+  const p = String(l.placement || '').trim();
+  if (!c) return p;
+  return (p && bomCutOf({ placement: p }) !== c && !/^shell$/i.test(p)) ? c + ' · ' + p.replace(/\s*\(block fused\)\s*$/i, ' (block fused)') : c;
+}
+// The cut field: suggestions plus anything typed.
+function bomCutDatalist(){
+  return `<datalist id="bom-cut-list">${BOM_CUTS.map(c => `<option value="${bomEsc(c)}">`).join('')}</datalist>`;
+}
+// A material swapped on a line keeps its usage; a yard/metre change converts it.
+function bomSwapMat(l, mat){
+  if (!l || !mat) return;
+  const was = l.unit, to = mat.unit || l.unit || 'yd';
+  const q = parseFloat(l.qty) || 0;
+  if (q > 0 && typeof fnConvert === 'function') l.qty = Math.round(fnConvert(q, was, to) * 100) / 100;
+  l.matId = mat.id; l.matName = mat.name; l.unit = to; l.supplier = mat.supplier || ''; l.costPerUnit = parseFloat(mat.costPerUnit) || 0;
+  if (mat.vendorId) l.vendorId = mat.vendorId; else delete l.vendorId;
+  // The Dr4ft yield stays recognised as Dr4ft's, so sending the marker again
+  // in the new fabric updates this line without asking.
+  if (l._fromDr4ft && q > 0) l._fromDr4ft = Object.assign({}, l._fromDr4ft, { qty: l.qty, unit: to });
+}
+// One fabric, several cuts: its need on a run is every line of it together,
+// in the fabric's unit, so it is ordered once and covered once.
+function rsMatNeed(d, l, units){
+  if (!l || !l.matId || !rsIsFabricLine(l)) return rsLineNeed(l, units);
+  const m = (STATE.materials || []).find(x => x.id === l.matId);
+  const to = (m && m.unit) || l.unit;
+  const tot = (d.bom || []).filter(x => x && x.matId === l.matId && rsIsFabricLine(x))
+    .reduce((a, x) => a + (typeof fnConvert === 'function' ? fnConvert(rsLineNeed(x, units), x.unit || to, to) : rsLineNeed(x, units)), 0);
+  return Math.round(tot * 10) / 10;
+}
+// The first line of a fabric on the run carries its order; the rest point to it.
+function rsMatFirst(d, l){
+  if (!l || !l.matId || !rsIsFabricLine(l)) return l;
+  return (d.bom || []).find(x => x && x.matId === l.matId && rsIsFabricLine(x)) || l;
+}
 // The BOM a run starts from: the style's own BOM, or (when it has none) the
 // shell fabric the style names. Usage per unit is never invented — a line with
 // no usage says so, everywhere its need would be shown.
@@ -21810,6 +21938,9 @@ function rsBomFromStyle(s){
     matName: l.matName||'', matId: l.matId||'', lineType: l.lineType || l.matType || 'Fabric',
     qty: parseFloat(l.qty)||0, unit: l.unit||'yd', waste: l.waste||'', supplier: l.supplier||'',
     costPerUnit: parseFloat(l.costPerUnit)||0, placement: l.placement||'',
+    // Build 744: the cut rides along, and the style line's id, so a save
+    // finds the right line when one fabric has several cuts.
+    cut: l.cut || '', cutOk: !!l.cutOk, bomId: l.id || '',
   }));
   if (src.length) return src;
   const out = [];
@@ -21923,7 +22054,7 @@ function rsGuide(d){
     if (!(parseFloat(l.qty) > 0)) add('Add how much ' + nm + ' goes into one piece', 'rs-bq-' + i);
     if (!m) add('Add ' + nm + ' to Sourcing with its mill and price', 'rs-ms-' + i);
     else if (fab && !matIsVendorManaged(m) && (!String(m.supplier||'').trim() || !(parseFloat(m.costPerUnit) > 0))) add('Add the mill and price for ' + nm, 'rs-ms-' + i);
-    else if (fab && !matIsVendorManaged(m) && !linkedMats.has(l.matId) && (parseFloat(l.qty) > 0)) add('Order the ' + nm, 'rs-of-' + i);
+    else if (fab && !matIsVendorManaged(m) && !linkedMats.has(l.matId) && rsMatFirst(d, l) === l && rsMatNeed(d, l, 1) > 0) add('Order the ' + nm, 'rs-of-' + i);
   });
   if (cmt){
     const w = d.work || [];
@@ -22043,12 +22174,23 @@ function rsBomToStyle(d){
   STATE.bom = STATE.bom || {};
   const old = (STATE.bom[s.id] || []).slice();
   const key = (l) => l.matId ? 'm:' + l.matId : 'n:' + String(l.matName||'').trim().toLowerCase();
-  const out = (d.bom || []).filter(l => l.matId || String(l.matName||'').trim()).map(l => {
-    const i = old.findIndex(o => key(o) === key(l));
-    const base = i >= 0 ? old.splice(i, 1)[0] : {};
-    return Object.assign({ id: 'bl' + Date.now().toString(36) + Math.random().toString(36).slice(2,6) }, base, { matId: l.matId||'', matName: l.matName||'', lineType: l.lineType||'Fabric', matType: l.lineType||'Fabric',
+  const lines = (d.bom || []).filter(l => l.matId || String(l.matName||'').trim());
+  // Build 744: a line copied from the style finds its own line by id first
+  // (three Tencel Twill cuts are three lines), then by fabric as before.
+  const bases = lines.map(l => {
+    const i = l.bomId ? old.findIndex(o => o.id === l.bomId) : -1;
+    return i >= 0 ? old.splice(i, 1)[0] : null;
+  });
+  const out = lines.map((l, n) => {
+    let base = bases[n];
+    if (!base){ const i = old.findIndex(o => key(o) === key(l)); base = i >= 0 ? old.splice(i, 1)[0] : {}; }
+    const row = Object.assign({ id: 'bl' + Date.now().toString(36) + Math.random().toString(36).slice(2,6) }, base, { matId: l.matId||'', matName: l.matName||'', lineType: l.lineType||'Fabric', matType: l.lineType||'Fabric',
       qty: parseFloat(l.qty)||0, unit: l.unit||base.unit||'yd', waste: l.waste||'', supplier: l.supplier||'', costPerUnit: parseFloat(l.costPerUnit)||0,
       placement: l.placement || base.placement || '' });
+    if (l.cut !== undefined) { if (l.cut) row.cut = l.cut; else if (base.cut && l.cutSet) delete row.cut; }
+    if (l.cutOk) row.cutOk = true; else if (l.cutOk === false) delete row.cutOk;
+    if (l.vendorId === undefined && base.vendorId && base.matId !== row.matId) delete row.vendorId;
+    return row;
   });
   STATE.bom[s.id] = out;
 }
@@ -22113,6 +22255,8 @@ function rsReadForm(){
     const q = v('rs-bq-'+i); if (q !== undefined) l.qty = Math.max(0, parseFloat(q)||0);
     const w = v('rs-bw-'+i); if (w !== undefined) l.waste = w;
     const t = v('rs-bt-'+i); if (t !== undefined) l.lineType = t;
+    const c = v('rs-bc-'+i);
+    if (c !== undefined && bomCutNorm(c) !== bomCutNorm(l.cut)) { l.cut = bomCutNorm(c); l.cutSet = true; }
     const m = v('rs-bm-'+i);
     if (m !== undefined && m !== (l.matId||'')){
       const mat = (STATE.materials||[]).find(x => x.id === m);
@@ -22194,6 +22338,24 @@ function rsDateSteps(d, all){
 }
 window.rsAddLine = function(){ rsReadForm(); (RS_DRAFT.bom = RS_DRAFT.bom || []).push({ matName:'', matId:'', lineType:'Trim', qty:0, unit:'pc', waste:'', supplier:'', costPerUnit:0 }); rsRender(RS_DRAFT.id||null); };
 window.rsDelLine = function(i){ rsReadForm(); RS_DRAFT.bom.splice(i,1); rsRender(RS_DRAFT.id||null); };
+// Build 744: pick the fabric a Lining / Pocketing line is really cut from.
+window.rsCutSwap = function(i, matId){
+  rsReadForm(); const d = RS_DRAFT; const l = d && (d.bom||[])[i]; if (!l || !matId) return;
+  if (matId === '__new'){
+    l.matId = ''; l.matName = ''; l.supplier = ''; l.costPerUnit = 0; l.lineType = 'Lining';
+    rsRender(d.id || null);
+    setTimeout(() => { const el = document.getElementById('rs-bn-' + i); if (el){ el.placeholder = 'Name the lining, e.g. cupro lining'; el.focus(); } }, 50);
+    return;
+  }
+  const mat = (STATE.materials||[]).find(x => x.id === matId); if (!mat) return;
+  bomSwapMat(l, mat);
+  rsRender(d.id || null);
+  showToast((bomCutOf(l) || 'This line') + ' is now cut from ' + mat.name + '. In Dr4ft, set that marker\'s fabric to ' + mat.name + ' too and send it again, so the yield uses its width. Save the run to keep it');
+};
+window.rsCutOk = function(i){
+  rsReadForm(); const d = RS_DRAFT; const l = d && (d.bom||[])[i]; if (!l) return;
+  l.cutOk = true; rsRender(d.id || null);
+};
 window.rsReloadBom = function(){
   rsReadForm(); const s = rsStyle(RS_DRAFT); if (!s) return;
   RS_DRAFT.bom = rsBomFromStyle(s); rsRender(RS_DRAFT.id||null);
@@ -22360,9 +22522,10 @@ function rsLineCovered(d, l){ return rsLineOrders(d, l).reduce((a, p) => a + (pa
 function rsSyncOrders(d){
   const units = d.qty || d.units || 0;
   (d.bom || []).forEach(l => {
+    if (rsMatFirst(d, l) !== l) return; // Build 744: a fabric's other cuts ride on its first line
     const orders = rsLineOrders(d, l); if (!orders.length) return;
     const drafts = orders.filter(p => p.status === 'draft'); if (!drafts.length) return;
-    const need = Math.ceil(rsLineNeed(l, units));
+    const need = Math.ceil(rsMatNeed(d, l, units));
     const fixed = orders.filter(p => p.status !== 'draft').reduce((a, p) => a + (parseFloat(p.qty) || 0), 0)
       + orders.reduce((a, p) => a + (parseFloat(p.fromStock) || 0), 0);
     const want = Math.max(0, need - fixed);
@@ -22393,7 +22556,7 @@ window.rsOrderFabric = async function(i){
   if (!m){ showToast('Pick the material from Sourcing first, so the order has a supplier and a price'); return; }
   if (!(parseFloat(l.qty) > 0)){ showToast('Add the usage per unit first — the order is usage × quantity'); return; }
   if (!(d.qty > 0)){ showToast('Set the quantity first'); return; }
-  const need = Math.ceil(rsLineNeed(l, d.qty));
+  const need = Math.ceil(rsMatNeed(d, l, d.qty)); // Build 744: every cut of this fabric
   const covered = rsLineCovered(d, l);
   const gap = Math.max(0, need - covered);
   if (!gap){ showToast('Already covered: ' + covered + ' ' + (m.unit||'yd') + ' ordered for a need of ' + need); return; }
@@ -22833,13 +22996,19 @@ function rsRender(id){
     const need = rsLineNeed(l, units);
     const noUse = !(parseFloat(l.qty) > 0);
     const fpo = linked.find(p => p.materialId && p.materialId === l.matId);
+    // Build 744: one fabric cut several ways is ordered once, on its first line.
+    const first = rsMatFirst(d, l);
+    const firstAt = (d.bom||[]).indexOf(first);
+    const cutNow = bomCutOf(l);
+    const clash = bomCutClash(d.bom, l);
     const vm = l.matId && matIsVendorManaged(bomMatFor(l.matId));
     const tpo = linked.find(p => p.type === 'trim' && p.lineKey === rsLineKey(l));
-    const act = !rsIsFabricLine(l) ? (rsMaker(d) !== 'cmt' ? ''
+    const act = (rsIsFabricLine(l) && l.matId && first !== l) ? `<span style="font-size:10px;color:var(--muted);white-space:nowrap" title="One order covers every cut of this fabric">Ordered with the ${slEsc(bomCutOf(first) || 'line ' + (firstAt + 1))} line</span>`
+      : !rsIsFabricLine(l) ? (rsMaker(d) !== 'cmt' ? ''
         : tpo ? `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[tpo.status]||tpo.status)}</span>`
         : `<button class="btn btn-ghost btn-sm" onclick="rsOrderTrim(${i})">Order</button>`)
       : vm ? '<span style="font-size:10px;color:var(--muted)">Factory buys it</span>'
-      : fpo ? (() => { const cov = rsLineCovered(d, l), gapN = Math.ceil(need) - cov;
+      : fpo ? (() => { const cov = rsLineCovered(d, l), gapN = Math.ceil(rsMatNeed(d, l, units)) - cov;
           return gapN > 0 && !noUse
             ? `<span style="font-size:10px;color:var(--amber);font-family:'DM Mono',monospace;white-space:nowrap">${cov} ordered · ${gapN} short</span> <button class="btn btn-ghost btn-sm" onclick="rsOrderFabric(${i})">Order ${gapN} more</button>`
             : `<span style="font-size:10px;color:var(--green);font-family:'DM Mono',monospace;white-space:nowrap">Ordered · ${slEsc(PO_STATUSES[fpo.status]||fpo.status)}${fpo.fromStock ? ' · ' + fpo.fromStock + ' from stock' : ''}</span>`; })()
@@ -22850,7 +23019,14 @@ function rsRender(id){
     const typed = String(l.matName||'').trim();
     const needsSrc = !vm && (mm ? (rsIsFabricLine(l) && (!String(mm.supplier||'').trim() || !(parseFloat(mm.costPerUnit) > 0))) : !!typed);
     const vendNames = (STATE.vendors||[]).filter(v => !v.archived).map(v => v.name).filter(Boolean);
-    const srcRow = needsSrc ? `<tr><td colspan="6" data-label="" style="background:var(--bg-off)">
+    const sibs = (rsIsFabricLine(l) && l.matId && first === l) ? (d.bom||[]).filter(x => x !== l && x.matId === l.matId && rsIsFabricLine(x)).length : 0;
+    const clashRow = clash ? `<tr><td colspan="7" data-label="" style="background:var(--bg-off)">
+      <div id="rs-cc-${i}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;font-size:11px;color:var(--ink)">
+        <span style="flex:1 1 100%"><strong style="color:var(--amber)">Check:</strong> ${slEsc(clash.cut)} is cut from ${slEsc(clash.matName)}, the same fabric as the Self line. If it should be a lining, pick it here.</span>
+        <select aria-label="Fabric the ${slEsc(clash.cut)} is cut from" style="${fld};flex:1 1 200px;max-width:340px" onchange="rsCutSwap(${i}, this.value)">${bomCutMatOpts(l.matId)}</select>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rsCutOk(${i})" title="It really is cut from the shell fabric">Keep ${slEsc(clash.matName)}</button>
+      </div></td></tr>` : '';
+    const srcRow = needsSrc ? `<tr><td colspan="7" data-label="" style="background:var(--bg-off)">
       <div id="rs-ms-${i}" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:4px 0">
         <div style="font-size:11px;color:var(--ink);flex:1 1 100%">${mm ? slEsc(mm.name) + ' has no mill or price yet.' : slEsc(typed) + " isn't in Sourcing yet."} Add them here so you can order it.</div>
         <label style="font-size:10px;color:var(--muted);flex:1 1 170px">Mill or supplier<input id="rs-matsup-${i}" list="rs-vend-list" type="text" style="${fld};margin-top:3px" value="${slEsc((mm && mm.supplier) || '')}" placeholder="e.g. the mill's name"></label>
@@ -22860,6 +23036,7 @@ function rsRender(id){
       </div></td></tr>` : '';
     return `<tr>
       <td data-label="Line"><select id="rs-bt-${i}" style="${fld};min-width:84px" onchange="rsRefresh()">${types.map(t => `<option ${String(l.lineType||'')===t?'selected':''}>${t}</option>`).join('')}</select></td>
+      <td data-label="Cut">${(rsIsFabricLine(l) || l.cut) ? `<input id="rs-bc-${i}" type="text" list="bom-cut-list" autocomplete="off" style="${fld};width:118px;${!cutNow && sibs ? 'border-color:var(--amber)' : ''}" value="${slEsc(l.cut ? bomCutNorm(l.cut) : '')}" placeholder="${slEsc(cutNow || 'Self, Lining…')}" title="What this line is cut as: Self, Self / Fuse, Lining, Pocketing…" aria-label="Cut" onchange="rsRefresh()">` : '<span style="font-size:10px;color:var(--muted)">—</span>'}</td>
       <td data-label="Material"><select id="rs-bm-${i}" style="${fld};min-width:140px" onchange="rsRefresh()">${matOpts(l.matId)}</select>
         ${l.matId ? '' : `<input id="rs-bn-${i}" type="text" style="${fld};margin-top:4px" value="${slEsc(l.matName||'')}" placeholder="Or type a new one, e.g. cotton gauze" onchange="rsRefresh()">`}</td>
       <td data-label="Per unit"><div style="display:flex;gap:4px;align-items:center"><input id="rs-bq-${i}" type="number" min="0" step="0.01" style="${fld};width:78px;${noUse?'border-color:var(--red)':''}" value="${noUse?'':l.qty}" placeholder="?" onchange="rsRefresh()"><span style="font-size:10px;color:var(--muted)">${slEsc(l.unit||'')}</span></div>
@@ -22867,7 +23044,7 @@ function rsRender(id){
       <td data-label="Waste %"><input id="rs-bw-${i}" type="number" min="0" style="${fld};width:56px" value="${slEsc(l.waste||'')}" placeholder="0" onchange="rsRefresh()"></td>
       <td data-label="Need" style="font-family:'DM Mono',monospace;font-size:12px;white-space:nowrap">${noUse ? '<span style="color:var(--red)">—</span>' : units ? need + ' ' + slEsc(l.unit||'') : '<span style="color:var(--muted)">set qty</span>'}</td>
       <td data-label=""><div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">${act}<button class="btn btn-ghost btn-sm" style="padding:4px 8px" title="Remove this line" aria-label="Remove line" onclick="rsDelLine(${i})">✕</button></div></td>
-    </tr>${srcRow}`;
+    </tr>${clashRow}${srcRow}`;
   }).join('');
   const today = rsIso(new Date());
   // Steps by phase: a tick to use the step, its date and done. Off steps stay
@@ -22995,7 +23172,7 @@ function rsRender(id){
             <button class="btn btn-ghost btn-sm" onclick="rsSaveBomToStyle()" title="Copy these lines onto the style">Save to style</button>`}
           </div>
         </div>
-        <div class="tbl-wrap" style="overflow-x:auto"><table class="stack-tbl"><thead><tr><th>Line</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
+        <div class="tbl-wrap" style="overflow-x:auto">${bomCutDatalist()}<table class="stack-tbl"><thead><tr><th>Line</th><th>Cut</th><th>Material</th><th>Per unit</th><th>Waste %</th><th>Need</th><th></th></tr></thead>
           <tbody>${bomRows || '<tr><td colspan="6" style="color:var(--muted);font-size:11px">No lines yet — add the fabric first.</td></tr>'}</tbody></table></div>
         <div style="font-size:10px;color:var(--muted);margin-top:6px">Not in the list? Type it under the picker, then add its mill and price right here.</div>
       </div>`;
@@ -25476,12 +25653,12 @@ function renderTechPackWork(s) {
              all rendered INSIDE it. That is why "Total" printed on top of the
              Unit column, why the columns never lined up, and why collapsing
              the BOM collapsed half the tech pack with it. -->
-        <div class="tpbr tpbh">${['Material','Qty','Unit','Placement','Supplier','Cost/Unit','Total',''].map(h=>`<div class="tpbc">${h}</div>`).join('')}</div>
+        <div class="tpbr tpbh">${['Material','Qty','Unit','Cut / placement','Supplier','Cost/Unit','Total',''].map(h=>`<div class="tpbc">${h}</div>`).join('')}</div>
         ${bom.map((item,idx)=>`<div class="tpbr" style="cursor:pointer" onclick="bomToggleEdit('${s.id}',${idx})">
           <div class="tpbc" style="font-weight:600;color:#000">${item.matName || item.material || '<span style="color:var(--amber);font-weight:400">Unnamed material</span>'}${item.lineType?`<span style="margin-left:5px;font-size:7.5px;border:1px solid #e0e0e0;padding:1px 5px;color:var(--muted);text-transform:uppercase">${item.lineType}</span>`:''}</div>
           <div class="tpbc" style="font-family:'DM Mono',monospace">${item.qty}</div>
           <div class="tpbc" style="color:var(--muted);font-size:10px">${item.unit}</div>
-          <div class="tpbc" style="font-size:10px">${item.placement||'—'}</div>
+          <div class="tpbc" style="font-size:10px">${bomEsc(bomCutPlace(item) || '—')}</div>
           <div class="tpbc" style="font-size:10px;color:var(--muted)">${item.supplier||'—'}</div>
           <div class="tpbc" style="font-family:'DM Mono',monospace;font-size:10px">$${(item.costPerUnit||0).toFixed(2)}</div>
           <div class="tpbc" style="font-family:'DM Mono',monospace;font-weight:700;color:#000000">$${((item.qty||0)*(item.costPerUnit||0)).toFixed(2)}</div>
@@ -28394,7 +28571,7 @@ function renderTechPackPrint(s) {
           <div style="background:#000;color:#fff;font-size:7.5px;letter-spacing:1.5px;text-transform:uppercase;padding:3px 8px;display:inline-block;margin-bottom:6px">${type}</div>
           <table style="width:100%;border-collapse:collapse">
             <thead><tr style="border-bottom:1px solid #000">
-              ${(tpNoCost ? ['Material','Qty','Unit','Placement','Supplier'] : ['Material','Qty','Unit','Placement','Supplier','$/Unit','Total']).map(h=>`<th style="text-align:left;padding:5px 6px;font-size:7.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:400">${h}</th>`).join('')}
+              ${(tpNoCost ? ['Material','Qty','Unit','Cut / placement','Supplier'] : ['Material','Qty','Unit','Cut / placement','Supplier','$/Unit','Total']).map(h=>`<th style="text-align:left;padding:5px 6px;font-size:7.5px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:400">${h}</th>`).join('')}
             </tr></thead>
             <tbody>${items.map((item,i)=>{
               // Mill specs travel with the fabric row — the factory orders
@@ -28405,7 +28582,7 @@ function renderTechPackPrint(s) {
               <td style="padding:7px 6px;font-size:11px;color:#000;font-weight:600">${item.matName}</td>
               <td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px">${item.qty}</td>
               <td style="padding:7px 6px;font-size:10px;color:var(--muted)">${item.unit}</td>
-              <td style="padding:7px 6px;font-size:10px;color:#666">${item.placement||'—'}</td>
+              <td style="padding:7px 6px;font-size:10px;color:#666">${bomEsc(bomCutPlace(item) || '—')}</td>
               <td style="padding:7px 6px;font-size:10px;color:#666">${item.supplier||'—'}</td>
               ${tpNoCost ? '' : `<td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px">$${(parseFloat(item.costPerUnit)||0).toFixed(2)}</td>
               <td style="padding:7px 6px;font-family:'DM Mono',monospace;font-size:10px;font-weight:700">$${((parseFloat(item.qty)||0)*(parseFloat(item.costPerUnit)||0)).toFixed(2)}</td>`}
