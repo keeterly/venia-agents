@@ -4509,7 +4509,7 @@ window.veniaYmd = veniaYmd;
   // Build number — bump on every deploy (kept in step with the service-worker
   // cache version). Shown on the login screen so you can confirm the PWA has
   // updated past its cache: if this number matches the latest, you're current.
-  const BUILD = '744';
+  const BUILD = '745';
   const BUILD_DATE = '2026.11.25';
   const HASH = 'ec08b0fbac65caea043df06c997c639cf8d9d79fb3a3d685ef0d305c50537bf4';
   const KEY  = 'venia_auth_v1';
@@ -14220,7 +14220,13 @@ function renderBomPage() {
   // the BOM out from under you every time a partner's edit landed.
   const sel = document.getElementById('bom-style-select');
   if (sel && sel.value && (STATE.styles||[]).some(x => x.id === sel.value)) { bomSelectStyle(sel.value); return; }
-  document.getElementById('bom-content').innerHTML = `<div class="empty"><div class="empty-icon">⊞</div><div class="empty-text">Select a style to view its Bill of Materials</div></div>`;
+  // Build 745: styles whose BOM has a Self / Fuse line and no Self line.
+  const fz = bomStylesFuseNoSelf();
+  const fzHtml = fz.length ? `<div style="padding:10px 12px;background:var(--bg-off);border:1px solid var(--amber);margin-bottom:12px;font-size:11px;color:var(--ink)">
+      <div style="margin-bottom:6px"><strong style="color:var(--amber)">Check:</strong> ${fz.length === 1 ? 'This style has' : 'These styles have'} a Self / Fuse line and no Self line, so ${fz.length === 1 ? 'its' : 'their'} BOM and tech pack say to block-fuse the whole garment.</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${fz.map(st => `<button type="button" class="btn btn-ghost btn-sm" onclick="const e=document.getElementById('bom-style-select');if(e)e.value='${st.id}';bomSelectStyle('${st.id}')">${bomEsc(st.name)} ${bomEsc(String(st.styleId || '').split('-').pop())}</button>`).join('')}</div>
+    </div>` : '';
+  document.getElementById('bom-content').innerHTML = fzHtml + `<div class="empty"><div class="empty-icon">⊞</div><div class="empty-text">Select a style to view its Bill of Materials</div></div>`;
 }
 
 // Extended cost per BOM line = qty × (1 + waste%) × cost-per-unit.
@@ -14295,6 +14301,7 @@ function bomSelectStyle(styleId) {
       <span>This style is made of <strong>${missing.map(w=>esc(w.name)).join('</strong> and <strong>')}</strong>, which ${missing.length>1?'are':'is'} not on the BOM yet.</span>
       <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="bomAddFromStyle('${styleId}');bomSelectStyle('${styleId}')">＋ Add from Materials</button>
     </div>` : ''}
+    ${bomAskHtml(styleId, items)}
     ${(items.filter(i=>i._fromPattern).length) ? `
     <div style="padding:8px 12px;background:var(--bg-off);border:1px solid var(--border-mid);margin-bottom:12px;font-size:10px;color:var(--muted);letter-spacing:.5px;display:flex;align-items:center;gap:8px">
       <span style="font-size:11px">↔</span>
@@ -14346,6 +14353,12 @@ function bomRowHtml(styleId, item, idx, typeColors) {
       <select class="fs" aria-label="Fabric the ${bomEsc(clash.cut)} is cut from" style="flex:1 1 200px;max-width:340px" onchange="bomCutSwap('${styleId}',${idx},this.value)">${bomCutMatOpts(item.matId)}</select>
       <button type="button" class="btn btn-ghost btn-sm" onclick="bomCutOk('${styleId}',${idx})" title="It really is cut from the shell fabric">Keep ${bomEsc(clash.matName)}</button>
     </div>` : '';
+  // Build 745: the only main-fabric line is cut Self / Fuse.
+  const fuseHtml = isFab && bomFuseNoSelf(all).indexOf(item) >= 0 ? `<div style="padding:8px 14px;background:var(--bg-off);border-top:1px solid var(--border);font-size:11px;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap" onclick="event.stopPropagation()">
+      <span style="flex:1 1 100%"><strong style="color:var(--amber)">Check:</strong> This style has no Self line, only this Self / Fuse line, so the BOM and tech pack say to block-fuse the whole garment. If only some pieces are fused, move this line to Self.</span>
+      <button type="button" class="btn btn-gold btn-sm" onclick="bomFuseToSelf('${styleId}',${idx})">Move to Self</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="bomFuseOk('${styleId}',${idx})" title="The whole garment really is block fused">It's all fused</button>
+    </div>` : '';
   const lineColor = typeColors[item.lineType||item.matType||'Custom'] || 'var(--muted)';
   const d4 = item._fromDr4ft && Math.abs((parseFloat(item.qty) || 0) - (+item._fromDr4ft.qty || 0)) < 0.005 ? item._fromDr4ft : null;
   const d4Title = d4 ? 'Yield from Dr4ft' + (d4.marker ? ', ' + d4.marker : '') + (d4.cut && d4.cut !== 'Self' ? ', cut ' + d4.cut : '') + (d4.pattern ? ' (' + d4.pattern + (d4.colorway ? ', ' + d4.colorway : '') + ')' : '') + (d4.widthMm ? ', ' + veniaFmtWidthMm(+d4.widthMm) + ' wide' : '') + (d4.efficiency ? ', ' + (d4.efficiency * 100).toFixed(1) + '% used' : '') + (d4.at ? ', ' + veniaDr4ftShort(d4.at) : '') : '';
@@ -14378,7 +14391,7 @@ function bomRowHtml(styleId, item, idx, typeColors) {
         <div data-l="Extended" style="padding:11px 14px;font-family:'DM Mono',monospace;font-size:11px;color:var(--gold);font-weight:700">$${bomExt(item).toFixed(2)}</div>
         <div class="bom-pencil" style="padding:11px 14px;font-size:10px;color:var(--muted)"><svg class="ico ico-i" width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.6 19.4v-3.5L15.5 5a2 2 0 0 1 2.83 2.83L7.4 19.4H4.6Z"/><path d="M13.9 6.6l3.5 3.5"/></svg></div>
       </div>
-      ${clashHtml}
+      ${clashHtml}${fuseHtml}
       <!-- EDIT MODE -->
       <div class="bom-edit-${idx}" style="display:none;padding:14px;background:var(--bg-off);border-top:1px solid var(--border)">
         ${d4 ? `<div style="margin-bottom:10px;padding:8px 10px;background:var(--bg);border:1px solid var(--border-mid);font-size:10px;color:var(--muted);letter-spacing:.5px">↔ ${esc(d4Title)}.${(d4.shrinkL || d4.shrinkW) ? ' The marker already allows ' + esc(String(d4.shrinkL || 0)) + '% / ' + esc(String(d4.shrinkW || 0)) + '% shrinkage.' : ''}${d4.replaced ? ' It replaced ' + esc((+d4.replaced.qty).toFixed(2) + ' ' + (d4.replaced.unit || item.unit)) + ' typed before.' : ''} Edit Qty here to override; the next marker then asks before changing it.</div>` : ''}
@@ -14432,6 +14445,67 @@ window.bomCutSwap = function(styleId, idx, matId){
 window.bomCutOk = function(styleId, idx){
   const l = ((STATE.bom || {})[styleId] || [])[idx]; if (!l) return;
   l.cutOk = true; save(); bomSelectStyle(styleId);
+};
+// Build 745: move a lone Self / Fuse line to Self, or say it's all fused.
+window.bomFuseToSelf = function(styleId, idx){
+  const l = ((STATE.bom || {})[styleId] || [])[idx]; if (!l) return;
+  const st = (STATE.styles || []).find(x => x.id === styleId);
+  bomMoveLineToSelf(l); save();
+  try { logActivity('BOM: ' + (st ? st.name + ' ' : '') + (l.matName || 'fabric') + ' moved from Self / Fuse to Self'); } catch(e){}
+  bomSelectStyle(styleId);
+  toast((l.matName || 'The line') + ' is now the Self line. If some pieces are fused, send that marker from Dr4ft as Self / Fuse and it gets its own line');
+};
+window.bomFuseOk = function(styleId, idx){
+  const l = ((STATE.bom || {})[styleId] || [])[idx]; if (!l) return;
+  l.fuseOk = true; save(); bomSelectStyle(styleId);
+};
+// Build 745: a fabric on this BOM that Sourcing has no unit, price or lead
+// time for. Asked here, saved to Sourcing on a tap. "Later" hides it until
+// the page reloads.
+let BOM_ASK_LATER = {};
+function bomAskHtml(styleId, items){
+  const seen = {}, rows = [];
+  (items || []).forEach(l => {
+    if (!l || !l.matId || !rsIsFabricLine(l) || seen[l.matId] || BOM_ASK_LATER[l.matId]) return;
+    seen[l.matId] = 1;
+    const m = (STATE.materials || []).find(x => x.id === l.matId); if (!m) return;
+    const miss = matMissingAsk(m); if (!miss.length) return;
+    const id = bomEsc(m.id);
+    const why = [miss.indexOf('unit') >= 0 ? 'Fabric to order can\'t total it without a unit' : '', miss.indexOf('price') >= 0 ? 'its cost is left out of totals' : ''].filter(Boolean).join(', and ');
+    const fl = 'font-size:10px;color:var(--muted);display:flex;flex-direction:column;gap:3px';
+    rows.push(`<div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:8px 0;border-top:1px solid var(--border)">
+      <div style="flex:1 1 100%;font-size:11px;color:var(--ink)"><strong>${bomEsc(m.name)}</strong> has no ${bomEsc(bomAndList(miss))} in Sourcing${why ? ', so ' + why : ''}.</div>
+      ${miss.indexOf('unit') >= 0 ? `<label style="${fl};flex:0 1 90px">Unit<select class="fs" id="ba-unit-${id}"><option value="yd" selected>yd</option><option value="m">m</option></select></label>` : ''}
+      ${miss.indexOf('price') >= 0 ? `<label style="${fl};flex:0 1 120px">Price per ${bomEsc(matUnitOr(m) || 'unit')}<input class="fi fi-mono" id="ba-cost-${id}" type="number" min="0" step="0.01" placeholder="$"></label>` : ''}
+      ${miss.indexOf('lead time') >= 0 ? `<label style="${fl};flex:0 1 110px">Lead · days<input class="fi fi-mono" id="ba-lead-${id}" type="number" min="0" placeholder="21"></label>` : ''}
+      <button type="button" class="btn btn-ghost btn-sm" onclick="bomAskSave('${styleId}','${id}')">Save to Sourcing</button>
+      <button type="button" class="btn btn-ghost btn-sm" style="color:var(--muted)" onclick="bomAskLater('${styleId}','${id}')">Later</button>
+    </div>`);
+  });
+  return rows.length ? `<div style="padding:4px 12px 2px;border:1px solid var(--border-mid);background:var(--bg-off);margin-bottom:12px">${rows.join('')}</div>` : '';
+}
+window.bomAskLater = function(styleId, matId){ BOM_ASK_LATER[matId] = 1; bomSelectStyle(styleId); };
+window.bomAskSave = function(styleId, matId){
+  const m = (STATE.materials || []).find(x => x.id === matId); if (!m) return;
+  const val = (k) => ((document.getElementById('ba-' + k + '-' + matId) || {}).value || '').trim();
+  const unit = val('unit'), cost = parseFloat(val('cost')) || 0, lead = parseInt(val('lead'), 10) || 0;
+  const did = [];
+  if (unit && matNoUnit(m)) { m.unit = unit; did.push('unit ' + unit); }
+  if (cost > 0 && !(parseFloat(m.costPerUnit) > 0)) { m.costPerUnit = cost; did.push('$' + cost.toFixed(2) + ' / ' + (m.unit || 'unit')); }
+  if (lead > 0 && !(parseInt(m.leadDays, 10) > 0)) { m.leadDays = lead; did.push(lead + ' day lead time'); }
+  if (!did.length) { toast('Fill in what\'s missing first'); return; }
+  m.updatedAt = new Date().toISOString();
+  // BOM lines of this fabric with no cost or unit of their own take it.
+  // A cost or unit already typed on a line stays.
+  Object.keys(STATE.bom || {}).forEach(k => (STATE.bom[k] || []).forEach(l => {
+    if (!l || l.matId !== m.id) return;
+    if (!(parseFloat(l.costPerUnit) > 0) && parseFloat(m.costPerUnit) > 0) l.costPerUnit = parseFloat(m.costPerUnit);
+    if (!String(l.unit || '').trim() && m.unit) l.unit = m.unit;
+  }));
+  save();
+  try { logActivity('Sourcing: ' + m.name + ' ' + did.join(', ') + ' (from the BOM)'); } catch(e){}
+  bomSelectStyle(styleId);
+  toast(m.name + ': ' + did.join(', ') + ' saved to Sourcing');
 };
 
 function bomToggleEdit(styleId, idx) {
@@ -17750,7 +17824,8 @@ function openMatModal(id=null) {
       document.getElementById('mm-supplier').value = m.supplier||'';
       document.getElementById('mm-sourcing').value = m.sourcing||'';
       document.getElementById('mm-cost').value = m.costPerUnit||'';
-      document.getElementById('mm-unit').value = m.unit||'';
+      // Build 745: a fabric saved with no unit opens with yd filled in.
+      document.getElementById('mm-unit').value = m.unit || (matNoUnit(m) ? 'yd' : '');
       document.getElementById('mm-lead').value = m.leadDays||'';
       document.getElementById('mm-content').value = m.content||'';
       document.getElementById('mm-color').value = matColors(m).join(', ');
@@ -17769,6 +17844,8 @@ function openMatModal(id=null) {
     }
   } else {
     mmRenderLots([]);
+    const u = document.getElementById('mm-unit'); // Build 745: a new fabric starts in yd
+    if (u && /^(fabric|lining)$/i.test((document.getElementById('mm-type') || {}).value || 'Fabric')) u.value = 'yd';
   }
   try { mmStockPaint(id); } catch(e){}
   try { mmWidthHint(); } catch(e){}
@@ -18094,7 +18171,8 @@ function saveMaterial() {
     supplier: document.getElementById('mm-supplier').value,
     sourcing: (document.getElementById('mm-sourcing')||{}).value || '',
     costPerUnit: parseFloat(document.getElementById('mm-cost').value)||0,
-    unit: document.getElementById('mm-unit').value,
+    // Build 745: a fabric or lining never saves with a blank unit (SUB Linen did).
+    unit: String(document.getElementById('mm-unit').value || '').trim() || (/^(fabric|lining)$/i.test(document.getElementById('mm-type').value) ? 'yd' : ''),
     leadDays: parseInt(document.getElementById('mm-lead').value)||0,
     content: document.getElementById('mm-content').value,
     colors: cwSplit(document.getElementById('mm-color').value).join(', '),
@@ -20470,10 +20548,11 @@ function fnDemand(opts){
       return;
     }
     const waste = parseFloat(line.waste) || 0;
-    const perMat = fnConvert(per, line.unit || m.unit, m.unit);
+    const mu = matUnitOr(m); // Build 745: a fabric with no unit saved counts in yards
+    const perMat = fnConvert(per, line.unit || mu, mu);
     const qty = perMat * (1 + waste / 100) * units;
     const row = { label: src.label, styleId: src.styleId, poId: src.poId || '', kind: src.kind, units,
-      per: perMat, perRaw: per, unitRaw: line.unit || m.unit || '', converted: fnUnitKey(line.unit) && fnUnitKey(m.unit) && fnUnitKey(line.unit) !== fnUnitKey(m.unit),
+      per: perMat, perRaw: per, unitRaw: line.unit || mu || '', converted: fnUnitKey(line.unit) && fnUnitKey(mu) && fnUnitKey(line.unit) !== fnUnitKey(mu),
       waste, placement: (typeof bomCutPlace === 'function' ? bomCutPlace(line) : String(line.cut || line.placement || '')).trim(), qty }; // Build 744: the cut, as the BOM tables show it
     if (src.kind === 'booked') { e.booked += qty; e.bookedLines.push(row); }
     else { e.need += qty; e.lines.push(row); }
@@ -20511,7 +20590,8 @@ function fnOnOrder(matId){
   const m = (STATE.materials || []).find(x => x.id === matId);
   const out = { qty: 0, draft: 0, pos: 0 };
   (STATE.pos || []).filter(po => po.type === 'fabric' && po.materialId === matId && !['received','cancelled'].includes(po.status)).forEach(po => {
-    const q = fnConvert(parseFloat(po.qty) || 0, po.unit || (m && m.unit), m && m.unit);
+    const mu = matUnitOr(m); // Build 745
+    const q = fnConvert(parseFloat(po.qty) || 0, po.unit || mu, mu);
     out.qty += q; out.pos++;
     if (po.status === 'draft') out.draft += q;
   });
@@ -20595,8 +20675,9 @@ function fnRows(){
     const vendor = matIsVendorManaged(m);
     const toOrder = vendor ? 0 : Math.round(Math.max(0, need - onHand - oo.qty) * 10) / 10;
     const cost = parseFloat(m.costPerUnit) || 0;
-    rows.push({ m, e, need, onHand, oo, toOrder, vendor, cost, unit: fnUnitWord(m.unit),
-      needYd: fnToYd(need, m.unit), toOrderYd: fnToYd(toOrder, m.unit), booked: Math.round(e.booked * 10) / 10 });
+    const mu = matUnitOr(m); // Build 745: no unit saved → yards, and said so
+    rows.push({ m, e, need, onHand, oo, toOrder, vendor, cost, unit: fnUnitWord(mu), noUnit: matNoUnit(m),
+      needYd: fnToYd(need, mu), toOrderYd: fnToYd(toOrder, mu), booked: Math.round(e.booked * 10) / 10 });
   });
   rows.sort((a, b) => (a.vendor - b.vendor) || (b.toOrder * (b.cost || 1) - a.toOrder * (a.cost || 1)) || (b.need - a.need) || String(a.m.name).localeCompare(String(b.m.name)));
   return { rows, noLink: d.noLink };
@@ -20625,6 +20706,15 @@ window.fnRender = function(){
   const bookedYd = ours.reduce((a, r) => a + (r.booked > 0 ? (fnToYd(r.booked, r.m.unit) || 0) : 0), 0);
   if (bookedYd > 0) flags.push('Plan production still has styles that aren\'t on a run. They would need about ' + fnNum(bookedYd) + ' yd more, shown under each fabric and not in To order.');
   if (notLen.length) flags.push(notLen.map(r => esc(r.m.name)).join(', ') + ' ' + (notLen.length === 1 ? 'is' : 'are') + ' not bought by length, so the yard totals leave ' + (notLen.length === 1 ? 'it' : 'them') + ' out.');
+  // Build 745: three checks from the Nov 25 review.
+  const noUnit = rows.filter(r => r.noUnit);
+  if (noUnit.length) flags.push(noUnit.map(r => esc(r.m.name)).join(', ') + ' ' + (noUnit.length === 1 ? 'has' : 'have') + ' no unit in Sourcing, so ' + (noUnit.length === 1 ? 'it is' : 'they are') + ' counted in yards here. Open ' + (noUnit.length === 1 ? 'it' : 'each') + ' to set the unit, price and lead time.');
+  try {
+    const fz = bomStylesFuseNoSelf();
+    if (fz.length) flags.push(fz.map(st => esc(st.name) + ' ' + esc(String(st.styleId || '').split('-').pop())).join(', ') + ' ' + (fz.length === 1 ? 'has' : 'have') + ' a Self / Fuse line and no Self line, so ' + (fz.length === 1 ? 'its' : 'their') + ' whole shell reads as block fused. Check the BOM.');
+    const dp = rsDupPairs();
+    if (dp.length) flags.push(dp.map(pr => esc(pr[0].name) + ' (' + pr.map(st => esc(String(st.styleId || '').split('-').pop())).join(' and ') + ')').join(', ') + ': two styles with one name, each on an open run, and one adds units but no fabric (no yield on its BOM). If one is a duplicate, open its run to archive it; if not, add its yield.');
+  } catch(e){}
   const sum = '<div class="fn-sum">'
     + '<div class="fn-big"><span class="fn-k">To order</span><b>' + fnNum(sumYd('toOrderYd')) + ' yd</b><span class="fn-s">' + (toOrderCost > 0 ? 'about ' + fnMoney(toOrderCost) + (noCost.length ? ', not counting ' + noCost.length + ' without a cost' : '') : 'no cost on file') + '</span></div>'
     + '<div class="fn-big"><span class="fn-k">Open production needs</span><b>' + fnNum(sumYd('needYd')) + ' yd</b><span class="fn-s">' + (needCost > 0 ? 'about ' + fnMoney(needCost) : 'no cost on file') + ' · ' + ours.filter(r => r.need > 0).length + ' fabric' + (ours.filter(r => r.need > 0).length === 1 ? '' : 's') + '</span></div>'
@@ -20643,7 +20733,7 @@ window.fnRender = function(){
     const toOrderCell = r.vendor ? '<span class="fn-mute">factory buys</span>' : r.toOrder > 0 ? '<b class="fn-short">' + fnNum(r.toOrder) + ' ' + u + '</b>' : (r.need > 0 && !r.e.noUse.length ? '<span class="fn-ok">covered</span>' : '<span class="fn-mute">—</span>');
     return '<details class="fn-row' + (r.vendor ? ' fn-vendor' : '') + '"' + (FN_OPEN[m.id] ? ' open' : '') + ' ontoggle="fnToggle(\'' + id + '\',this)">'
       + '<summary>'
-      + '<span class="fn-name"><b>' + esc(m.name || 'Fabric') + '</b><span class="fn-sub">' + [m.supplier ? esc(m.supplier) : '', r.cost > 0 ? '$' + r.cost.toFixed(2) + ' / ' + u : '', r.vendor ? 'factory sources it' : ''].filter(Boolean).join(' · ') + '</span></span>'
+      + '<span class="fn-name"><b>' + esc(m.name || 'Fabric') + '</b><span class="fn-sub">' + [m.supplier ? esc(m.supplier) : '', r.cost > 0 ? '$' + r.cost.toFixed(2) + ' / ' + u : '', r.vendor ? 'factory sources it' : '', r.noUnit ? '<span class="fn-warn">no unit saved, read as yd</span>' : ''].filter(Boolean).join(' · ') + '</span></span>'
       + cell('Need', r.need > 0 ? fnNum(r.need) + ' ' + u : '<span class="fn-mute">—</span>')
       + cell('On hand', r.onHand > 0 ? fnNum(r.onHand) + ' ' + u : '<span class="fn-mute">—</span>')
       + cell('On order', r.oo.qty > 0 ? fnNum(r.oo.qty) + ' ' + u + (r.oo.draft > 0 ? ' <span class="fn-mute">(' + (r.oo.draft >= r.oo.qty ? 'draft' : fnNum(r.oo.draft) + ' draft') + ')</span>' : '') : '<span class="fn-mute">—</span>')
@@ -20655,7 +20745,7 @@ window.fnRender = function(){
       + (r.e.noUse.length ? '<div class="fn-warn fn-note">No usage per unit on ' + esc(r.e.noUse.join(', ')) + ', so ' + (r.e.noUse.length === 1 ? 'it adds' : 'they add') + ' nothing above. Add the yield in its BOM.</div>' : '')
       + (r.booked > 0 ? '<div class="fn-note">Not on a run yet: Plan production still has ' + esc(r.e.bookedLines.map(l => l.label + ' ' + l.units + 'u').filter((v, i, a) => a.indexOf(v) === i).join(', ')) + ' to plan, which would need about <b>' + fnNum(r.booked) + ' ' + u + '</b> more. It isn\'t in To order.</div>' : '')
       + (!r.vendor ? '<button type="button" class="ag-btn ag-btn-ghost ag-btn-sm" onclick="poOrderFabric(\'' + id + '\')">Order fabric</button>' : '')
-      + '<button type="button" class="ag-btn ag-btn-ghost ag-btn-sm" onclick="openMatModal(\'' + id + '\')">Open fabric</button>'
+      + '<button type="button" class="ag-btn ag-btn-ghost ag-btn-sm" onclick="openMatModal(\'' + id + '\')">' + (!r.vendor && (r.noUnit || !(r.cost > 0)) ? 'Add ' + (r.noUnit && !(r.cost > 0) ? 'unit and price' : r.noUnit ? 'unit' : 'price') : 'Open fabric') + '</button>'
       + '</div></details>';
   };
   const noLinkHtml = noLink.length ? '<p class="fn-how">BOM lines not linked to a fabric in Materials, so not counted: '
@@ -21880,6 +21970,92 @@ function bomCutClash(lines, l){
   const self = (lines || []).find(x => x && x !== l && x.matId === l.matId && bomCutOf(x) === 'Self');
   return self ? { cut: c, matName: self.matName || l.matName || 'the shell fabric' } : null;
 }
+// ── Build 745: three checks from the Nov 25 review ──────────────────────
+// 1. A style whose only main-fabric line is cut Self / Fuse reads as
+//    block-fusing the whole garment (Eclipse MO01, Obsidian MO02 after a
+//    Dr4ft send). Flag it; moving the line to Self is Keeter's tap.
+// 2. A fabric saved with no unit, price or lead time (SUB Linen) can't be
+//    added up or costed. Ask for them where it sits on a BOM.
+// 3. Two live styles with one name, each with an open run (Obsidian
+//    MO02/MO08, Vivienne 048/UO01). Warn on the run; archiving is a tap.
+// Nothing here changes data by itself.
+//
+// Fabric lines cut Self / Fuse when the style has no Self line. A fabric
+// line with no cut counts as the main line (Dr4ft treats it the same way).
+function bomFuseNoSelf(lines){
+  const fab = (lines || []).filter(l => l && (rsIsFabricLine(l) || l.cut));
+  if (fab.some(l => { const c = bomCutOf(l); return c === 'Self' || (!c && rsIsFabricLine(l)); })) return [];
+  return fab.filter(l => bomCutOf(l) === 'Self / Fuse' && !l.fuseOk);
+}
+function bomStylesFuseNoSelf(){
+  const bom = STATE.bom || {};
+  return (STATE.styles || []).filter(s => s && s.status !== 'archived' && bomFuseNoSelf(bom[s.id]).length);
+}
+// The tap: the line becomes the Self line. What it was is kept on the line.
+function bomMoveLineToSelf(l){
+  if (!l) return;
+  l.cutWas = { cut: l.cut || '', placement: l.placement || '', at: new Date().toISOString() };
+  l.cut = 'Self'; l.placement = 'Shell';
+}
+// A fabric with no unit saved is bought by the yard until Sourcing says
+// otherwise. Only read this way; nothing is written.
+function matUnitOr(m){
+  const u = String((m && m.unit) || '').trim();
+  if (u) return u;
+  return m && /^(fabric|lining|)$/i.test(String(m.type || '').trim()) ? 'yd' : '';
+}
+function matNoUnit(m){ return !!(m && !String(m.unit || '').trim() && /^(fabric|lining|)$/i.test(String(m.type || '').trim())); }
+// What Sourcing still needs for a fabric we buy: unit, price, lead time.
+function matMissingAsk(m){
+  if (!m || matIsVendorManaged(m)) return [];
+  const out = [];
+  if (matNoUnit(m)) out.push('unit');
+  if (!(parseFloat(m.costPerUnit) > 0)) out.push('price');
+  if (!(parseInt(m.leadDays, 10) > 0)) out.push('lead time');
+  return out;
+}
+function bomAndList(a){ return a.length < 2 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' or ' + a[a.length - 1]; }
+// Other live styles with the same name as this run's style that have an
+// open run of their own. "Keep both" (dupOk) quiets a pair.
+function rsDupStyles(d){
+  const s = d && rsStyle(d); if (!s) return [];
+  const nm = String(s.name || '').trim().toLowerCase(); if (!nm) return [];
+  const ok = Array.isArray(s.dupOk) ? s.dupOk : [];
+  return (STATE.styles || []).filter(x => x && x.id !== s.id && x.status !== 'archived'
+      && String(x.name || '').trim().toLowerCase() === nm && ok.indexOf(x.id) < 0)
+    .map(x => ({ s: x, runs: poList().filter(p => p && p.kind === 'restock' && p.id !== d.id
+      && !['received', 'cancelled'].includes(p.status) && (rsStyle(p) || {}).id === x.id) }))
+    .filter(x => x.runs.length);
+}
+// The warning on a run (new or saved) whose style has a same-name twin on
+// another open run.
+function rsDupHtml(d, s){
+  const dups = rsDupStyles(d); if (!dups.length) return '';
+  const code = (st) => String(st.styleId || '').split('-').pop();
+  const units = (p) => (p.items || []).reduce((a, it) => a + Math.max(0, (it.qty || 0) - (it.receivedQty || 0)), 0);
+  return dups.map(x => `<div style="margin-top:12px;padding:10px 12px;background:var(--bg-off);border:1px solid var(--amber);font-size:11px;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="flex:1 1 100%"><strong style="color:var(--amber)">Same name:</strong> ${slEsc(x.s.name)} ${slEsc(code(x.s))}${x.s.fabric ? ' (' + slEsc(x.s.fabric) + ')' : ''} is another style with its own open run: ${x.runs.map(p => slEsc(p.id) + ', ' + units(p) + ' unit' + (units(p) === 1 ? '' : 's') + ' ' + slEsc(p.status || 'draft')).join('; ')}. This one is ${slEsc(code(s))}${s.fabric ? ' (' + slEsc(s.fabric) + ')' : ''}. If they're the same garment, archive the duplicate so its units aren't counted twice. If it's another fabric version, keep both.</span>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="rsArchiveDup('${slEsc(x.s.id)}')">Archive ${slEsc(code(x.s))}</button>
+      <button type="button" class="btn btn-ghost btn-sm" onclick="rsDupKeep('${slEsc(x.s.id)}')">Keep both</button>
+    </div>`).join('');
+}
+// Every pair of same-name styles that both have open runs. Fabric to order
+// names a pair only when one side's run adds units but no fabric (no yield
+// on its BOM), since that is where the totals go wrong; two fabric versions
+// that both carry yields (Vitr UT02/UT03) are left alone there.
+function rsDupPairs(){
+  const open = poList().filter(p => p && p.kind === 'restock' && !['received', 'cancelled'].includes(p.status));
+  const seen = {}, out = [];
+  open.forEach(p => {
+    const s = rsStyle(p); if (!s || s.status === 'archived' || seen[s.id]) return;
+    rsDupStyles(p).forEach(x => {
+      const k = [s.id, x.s.id].sort().join('|'); if (seen[k]) return; seen[k] = 1;
+      const noYield = (st) => !((STATE.bom || {})[st.id] || []).some(l => l && rsIsFabricLine(l) && parseFloat(l.qty) > 0);
+      if (noYield(s) || noYield(x.s)) out.push([s, x.s]);
+    });
+  });
+  return out;
+}
 // Materials to pick instead: linings first, then other fabrics, then a new one.
 function bomCutMatOpts(curId){
   const mats = (STATE.materials || []).filter(m => m && !m.archived && m.id !== curId && String(m.name || '').trim());
@@ -21941,6 +22117,7 @@ function rsBomFromStyle(s){
     // Build 744: the cut rides along, and the style line's id, so a save
     // finds the right line when one fabric has several cuts.
     cut: l.cut || '', cutOk: !!l.cutOk, bomId: l.id || '',
+    fuseOk: !!l.fuseOk, // Build 745
   }));
   if (src.length) return src;
   const out = [];
@@ -22082,8 +22259,9 @@ window.rsSaveMat = function(i){
   if (!(cost > 0)){ showToast('Add the price per ' + (l.unit || 'unit')); return; }
   const link = (m) => { try { const v = (STATE.vendors||[]).find(x => String(x.name||'').trim().toLowerCase() === supplier.toLowerCase()); if (v) m.vendorId = v.id; } catch(e){} };
   let m = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
+  const unit = val('unit'); // Build 745: only asked when Sourcing has none
   if (m){
-    m.supplier = supplier; m.costPerUnit = cost; if (lead) m.leadDays = lead; link(m);
+    m.supplier = supplier; m.costPerUnit = cost; if (lead) m.leadDays = lead; if (unit && matNoUnit(m)) m.unit = unit; link(m);
   } else {
     const name = String(l.matName||'').trim();
     if (!name){ showToast('Name the material first'); return; }
@@ -22189,6 +22367,8 @@ function rsBomToStyle(d){
       placement: l.placement || base.placement || '' });
     if (l.cut !== undefined) { if (l.cut) row.cut = l.cut; else if (base.cut && l.cutSet) delete row.cut; }
     if (l.cutOk) row.cutOk = true; else if (l.cutOk === false) delete row.cutOk;
+    if (l.fuseOk) row.fuseOk = true; // Build 745
+    if (l.cutWas && !row.cutWas) row.cutWas = l.cutWas;
     if (l.vendorId === undefined && base.vendorId && base.matId !== row.matId) delete row.vendorId;
     return row;
   });
@@ -22355,6 +22535,52 @@ window.rsCutSwap = function(i, matId){
 window.rsCutOk = function(i){
   rsReadForm(); const d = RS_DRAFT; const l = d && (d.bom||[])[i]; if (!l) return;
   l.cutOk = true; rsRender(d.id || null);
+};
+// Build 745: the run's lone Self / Fuse line becomes Self. Kept on Save.
+window.rsFuseToSelf = function(i){
+  rsReadForm(); const d = RS_DRAFT; const l = d && (d.bom||[])[i]; if (!l) return;
+  bomMoveLineToSelf(l); l.cutSet = true;
+  rsRender(d.id || null);
+  showToast((l.matName || 'The line') + ' is now the Self line. Save the run to keep it' + (d.bomShared ? ' (it changes the style\'s BOM too)' : ''));
+};
+window.rsFuseOk = function(i){
+  rsReadForm(); const d = RS_DRAFT; const l = d && (d.bom||[])[i]; if (!l) return;
+  l.fuseOk = true; rsRender(d.id || null);
+};
+// Build 745: two styles, one name, each on an open run. Archive the other
+// one (restorable from Styles › Archived) and cancel its draft runs
+// (reopenable), or keep both. Nothing happens without the tap and the yes.
+window.rsArchiveDup = async function(otherId){
+  rsReadForm();
+  const d = RS_DRAFT; const s = d && rsStyle(d); if (!s) return;
+  const x = (STATE.styles || []).find(y => y.id === otherId); if (!x || x.status === 'archived') return;
+  const runs = poList().filter(p => p && p.kind === 'restock' && !['received', 'cancelled'].includes(p.status) && (rsStyle(p) || {}).id === x.id);
+  const drafts = runs.filter(p => p.status === 'draft');
+  const placed = runs.filter(p => p.status !== 'draft');
+  const code = (st) => String(st.styleId || '').split('-').pop();
+  const msg = 'Archive ' + x.name + ' ' + code(x) + (x.fabric ? ' (' + x.fabric + ')' : '') + '?\n'
+    + 'You keep ' + s.name + ' ' + code(s) + (s.fabric ? ' (' + s.fabric + ')' : '') + ' and this run.\n'
+    + (drafts.length ? 'Its draft run' + (drafts.length > 1 ? 's' : '') + ' ' + drafts.map(p => p.id).join(', ') + ' will be cancelled, with ' + (drafts.length > 1 ? 'their' : 'its') + ' draft fabric and trim orders. ' : '')
+    + (placed.length ? placed.map(p => p.id).join(', ') + ' ' + (placed.length > 1 ? 'are' : 'is') + ' already placed, so ' + (placed.length > 1 ? 'they stay' : 'it stays') + ' open; cancel ' + (placed.length > 1 ? 'them' : 'it') + ' yourself if needed. ' : '')
+    + 'Nothing is deleted: restore the style from Styles › Archived and reopen a run any time.';
+  if (!(await veniaConfirm(msg, { ok: 'Archive ' + code(x), danger: true, cancel: 'Keep it' }))) return;
+  archiveStyle(x); x.updatedAt = new Date().toISOString();
+  drafts.forEach(p => { p.status = 'cancelled'; p.updatedAt = new Date().toISOString(); p.notes = (p.notes ? p.notes + ' · ' : '') + 'Cancelled with its duplicate style ' + code(x) + ' (kept ' + code(s) + ')'; try { rsCancelDraftOrders(p); } catch(e){} });
+  save();
+  try { logActivity('Archived duplicate style ' + x.name + ' ' + code(x) + (drafts.length ? ' and cancelled its draft run ' + drafts.map(p => p.id).join(', ') : '') + ' (kept ' + code(s) + ')'); } catch(e){}
+  try { renderProduction(); } catch(e){}
+  try { buildTodayFocus(); } catch(e){}
+  rsRender(d.id || null);
+  showToast(x.name + ' ' + code(x) + ' archived' + (drafts.length ? ' and its draft run cancelled' : ''), 'success');
+};
+window.rsDupKeep = function(otherId){
+  rsReadForm();
+  const d = RS_DRAFT; const s = d && rsStyle(d); if (!s) return;
+  const x = (STATE.styles || []).find(y => y.id === otherId); if (!x) return;
+  s.dupOk = Array.isArray(s.dupOk) ? s.dupOk : []; if (s.dupOk.indexOf(x.id) < 0) s.dupOk.push(x.id);
+  x.dupOk = Array.isArray(x.dupOk) ? x.dupOk : []; if (x.dupOk.indexOf(s.id) < 0) x.dupOk.push(s.id);
+  save();
+  rsRender(d.id || null);
 };
 window.rsReloadBom = function(){
   rsReadForm(); const s = rsStyle(RS_DRAFT); if (!s) return;
@@ -23017,7 +23243,15 @@ function rsRender(id){
         : '';
     const mm = l.matId ? (STATE.materials||[]).find(x => x.id === l.matId) : null;
     const typed = String(l.matName||'').trim();
-    const needsSrc = !vm && (mm ? (rsIsFabricLine(l) && (!String(mm.supplier||'').trim() || !(parseFloat(mm.costPerUnit) > 0))) : !!typed);
+    const needsSrc = !vm && (mm ? (rsIsFabricLine(l) && (!String(mm.supplier||'').trim() || !(parseFloat(mm.costPerUnit) > 0) || matNoUnit(mm))) : !!typed);
+    // Build 745: what this fabric is missing in Sourcing, named.
+    const srcMiss = mm ? [!String(mm.supplier||'').trim() ? 'mill' : '', matNoUnit(mm) ? 'unit' : '', !(parseFloat(mm.costPerUnit) > 0) ? 'price' : ''].filter(Boolean) : [];
+    const fuseRow = rsIsFabricLine(l) && bomFuseNoSelf(d.bom).indexOf(l) >= 0 ? `<tr><td colspan="7" data-label="" style="background:var(--bg-off)">
+      <div id="rs-fz-${i}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:4px 0;font-size:11px;color:var(--ink)">
+        <span style="flex:1 1 100%"><strong style="color:var(--amber)">Check:</strong> No Self line, only this Self / Fuse line, so the BOM and tech pack say to block-fuse the whole garment. If only some pieces are fused, move it to Self.</span>
+        <button type="button" class="btn btn-gold btn-sm" onclick="rsFuseToSelf(${i})">Move to Self</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="rsFuseOk(${i})" title="The whole garment really is block fused">It's all fused</button>
+      </div></td></tr>` : '';
     const vendNames = (STATE.vendors||[]).filter(v => !v.archived).map(v => v.name).filter(Boolean);
     const sibs = (rsIsFabricLine(l) && l.matId && first === l) ? (d.bom||[]).filter(x => x !== l && x.matId === l.matId && rsIsFabricLine(x)).length : 0;
     const clashRow = clash ? `<tr><td colspan="7" data-label="" style="background:var(--bg-off)">
@@ -23028,8 +23262,9 @@ function rsRender(id){
       </div></td></tr>` : '';
     const srcRow = needsSrc ? `<tr><td colspan="7" data-label="" style="background:var(--bg-off)">
       <div id="rs-ms-${i}" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;padding:4px 0">
-        <div style="font-size:11px;color:var(--ink);flex:1 1 100%">${mm ? slEsc(mm.name) + ' has no mill or price yet.' : slEsc(typed) + " isn't in Sourcing yet."} Add them here so you can order it.</div>
+        <div style="font-size:11px;color:var(--ink);flex:1 1 100%">${mm ? slEsc(mm.name) + ' has no ' + slEsc(bomAndList(srcMiss.length ? srcMiss : ['mill', 'price'])) + ' yet.' : slEsc(typed) + " isn't in Sourcing yet."} Add them here so you can order it.</div>
         <label style="font-size:10px;color:var(--muted);flex:1 1 170px">Mill or supplier<input id="rs-matsup-${i}" list="rs-vend-list" type="text" style="${fld};margin-top:3px" value="${slEsc((mm && mm.supplier) || '')}" placeholder="e.g. the mill's name"></label>
+        ${mm && matNoUnit(mm) ? `<label style="font-size:10px;color:var(--muted);flex:0 1 80px">Unit<select id="rs-matunit-${i}" style="${fld};margin-top:3px"><option value="yd" selected>yd</option><option value="m">m</option></select></label>` : ''}
         <label style="font-size:10px;color:var(--muted);flex:0 1 110px">Price per ${slEsc(l.unit||'unit')}<input id="rs-matcost-${i}" type="number" min="0" step="0.01" style="${fld};margin-top:3px" value="${mm && parseFloat(mm.costPerUnit) > 0 ? mm.costPerUnit : ''}" placeholder="$"></label>
         <label style="font-size:10px;color:var(--muted);flex:0 1 100px">Lead · days<input id="rs-matlead-${i}" type="number" min="0" style="${fld};margin-top:3px" value="${mm && mm.leadDays ? mm.leadDays : ''}" placeholder="21"></label>
         <button type="button" class="btn btn-ghost btn-sm" onclick="rsSaveMat(${i})">Save to Sourcing</button>
@@ -23044,7 +23279,7 @@ function rsRender(id){
       <td data-label="Waste %"><input id="rs-bw-${i}" type="number" min="0" style="${fld};width:56px" value="${slEsc(l.waste||'')}" placeholder="0" onchange="rsRefresh()"></td>
       <td data-label="Need" style="font-family:'DM Mono',monospace;font-size:12px;white-space:nowrap">${noUse ? '<span style="color:var(--red)">—</span>' : units ? need + ' ' + slEsc(l.unit||'') : '<span style="color:var(--muted)">set qty</span>'}</td>
       <td data-label=""><div style="display:flex;gap:6px;align-items:center;justify-content:flex-end;flex-wrap:wrap">${act}<button class="btn btn-ghost btn-sm" style="padding:4px 8px" title="Remove this line" aria-label="Remove line" onclick="rsDelLine(${i})">✕</button></div></td>
-    </tr>${clashRow}${srcRow}`;
+    </tr>${clashRow}${fuseRow}${srcRow}`;
   }).join('');
   const today = rsIso(new Date());
   // Steps by phase: a tick to use the step, its date and done. Off steps stay
@@ -23160,7 +23395,7 @@ function rsRender(id){
       </div>
       <button type="button" class="btn btn-ghost btn-sm" onclick="rsOpenTechPack()">${d.id ? 'Open tech pack' : 'Save and open tech pack'}</button>
     </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px" role="group" aria-label="What are you making?">${pathBtns}</div>`;
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px" role="group" aria-label="What are you making?">${pathBtns}</div>${rsDupHtml(d, s)}`;
   const stage2 = `<div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
           <datalist id="rs-vend-list">${(STATE.vendors||[]).filter(v => !v.archived && v.name).map(v => `<option value="${slEsc(v.name)}">`).join('')}</datalist><div id="rs-bom" tabindex="-1" style="${lbl};margin:0">Need = usage × ${units||0} units + waste</div>
@@ -33046,7 +33281,10 @@ window.veniaDr4ftSendYield = function(y){
     cut: veniaDr4ftCut(y.cut || y.material), colorway: y.colorway ? String(y.colorway) : null,
     widthMm: +y.widthMm || null, efficiency: +y.efficiency || null, garments: y.garments == null ? null : +y.garments,
     shrinkL: +y.shrinkL || 0, shrinkW: +y.shrinkW || 0, at: now };
-  const tell = (msg) => { try { if ((document.getElementById('bom-style-select') || {}).value === st.id) bomSelectStyle(st.id); } catch(e){} return msg; };
+  // Build 745: Dr4ft hears it when this send leaves the style with a Self /
+  // Fuse line and no Self line (the whole shell would read as block fused).
+  const fuseNote = () => { try { return bomFuseNoSelf((bomAll || {})[st.id]).length ? ' Check: ' + st.name + ' now has a Self / Fuse line and no Self line, so its BOM and tech pack say to block-fuse the whole garment. If the shell isn’t fused, send the Self marker too, or tap Move to Self on the BOM.' : ''; } catch(e){ return ''; } };
+  const tell = (msg) => { try { if ((document.getElementById('bom-style-select') || {}).value === st.id) bomSelectStyle(st.id); } catch(e){} return msg + fuseNote(); };
   if (!ln) {
     if (!bomAll[st.id]) bomAll[st.id] = [];
     const lid = 'bl-dr4ft-' + m.id + (cut === 'Self' ? '' : '-' + cut.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
